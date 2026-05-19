@@ -1,0 +1,1 @@
+"""Bundled agent prompt templates."""

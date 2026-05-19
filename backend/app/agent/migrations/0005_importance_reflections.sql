@@ -1,0 +1,2 @@
+-- Legacy SQLite long-term memory migration retired.
+-- Durable memory now lives as Markdown under the AppData memory folder.

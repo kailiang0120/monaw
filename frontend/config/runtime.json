@@ -1,0 +1,13 @@
+{
+  "backendHost": "127.0.0.1",
+  "backendPort": 8435,
+  "allowedStoreKeys": [
+    "openai_api_key",
+    "deepseek_api_key",
+    "google_api_key",
+    "tavily_api_key",
+    "telegram_bot_token",
+    "telegram_allowed_user_ids",
+    "telegram_allowed_chat_ids"
+  ]
+}

@@ -1,0 +1,174 @@
+import subprocess
+from types import SimpleNamespace
+
+import pytest
+
+from app.agent.sandbox.backends import docker as docker_backend
+from app.agent.sandbox.backends.docker import DockerRunner
+from app.agent.sandbox.manager import SandboxManager
+from app.agent.settings_store import AgentSettings
+
+from .test_sandbox_manager import _capabilities, _request
+
+
+def _docker_image_available(image: str) -> bool:
+    try:
+        version = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        image_check = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return version.returncode == 0 and image_check.returncode == 0
+
+
+def test_docker_command_defaults_to_hardened_flags():
+    settings = AgentSettings()
+    request = _request("python -c \"print('ok')\"")
+    request.shell = "bash"
+
+    command = DockerRunner(settings.sandbox).docker_command(request)
+
+    assert command[:3] == ["docker", "run", "--rm"]
+    assert ["--network", "none"] == command[command.index("--network") : command.index("--network") + 2]
+    assert ["--cap-drop", "ALL"] == command[command.index("--cap-drop") : command.index("--cap-drop") + 2]
+    assert "no-new-privileges" in command
+    assert "--read-only" in command
+    assert "--tmpfs" in command
+    assert "--memory" in command
+    assert "--cpus" in command
+    assert "--pids-limit" in command
+    assert command[-3:-1] == ["bash", "-lc"]
+
+
+def test_docker_command_does_not_mount_host_paths_by_default():
+    settings = AgentSettings()
+    request = _request("echo ok")
+    request.shell = "bash"
+    command = DockerRunner(settings.sandbox).docker_command(request)
+
+    assert "-v" not in command
+    assert "--volume" not in command
+    assert "--mount" not in command
+
+
+def test_docker_command_honors_configured_pull_and_hardening_flags():
+    settings = AgentSettings()
+    settings.sandbox.docker.pull_policy = "never"
+    settings.sandbox.docker.read_only_root = False
+    settings.sandbox.docker.no_new_privileges = False
+    request = _request("echo ok")
+    request.shell = "bash"
+
+    command = DockerRunner(settings.sandbox).docker_command(request)
+
+    assert ["--pull", "never"] == command[command.index("--pull") : command.index("--pull") + 2]
+    assert "--read-only" not in command
+    assert "no-new-privileges" not in command
+
+
+def test_auto_mode_does_not_select_docker_without_policy_request(monkeypatch):
+    settings = AgentSettings()
+    manager = SandboxManager(settings.sandbox, capabilities=_capabilities(docker=True, local=True))
+
+    monkeypatch.setattr(manager.local_restricted, "is_available", lambda: True)
+    monkeypatch.setattr(manager.local_restricted, "run", lambda request: manager._blocked_result(
+        request,
+        backend="local_restricted",
+        reason="fake local restricted selected",
+        reason_code="fake_selected",
+    ))
+
+    result = manager.run(_request("echo ok"))
+
+    assert result.status == "blocked"
+    assert result.reason_code == "fake_selected"
+    assert result.sandbox["selected_backend"] == "local_restricted"
+
+
+def test_enforce_mode_allows_docker_when_available(monkeypatch):
+    settings = AgentSettings()
+    settings.sandbox.mode = "enforce"
+    manager = SandboxManager(settings.sandbox, capabilities=_capabilities(docker=True, local=True))
+
+    monkeypatch.setattr(manager.docker, "is_available", lambda: True)
+    monkeypatch.setattr(manager.docker, "run", lambda request: manager._blocked_result(
+        request,
+        backend="docker",
+        reason="fake docker selected",
+        reason_code="fake_selected",
+    ))
+
+    result = manager.run(_request("echo ok"))
+
+    assert result.status == "blocked"
+    assert result.reason_code == "fake_selected"
+    assert result.sandbox["selected_backend"] == "docker"
+
+
+def test_docker_runner_blocks_unsupported_shell():
+    settings = AgentSettings()
+    request = _request("Write-Output ok")
+    request.backend = "docker"
+    request.shell = "powershell"
+
+    result = DockerRunner(settings.sandbox).run(request)
+
+    assert result.status == "blocked"
+    assert result.reason_code == "unsupported_shell_for_backend"
+    assert "bash commands" in result.reason
+
+
+def test_docker_timeout_removes_named_container(monkeypatch):
+    settings = AgentSettings()
+    runner = DockerRunner(settings.sandbox)
+    request = _request("sleep 5")
+    request.shell = "bash"
+    request.timeout = 1
+    removed: list[str] = []
+    captured_name = ""
+
+    monkeypatch.setattr(runner, "is_available", lambda: True)
+    monkeypatch.setattr(runner, "_remove_container", lambda name: removed.append(name))
+
+    def fake_run_command(command, _request, **kwargs):
+        nonlocal captured_name
+        captured_name = command[command.index("--name") + 1]
+        kwargs["on_timeout"](SimpleNamespace())
+        return SimpleNamespace(returncode=-9, stdout="", stderr="", timed_out=True)
+
+    monkeypatch.setattr(docker_backend, "_run_command_capped", fake_run_command)
+
+    result = runner.run(request)
+
+    assert result.status == "error"
+    assert result.timed_out is True
+    assert removed == [captured_name]
+    assert captured_name.startswith("monaw-sandbox-")
+
+
+@pytest.mark.skipif(
+    not _docker_image_available(AgentSettings().sandbox.docker.image),
+    reason="Docker daemon or configured sandbox image is unavailable",
+)
+def test_docker_integration_executes_simple_command_when_available():
+    settings = AgentSettings()
+    runner = DockerRunner(settings.sandbox)
+    request = _request("python -c \"print('ok')\"")
+    request.shell = "bash"
+    result = runner.run(request)
+
+    assert result.status == "ok"
+    assert result.stdout.strip() == "ok"
+    assert result.sandbox["backend"] == "docker"
+    assert result.sandbox["security_label"] == "strong"

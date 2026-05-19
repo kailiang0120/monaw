@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+backend/.pytest-tmp/
+backend/pytest-cache-files-*/
+backend/.tmp/pytest-*/
+backend/.tmp/manual-db-check/
+
+# Environment files
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+!.env.*.example
+
+# Node / Electron
+node_modules/
+frontend/dist/
+*.log
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.cursor/
+.runtime/
+.claude/
