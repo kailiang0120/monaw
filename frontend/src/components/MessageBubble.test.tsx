@@ -65,7 +65,7 @@ describe('MessageBubble', () => {
     expect(summary.compareDocumentPosition(timer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('shows elapsed response time while assistant content is streaming', () => {
+  it('shows only answer content while assistant content is streaming', () => {
     vi.spyOn(Date, 'now').mockReturnValue(2_000)
 
     render(
@@ -80,7 +80,9 @@ describe('MessageBubble', () => {
       />,
     )
 
-    expect(screen.getByLabelText('Elapsed time 1.5s')).toBeInTheDocument()
+    expect(screen.getByText('Still writing.')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Elapsed time 1.5s')).not.toBeInTheDocument()
+    expect(screen.queryByText('Writing response')).not.toBeInTheDocument()
   })
 
   it('renders structured plain text with headings and tables', () => {
@@ -233,7 +235,6 @@ const answer = 42
     )
 
     expect(screen.queryByText('Opening the browser.')).not.toBeInTheDocument()
-    expect(screen.getAllByLabelText(/Elapsed time/).length).toBeGreaterThan(0)
     expect(screen.getByText('Inspecting the page.')).toBeInTheDocument()
     expect(screen.getByRole('tablist', { name: 'Tool calls' })).toBeInTheDocument()
     expect(screen.getAllByRole('tab')).toHaveLength(2)
@@ -263,6 +264,63 @@ const answer = 42
 
     expect(screen.getByText('Checked the available context.')).toBeInTheDocument()
     expect(screen.getByLabelText('Reasoning trace')).toBeInTheDocument()
+  })
+
+  it('does not expose reasoning trace while the answer is still streaming', () => {
+    render(
+      <MessageBubble
+        message={{
+          id: 'msg-live-thinking',
+          role: 'assistant',
+          content: '',
+          streaming: true,
+          thinking: 'Still reasoning through the request.',
+        }}
+      />,
+    )
+
+    expect(screen.getByText('Thinking')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for the first response token')).toBeInTheDocument()
+    expect(screen.queryByText('Trace')).not.toBeInTheDocument()
+    expect(screen.queryByText('Still reasoning through the request.')).not.toBeInTheDocument()
+  })
+
+  it('hides the live planning card once answer playback has started', () => {
+    render(
+      <MessageBubble
+        message={{
+          id: 'msg-answer-plan',
+          role: 'assistant',
+          content: 'The answer is now typing.',
+          streaming: true,
+          plan: [{ step_id: 'step-1', description: 'Prepare response' }],
+          stepProgress: [{ step_id: 'step-1', description: 'Prepare response', status: 'active' }],
+        }}
+      />,
+    )
+
+    expect(screen.getByText('The answer is now typing.')).toBeInTheDocument()
+    expect(screen.queryByText('Planning')).not.toBeInTheDocument()
+    expect(screen.queryByText('Prepare response')).not.toBeInTheDocument()
+  })
+
+  it('hides live progress once answer playback has started', () => {
+    render(
+      <MessageBubble
+        message={{
+          id: 'msg-answer-progress',
+          role: 'assistant',
+          content: 'The visible answer.',
+          streaming: true,
+          activityItems: [
+            { id: 'progress-final', type: 'progress', content: 'The leaked progress answer.' },
+          ],
+        }}
+      />,
+    )
+
+    expect(screen.getByText('The visible answer.')).toBeInTheDocument()
+    expect(screen.queryByText('The leaked progress answer.')).not.toBeInTheDocument()
   })
 
   it('does not display thinking traces that exceed the visible length limit', () => {

@@ -102,7 +102,8 @@ function streamingStatus(message: Message): { label: string; detail?: string } |
   if (!message.content.trim()) {
     return { label: 'Thinking', detail: 'Waiting for the first response token' }
   }
-  return { label: 'Writing response', detail: 'Streaming answer' }
+
+  return null
 }
 
 function formatResponseDuration(durationMs: number): string {
@@ -135,7 +136,7 @@ export function MessageBubble({ message, agentName = DEFAULT_AGENT_NAME }: { mes
   const hasBody = message.content.trim().length > 0
   const formattedContent = hasBody ? formatAgentResponse(message.content) : ''
   const showToolCalls = message.toolCalls && message.toolCalls.length > 0
-  const showThinking = isDisplayableThinking(message.thinking)
+  const showThinking = !message.streaming && isDisplayableThinking(message.thinking)
   const showPlan = message.stepProgress && message.stepProgress.length > 0
   const runStatus = message.streaming ? 'streaming' : message.runStatus ?? 'complete'
   const activityItems = message.activityItems ?? (
@@ -149,12 +150,14 @@ export function MessageBubble({ message, agentName = DEFAULT_AGENT_NAME }: { mes
   )
   const showLiveActivity = activityItems.length > 0 && (
     message.streaming || runStatus === 'paused' || runStatus === 'error'
-  )
+  ) && !hasBody
   const showExecutionSummary = !showLiveActivity && !message.streaming && (showPlan || showToolCalls)
   const responseDuration = message.responseDurationMs !== undefined
     ? formatResponseDuration(message.responseDurationMs)
     : ''
   const showLiveDuration = message.streaming && message.responseStartedAtMs !== undefined
+  const showLiveWorkPanel =
+    (!hasBody && (status || (message.streaming && showPlan))) || showThinking
   const statusBadge =
     runStatus === 'streaming'
       ? { label: 'Streaming', className: 'border-accent/30 bg-accent/10 text-accent-light' }
@@ -189,7 +192,7 @@ export function MessageBubble({ message, agentName = DEFAULT_AGENT_NAME }: { mes
           </span>
         </div>
 
-        {(status || showThinking || (message.streaming && showPlan)) && (
+        {showLiveWorkPanel && (
           <LiveWorkPanel
             status={status}
             thinking={showThinking ? message.thinking : undefined}

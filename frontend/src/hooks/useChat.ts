@@ -177,6 +177,7 @@ export function useChat(conversationId: string | null) {
         queue: '',
         timer: null as ReturnType<typeof setTimeout> | null,
         done: null as StreamDonePayload | null,
+        ready: false,
         stopped: false,
       }
 
@@ -270,9 +271,15 @@ export function useChat(conversationId: string | null) {
       const enqueueToken = (token: string) => {
         if (!token || typewriter.stopped) return
         typewriter.queue += token
-        if (!typewriter.timer) {
+        if (typewriter.ready && !typewriter.timer) {
           typewriter.timer = setTimeout(flushTypewriter, 0)
         }
+      }
+
+      const startTypewriter = () => {
+        if (typewriter.stopped || typewriter.timer) return
+        typewriter.ready = true
+        typewriter.timer = setTimeout(flushTypewriter, 0)
       }
 
       // Idle timeout: auto-stop if no SSE activity for IDLE_TIMEOUT_MS
@@ -461,7 +468,7 @@ export function useChat(conversationId: string | null) {
         (done) => {
           clearIdleTimer()
           typewriter.done = done
-          maybeFinalizeDone()
+          startTypewriter()
         },
         // onError
         (err, data) => {

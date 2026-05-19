@@ -169,6 +169,11 @@ function LiveRunDock({
   const activeStep = steps.find((step) => step.status === 'active' || step.status === 'retrying')
   const completedSteps = steps.filter((step) => step.status === 'done').length
   const runningTool = [...(message?.toolCalls ?? [])].reverse().find((tool) => tool.pending)
+  const hasAnswer = Boolean(message?.content.trim())
+
+  if (!message || hasAnswer) {
+    return null
+  }
 
   const primary = runningTool
     ? 'Running tool'
