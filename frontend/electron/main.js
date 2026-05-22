@@ -10,6 +10,7 @@ const runtimeConfig = require('../config/runtime.json')
 const BACKEND_HOST = runtimeConfig.backendHost || '127.0.0.1'
 const BACKEND_PORT = runtimeConfig.backendPort || 8420
 const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`
+const BACKEND_RESTART_EXIT_CODE = 78
 const isDev = !app.isPackaged
 const APP_USER_MODEL_ID = 'com.monaw.agent'
 const STORE_KEYS = Array.isArray(runtimeConfig.allowedStoreKeys) ? runtimeConfig.allowedStoreKeys : []
@@ -23,6 +24,7 @@ const APP_THEME_COLORS = {
 let mainWindow = null
 let backendProcess = null
 let backendPythonCommand = null
+let appQuitting = false
 
 function getBackendPath() {
   if (isDev) {
@@ -74,7 +76,7 @@ function rotateFileIfNeeded(filePath, maxBytes = 5 * 1024 * 1024) {
   }
 }
 
-function attachBackendLogging(runtimeDir) {
+function attachBackendLogging(runtimeDir, proc) {
   const logPath = path.join(runtimeDir, 'backend.log')
   rotateFileIfNeeded(logPath)
   const logStream = fs.createWriteStream(logPath, { flags: 'a' })
@@ -84,17 +86,27 @@ function attachBackendLogging(runtimeDir) {
   }
 
   console.log('[main] Backend log file:', logPath)
-  backendProcess.stdout?.on('data', (d) => writeLog('stdout', d))
-  backendProcess.stderr?.on('data', (d) => writeLog('stderr', d))
-  backendProcess.on('error', (err) => {
+  proc.stdout?.on('data', (d) => writeLog('stdout', d))
+  proc.stderr?.on('data', (d) => writeLog('stderr', d))
+  proc.on('error', (err) => {
     logStream.write(`[${new Date().toISOString()}] [error] ${err.stack || err.message}\n`)
     console.error('[backend] process error', err.message)
   })
-  backendProcess.on('exit', (code) => {
+  proc.on('exit', (code) => {
     const line = `[${new Date().toISOString()}] [exit] code=${code}\n`
     logStream.write(line)
     logStream.end()
     console.log('[backend] exited with code', code)
+    if (backendProcess === proc) backendProcess = null
+    if (!appQuitting && code === BACKEND_RESTART_EXIT_CODE) {
+      console.log('[main] Backend requested restart; respawning')
+      setTimeout(() => {
+        spawnBackend()
+        waitForBackend().catch((err) => {
+          console.error('[main] Backend restart did not become ready:', err.message)
+        })
+      }, 500)
+    }
   })
 }
 
@@ -109,7 +121,7 @@ function spawnBackend() {
 
   console.log('[main] Spawning Python backend from', backendDir, 'with', cmd)
 
-  backendProcess = spawn(
+  const proc = spawn(
     cmd,
     ['-m', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)],
     {
@@ -124,7 +136,8 @@ function spawnBackend() {
       windowsHide: true,
     }
   )
-  attachBackendLogging(runtimeDir)
+  backendProcess = proc
+  attachBackendLogging(runtimeDir, proc)
 }
 
 installUserDataDir()
@@ -180,10 +193,11 @@ async function pickBackendPython() {
 
 function killBackend() {
   if (!backendProcess) return
+  const proc = backendProcess
   if (process.platform === 'win32') {
-    spawn('taskkill', ['/pid', String(backendProcess.pid), '/f', '/t'])
+    spawn('taskkill', ['/pid', String(proc.pid), '/f', '/t'])
   } else {
-    backendProcess.kill('SIGTERM')
+    proc.kill('SIGTERM')
   }
   backendProcess = null
 }
@@ -389,10 +403,16 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   killBackend()
-  if (process.platform !== 'darwin') app.quit()
+  if (process.platform !== 'darwin') {
+    appQuitting = true
+    app.quit()
+  }
 })
 
-app.on('before-quit', killBackend)
+app.on('before-quit', () => {
+  appQuitting = true
+  killBackend()
+})
 
 let store = null
 function readLegacyStoreData() {

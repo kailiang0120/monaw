@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Activity, Loader2, RefreshCw, ShieldQuestion, Wrench } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { MessageBubble } from './MessageBubble'
 import type { Message } from '../hooks/useChat'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
@@ -14,7 +14,6 @@ function LivePulseDot() {
     </span>
   )
 }
-
 interface Props {
   messages: Message[]
   isLoadingHistory?: boolean
@@ -22,7 +21,6 @@ interface Props {
   isStreaming?: boolean
   agentName?: string
   onRename?: (title: string) => void
-  onRefresh?: () => void
   onPromptSelect?: (prompt: string) => void // kept for API compat
 }
 
@@ -33,14 +31,12 @@ export function ChatWindow({
   isStreaming = false,
   agentName = DEFAULT_AGENT_NAME,
   onRename,
-  onRefresh,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const titleInputRef = useRef<HTMLInputElement>(null)
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleValue, setTitleValue] = useState('')
   const insights = getSessionInsights(messages)
-  const { metrics } = insights
   const assistantLabel = resolveAgentName(agentName)
 
   useEffect(() => {
@@ -64,69 +60,39 @@ export function ChatWindow({
 
   return (
     <section className="relative flex min-h-0 flex-1 flex-col bg-[#11100f]">
-      <header className="drag-region border-b border-white/[0.07] bg-[#11100f]/95 px-5 py-4">
-        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-          
-            <div className="no-drag min-w-0">
-              <p className="section-label">Conversation</p>
-              {editingTitle ? (
-                <input
-                  ref={titleInputRef}
-                  value={titleValue}
-                  onChange={(e) => setTitleValue(e.target.value)}
-                  onBlur={commitTitleEdit}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') { e.preventDefault(); commitTitleEdit() }
-                    if (e.key === 'Escape') { e.preventDefault(); cancelTitleEdit() }
-                  }}
-                  className="mt-1 w-full max-w-xs rounded bg-white/[0.06] px-1.5 py-0.5 text-base font-semibold tracking-tight text-neutral-100 outline-none ring-1 ring-accent/50"
-                />
-              ) : (
-                <h1
-                  className={`mt-1 truncate text-base font-semibold tracking-tight text-neutral-100 ${conversationTitle && onRename ? 'cursor-text hover:text-neutral-200' : ''}`}
-                  title={conversationTitle && onRename ? 'Click to rename' : undefined}
-                  onClick={startTitleEdit}
-                >
-                  {conversationTitle || 'New chat'}
-                </h1>
-              )}
-            </div>
-          </div>
-          <div className="no-drag flex flex-wrap items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={onRefresh}
-              disabled={!onRefresh || isLoadingHistory || isStreaming}
-              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.03] text-neutral-500 outline-none transition-colors hover:border-white/[0.12] hover:text-neutral-200 focus:border-accent/50 disabled:cursor-not-allowed disabled:opacity-50"
-              aria-label="Refresh chat"
-              title="Refresh chat"
+      <header className="chat-title-fade drag-region pointer-events-none absolute inset-x-0 top-0 z-20 px-5 pb-12 pt-4">
+        <div className="no-drag min-w-0">
+          {editingTitle ? (
+            <input
+              ref={titleInputRef}
+              value={titleValue}
+              onChange={(e) => setTitleValue(e.target.value)}
+              onBlur={commitTitleEdit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); commitTitleEdit() }
+                if (e.key === 'Escape') { e.preventDefault(); cancelTitleEdit() }
+              }}
+              className="pointer-events-auto w-full max-w-sm rounded-lg bg-white/[0.06] px-2 py-1 text-base font-semibold tracking-tight text-neutral-100 outline-none ring-1 ring-accent/50"
+            />
+          ) : (
+            <h1
+              className={`pointer-events-auto inline-block max-w-full truncate text-base font-semibold tracking-tight text-neutral-100 ${conversationTitle && onRename ? 'cursor-text hover:text-neutral-200' : ''}`}
+              title={conversationTitle && onRename ? 'Click to rename' : undefined}
+              onClick={startTitleEdit}
             >
-              <RefreshCw size={13} className={isLoadingHistory ? 'animate-spin' : ''} />
-            </button>
-            <HeaderMetric icon={Wrench} label="Tools" value={metrics.toolCalls} />
-            <HeaderMetric icon={Activity} label="Running" value={metrics.pendingTools} />
-            <HeaderMetric icon={ShieldQuestion} label="Approvals" value={metrics.approvals} />
-            <span
-              className={`status-pill ${
-                isStreaming
-                  ? 'border-accent/30 bg-accent/10 text-accent-light'
-                  : 'border-white/[0.07] bg-white/[0.03] text-neutral-500'
-              }`}
-            >
-              {isStreaming ? 'Streaming' : 'Ready'}
-            </span>
-          </div>
+              {conversationTitle || 'New chat'}
+            </h1>
+          )}
         </div>
       </header>
 
       {isLoadingHistory ? (
-        <div className="flex flex-1 select-none flex-col items-center justify-center gap-3 text-neutral-500">
+        <div className="flex flex-1 select-none flex-col items-center justify-center gap-3 pt-16 text-neutral-500">
           <Loader2 size={24} className="animate-spin text-neutral-500" />
           <p className="text-sm font-medium">Loading conversation</p>
         </div>
       ) : messages.length === 0 ? (
-        <div className="flex flex-1 select-none flex-col items-center justify-center gap-5 px-4">
+        <div className="flex flex-1 select-none flex-col items-center justify-center gap-5 px-4 pt-16">
           <img
             src={startMascotImg}
             alt={assistantLabel}
@@ -139,7 +105,7 @@ export function ChatWindow({
           </div>
         </div>
       ) : (
-        <div className={`flex-1 overflow-y-auto px-4 pt-6 ${isStreaming ? 'pb-28' : 'pb-6'}`}>
+        <div className={`flex-1 overflow-y-auto px-4 pt-24 ${isStreaming ? 'pb-28' : 'pb-6'}`}>
           <div className="mx-auto max-w-3xl">
             {messages.map((msg) => (
               <MessageBubble key={msg.id} message={msg} agentName={assistantLabel} />
@@ -215,25 +181,6 @@ function LiveRunDock({
       >
         <span className="live-shimmer absolute inset-0 animate-progress-shimmer" />
       </span>
-    </div>
-  )
-}
-
-function HeaderMetric({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: typeof Activity
-  label: string
-  value: number
-}) {
-  if (value === 0) return null
-  return (
-    <div className="hidden animate-fade-in h-7 items-center gap-1.5 rounded-lg border border-accent/20 bg-accent/10 px-2.5 text-[10px] text-accent-light sm:inline-flex">
-      <Icon size={11} className="text-accent-light/70" />
-      <span>{label}</span>
-      <span className="font-semibold">{value}</span>
     </div>
   )
 }

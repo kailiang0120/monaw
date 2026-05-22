@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from typing import AsyncIterator
 
 from app.agent.llm_client import LLMClient, build_vision_describer
@@ -20,6 +21,30 @@ from app.agent.workspace_instructions import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_compact_command(message: str) -> bool:
+    return str(message or "").strip().casefold() == "/compact"
+
+
+def _format_compact_reply(result: dict) -> str:
+    status = str(result.get("status") or "")
+    if status == "empty":
+        return "Nothing to compact yet."
+    if status == "unchanged":
+        return "Already compacted. No new messages since the last /compact."
+
+    message_count = int(result.get("message_count") or 0)
+    tokens_before = int(result.get("tokens_before") or 0)
+    tokens_after = int(result.get("tokens_after") or 0)
+    saved = max(0, tokens_before - tokens_after)
+    return (
+        "Compacted this chat. Future turns will use the compacted context "
+        "instead of the earlier raw history.\n\n"
+        f"Messages compacted: {message_count}\n"
+        f"Context estimate: {tokens_before} -> {tokens_after} tokens"
+        + (f" ({saved} saved)" if saved else "")
+    )
 
 
 def _compact_identity_text(value: str | None, *, fallback: str = "") -> str:
@@ -135,8 +160,41 @@ class AgentRuntime:
         conversation_id: str,
         attachments: list[dict] | None = None,
     ) -> AsyncIterator[dict]:
+        global _active_run_count
         self._active_runs += 1
+        with _active_run_lock:
+            _active_run_count += 1
         try:
+            if _is_compact_command(message):
+                result = await self.memory.compact_conversation(conversation_id)
+                reply = _format_compact_reply(result)
+                await self.memory.persist_turn(
+                    conversation_id,
+                    str(message or "").strip() or "/compact",
+                    reply,
+                    tool_calls=[],
+                )
+                if result.get("status") in {"compacted", "unchanged"} and str(result.get("summary") or "").strip():
+                    source_message_id = self.memory._db.get_last_message_id(conversation_id)
+                    if source_message_id > int(result.get("source_message_id") or 0):
+                        self.memory._db.upsert_conversation_compaction(
+                            conv_id=conversation_id,
+                            summary=str(result.get("summary") or ""),
+                            source_message_id=source_message_id,
+                            message_count=int(result.get("message_count") or 0),
+                            tokens_before=int(result.get("tokens_before") or 0),
+                            tokens_after=int(result.get("tokens_after") or 0),
+                        )
+                yield {"event": "token", "data": {"content": reply}}
+                yield {
+                    "event": "done",
+                    "data": {
+                        "summary": reply,
+                        "status": "complete",
+                        "attachments": [],
+                    },
+                }
+                return
             async for event in self.turn_loop.run(
                 message,
                 conversation_id,
@@ -146,6 +204,8 @@ class AgentRuntime:
                 yield event
         finally:
             self._active_runs = max(0, self._active_runs - 1)
+            with _active_run_lock:
+                _active_run_count = max(0, _active_run_count - 1)
             if self._retired and self._active_runs == 0:
                 self.shutdown()
 
@@ -160,6 +220,8 @@ class AgentRuntime:
 
 
 _runtimes: dict[str, AgentRuntime] = {}
+_active_run_lock = threading.Lock()
+_active_run_count = 0
 
 
 def _key_fingerprint(value: str) -> str:
@@ -264,6 +326,11 @@ def reset_runtime_cache(*, reset_mcp: bool = True, reset_browser: bool = False) 
     for runtime in _runtimes.values():
         runtime.retire()
     _runtimes.clear()
+
+
+def active_runtime_run_count() -> int:
+    with _active_run_lock:
+        return _active_run_count
 
 
 def get_runtime(settings) -> AgentRuntime:

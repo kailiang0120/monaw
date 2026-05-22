@@ -134,6 +134,30 @@ def test_build_llm_messages_refreshes_persisted_history_for_reopened_chat(monkey
     assert any("Malaysia is the target country" in item["content"] for item in history)
 
 
+def test_manual_compact_replaces_prior_raw_history_with_checkpoint(monkeypatch, tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    db.create_conversation("conv-manual-compact", "Manual compact")
+    monkeypatch.setattr(memory_manager_mod, "get_db", lambda: db)
+
+    db.add_message("conv-manual-compact", "user", "Raw old user line that should be replaced.")
+    db.add_message("conv-manual-compact", "assistant", "Raw old assistant line that should be replaced.")
+    manager = MemoryManager(RecordingLLM(reply="Current goal: preserve the compacted facts."))
+
+    result = asyncio.run(manager.compact_conversation("conv-manual-compact"))
+    db.add_message("conv-manual-compact", "user", "New request after compact.")
+    history = manager.build_llm_messages("conv-manual-compact")
+    joined = "\n".join(item["content"] for item in history)
+
+    assert result["status"] == "compacted"
+    assert db.get_conversation_compaction("conv-manual-compact")["source_message_id"] == 2
+    assert "Compacted Conversation Context" in joined
+    assert "Current goal: preserve the compacted facts." in joined
+    assert "New request after compact." in joined
+    assert "Raw old user line that should be replaced." not in joined
+    assert "Raw old assistant line that should be replaced." not in joined
+
+
 def test_memory_manager_compaction_prompt_preserves_task_critical_facts(monkeypatch, tmp_path):
     _patch_memory_dirs(monkeypatch, tmp_path)
     llm = RecordingLLM(reply="Compacted summary with task facts preserved.")

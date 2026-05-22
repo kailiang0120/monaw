@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agent.llm_constants import (
@@ -43,6 +44,7 @@ DEFAULT_SKILLS = {
     "computer-use": True,
     "filesystem": True,
     "memory": True,
+    "skill-creator": True,
     "background-check": False,
     "browser-use": True,
 }
@@ -371,16 +373,44 @@ def _legacy_tools_to_skills(payload: dict[str, Any]) -> dict[str, bool]:
         "computer-use": windows_tools or windows_controller,
         "filesystem": windows_controller,
         "memory": True,
+        "skill-creator": True,
         "background-check": False,
         "browser-use": True,
     }
 
 
+def _split_skill_frontmatter(raw: str) -> dict[str, Any]:
+    if not raw.startswith("---"):
+        return {}
+    parts = raw.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    loaded = yaml.safe_load(parts[1]) or {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _local_skill_names() -> set[str]:
+    skills_dir = Path(__file__).resolve().parents[1] / "skills"
+    names = set(DEFAULT_SKILLS) | {"scheduling"}
+    if not skills_dir.exists():
+        return names
+    for skill_md in skills_dir.glob("*/SKILL.md"):
+        try:
+            frontmatter = _split_skill_frontmatter(skill_md.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        name = str(frontmatter.get("name") or skill_md.parent.name.replace("_", "-")).strip()
+        if name:
+            names.add(name)
+    return names
+
+
 def _normalize_skill_flags(skills: dict[str, Any], *, include_defaults: bool = False) -> dict[str, bool]:
     normalized: dict[str, bool] = dict(DEFAULT_SKILLS) if include_defaults else {}
+    known_skills = _local_skill_names()
     for key, value in skills.items():
         canonical_key = LEGACY_SKILL_ALIASES.get(str(key), str(key))
-        if canonical_key in DEFAULT_SKILLS or canonical_key == "scheduling":
+        if canonical_key in known_skills:
             normalized[canonical_key] = bool(value)
     return normalized
 

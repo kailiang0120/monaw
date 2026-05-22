@@ -1,5 +1,5 @@
 import { KeyboardEvent, useEffect, useRef, useState } from 'react'
-import { Check, ChevronUp, FileText, Loader2, Mic, Paperclip, Send, Shield, Square, X } from 'lucide-react'
+import { Check, ChevronUp, FileText, Loader2, Mic, Paperclip, Send, Shield, Square, Terminal, X } from 'lucide-react'
 import { ContextUsageBar } from './ContextUsageBar'
 import { fetchContextUsage } from '../lib/api/conversations'
 import { transcribeSpeech } from '../lib/api/speechToText'
@@ -22,6 +22,13 @@ const VOICE_MIME_TYPES = [
   'audio/ogg;codecs=opus',
 ]
 const WAVEFORM_RATIOS = [0.35, 0.65, 0.9, 1, 0.85, 0.55, 0.75, 0.45, 0.95, 0.6]
+const SLASH_COMMANDS = [
+  {
+    command: '/compact',
+    label: 'Compact context',
+    description: 'Summarize this chat and use it as future context.',
+  },
+]
 
 interface Props {
   onSend: (text: string, attachments?: UploadedAttachment[]) => void
@@ -75,6 +82,16 @@ export function InputBar({
   const voiceTranscriptQueueRef = useRef<Map<number, string>>(new Map())
   const voiceStopRequestedRef = useRef(false)
   const activeApprovalLabel = APPROVAL_OPTIONS.find((o) => o.value === approvalMode)?.label ?? approvalMode
+  const slashQuery = value.startsWith('/') && !value.includes('\n') && !value.includes(' ')
+    ? value.slice(1).toLowerCase()
+    : ''
+  const slashCommandMatches = value.startsWith('/') && !value.includes('\n') && !value.includes(' ')
+    ? SLASH_COMMANDS.filter((item) => {
+      const command = item.command.slice(1).toLowerCase()
+      return command.startsWith(slashQuery) || item.label.toLowerCase().includes(slashQuery)
+    })
+    : []
+  const showSlashCommands = !recording && !isStreaming && !disabled && slashCommandMatches.length > 0
 
   useEffect(() => () => {
     if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current)
@@ -93,6 +110,7 @@ export function InputBar({
       setContextUsage(null)
       return
     }
+    setContextUsage(null)
     const loadUsage = async () => {
       try {
         const usage = await fetchContextUsage(conversationId)
@@ -131,7 +149,42 @@ export function InputBar({
     }
   }
 
+  const chooseSlashCommand = (command: string, submit = false) => {
+    setValue(command)
+    window.setTimeout(() => {
+      textareaRef.current?.focus()
+      handleInput()
+    }, 0)
+    if (submit) {
+      window.setTimeout(() => {
+        void handleSendCommand(command)
+      }, 0)
+    }
+  }
+
+  const handleSendCommand = async (command: string) => {
+    if (isStreaming || disabled || uploading || recording || transcribing) return
+    setUploadError('')
+    onSend(command, [])
+    setValue('')
+    setSelectedFiles([])
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+  }
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSlashCommands && slashCommandMatches[0]) {
+      if (e.key === 'Tab' || (e.key === 'Enter' && value.trim() !== slashCommandMatches[0].command)) {
+        e.preventDefault()
+        chooseSlashCommand(slashCommandMatches[0].command, e.key === 'Enter')
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setValue('')
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       void handleSend()
@@ -416,7 +469,33 @@ export function InputBar({
     <footer className="bg-[#11100f] px-4 pb-4 pt-2">
       <div className="mx-auto max-w-3xl">
         {/* Unified dock panel */}
-        <div className="panel rounded-2xl transition-colors focus-within:border-accent/40">
+        <div className="panel relative rounded-2xl transition-colors focus-within:border-accent/40">
+          {showSlashCommands && (
+            <div className="panel absolute bottom-full left-0 right-0 z-30 mb-2 overflow-hidden rounded-xl p-1">
+              {slashCommandMatches.map((item) => (
+                <button
+                  key={item.command}
+                  type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    chooseSlashCommand(item.command)
+                  }}
+                  className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-accent/10 focus:bg-accent/10 focus:outline-none"
+                >
+                  <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-accent/25 bg-accent/10 text-accent-light">
+                    <Terminal size={13} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-mono text-xs text-neutral-100">{item.command}</span>
+                    <span className="block truncate text-[11px] text-neutral-500">{item.description}</span>
+                  </span>
+                  <span className="rounded-md border border-accent/20 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-neutral-500">
+                    Enter
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
           {/* Textarea / waveform row */}
           <div className="px-4 pt-3">
             <input

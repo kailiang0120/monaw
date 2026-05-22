@@ -73,6 +73,17 @@
     @apply border border-lime-300/[0.13];
   }
 
+  .chat-title-fade {
+    background:
+      linear-gradient(
+        180deg,
+        rgba(17, 27, 19, 0.98) 0%,
+        rgba(17, 27, 19, 0.82) 42%,
+        rgba(17, 27, 19, 0.34) 72%,
+        rgba(17, 27, 19, 0) 100%
+      );
+  }
+
   .live-shimmer {
     background: linear-gradient(
       90deg,
@@ -301,6 +312,17 @@
   .theme-light .live-surface {
     background: #eaf6c5;
     border-color: rgba(79, 122, 43, 0.26) !important;
+  }
+
+  .theme-light .chat-title-fade {
+    background:
+      linear-gradient(
+        180deg,
+        rgba(247, 251, 223, 0.98) 0%,
+        rgba(247, 251, 223, 0.82) 42%,
+        rgba(247, 251, 223, 0.34) 72%,
+        rgba(247, 251, 223, 0) 100%
+      );
   }
 
   .theme-light .live-surface [class*="bg-accent-light"] {

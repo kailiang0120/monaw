@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Clock3, MessageSquare, Moon, Plus, Settings, Sun, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Clock3, MessageSquare, Moon, Plus, RefreshCw, Settings, Sun, Trash2 } from 'lucide-react'
 import type { Conversation, ScheduledTask } from '../lib/api/types'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
 import { ScheduledTasksList } from './scheduling/ScheduledTasksList'
@@ -16,6 +16,7 @@ interface Props {
   onNew: () => void
   onDelete: (id: string) => void
   onRename?: (id: string, title: string) => void
+  onRefreshConversation?: (id: string) => void
   onOpenSettings: () => void
   scheduledTasks: ScheduledTask[]
   onOpenScheduledTaskCreate: () => void
@@ -75,6 +76,7 @@ export function Sidebar({
   onNew,
   onDelete,
   onRename,
+  onRefreshConversation,
   onOpenSettings,
   scheduledTasks,
   onOpenScheduledTaskCreate,
@@ -301,17 +303,33 @@ export function Sidebar({
                             )}
                           </div>
                           {!isEditing && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                onDelete(c.id)
-                              }}
-                              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-700 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100 focus:opacity-100 focus:outline-none"
-                              aria-label={`Delete ${c.title}`}
-                            >
-                              <Trash2 size={11} />
-                            </button>
+                            <div className="flex shrink-0 items-center gap-0.5">
+                              {active && onRefreshConversation && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    onRefreshConversation(c.id)
+                                  }}
+                                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-600 transition-all hover:bg-accent/10 hover:text-accent-light focus:outline-none focus:ring-2 focus:ring-accent/20"
+                                  aria-label={`Refresh ${c.title}`}
+                                  title="Refresh chat"
+                                >
+                                  <RefreshCw size={11} />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  onDelete(c.id)
+                                }}
+                                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-700 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100 focus:opacity-100 focus:outline-none"
+                                aria-label={`Delete ${c.title}`}
+                              >
+                                <Trash2 size={11} />
+                              </button>
+                            </div>
                           )}
                         </div>
                       )

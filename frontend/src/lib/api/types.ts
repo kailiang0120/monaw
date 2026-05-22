@@ -77,6 +77,8 @@ export interface ContextUsage {
   percentage: number
   free_tokens: number
   compaction_buffer_tokens: number
+  tool_call_count: number
+  loaded_tool_count: number
   estimator: string
   breakdown: {
     key: string

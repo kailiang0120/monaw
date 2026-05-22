@@ -24,7 +24,7 @@ _RUNTIME_DIR = RUNTIME_DIR
 _DB_PATH = _RUNTIME_DIR / "agent.db"
 _JSON_CONVERSATIONS_DIR = _RUNTIME_DIR / "conversations"
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -130,6 +130,17 @@ CREATE TABLE IF NOT EXISTS scheduled_task_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
 ON scheduled_task_runs(task_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS conversation_compactions (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    summary TEXT NOT NULL DEFAULT '',
+    source_message_id INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    tokens_before INTEGER NOT NULL DEFAULT 0,
+    tokens_after INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -629,6 +640,31 @@ class Database:
         result.reverse()
         return result
 
+    def get_messages_after(
+        self,
+        conv_id: str,
+        after_id: int = 0,
+        limit: int = 200,
+    ) -> list[dict]:
+        rows = self.fetchall(
+            """
+            SELECT * FROM messages
+            WHERE conversation_id = ?
+              AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (conv_id, max(0, int(after_id or 0)), max(1, int(limit))),
+        )
+        return [dict(row) for row in rows]
+
+    def get_last_message_id(self, conv_id: str) -> int:
+        row = self.fetchone(
+            "SELECT MAX(id) AS last_id FROM messages WHERE conversation_id = ?",
+            (conv_id,),
+        )
+        return int(row["last_id"] or 0) if row is not None else 0
+
     def get_recent_messages(self, conv_id: str, limit: int = 10) -> list[dict]:
         return self.get_messages(conv_id, limit=limit)
 
@@ -789,6 +825,64 @@ class Database:
             (message_id,),
         )
         return [dict(row) for row in rows]
+
+    def count_tool_calls_for_conversation(self, conv_id: str) -> int:
+        row = self.fetchone(
+            "SELECT COUNT(*) AS count FROM tool_calls WHERE conversation_id = ?",
+            (conv_id,),
+        )
+        return int(row["count"]) if row is not None else 0
+
+    def get_conversation_compaction(self, conv_id: str) -> dict[str, Any] | None:
+        row = self.fetchone(
+            "SELECT * FROM conversation_compactions WHERE conversation_id = ?",
+            (conv_id,),
+        )
+        return dict(row) if row is not None else None
+
+    def upsert_conversation_compaction(
+        self,
+        *,
+        conv_id: str,
+        summary: str,
+        source_message_id: int,
+        message_count: int,
+        tokens_before: int,
+        tokens_after: int,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT INTO conversation_compactions (
+                    conversation_id, summary, source_message_id, message_count,
+                    tokens_before, tokens_after, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    source_message_id = excluded.source_message_id,
+                    message_count = excluded.message_count,
+                    tokens_before = excluded.tokens_before,
+                    tokens_after = excluded.tokens_after,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    conv_id,
+                    summary,
+                    int(source_message_id),
+                    int(message_count),
+                    int(tokens_before),
+                    int(tokens_after),
+                    now,
+                    now,
+                ),
+            )
+            self.conn.commit()
+        compaction = self.get_conversation_compaction(conv_id)
+        if compaction is None:
+            raise RuntimeError("conversation compaction could not be reloaded")
+        return compaction
 
     def get_recent_tool_outcomes(self, conv_id: str, limit: int = 5) -> list[dict]:
         rows = self.fetchall(

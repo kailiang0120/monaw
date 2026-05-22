@@ -38,6 +38,27 @@ logger = logging.getLogger(__name__)
 CONTEXT_TOKEN_LIMIT = DEFAULT_CONTEXT_TOKEN_LIMIT
 COMPACTION_THRESHOLD = int(DEFAULT_CONTEXT_TOKEN_LIMIT * 0.9)
 CHARS_PER_TOKEN = 4
+MANUAL_COMPACT_MESSAGE_LIMIT = 1000
+
+MANUAL_COMPACT_SYSTEM_PROMPT = (
+    "You are a separate summarizer for a /compact command. "
+    "Do not execute tasks, call tools, or continue the conversation. "
+    "Only write a durable continuation summary."
+)
+
+MANUAL_COMPACT_PROMPT = (
+    "Compact this conversation so the next assistant turn can use the summary "
+    "instead of the original chat history.\n\n"
+    "Write a concise but complete handoff with these sections:\n"
+    "- Current goal\n"
+    "- User preferences and constraints\n"
+    "- Decisions and important facts\n"
+    "- Repo, files, commands, URLs, ids, and tool results that matter\n"
+    "- Errors, blockers, and unresolved questions\n"
+    "- Current state and next steps\n\n"
+    "Preserve exact file paths, commands, URLs, identifiers, settings, and error text. "
+    "Drop chit-chat and repeated acknowledgements. Do not invent facts."
+)
 
 
 # ── Module-level helpers (no manager instance required) ───────────────────────
@@ -251,19 +272,41 @@ class MemoryManager:
     def build_llm_messages(self, conversation_id: str) -> list[dict]:
         """Build conversation history messages for cross-turn LLM continuity."""
         state = self.get_or_create(conversation_id)
-        persisted_history = self._db.get_messages(conversation_id, limit=200)
-        if persisted_history:
+        compaction = self._db.get_conversation_compaction(conversation_id)
+        compaction_source_id = int((compaction or {}).get("source_message_id") or 0)
+        if compaction is not None:
+            persisted_history = self._db.get_messages_after(
+                conversation_id,
+                after_id=compaction_source_id,
+                limit=self.LLM_HISTORY_MESSAGES,
+            )
+        else:
+            persisted_history = self._db.get_messages(conversation_id, limit=200)
+        if persisted_history or compaction is not None:
             state.all_messages = [
                 {"role": m["role"], "content": m["content"], "timestamp": m["created_at"]}
                 for m in persisted_history
             ]
             state.recent_messages = state.all_messages[-self.MAX_RECENT_MESSAGES:]
-        history = state.all_messages[-self.LLM_HISTORY_MESSAGES:] or state.recent_messages[
-            -self.LLM_HISTORY_MESSAGES:
-        ]
+        if compaction is not None:
+            history = state.all_messages[-self.LLM_HISTORY_MESSAGES:]
+        else:
+            history = state.all_messages[-self.LLM_HISTORY_MESSAGES:] or state.recent_messages[
+                -self.LLM_HISTORY_MESSAGES:
+            ]
         messages: list[dict] = []
 
-        if state.summary.strip():
+        if compaction is not None and str(compaction.get("summary") or "").strip():
+            messages.append({
+                "role": "assistant",
+                "content": (
+                    "[Compacted Conversation Context]\n"
+                    "This replaces all earlier chat history before message "
+                    f"{compaction_source_id}. Treat it as authoritative prior context.\n\n"
+                    f"{str(compaction.get('summary') or '').strip()}"
+                ),
+            })
+        elif state.summary.strip():
             messages.append({
                 "role": "assistant",
                 "content": f"Earlier conversation summary:\n{state.summary.strip()}",
@@ -285,6 +328,157 @@ class MemoryManager:
             })
 
         return messages
+
+    def _messages_for_manual_compaction(
+        self,
+        conversation_id: str,
+        *,
+        after_id: int = 0,
+    ) -> list[dict]:
+        messages = self._db.get_messages_after(
+            conversation_id,
+            after_id=after_id,
+            limit=MANUAL_COMPACT_MESSAGE_LIMIT,
+        )
+        for message in messages:
+            if message.get("role") == "assistant":
+                message["tool_calls"] = self._db.get_tool_calls_for_message(int(message["id"]))
+        return messages
+
+    def _format_messages_for_compaction(self, messages: list[dict]) -> str:
+        parts: list[str] = []
+        for message in messages:
+            role = str(message.get("role") or "user")
+            message_id = int(message.get("id") or 0)
+            content = str(message.get("content") or "").strip()
+            parts.append(f"[message {message_id}] {role}: {content}")
+            for tool_call in message.get("tool_calls") or []:
+                tool_name = str(tool_call.get("tool_name") or "")
+                status = str(tool_call.get("status") or "")
+                tool_input = str(tool_call.get("input") or "").strip()
+                output = str(tool_call.get("output") or "").strip()
+                if len(output) > 4000:
+                    output = output[:4000].rstrip() + "\n[truncated]"
+                parts.append(
+                    "[tool call "
+                    f"{tool_call.get('id')}] {tool_name} ({status})\n"
+                    f"input: {tool_input}\noutput: {output}"
+                )
+        return "\n\n".join(parts).strip()
+
+    def _fallback_compaction_summary(
+        self,
+        *,
+        existing_summary: str,
+        messages: list[dict],
+    ) -> str:
+        lines = [
+            "Current goal: Continue the conversation from the compacted checkpoint.",
+            "User preferences and constraints: Preserve the user's latest instructions and any explicit constraints from the conversation.",
+        ]
+        if existing_summary.strip():
+            lines.append(f"Prior compacted context: {existing_summary.strip()}")
+        tail = messages[-12:]
+        if tail:
+            lines.append("Recent state and next steps:")
+            for message in tail:
+                role = str(message.get("role") or "user")
+                content = " ".join(str(message.get("content") or "").split())
+                if len(content) > 500:
+                    content = content[:500].rstrip() + "..."
+                lines.append(f"- {role}: {content}")
+        return "\n".join(lines).strip()
+
+    async def compact_conversation(self, conversation_id: str) -> dict:
+        """Create a durable /compact checkpoint for future turns."""
+        self.get_or_create(conversation_id)
+        existing = self._db.get_conversation_compaction(conversation_id)
+        previous_source_id = int((existing or {}).get("source_message_id") or 0)
+        existing_summary = str((existing or {}).get("summary") or "").strip()
+        messages = self._messages_for_manual_compaction(
+            conversation_id,
+            after_id=previous_source_id,
+        )
+        if not messages and not existing_summary:
+            return {
+                "status": "empty",
+                "summary": "",
+                "message_count": 0,
+                "source_message_id": 0,
+                "tokens_before": 0,
+                "tokens_after": 0,
+            }
+        if not messages and existing_summary:
+            return {
+                "status": "unchanged",
+                "summary": existing_summary,
+                "message_count": 0,
+                "source_message_id": previous_source_id,
+                "tokens_before": count_text_tokens(existing_summary, llm_client=self.llm_client),
+                "tokens_after": count_text_tokens(existing_summary, llm_client=self.llm_client),
+            }
+
+        transcript = self._format_messages_for_compaction(messages)
+        prompt_parts = [MANUAL_COMPACT_PROMPT]
+        if existing_summary:
+            prompt_parts.extend([
+                "",
+                "Existing compacted context to merge and update:",
+                existing_summary,
+            ])
+        prompt_parts.extend(["", "Conversation segment to compact:", transcript])
+        prompt = "\n".join(prompt_parts).strip()
+
+        try:
+            summary = await self.llm_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt=MANUAL_COMPACT_SYSTEM_PROMPT,
+            )
+            summary = str(summary or "").strip()
+        except Exception as exc:
+            logger.warning("/compact summarization failed; using fallback summary: %s", exc)
+            summary = ""
+        if not summary:
+            summary = self._fallback_compaction_summary(
+                existing_summary=existing_summary,
+                messages=messages,
+            )
+
+        source_message_id = int(messages[-1].get("id") or previous_source_id)
+        tokens_before = count_text_tokens(
+            "\n\n".join(
+                part
+                for part in [existing_summary, transcript]
+                if part.strip()
+            ),
+            llm_client=self.llm_client,
+        )
+        tokens_after = count_text_tokens(summary, llm_client=self.llm_client)
+        compaction = self._db.upsert_conversation_compaction(
+            conv_id=conversation_id,
+            summary=summary,
+            source_message_id=source_message_id,
+            message_count=len(messages),
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+        )
+
+        state = self.get_or_create(conversation_id)
+        state.all_messages = []
+        state.recent_messages = []
+        state.context_tokens_estimate = self.estimate_context_tokens(conversation_id, "")
+        self._db.update_conversation(
+            conversation_id,
+            context_tokens_estimate=state.context_tokens_estimate,
+        )
+        return {
+            "status": "compacted",
+            "summary": summary,
+            "message_count": len(messages),
+            "source_message_id": int(compaction["source_message_id"]),
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+        }
 
     def add_message(
         self,

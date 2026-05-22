@@ -286,6 +286,7 @@ def build_context_usage_report(
     long_term_context: str = "",
     visible_tools: list[dict] | None = None,
     hidden_tools: list[dict] | None = None,
+    tool_call_count: int = 0,
     current_user_message: str = "",
     limit: int,
     compaction_at: int,
@@ -298,6 +299,7 @@ def build_context_usage_report(
     deferred_tools = list(hidden_tools or [])
     mcp_tools = [tool for tool in active_tools if tool.get("mcp_bridge")]
     built_in_tools = [tool for tool in active_tools if not tool.get("mcp_bridge")]
+    loaded_tool_count = len(active_tools) + len(deferred_tools)
 
     breakdown: list[dict[str, Any]] = []
 
@@ -422,6 +424,8 @@ def build_context_usage_report(
         "percentage": percentage,
         "free_tokens": free_tokens,
         "compaction_buffer_tokens": compaction_buffer_tokens,
+        "tool_call_count": max(0, int(tool_call_count)),
+        "loaded_tool_count": loaded_tool_count,
         "estimator": token_estimation_method(llm_client),
         "breakdown": breakdown,
         "notes": (

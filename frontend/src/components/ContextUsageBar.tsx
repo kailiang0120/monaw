@@ -67,11 +67,10 @@ export function ContextUsageBar({ usage }: Props) {
   const tools = usage.breakdown
     .filter((item) => ['builtin_tools', 'mcp_tools', 'deferred_tools'].includes(item.key))
     .reduce((total, item) => total + item.tokens, 0)
-
   const summaryRows = [
     { label: 'Messages', value: messages },
     { label: 'System', value: system },
-    { label: 'Tools', value: tools },
+    { label: 'Tools', value: tools, toolCalls: usage.tool_call_count ?? 0 },
     { label: 'Free', value: Math.max(0, usage.free_tokens) },
   ]
 
@@ -132,6 +131,11 @@ export function ContextUsageBar({ usage }: Props) {
                 <p className="mt-0.5 text-[11px] font-medium tabular-nums text-neutral-300">
                   {formatTokens(row.value)}
                 </p>
+                {'toolCalls' in row && row.toolCalls > 0 && (
+                  <p className="mt-0.5 text-[9px] font-medium tabular-nums text-neutral-600">
+                    {row.toolCalls} calls
+                  </p>
+                )}
               </div>
             ))}
           </div>

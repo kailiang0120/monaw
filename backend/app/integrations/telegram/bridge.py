@@ -42,6 +42,7 @@ COMMANDS = [
     BotCommand("models", "List or switch model"),
     BotCommand("modeldefault", "Use the desktop default model"),
     BotCommand("effort", "List or switch reasoning effort"),
+    BotCommand("compact", "Compact this chat context"),
     BotCommand("new", "Start a fresh Telegram conversation session"),
 ]
 TELEGRAM_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -156,7 +157,7 @@ def _start_message() -> str:
     return (
         f"{_agent_display_name()} AI Agent is online and connected to your laptop.\n"
         "Send a message to use the same agent runtime as the desktop app.\n"
-        "Commands: /status, /whoami, /session, /resume, /models, /modeldefault, /effort, /new, /help."
+        "Commands: /status, /whoami, /session, /resume, /models, /modeldefault, /effort, /compact, /new, /help."
     )
 
 
@@ -181,6 +182,7 @@ def _help_message() -> str:
         "/effort 4 - Switch this Telegram chat to a listed reasoning effort.\n"
         "/effort medium - Switch by effort name.\n"
         "/effort default - Clear this Telegram chat's effort override and use the desktop default.\n"
+        "/compact - Compact this chat so future replies use the summary instead of earlier raw history.\n"
         "/new - Start a fresh Telegram conversation session.\n\n"
         "Files and photos are sent to the agent as attachments. Voice and audio messages are transcribed first. "
         "Desktop approvals still happen in the desktop app."
@@ -799,6 +801,31 @@ async def effort_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def compact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None:
+        return
+    if not await _ensure_authorized(update, context):
+        return
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    try:
+        result = await _agent_bridge(context).run_chat_message(
+            chat_id=update.effective_chat.id,
+            thread_id=_message_thread_id(update),
+            chat_title=_chat_title(update),
+            sender_name=_sender_name(update),
+            text="/compact",
+        )
+    except Exception as exc:
+        logger.exception("Telegram /compact failed.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Could not compact this chat: {exc}",
+        )
+        return
+    for chunk in split_telegram_message(result.reply):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
+
+
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None:
         return
@@ -946,6 +973,7 @@ def build_application(token: str | None = None):
     application.add_handler(CommandHandler("models", models_command))
     application.add_handler(CommandHandler("modeldefault", modeldefault_command))
     application.add_handler(CommandHandler("effort", effort_command))
+    application.add_handler(CommandHandler("compact", compact_command))
     application.add_handler(CommandHandler("new", new_session))
     application.add_handler(
         MessageHandler(

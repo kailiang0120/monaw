@@ -245,6 +245,9 @@ export default function App() {
         onNew={handleNewChat}
         onDelete={handleDeleteConversation}
         onRename={(id, title) => handleRenameConversation(id, title)}
+        onRefreshConversation={(id) => {
+          if (id === activeConvId) handleRefreshChat()
+        }}
         onOpenSettings={() => setShowSettings(true)}
         scheduledTasks={scheduledTasks}
         onOpenScheduledTaskCreate={openScheduledTaskCreate}
@@ -267,7 +270,6 @@ export default function App() {
             isStreaming={isStreaming}
             agentName={agentName}
             onRename={activeConvId ? (title) => handleRenameConversation(activeConvId, title) : undefined}
-            onRefresh={activeConvId ? handleRefreshChat : undefined}
             onPromptSelect={handleSend}
           />
           <InputBar

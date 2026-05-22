@@ -97,6 +97,8 @@ class ContextUsagePayload(BaseModel):
     percentage: float
     free_tokens: int = 0
     compaction_buffer_tokens: int = 0
+    tool_call_count: int = 0
+    loaded_tool_count: int = 0
     estimator: str = ""
     breakdown: list[ContextUsageBreakdownItemPayload] = Field(default_factory=list)
     notes: str = ""
