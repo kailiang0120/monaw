@@ -35,6 +35,9 @@ def test_close_session_archives_hot_messages_and_creates_markdown_reflection(tmp
     assert db.count_archived_messages("conv-close") == 50
     assert len(reflections) >= 1
     assert (tmp_path / "memory" / "short-term" / "session-conv-close.md").exists()
+    episodes = store.list_episodes(conversation_id="conv-close")
+    assert len(episodes) == 1
+    assert "Goal:" in episodes[0]["summary"]
 
 
 def test_memory_health_archives_tunes_and_merges_markdown_memories(tmp_path):

@@ -414,8 +414,79 @@ export interface MemoryStats {
   curated_sessions: number
   audit_events: number
   archived_messages: number
+  episodes: number
+  active_checkpoints: number
+  profile_fields: number
   memory_root: string
   categories: Partial<Record<MemoryCategory, number>>
+}
+
+export interface MemoryProfileField {
+  field: string
+  value: string
+  privacy_level: 'normal' | 'private' | 'sensitive'
+  confidence: number
+  review_state: MemoryReviewState
+  source_conversation_id: string
+  source_message_id: number | null
+  updated_at: string
+}
+
+export interface MemoryCandidate {
+  id: string
+  kind: MemoryKind
+  content: string
+  category: MemoryCategory
+  confidence: number
+  importance: number
+  status: 'new' | 'approved' | 'rejected'
+  reason: string
+  source_conversation_id: string
+  source_message_id: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface MemoryCheckpoint {
+  id: string
+  scope: string
+  status: string
+  conversation_id: string
+  project: string
+  app_name: string
+  goal: string
+  last_known_state: string
+  next_action: string
+  blocker: string
+  browser_url: string
+  browser_title: string
+  workspace_path: string
+  files_touched: string[]
+  commands_run: string[]
+  expires_at: string
+  source_refs: Record<string, unknown>[]
+  created_at: string
+  updated_at: string
+}
+
+export interface MemoryEpisode {
+  id: string
+  conversation_id: string
+  channel: string
+  project: string
+  task_type: string
+  summary: string
+  decisions: unknown[]
+  artifacts: unknown[]
+  errors: unknown[]
+  fixes: unknown[]
+  open_questions: unknown[]
+  follow_ups: unknown[]
+  source_message_start_id: number | null
+  source_message_end_id: number | null
+  tool_call_ids: number[]
+  created_at: string
+  updated_at: string
 }
 
 export interface AgentSettings {

@@ -4,11 +4,17 @@ from app.agent.memory_consolidation import close_session_async
 from app.agent.long_term_memory import get_long_term_memory
 from app.schemas import (
     MemoryAuditOut,
+    MemoryCandidateOut,
+    MemoryCandidateUpdate,
+    MemoryCheckpointOut,
     MemoryCreate,
+    MemoryEpisodeOut,
     MemoryFileOut,
     MemoryFileSectionOut,
     MemoryFileUpdate,
     MemoryOut,
+    MemoryProfileFieldOut,
+    MemoryProfileFieldUpdate,
     MemorySearchOut,
     MemorySectionUpdate,
     MemorySessionCloseIn,
@@ -94,6 +100,66 @@ async def memory_audit(
 @router.post("/memories/session/close", response_model=MemorySessionCloseOut)
 async def close_memory_session(body: MemorySessionCloseIn):
     return await close_session_async(body.conversation_id)
+
+
+@router.get("/memories/profile", response_model=list[MemoryProfileFieldOut])
+async def memory_profile():
+    return get_long_term_memory().profile_fields()
+
+
+@router.patch("/memories/profile/{field}", response_model=MemoryProfileFieldOut)
+async def update_memory_profile(field: str, body: MemoryProfileFieldUpdate):
+    try:
+        return get_long_term_memory().update_profile_field(
+            field,
+            body.value,
+            privacy_level=body.privacy_level,
+            confidence=body.confidence,
+            review_state=body.review_state,
+            source_conversation_id=body.source_conversation_id,
+            source_message_id=body.source_message_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/memories/candidates", response_model=list[MemoryCandidateOut])
+async def list_memory_candidates(
+    status: str = Query("new", pattern="^(new|approved|rejected|)$"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    return get_long_term_memory().list_candidates(status=status, limit=limit)
+
+
+@router.patch("/memories/candidates/{candidate_id}", response_model=MemoryCandidateOut)
+async def update_memory_candidate(candidate_id: str, body: MemoryCandidateUpdate):
+    try:
+        candidate = get_long_term_memory().update_candidate(
+            candidate_id,
+            status=body.status,
+            approve=body.approve,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Memory candidate not found")
+    return candidate
+
+
+@router.get("/memories/episodes", response_model=list[MemoryEpisodeOut])
+async def list_memory_episodes(
+    conversation_id: str = "",
+    limit: int = Query(100, ge=1, le=500),
+):
+    return get_long_term_memory().list_episodes(conversation_id=conversation_id, limit=limit)
+
+
+@router.get("/memories/checkpoints", response_model=list[MemoryCheckpointOut])
+async def list_memory_checkpoints(
+    status: str = Query("active", pattern="^(active|paused|blocked|completed|stale|)$"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    return get_long_term_memory().list_checkpoints(status=status, limit=limit)
 
 
 @router.get("/memories/files/{category}", response_model=MemoryFileOut)

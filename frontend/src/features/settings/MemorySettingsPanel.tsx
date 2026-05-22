@@ -4,17 +4,26 @@ import {
   createMemory,
   deleteMemory,
   fetchMemories,
+  fetchMemoryCandidates,
+  fetchMemoryCheckpoints,
+  fetchMemoryEpisodes,
   fetchMemoryFile,
+  fetchMemoryProfile,
   fetchMemoryStats,
   saveMemoryFile,
+  updateMemoryCandidate,
   updateMemory,
   updateSection,
   type MemoryListParams,
 } from '../../lib/api/memories'
 import type {
   AgentSettings,
+  MemoryCandidate,
   MemoryCategory,
+  MemoryCheckpoint,
+  MemoryEpisode,
   MemoryFileRecord,
+  MemoryProfileField,
   MemoryRecord,
   MemoryReviewState,
   MemorySectionRecord,
@@ -48,6 +57,9 @@ const EMPTY_STATS = {
   curated_sessions: 0,
   audit_events: 0,
   archived_messages: 0,
+  episodes: 0,
+  active_checkpoints: 0,
+  profile_fields: 0,
   memory_root: '',
   categories: {} as Partial<Record<MemoryCategory, number>>,
 }
@@ -64,6 +76,10 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
   const [reviewFilter, setReviewFilter] = useState<'' | MemoryReviewState>('')
   const [memories, setMemories] = useState<MemoryRecord[]>([])
   const [memoryFile, setMemoryFile] = useState<MemoryFileRecord | null>(null)
+  const [profileFields, setProfileFields] = useState<MemoryProfileField[]>([])
+  const [candidates, setCandidates] = useState<MemoryCandidate[]>([])
+  const [episodes, setEpisodes] = useState<MemoryEpisode[]>([])
+  const [checkpoints, setCheckpoints] = useState<MemoryCheckpoint[]>([])
   const [rawMarkdown, setRawMarkdown] = useState('')
   const [stats, setStats] = useState(EMPTY_STATS)
   const [loading, setLoading] = useState(false)
@@ -121,11 +137,21 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
         memoryFilePromise,
         fetchMemoryStats(),
       ])
+      const [nextProfile, nextCandidates, nextEpisodes, nextCheckpoints] = await Promise.all([
+        fetchMemoryProfile().catch(() => []),
+        fetchMemoryCandidates({ status: 'new', limit: 5 }).catch(() => []),
+        fetchMemoryEpisodes({ limit: 5 }).catch(() => []),
+        fetchMemoryCheckpoints({ status: 'active', limit: 5 }).catch(() => []),
+      ])
       if (requestId !== requestSeq.current) return
       setMemories(items)
       setMemoryFile(file)
       setRawMarkdown(file?.raw_markdown ?? '')
       setStats(nextStats)
+      setProfileFields(nextProfile)
+      setCandidates(nextCandidates)
+      setEpisodes(nextEpisodes)
+      setCheckpoints(nextCheckpoints)
       setLoadError('')
     } catch {
       if (requestId !== requestSeq.current) return
@@ -133,6 +159,10 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
       if (clearOnError) {
         setMemories([])
         setMemoryFile(null)
+        setProfileFields([])
+        setCandidates([])
+        setEpisodes([])
+        setCheckpoints([])
         setStats(EMPTY_STATS)
       }
     } finally {
@@ -272,6 +302,19 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
     }
   }
 
+  const resolveCandidate = async (candidate: MemoryCandidate, approve: boolean) => {
+    setMutationError('')
+    try {
+      await updateMemoryCandidate(candidate.id, {
+        status: approve ? 'approved' : 'rejected',
+        approve,
+      })
+      await loadMemoryData({ silent: true })
+    } catch (error) {
+      setMutationError(error instanceof Error ? error.message : 'Candidate could not be updated.')
+    }
+  }
+
   return (
     <div className="max-w-5xl space-y-3">
       {loadError && <Alert>{loadError}</Alert>}
@@ -361,9 +404,9 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
         <MemoryStat label="Active" value={stats.active} />
         <MemoryStat label="Review" value={stats.new} />
         <MemoryStat label="Archived" value={stats.archived} />
-        <MemoryStat label="Summaries" value={stats.short_term} />
-        <MemoryStat label="Profiles" value={stats.personalities} />
-        <MemoryStat label="Curated" value={stats.curated_sessions} />
+        <MemoryStat label="Candidates" value={stats.unresolved_candidates} />
+        <MemoryStat label="Episodes" value={stats.episodes} />
+        <MemoryStat label="Context" value={stats.active_checkpoints} />
       </div>
 
       {/* Add memory */}
@@ -541,6 +584,53 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
             </div>
           )}
           <MemoryRetrievalDebugger initialQuery={query} />
+          <div className="grid gap-2 border-t border-white/[0.06] pt-2 lg:grid-cols-2">
+            <MemoryOpsPanel title="Profile" empty="No profile fields.">
+              {profileFields.slice(0, 5).map((field) => (
+                <MemoryOpsItem key={field.field} title={field.field} meta={field.review_state}>
+                  {field.privacy_level === 'normal' ? field.value : `${field.privacy_level} value`}
+                </MemoryOpsItem>
+              ))}
+            </MemoryOpsPanel>
+
+            <MemoryOpsPanel title="Candidates" empty="No candidates waiting.">
+              {candidates.map((candidate) => (
+                <MemoryOpsItem
+                  key={candidate.id}
+                  title={candidate.category}
+                  meta={`I${candidate.importance} · ${Math.round(candidate.confidence * 100)}%`}
+                  actions={(
+                    <>
+                      <button type="button" className="ghost-button h-6 rounded-md px-2 text-[10px]" onClick={() => resolveCandidate(candidate, false)}>
+                        Reject
+                      </button>
+                      <button type="button" className="primary-button h-6 rounded-md px-2 text-[10px]" onClick={() => resolveCandidate(candidate, true)}>
+                        Approve
+                      </button>
+                    </>
+                  )}
+                >
+                  {candidate.content}
+                </MemoryOpsItem>
+              ))}
+            </MemoryOpsPanel>
+
+            <MemoryOpsPanel title="Episodes" empty="No curated episodes.">
+              {episodes.map((episode) => (
+                <MemoryOpsItem key={episode.id} title={episode.conversation_id} meta={episode.channel}>
+                  {episode.summary}
+                </MemoryOpsItem>
+              ))}
+            </MemoryOpsPanel>
+
+            <MemoryOpsPanel title="Current Context" empty="No active checkpoints.">
+              {checkpoints.map((checkpoint) => (
+                <MemoryOpsItem key={checkpoint.id} title={checkpoint.scope} meta={checkpoint.status}>
+                  {checkpoint.goal || checkpoint.next_action || checkpoint.last_known_state}
+                </MemoryOpsItem>
+              ))}
+            </MemoryOpsPanel>
+          </div>
         </div>
       )}
     </div>
@@ -560,6 +650,45 @@ function MemoryStat({ label, value }: { label: string; value: number }) {
     <div className="rounded-lg border border-white/[0.07] bg-white/[0.025] px-2.5 py-2">
       <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500">{label}</p>
       <p className="mt-1 text-sm font-semibold tabular-nums text-neutral-100">{value}</p>
+    </div>
+  )
+}
+
+function MemoryOpsPanel({ title, empty, children }: { title: string; empty: string; children: ReactNode }) {
+  const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children)
+  return (
+    <div className="rounded-lg border border-white/[0.07] bg-white/[0.025] p-2">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500">{title}</p>
+      <div className="mt-1.5 space-y-1.5">
+        {hasChildren ? children : <p className="text-[11px] text-neutral-500">{empty}</p>}
+      </div>
+    </div>
+  )
+}
+
+function MemoryOpsItem({
+  title,
+  meta,
+  actions,
+  children,
+}: {
+  title: string
+  meta?: string
+  actions?: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <div className="rounded-md bg-black/10 px-2 py-1.5">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <p className="min-w-0 truncate text-[11px] font-medium text-neutral-200">{title}</p>
+            {meta && <span className="shrink-0 text-[10px] text-neutral-500">{meta}</span>}
+          </div>
+          <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-neutral-400">{children}</p>
+        </div>
+        {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
+      </div>
     </div>
   )
 }

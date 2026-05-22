@@ -568,6 +568,28 @@ class LongTermMemory:
             return None
         return record
 
+    def _json_list(self, value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        try:
+            loaded = json.loads(str(value or "[]"))
+        except json.JSONDecodeError:
+            return []
+        return loaded if isinstance(loaded, list) else []
+
+    def _db_rows(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        try:
+            return [dict(row) for row in self._db.fetchall(sql, params)]
+        except sqlite3.Error:
+            return []
+
+    def _db_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+        try:
+            row = self._db.fetchone(sql, params)
+        except sqlite3.Error:
+            return None
+        return dict(row) if row is not None else None
+
     def _all_records(self, *, include_archived: bool = True, include_short_term: bool = True) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for category in VALID_CATEGORIES:
@@ -1189,6 +1211,360 @@ class LongTermMemory:
             record["updated_at"] = _now()
             self._write_record(record)
 
+    def profile_fields(self) -> list[dict[str, Any]]:
+        rows = self._db_rows(
+            """
+            SELECT field, value, privacy_level, confidence, review_state,
+                   source_conversation_id, source_message_id, updated_at
+            FROM memory_profile_fields
+            ORDER BY field
+            """
+        )
+        return rows
+
+    def update_profile_field(
+        self,
+        field: str,
+        value: str,
+        *,
+        privacy_level: str = "normal",
+        confidence: float = 1.0,
+        review_state: str = "reviewed",
+        source_conversation_id: str = "",
+        source_message_id: int | None = None,
+    ) -> dict[str, Any]:
+        field_id = _safe_id(field)
+        text = str(value or "").strip()
+        if not field_id or not text:
+            raise ValueError("Profile field and value are required")
+        if self._contains_sensitive(text) and privacy_level not in {"sensitive", "private"}:
+            raise ValueError("Sensitive profile values must be marked private or sensitive")
+        if review_state not in VALID_REVIEW_STATES:
+            review_state = "new"
+        privacy = str(privacy_level or "normal").lower()
+        if privacy not in {"normal", "private", "sensitive"}:
+            privacy = "normal"
+        now = _now()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO memory_profile_fields (
+                    field, value, privacy_level, confidence, review_state,
+                    source_conversation_id, source_message_id, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(field) DO UPDATE SET
+                    value = excluded.value,
+                    privacy_level = excluded.privacy_level,
+                    confidence = excluded.confidence,
+                    review_state = excluded.review_state,
+                    source_conversation_id = excluded.source_conversation_id,
+                    source_message_id = excluded.source_message_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    field_id,
+                    text,
+                    privacy,
+                    max(0.0, min(1.0, float(confidence))),
+                    review_state,
+                    source_conversation_id,
+                    source_message_id,
+                    now,
+                ),
+            )
+            self._db.commit()
+        self._audit(action="PROFILE_UPDATE", reason=field_id, source_conversation_id=source_conversation_id, candidate_content=text[:1000])
+        row = self._db_one("SELECT * FROM memory_profile_fields WHERE field = ?", (field_id,))
+        return row or {}
+
+    def _candidate_public(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(row.get("id") or ""),
+            "kind": str(row.get("kind") or "fact"),
+            "content": str(row.get("content") or ""),
+            "category": self._normalize_category(str(row.get("category") or "fact")),
+            "confidence": _coerce_float(row.get("confidence"), 0.8),
+            "importance": _coerce_int(row.get("importance"), 5),
+            "status": str(row.get("status") or "new"),
+            "reason": str(row.get("reason") or ""),
+            "source_conversation_id": str(row.get("source_conversation_id") or ""),
+            "source_message_id": row.get("source_message_id"),
+            "created_at": str(row.get("created_at") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+
+    def add_candidate(
+        self,
+        content: str,
+        *,
+        category: str = "fact",
+        kind: str = "fact",
+        confidence: float = 0.8,
+        importance: int = 5,
+        reason: str = "",
+        source_conversation_id: str = "",
+        source_message_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        text = str(content or "").strip()
+        confidence = max(0.0, min(1.0, float(confidence)))
+        if not self._is_storable(text, confidence=confidence):
+            self._audit(action="REJECT_CANDIDATE", reason="safety_or_quality_filter", source_conversation_id=source_conversation_id, candidate_content=text[:1000])
+            return None
+        category = self._normalize_category(category)
+        if kind not in VALID_KINDS:
+            kind = "reflection" if category == "reflection" else "fact"
+        candidate_id = _safe_id(f"cand-{source_conversation_id}-{category}-{_content_hash(text)[:16]}")
+        now = _now()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO memory_candidates (
+                    id, kind, content, category, confidence, importance, status,
+                    reason, source_conversation_id, source_message_id, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    confidence = MAX(memory_candidates.confidence, excluded.confidence),
+                    importance = MAX(memory_candidates.importance, excluded.importance),
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    candidate_id,
+                    kind,
+                    text,
+                    category,
+                    confidence,
+                    max(1, min(10, int(importance))),
+                    reason,
+                    source_conversation_id,
+                    source_message_id,
+                    now,
+                    now,
+                ),
+            )
+            self._db.commit()
+        self._audit(action="CANDIDATE", reason=reason or "turn_capture", source_conversation_id=source_conversation_id, candidate_content=text[:1000])
+        row = self._db_one("SELECT * FROM memory_candidates WHERE id = ?", (candidate_id,))
+        return self._candidate_public(row) if row else None
+
+    def list_candidates(self, *, status: str = "new", limit: int = 100) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if status:
+            where = "WHERE status = ?"
+            params.append(status)
+        rows = self._db_rows(
+            f"""
+            SELECT * FROM memory_candidates
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params + [max(1, min(500, int(limit)))]),
+        )
+        return [self._candidate_public(row) for row in rows]
+
+    def update_candidate(self, candidate_id: str, *, status: str, approve: bool = False) -> dict[str, Any] | None:
+        row = self._db_one("SELECT * FROM memory_candidates WHERE id = ?", (_safe_id(candidate_id),))
+        if row is None:
+            return None
+        if status not in {"new", "approved", "rejected"}:
+            raise ValueError("Invalid candidate status")
+        if approve:
+            memory = self.remember(
+                str(row.get("content") or ""),
+                category=str(row.get("category") or "fact"),
+                confidence=_coerce_float(row.get("confidence"), 0.8),
+                review_state="reviewed",
+                importance=_coerce_int(row.get("importance"), 5),
+                kind=str(row.get("kind") or "fact"),
+                source="candidate",
+                source_conversation_id=str(row.get("source_conversation_id") or ""),
+                source_message_id=row.get("source_message_id"),
+            )
+            status = "approved" if memory is not None else "rejected"
+        with self._lock:
+            self._db.execute(
+                "UPDATE memory_candidates SET status = ?, updated_at = ? WHERE id = ?",
+                (status, _now(), _safe_id(candidate_id)),
+            )
+            self._db.commit()
+        row = self._db_one("SELECT * FROM memory_candidates WHERE id = ?", (_safe_id(candidate_id),))
+        return self._candidate_public(row) if row else None
+
+    def capture_turn_candidates(
+        self,
+        *,
+        conversation_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> list[dict[str, Any]]:
+        if not self.enabled or not self.auto_learn_enabled or self.write_policy in {"off", "manual"}:
+            return []
+        messages = [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": assistant_message},
+        ]
+        captured: list[dict[str, Any]] = []
+        for decision in self._heuristic_curator_decisions(messages):
+            if str(decision.get("action") or "") != "remember":
+                continue
+            candidate = self.add_candidate(
+                str(decision.get("content") or ""),
+                category=str(decision.get("category") or "fact"),
+                confidence=_coerce_float(decision.get("confidence"), 0.8),
+                importance=_coerce_int(decision.get("importance"), 5),
+                reason="turn_candidate",
+                source_conversation_id=conversation_id,
+            )
+            if candidate is not None:
+                captured.append(candidate)
+        return captured
+
+    def upsert_checkpoint(self, checkpoint_id: str, **fields: Any) -> dict[str, Any]:
+        cid = _safe_id(checkpoint_id)
+        now = _now()
+        payload = {
+            "id": cid,
+            "scope": str(fields.get("scope") or "conversation"),
+            "status": str(fields.get("status") or "active"),
+            "conversation_id": str(fields.get("conversation_id") or ""),
+            "project": str(fields.get("project") or ""),
+            "app_name": str(fields.get("app_name") or ""),
+            "goal": str(fields.get("goal") or ""),
+            "last_known_state": str(fields.get("last_known_state") or ""),
+            "next_action": str(fields.get("next_action") or ""),
+            "blocker": str(fields.get("blocker") or ""),
+            "browser_url": str(fields.get("browser_url") or ""),
+            "browser_title": str(fields.get("browser_title") or ""),
+            "workspace_path": str(fields.get("workspace_path") or ""),
+            "files_touched_json": json.dumps(fields.get("files_touched") or [], ensure_ascii=False),
+            "commands_run_json": json.dumps(fields.get("commands_run") or [], ensure_ascii=False),
+            "expires_at": str(fields.get("expires_at") or ""),
+            "source_refs_json": json.dumps(fields.get("source_refs") or [], ensure_ascii=False),
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO memory_checkpoints (
+                    id, scope, status, conversation_id, project, app_name, goal,
+                    last_known_state, next_action, blocker, browser_url, browser_title,
+                    workspace_path, files_touched_json, commands_run_json, expires_at,
+                    source_refs_json, created_at, updated_at
+                )
+                VALUES (
+                    :id, :scope, :status, :conversation_id, :project, :app_name, :goal,
+                    :last_known_state, :next_action, :blocker, :browser_url, :browser_title,
+                    :workspace_path, :files_touched_json, :commands_run_json, :expires_at,
+                    :source_refs_json, :created_at, :updated_at
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    scope = excluded.scope,
+                    status = excluded.status,
+                    conversation_id = excluded.conversation_id,
+                    project = excluded.project,
+                    app_name = excluded.app_name,
+                    goal = excluded.goal,
+                    last_known_state = excluded.last_known_state,
+                    next_action = excluded.next_action,
+                    blocker = excluded.blocker,
+                    browser_url = excluded.browser_url,
+                    browser_title = excluded.browser_title,
+                    workspace_path = excluded.workspace_path,
+                    files_touched_json = excluded.files_touched_json,
+                    commands_run_json = excluded.commands_run_json,
+                    expires_at = excluded.expires_at,
+                    source_refs_json = excluded.source_refs_json,
+                    updated_at = excluded.updated_at
+                """,
+                payload,
+            )
+            self._db.commit()
+        row = self._db_one("SELECT * FROM memory_checkpoints WHERE id = ?", (cid,))
+        return self._checkpoint_public(row or payload)
+
+    def list_checkpoints(self, *, status: str = "active", limit: int = 100) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if status:
+            where = "WHERE status = ?"
+            params.append(status)
+        rows = self._db_rows(
+            f"""
+            SELECT * FROM memory_checkpoints
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params + [max(1, min(500, int(limit)))]),
+        )
+        return [self._checkpoint_public(row) for row in rows]
+
+    def _checkpoint_public(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(row.get("id") or ""),
+            "scope": str(row.get("scope") or "conversation"),
+            "status": str(row.get("status") or "active"),
+            "conversation_id": str(row.get("conversation_id") or ""),
+            "project": str(row.get("project") or ""),
+            "app_name": str(row.get("app_name") or ""),
+            "goal": str(row.get("goal") or ""),
+            "last_known_state": str(row.get("last_known_state") or ""),
+            "next_action": str(row.get("next_action") or ""),
+            "blocker": str(row.get("blocker") or ""),
+            "browser_url": str(row.get("browser_url") or ""),
+            "browser_title": str(row.get("browser_title") or ""),
+            "workspace_path": str(row.get("workspace_path") or ""),
+            "files_touched": self._json_list(row.get("files_touched_json")),
+            "commands_run": self._json_list(row.get("commands_run_json")),
+            "expires_at": str(row.get("expires_at") or ""),
+            "source_refs": self._json_list(row.get("source_refs_json")),
+            "created_at": str(row.get("created_at") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+
+    def list_episodes(self, *, conversation_id: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if conversation_id:
+            where = "WHERE conversation_id = ?"
+            params.append(conversation_id)
+        rows = self._db_rows(
+            f"""
+            SELECT * FROM memory_episodes
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params + [max(1, min(500, int(limit)))]),
+        )
+        return [self._episode_public(row) for row in rows]
+
+    def _episode_public(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(row.get("id") or ""),
+            "conversation_id": str(row.get("conversation_id") or ""),
+            "channel": str(row.get("channel") or "desktop"),
+            "project": str(row.get("project") or ""),
+            "task_type": str(row.get("task_type") or ""),
+            "summary": str(row.get("summary") or ""),
+            "decisions": self._json_list(row.get("decisions_json")),
+            "artifacts": self._json_list(row.get("artifacts_json")),
+            "errors": self._json_list(row.get("errors_json")),
+            "fixes": self._json_list(row.get("fixes_json")),
+            "open_questions": self._json_list(row.get("open_questions_json")),
+            "follow_ups": self._json_list(row.get("follow_ups_json")),
+            "source_message_start_id": row.get("source_message_start_id"),
+            "source_message_end_id": row.get("source_message_end_id"),
+            "tool_call_ids": self._json_list(row.get("tool_call_ids_json")),
+            "created_at": str(row.get("created_at") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+
     def stats(self) -> dict[str, Any]:
         records = self._all_records(include_archived=True, include_short_term=True)
         active = [record for record in records if record["status"] == "active"]
@@ -1197,6 +1573,10 @@ class LongTermMemory:
         short_term = list((self.root / "short-term").glob("*.md"))
         personalities = list((self.root / "personalities").glob("*.md"))
         curated_sessions = list((self.root / ".system" / "curated").glob("*.json"))
+        candidate_rows = self._db_rows("SELECT status FROM memory_candidates")
+        checkpoint_rows = self._db_rows("SELECT status FROM memory_checkpoints")
+        episode_rows = self._db_rows("SELECT id FROM memory_episodes")
+        profile_rows = self._db_rows("SELECT field FROM memory_profile_fields")
         category_counts = {
             category: len([record for record in active if record["category"] == category])
             for category in VALID_CATEGORIES
@@ -1211,13 +1591,16 @@ class LongTermMemory:
             **category_counts,
             "fact": len([record for record in records if record["kind"] == "fact"]),
             "reflection": len([record for record in records if record["kind"] == "reflection"]),
-            "candidates": len([row for row in audits if row["action"] in {"SKIP", "CURATE", "MIGRATE_CANDIDATE"}]),
-            "unresolved_candidates": len([row for row in audits if row["action"] == "SKIP"]),
+            "candidates": len(candidate_rows) or len([row for row in audits if row["action"] in {"SKIP", "CURATE", "MIGRATE_CANDIDATE"}]),
+            "unresolved_candidates": len([row for row in candidate_rows if row.get("status") == "new"]) or len([row for row in audits if row["action"] == "SKIP"]),
             "short_term": len(short_term),
             "personalities": len(personalities),
             "curated_sessions": len(curated_sessions),
             "audit_events": len(audits),
             "archived_messages": self._db.count_archived_messages(),
+            "episodes": len(episode_rows),
+            "active_checkpoints": len([row for row in checkpoint_rows if row.get("status") == "active"]),
+            "profile_fields": len(profile_rows),
             "memory_root": str(self.root),
         }
 
@@ -1277,6 +1660,7 @@ class LongTermMemory:
         result = {"processed": 0, "added": 0, "updated": 0, "skipped": 0, "summaries": 0, "personality_updates": 0, "archived": 0}
         before_ids = {record["id"] for record in self._all_records(include_archived=True)}
         summary_written = False
+        summary_text = ""
         review_state = "reviewed" if self.write_policy == "auto_reviewed" else "new"
 
         for decision in decisions:
@@ -1309,6 +1693,7 @@ class LongTermMemory:
             elif action == "session_summary":
                 if self._write_session_summary(conversation_id, content, source="memory_curator"):
                     summary_written = True
+                    summary_text = content
                     result["summaries"] += 1
             elif action == "archive":
                 target_id = str(decision.get("memory_id") or "")
@@ -1328,7 +1713,13 @@ class LongTermMemory:
         if not summary_written:
             summary = self._default_session_summary(conversation_id, messages)
             if self._write_session_summary(conversation_id, summary, source="memory_curator_default"):
+                summary_text = summary
                 result["summaries"] += 1
+
+        if self._write_episode(conversation_id, messages, summary_text or self._default_session_summary(conversation_id, messages)):
+            result["episodes"] = 1
+        else:
+            result["episodes"] = 0
 
         self._audit(
             action="CURATE",
@@ -1356,6 +1747,77 @@ class LongTermMemory:
                 archived = []
         combined = {int(row["id"]): row for row in archived + hot if row.get("id") is not None}
         return [combined[key] for key in sorted(combined)]
+
+    def _conversation_tool_calls(self, conversation_id: str) -> list[dict[str, Any]]:
+        return self._db_rows(
+            """
+            SELECT id, message_id, tool_name, input, output, status, created_at
+            FROM tool_calls
+            WHERE conversation_id = ?
+            ORDER BY id ASC
+            """,
+            (conversation_id,),
+        )
+
+    def _write_episode(self, conversation_id: str, messages: list[dict[str, Any]], summary: str) -> bool:
+        if not messages:
+            return False
+        tool_calls = self._conversation_tool_calls(conversation_id)
+        message_ids = [int(item["id"]) for item in messages if item.get("id") is not None]
+        errors = [
+            {
+                "tool": str(call.get("tool_name") or ""),
+                "status": str(call.get("status") or ""),
+                "output": str(call.get("output") or "")[:500],
+            }
+            for call in tool_calls
+            if str(call.get("status") or "").lower() not in {"", "complete", "success", "ok"}
+        ][:10]
+        artifacts = [
+            str(call.get("output") or "")[:300]
+            for call in tool_calls
+            if any(marker in str(call.get("output") or "").lower() for marker in ["path", "file", "saved", "created", "updated"])
+        ][:10]
+        episode_id = f"episode-{_safe_id(conversation_id)}"
+        now = _now()
+        try:
+            with self._lock:
+                self._db.execute(
+                    """
+                    INSERT INTO memory_episodes (
+                        id, conversation_id, channel, project, task_type, summary,
+                        decisions_json, artifacts_json, errors_json, fixes_json,
+                        open_questions_json, follow_ups_json, source_message_start_id,
+                        source_message_end_id, tool_call_ids_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, 'desktop', '', '', ?, '[]', ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        summary = excluded.summary,
+                        artifacts_json = excluded.artifacts_json,
+                        errors_json = excluded.errors_json,
+                        source_message_start_id = excluded.source_message_start_id,
+                        source_message_end_id = excluded.source_message_end_id,
+                        tool_call_ids_json = excluded.tool_call_ids_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        episode_id,
+                        conversation_id,
+                        summary,
+                        json.dumps(artifacts, ensure_ascii=False),
+                        json.dumps(errors, ensure_ascii=False),
+                        min(message_ids) if message_ids else None,
+                        max(message_ids) if message_ids else None,
+                        json.dumps([int(call["id"]) for call in tool_calls if call.get("id") is not None], ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                self._db.commit()
+            return True
+        except sqlite3.Error as exc:
+            logger.debug("Unable to write memory episode: %s", exc)
+            return False
 
     def _heuristic_curator_decisions(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         decisions: list[dict[str, Any]] = []
@@ -1475,11 +1937,36 @@ class LongTermMemory:
     def _default_session_summary(self, conversation_id: str, messages: list[dict[str, Any]]) -> str:
         last_user = next((str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"), "")
         last_assistant = next((str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "assistant"), "")
-        parts = [f"Session {conversation_id} had {len(messages)} messages."]
+        conversation = self._db.get_conversation(conversation_id) or {}
+        tool_calls = self._conversation_tool_calls(conversation_id)
+        failed_tools = [
+            call
+            for call in tool_calls
+            if str(call.get("status") or "").lower() not in {"", "complete", "success", "ok"}
+        ]
+        parts = [
+            f"Session {conversation_id} had {len(messages)} messages.",
+            f"Goal: {str(conversation.get('task_goal') or conversation.get('title') or '').strip() or 'Unknown.'}",
+        ]
+        if tool_calls:
+            tool_names = []
+            for call in tool_calls:
+                name = str(call.get("tool_name") or "").strip()
+                if name and name not in tool_names:
+                    tool_names.append(name)
+            parts.append(f"Tools used: {', '.join(tool_names[:12])}.")
+        if failed_tools:
+            parts.append(
+                "Errors: "
+                + "; ".join(
+                    f"{call.get('tool_name')}: {str(call.get('output') or call.get('status') or '')[:160]}"
+                    for call in failed_tools[:3]
+                )
+            )
         if last_user:
-            parts.append(f"Last user request: {' '.join(last_user.split())[:400]}")
+            parts.append(f"Last user request: {' '.join(last_user.split())[:500]}")
         if last_assistant:
-            parts.append(f"Last assistant response: {' '.join(last_assistant.split())[:400]}")
+            parts.append(f"Last assistant outcome: {' '.join(last_assistant.split())[:700]}")
         return "\n".join(parts)
 
     def _write_session_summary(self, conversation_id: str, content: str, *, source: str) -> dict[str, Any] | None:

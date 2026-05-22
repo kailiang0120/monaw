@@ -624,6 +624,9 @@ class MemoryStatsOut(BaseModel):
     curated_sessions: int = 0
     audit_events: int = 0
     archived_messages: int = 0
+    episodes: int = 0
+    active_checkpoints: int = 0
+    profile_fields: int = 0
     memory_root: str = ""
     categories: dict[str, int] = Field(default_factory=dict)
 
@@ -673,3 +676,85 @@ class MemorySessionCloseOut(BaseModel):
     hot_messages_before: int
     hot_messages_after: int
     reflection_id: str | None = None
+
+
+class MemoryProfileFieldOut(BaseModel):
+    field: str
+    value: str
+    privacy_level: str = "normal"
+    confidence: float = 1.0
+    review_state: str = "new"
+    source_conversation_id: str = ""
+    source_message_id: int | None = None
+    updated_at: str
+
+
+class MemoryProfileFieldUpdate(BaseModel):
+    value: str = Field(..., min_length=1, max_length=2000)
+    privacy_level: str = Field("normal", pattern="^(normal|private|sensitive)$")
+    confidence: float = Field(1.0, ge=0.0, le=1.0)
+    review_state: str = Field("reviewed", pattern="^(new|reviewed)$")
+    source_conversation_id: str = ""
+    source_message_id: int | None = None
+
+
+class MemoryCandidateOut(BaseModel):
+    id: str
+    kind: str = "fact"
+    content: str
+    category: str
+    confidence: float = 0.8
+    importance: int = 5
+    status: str = "new"
+    reason: str = ""
+    source_conversation_id: str = ""
+    source_message_id: int | None = None
+    created_at: str
+    updated_at: str
+
+
+class MemoryCandidateUpdate(BaseModel):
+    status: str = Field(..., pattern="^(new|approved|rejected)$")
+    approve: bool = False
+
+
+class MemoryCheckpointOut(BaseModel):
+    id: str
+    scope: str = "conversation"
+    status: str = "active"
+    conversation_id: str = ""
+    project: str = ""
+    app_name: str = ""
+    goal: str = ""
+    last_known_state: str = ""
+    next_action: str = ""
+    blocker: str = ""
+    browser_url: str = ""
+    browser_title: str = ""
+    workspace_path: str = ""
+    files_touched: list[str] = Field(default_factory=list)
+    commands_run: list[str] = Field(default_factory=list)
+    expires_at: str = ""
+    source_refs: list[dict] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class MemoryEpisodeOut(BaseModel):
+    id: str
+    conversation_id: str
+    channel: str = "desktop"
+    project: str = ""
+    task_type: str = ""
+    summary: str
+    decisions: list = Field(default_factory=list)
+    artifacts: list = Field(default_factory=list)
+    errors: list = Field(default_factory=list)
+    fixes: list = Field(default_factory=list)
+    open_questions: list = Field(default_factory=list)
+    follow_ups: list = Field(default_factory=list)
+    source_message_start_id: int | None = None
+    source_message_end_id: int | None = None
+    tool_call_ids: list[int] = Field(default_factory=list)
+    created_at: str
+    updated_at: str

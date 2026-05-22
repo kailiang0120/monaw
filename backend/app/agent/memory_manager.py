@@ -219,8 +219,16 @@ class MemoryManager:
         user_message: str,
         assistant_message: str,
     ) -> None:
-        # Durable memory is curated at session close. Per-turn learning is intentionally disabled.
-        return
+        if self.long_term_memory is None:
+            return
+        try:
+            self.long_term_memory.capture_turn_candidates(
+                conversation_id=conversation_id,
+                user_message=user_message,
+                assistant_message=assistant_message,
+            )
+        except Exception as exc:
+            logger.warning("Long-term memory candidate capture failed: %s", exc)
 
     def close_session(self, conversation_id: str) -> dict:
         from app.agent.memory_consolidation import close_session
@@ -411,6 +419,19 @@ class MemoryManager:
         state.task_goal = goal.strip()
         state.updated_at = datetime.now(timezone.utc)
         self._db.update_conversation(conversation_id, task_goal=state.task_goal)
+        if self.long_term_memory is not None and state.task_goal:
+            try:
+                self.long_term_memory.upsert_checkpoint(
+                    f"conversation-{conversation_id}",
+                    scope="conversation",
+                    status="active",
+                    conversation_id=conversation_id,
+                    goal=state.task_goal,
+                    last_known_state="Task started.",
+                    next_action="Continue the active task.",
+                )
+            except Exception as exc:
+                logger.debug("Unable to persist memory checkpoint: %s", exc)
 
     def sync_plan_progress(self, conversation_id: str, plan) -> None:
         """Persist current pending/completed plan progress."""
@@ -429,6 +450,22 @@ class MemoryManager:
         state.completed_steps = completed
         state.updated_at = datetime.now(timezone.utc)
         self._db.sync_plan_steps(conversation_id, pending, completed)
+        if self.long_term_memory is not None:
+            try:
+                next_step = pending[0]["description"] if pending else ""
+                self.long_term_memory.upsert_checkpoint(
+                    f"conversation-{conversation_id}",
+                    scope="conversation",
+                    status="active",
+                    conversation_id=conversation_id,
+                    goal=state.task_goal,
+                    last_known_state=(
+                        f"Completed: {completed[-1]}" if completed else "Plan is in progress."
+                    ),
+                    next_action=next_step or "Finish the current task.",
+                )
+            except Exception as exc:
+                logger.debug("Unable to update memory checkpoint from plan: %s", exc)
 
     def clear_task_progress(self, conversation_id: str) -> None:
         """Clear the persisted active goal and remaining steps after completion."""
@@ -439,6 +476,19 @@ class MemoryManager:
         state.updated_at = datetime.now(timezone.utc)
         self._db.update_conversation(conversation_id, task_goal="")
         self._db.clear_plan_steps(conversation_id)
+        if self.long_term_memory is not None:
+            try:
+                self.long_term_memory.upsert_checkpoint(
+                    f"conversation-{conversation_id}",
+                    scope="conversation",
+                    status="completed",
+                    conversation_id=conversation_id,
+                    goal="",
+                    last_known_state="Task completed.",
+                    next_action="",
+                )
+            except Exception as exc:
+                logger.debug("Unable to clear memory checkpoint: %s", exc)
 
     def set_active_task(self, conversation_id: str, task: TaskState | None) -> None:
         """Set or clear the active task (transient — not persisted)."""

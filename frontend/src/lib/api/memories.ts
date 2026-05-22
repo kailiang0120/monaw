@@ -1,9 +1,13 @@
 import { BASE, JSON_HEADERS } from './client'
 import type {
   MemoryAuditRecord,
+  MemoryCandidate,
   MemoryCategory,
+  MemoryCheckpoint,
+  MemoryEpisode,
   MemoryFileRecord,
   MemoryKind,
+  MemoryProfileField,
   MemoryRecord,
   MemoryReviewState,
   MemorySearchRecord,
@@ -122,6 +126,71 @@ export async function closeMemorySession(conversation_id: string): Promise<{
     body: JSON.stringify({ conversation_id }),
   })
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to close memory session'))
+  return res.json()
+}
+
+export async function fetchMemoryProfile(): Promise<MemoryProfileField[]> {
+  const res = await fetch(`${BASE}/api/memories/profile`)
+  if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory profile'))
+  return res.json()
+}
+
+export async function updateMemoryProfileField(
+  field: string,
+  body: Pick<MemoryProfileField, 'value' | 'privacy_level' | 'confidence' | 'review_state'> & {
+    source_conversation_id?: string
+    source_message_id?: number | null
+  },
+): Promise<MemoryProfileField> {
+  const res = await fetch(`${BASE}/api/memories/profile/${encodeURIComponent(field)}`, {
+    method: 'PATCH',
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await errorMessage(res, 'Failed to update memory profile'))
+  return res.json()
+}
+
+export async function fetchMemoryCandidates(params: {
+  status?: '' | MemoryCandidate['status']
+  limit?: number
+} = {}): Promise<MemoryCandidate[]> {
+  const query = paramsToSearch(params)
+  const res = await fetch(`${BASE}/api/memories/candidates${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory candidates'))
+  return res.json()
+}
+
+export async function updateMemoryCandidate(
+  id: string,
+  body: { status: MemoryCandidate['status']; approve?: boolean },
+): Promise<MemoryCandidate> {
+  const res = await fetch(`${BASE}/api/memories/candidates/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await errorMessage(res, 'Failed to update memory candidate'))
+  return res.json()
+}
+
+export async function fetchMemoryEpisodes(params: {
+  conversation_id?: string
+  limit?: number
+} = {}): Promise<MemoryEpisode[]> {
+  const query = paramsToSearch(params)
+  const res = await fetch(`${BASE}/api/memories/episodes${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory episodes'))
+  return res.json()
+}
+
+export async function fetchMemoryCheckpoints(params: {
+  status?: '' | MemoryCheckpoint['status']
+  limit?: number
+} = {}): Promise<MemoryCheckpoint[]> {
+  const query = paramsToSearch(params)
+  const res = await fetch(`${BASE}/api/memories/checkpoints${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory checkpoints'))
   return res.json()
 }
 

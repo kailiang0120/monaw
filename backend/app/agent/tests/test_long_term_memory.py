@@ -273,3 +273,55 @@ def test_recall_memory_writes_explicit_telemetry(tmp_path, monkeypatch):
     assert telemetry["recall_memory_called"] is True
     assert telemetry["query"] == "Python automation"
     assert telemetry["category"] == "preference"
+
+
+def test_profile_candidates_and_checkpoints_are_persistent(tmp_path):
+    store = _store(tmp_path)
+
+    profile = store.update_profile_field(
+        "github_username",
+        "kai-liang",
+        privacy_level="normal",
+        review_state="reviewed",
+    )
+    captured = store.capture_turn_candidates(
+        conversation_id="conv-profile",
+        user_message="I prefer Python for automation.",
+        assistant_message="Noted.",
+    )
+    checkpoint = store.upsert_checkpoint(
+        "conversation-conv-profile",
+        scope="conversation",
+        status="active",
+        conversation_id="conv-profile",
+        goal="Build memory system",
+        last_known_state="Implementation started.",
+        next_action="Run tests.",
+    )
+
+    assert profile["field"] == "github_username"
+    assert store.profile_fields()[0]["value"] == "kai-liang"
+    assert len(captured) == 1
+    assert store.list_candidates()[0]["category"] == "preference"
+    assert checkpoint["status"] == "active"
+    assert store.list_checkpoints()[0]["next_action"] == "Run tests."
+
+
+def test_approving_candidate_promotes_to_reviewed_memory(tmp_path):
+    store = _store(tmp_path)
+    candidate = store.add_candidate(
+        "The user prefers direct progress updates.",
+        category="preference",
+        confidence=0.9,
+        importance=8,
+        source_conversation_id="conv-candidate",
+    )
+
+    assert candidate is not None
+    updated = store.update_candidate(candidate["id"], status="approved", approve=True)
+    memories = store.list_memories(category="preference", status="active")
+
+    assert updated is not None
+    assert updated["status"] == "approved"
+    assert len(memories) == 1
+    assert memories[0]["review_state"] == "reviewed"
