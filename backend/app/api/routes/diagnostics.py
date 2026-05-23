@@ -8,8 +8,6 @@ from app.agent.sandbox.capabilities import get_sandbox_status
 from app.agent.scheduler import get_scheduled_task_service
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
 from app.agent.skill_loader import available_skill_payload
-from app.agent.observability.trajectory import get_trajectory_logger
-from app.agent.runtime import run_agent_stream
 from app.config import settings
 from app.schemas import BrowserUseDiagnosticsOut
 from app.skills.browser_use.manager import (
@@ -29,14 +27,6 @@ def _runtime_file_status(path: Path) -> dict:
         "exists": exists,
         "size_bytes": path.stat().st_size if exists and path.is_file() else 0,
     }
-
-
-def _first_human_message(payload: dict) -> str:
-    entries = payload.get("conversations") if isinstance(payload.get("conversations"), list) else []
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("from") == "human":
-            return str(entry.get("value") or "").strip()
-    return ""
 
 
 @router.get("/diagnostics/summary")
@@ -219,56 +209,3 @@ async def get_browser_use_status():
 async def reset_browser_use_status():
     await reset_browser_use_runtime(clear_managed_session=True)
     return await get_browser_use_status()
-
-
-@router.get("/diagnostics/evaluations")
-async def list_evaluation_runs(limit: int = 50):
-    return get_trajectory_logger().list_runs(limit=limit)
-
-
-@router.get("/diagnostics/evaluations/{run_id}")
-async def get_evaluation_run(run_id: str):
-    payload = get_trajectory_logger().get_run(run_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="Evaluation run not found")
-    return payload
-
-
-@router.post("/diagnostics/evaluations/{run_id}/replay")
-async def replay_evaluation_run(run_id: str):
-    payload = get_trajectory_logger().get_run(run_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="Evaluation run not found")
-    message = _first_human_message(payload)
-    if not message:
-        raise HTTPException(status_code=400, detail="Evaluation run has no user message to replay")
-
-    import uuid
-
-    conversation_id = f"replay_{uuid.uuid4().hex[:20]}"
-    runtime_settings = build_runtime_namespace(settings, load_agent_settings(settings))
-    summary = ""
-    status = "complete"
-    errors: list[str] = []
-    async for event in run_agent_stream(
-        message=message,
-        conversation_id=conversation_id,
-        settings=runtime_settings,
-        attachments=None,
-    ):
-        event_name = str(event.get("event") or "")
-        data = event.get("data") if isinstance(event.get("data"), dict) else {}
-        if event_name == "done":
-            summary = str(data.get("summary") or "")
-            status = str(data.get("status") or status)
-            if data.get("incomplete") and data.get("reason_code"):
-                errors.append(str(data.get("reason_code")))
-        elif event_name == "error":
-            errors.append(str(data.get("message") or data.get("code") or "error"))
-    return {
-        "source_run_id": run_id,
-        "conversation_id": conversation_id,
-        "status": status,
-        "summary": summary,
-        "errors": errors,
-    }

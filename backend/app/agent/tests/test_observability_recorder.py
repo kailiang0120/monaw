@@ -1,0 +1,119 @@
+import json
+import logging
+
+from app.agent.observability import recorder as recorder_module
+from app.agent.observability.recorder import ObservabilityLoggingHandler, ObservabilityRecorder, UsageStats
+
+
+def test_observability_recorder_writes_jsonl_sqlite_and_redacts_secrets(tmp_path):
+    recorder = ObservabilityRecorder(root=tmp_path)
+
+    run_id = recorder.start_run(
+        conversation_id="conv-1",
+        user_message="Use Bearer abcdefghijklmnopqrstuvwxyz",
+        model="gpt-test",
+        provider="openai",
+    )
+    recorder.log_event(
+        run_id=run_id,
+        conversation_id="conv-1",
+        event_type="llm_call_finished",
+        error_message="failed with Bearer abcdefghijklmnopqrstuvwxyz and sk-secretsecretsecretsecret",
+        input={"api_key": "sk-secretsecretsecretsecret", "prompt": "hello"},
+        output={"authorization": "Bearer abcdefghijklmnopqrstuvwxyz", "text": "done"},
+        tokens=UsageStats(input_tokens=10, output_tokens=5, total_tokens=15, source="provider"),
+    )
+    recorder.finish_run(
+        run_id=run_id,
+        status="complete",
+        final_output="done",
+        usage=UsageStats(input_tokens=10, output_tokens=5, total_tokens=15, source="provider"),
+    )
+
+    detail = recorder.get_run(run_id)
+    assert detail is not None
+    assert detail["status"] == "complete"
+    assert detail["events"][1]["input"]["api_key"] == "[REDACTED]"
+    assert detail["events"][1]["output"]["authorization"] == "[REDACTED]"
+    assert detail["events"][1]["error_message"] == "failed with Bearer [REDACTED] and sk-[REDACTED]"
+
+    event_files = list((tmp_path / "events").glob("*.jsonl"))
+    assert event_files
+    event_lines = [json.loads(line) for line in event_files[0].read_text(encoding="utf-8").splitlines()]
+    assert event_lines[1]["input"]["api_key"] == "[REDACTED]"
+    assert event_lines[1]["error_message"] == "failed with Bearer [REDACTED] and sk-[REDACTED]"
+
+
+def test_turn_timeout_can_override_wait_for_cancelled_run(tmp_path):
+    recorder = ObservabilityRecorder(root=tmp_path)
+
+    run_id = recorder.start_run(
+        conversation_id="conv-timeout",
+        user_message="slow task",
+        model="gpt-test",
+        provider="openai",
+    )
+    recorder.finish_run(
+        run_id=run_id,
+        status="paused",
+        final_output="Stopped before final answer.",
+        failure_reason="cancelled",
+    )
+    recorder.finish_open_run_for_conversation(
+        conversation_id="conv-timeout",
+        status="paused",
+        failure_reason="turn_timeout",
+        final_output="Timed out.",
+    )
+
+    detail = recorder.get_run(run_id)
+    assert detail is not None
+    assert detail["status"] == "paused"
+    assert detail["failure_reason"] == "turn_timeout"
+    assert detail["failure_pattern"] == "timeout"
+
+
+def test_observability_logging_handler_captures_logger_exception(tmp_path, monkeypatch):
+    recorder = ObservabilityRecorder(root=tmp_path)
+    monkeypatch.setattr(recorder_module, "_RECORDER", recorder)
+
+    logger = logging.getLogger("test.observability.exception")
+    logger.handlers = []
+    logger.propagate = False
+    logger.setLevel(logging.ERROR)
+    logger.addHandler(ObservabilityLoggingHandler(level=logging.ERROR))
+
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError:
+        logger.exception("captured failure")
+
+    errors = recorder.list_errors()
+    assert len(errors) == 1
+    assert errors[0]["message"] == "captured failure"
+    assert errors[0]["error_type"] == "RuntimeError"
+    assert "RuntimeError: boom" in errors[0]["traceback"]
+
+
+def test_observability_recorder_stores_replay_comparison(tmp_path):
+    recorder = ObservabilityRecorder(root=tmp_path)
+
+    result = recorder.record_replay(
+        source_run_id="run-source",
+        replay_run_id="run-replay",
+        conversation_id="replay-1",
+        status_change="paused->complete",
+        duration_delta_ms=-120,
+        token_delta=42,
+        tool_sequence_diff="different",
+        failure_reason_diff="timeout->",
+    )
+
+    detail = recorder.get_run("run-source")
+    assert detail is None
+    assert result["source_run_id"] == "run-source"
+
+    with recorder._connect() as conn:  # noqa: SLF001 - focused storage assertion
+        row = conn.execute("SELECT * FROM observability_replays WHERE replay_id = ?", (result["replay_id"],)).fetchone()
+    assert row["status_change"] == "paused->complete"
+    assert row["token_delta"] == 42

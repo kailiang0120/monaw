@@ -27,6 +27,10 @@ def _is_compact_command(message: str) -> bool:
     return str(message or "").strip().casefold() == "/compact"
 
 
+def _is_skill_creator_command(message: str) -> bool:
+    return " ".join(str(message or "").strip().split()).casefold() == "/skill creator"
+
+
 def _format_compact_reply(result: dict) -> str:
     status = str(result.get("status") or "")
     if status == "empty":
@@ -44,6 +48,14 @@ def _format_compact_reply(result: dict) -> str:
         f"Messages compacted: {message_count}\n"
         f"Context estimate: {tokens_before} -> {tokens_after} tokens"
         + (f" ({saved} saved)" if saved else "")
+    )
+
+
+def _format_skill_creator_reply() -> str:
+    return (
+        "Skill Creator mode is active. Tell me the skill name, what should trigger it, "
+        "and whether it needs tool code. I will create it as an optional skill under "
+        "`backend/app/skills`, reload skills, and only restart the backend if reload is not enough."
     )
 
 
@@ -185,6 +197,24 @@ class AgentRuntime:
                             tokens_before=int(result.get("tokens_before") or 0),
                             tokens_after=int(result.get("tokens_after") or 0),
                         )
+                yield {"event": "token", "data": {"content": reply}}
+                yield {
+                    "event": "done",
+                    "data": {
+                        "summary": reply,
+                        "status": "complete",
+                        "attachments": [],
+                    },
+                }
+                return
+            if _is_skill_creator_command(message):
+                reply = _format_skill_creator_reply()
+                await self.memory.persist_turn(
+                    conversation_id,
+                    str(message or "").strip() or "/skill creator",
+                    reply,
+                    tool_calls=[],
+                )
                 yield {"event": "token", "data": {"content": reply}}
                 yield {
                     "event": "done",

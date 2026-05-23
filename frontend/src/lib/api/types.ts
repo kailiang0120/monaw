@@ -318,30 +318,144 @@ export interface DiagnosticsSummary {
   sandbox: SandboxStatus
 }
 
-export interface EvaluationRun {
-  run_id: string
-  conversation_id: string
-  model: string
-  provider: string
-  started_at: string
-  finished_at: string
-  success: boolean
-  error: string
-  entry_count: number
-  tool_count: number
+export interface ObservabilityUsage {
+  input_tokens: number
+  output_tokens: number
+  reasoning_tokens: number
+  cached_tokens: number
+  image_tokens: number
   total_tokens: number
-  total_cost_usd: number
-  last_user_message: string
-  final_assistant_message: string
   source: string
 }
 
-export interface EvaluationReplayResult {
+export interface ObservabilitySummary {
+  total_runs: number
+  successful_runs: number
+  success_rate: number
+  failed_runs: number
+  total_tokens: number
+  estimated_cost_usd: number
+  average_duration_ms: number
+  tool_error_count: number
+  storage_path: string
+  token_usage_over_time: Array<{ day: string; runs: number; tokens: number; average_duration_ms: number }>
+  duration_trend: Array<{ day: string; runs: number; tokens: number; average_duration_ms: number }>
+  top_error_reasons: Array<{ reason: string; count: number }>
+  top_failing_tools: Array<{ tool_name: string; count: number }>
+  model_usage: Array<{ model: string; provider: string; runs: number; tokens: number }>
+}
+
+export interface ObservabilityRun {
+  run_id: string
+  conversation_id: string
+  message_id: string
+  source: string
+  model: string
+  provider: string
+  status: string
+  failure_reason: string
+  failure_pattern: string
+  started_at: string
+  finished_at: string
+  duration_ms: number
+  user_message: string
+  final_output: string
+  input_tokens: number
+  output_tokens: number
+  reasoning_tokens: number
+  cached_tokens: number
+  image_tokens: number
+  total_tokens: number
+  usage_source: string
+  estimated_cost_usd: number
+  cost_source: string
+  tool_count: number
+  tool_error_count: number
+  event_count: number
+  metadata_json?: string
+}
+
+export interface ObservabilityEvent {
+  event_id: string
+  run_id: string
+  conversation_id: string
+  message_id: string
+  event_type: string
+  level: string
+  status: string
+  source: string
+  model: string
+  provider: string
+  tool_name: string
+  error_code: string
+  error_message: string
+  duration_ms: number
+  input: unknown
+  output: unknown
+  tokens: ObservabilityUsage | null
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface ObservabilityError {
+  error_id: string
+  run_id: string
+  conversation_id: string
+  message_id: string
+  level: string
+  logger_name: string
+  module: string
+  error_type: string
+  message: string
+  traceback: string
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface ObservabilityReplay {
+  replay_id: string
   source_run_id: string
+  replay_run_id: string
+  conversation_id: string
+  status_change: string
+  duration_delta_ms: number
+  token_delta: number
+  tool_sequence_diff: string
+  failure_reason_diff: string
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface ObservabilityRunDetail extends ObservabilityRun {
+  events: ObservabilityEvent[]
+  errors: ObservabilityError[]
+  replays: ObservabilityReplay[]
+  tool_sequence: string[]
+}
+
+export interface ObservabilityBackendLog {
+  path: string
+  exists: boolean
+  size_bytes?: number
+  lines: string[]
+  truncated: boolean
+  error?: string
+}
+
+export interface ObservabilityReplayResult {
+  source_run_id: string
+  replay_run_id: string
   conversation_id: string
   status: string
   summary: string
   errors: string[]
+  comparison: ObservabilityReplay
+}
+
+export interface ObservabilityDebugBundle {
+  path: string
+  run_id: string
+  size_bytes: number
 }
 
 export type MemoryCategory = 'preference' | 'behavior' | 'fact' | 'workflow' | 'project' | 'reflection'

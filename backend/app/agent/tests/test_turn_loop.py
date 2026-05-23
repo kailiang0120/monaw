@@ -2173,7 +2173,29 @@ def test_turn_loop_prompts_recovery_on_repeated_policy_blocked_tool_call():
     )
 
 
-def test_turn_loop_stops_on_repeated_policy_blocked_tool_call_after_recovery():
+def test_turn_loop_stops_on_repeated_policy_blocked_tool_call_after_recovery(monkeypatch):
+    class CapturingRecorder:
+        def __init__(self) -> None:
+            self.events: list[dict] = []
+            self.finished: list[dict] = []
+
+        def start_run(self, **_kwargs):
+            return "run-repeat"
+
+        def log_event(self, **kwargs):
+            self.events.append(kwargs)
+
+        def log_error(self, **kwargs):
+            self.events.append({"event_type": "error", **kwargs})
+
+        def finish_run(self, **kwargs):
+            self.finished.append(kwargs)
+
+        def finish_open_run_for_conversation(self, **_kwargs):
+            return None
+
+    recorder = CapturingRecorder()
+    monkeypatch.setattr("app.agent.turn_loop.get_observability_recorder", lambda: recorder)
     registry = ToolRegistry(
         [
             {
@@ -2210,6 +2232,12 @@ def test_turn_loop_stops_on_repeated_policy_blocked_tool_call_after_recovery():
     assert events[-1]["data"]["status"] == "paused"
     assert events[-1]["data"]["reason_code"] == "repeated_tool_call_blocked"
     assert "after a recovery prompt" in events[-1]["data"]["summary"]
+    assert any(
+        item.get("event_type") == "guardrail_triggered"
+        and item.get("error_code") == "repeated_tool_call_blocked"
+        for item in recorder.events
+    )
+    assert recorder.finished[-1]["failure_reason"] == "repeated_tool_call_blocked"
 
 
 def test_turn_loop_allows_repeated_metadata_observation_tool_calls():

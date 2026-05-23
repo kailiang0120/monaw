@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
+  Activity,
   AlertCircle,
   Bot,
   Brain,
   CheckCircle2,
   ChevronDown,
-  ClipboardCheck,
   Container,
   Download,
   Folder,
@@ -25,7 +25,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { MemorySettingsPanel } from './MemorySettingsPanel'
-import { EvaluationReplayPanel } from './EvaluationReplayPanel'
+import { ObservabilityPanel } from './ObservabilityPanel'
 import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel'
 import {
   DEFAULT_CONNECTION_PORTAL,
@@ -91,7 +91,7 @@ interface Props {
   onClose: () => void
 }
 
-type SettingsTab = 'model' | 'apiKeys' | 'identity' | 'memory' | 'skills' | 'browser' | 'mcp' | 'evaluations' | 'permissions' | 'sandbox'
+type SettingsTab = 'model' | 'apiKeys' | 'identity' | 'memory' | 'skills' | 'browser' | 'mcp' | 'observability' | 'permissions' | 'sandbox'
 
 const PERMISSION_MODE_LABEL: Record<AgentSettings['permissions']['mode'], string> = {
   default: 'Default',
@@ -112,7 +112,7 @@ const SETTINGS_TABS: Array<{
   { id: 'skills', label: 'Skills', description: 'Agent capabilities', icon: Wrench },
   { id: 'browser', label: 'Browser', description: 'Browser-use runtime', icon: Globe2 },
   { id: 'mcp', label: 'MCP', description: 'External tool servers', icon: Server },
-  { id: 'evaluations', label: 'Evals', description: 'Replay center', icon: ClipboardCheck },
+  { id: 'observability', label: 'Observability', description: 'Traces and logs', icon: Activity },
   { id: 'permissions', label: 'Permissions', description: 'Approvals and overrides', icon: Shield },
   { id: 'sandbox', label: 'Sandbox', description: 'Exec isolation', icon: Container },
 ]
@@ -1620,13 +1620,13 @@ export function SettingsModal({ onClose }: Props) {
               </SettingsPanel>
             )}
 
-            {activeTab === 'evaluations' && (
+            {activeTab === 'observability' && (
               <SettingsPanel
-                icon={ClipboardCheck}
-                title="Evaluations"
-                description="Inspect recorded agent turns and replay them into fresh conversations."
+                icon={Activity}
+                title="Observability"
+                description="Inspect structured traces, token usage, local errors, and replay diagnosis."
               >
-                <EvaluationReplayPanel />
+                <ObservabilityPanel />
               </SettingsPanel>
             )}
 

@@ -29,6 +29,7 @@ from app.integrations.telegram.agent_bridge import (
 from app.integrations.telegram.bridge import (
     COMMANDS,
     TELEGRAM_AUTH_CONFIG_KEY,
+    TELEGRAM_PERMISSION_CALLBACK_PREFIX,
     TelegramAuthorization,
     _ensure_authorized,
     _format_effort_options,
@@ -36,8 +37,10 @@ from app.integrations.telegram.bridge import (
     _format_resume_options,
     _help_message,
     _parse_id_set,
+    _permission_notice,
     _download_telegram_file,
     _handle_authorized_message,
+    permission_callback,
     prepare_telegram_message_input,
     register_bot_commands,
     send_response_attachments,
@@ -646,6 +649,120 @@ def test_help_message_lists_all_registered_commands():
 
     for command in COMMANDS:
         assert f"/{command.command}" in text
+
+
+def test_telegram_permission_notice_uses_inline_buttons():
+    text, keyboard = _permission_notice({
+        "event": "approval_required",
+        "data": {
+            "ticket_id": "ticket-1",
+            "action": "Delete file",
+            "reason": "High-risk action",
+        },
+    })
+
+    assert "Approval required" in text
+    assert "ticket-1" in text
+    assert keyboard.inline_keyboard[0][0].callback_data == (
+        f"{TELEGRAM_PERMISSION_CALLBACK_PREFIX}:approve:ticket-1"
+    )
+    assert keyboard.inline_keyboard[0][1].callback_data == (
+        f"{TELEGRAM_PERMISSION_CALLBACK_PREFIX}:reject:ticket-1"
+    )
+
+
+def test_telegram_permission_callback_resumes_approval(monkeypatch):
+    calls = []
+
+    class Query:
+        data = f"{TELEGRAM_PERMISSION_CALLBACK_PREFIX}:approve:ticket-1"
+
+        async def answer(self, text):
+            calls.append(("answer", text))
+
+        async def edit_message_text(self, text):
+            calls.append(("edit", text))
+
+    monkeypatch.setattr(
+        telegram_bridge,
+        "approve_ticket",
+        lambda ticket_id, resolved_by: SimpleNamespace(id=ticket_id, resolved_by=resolved_by),
+    )
+    monkeypatch.setattr(
+        telegram_bridge,
+        "signal_approval_resume",
+        lambda ticket_id, decision: calls.append(("signal", ticket_id, decision)),
+    )
+
+    update = SimpleNamespace(
+        callback_query=Query(),
+        effective_chat=SimpleNamespace(id=222),
+        effective_user=SimpleNamespace(id=111),
+    )
+    context = SimpleNamespace(
+        application=SimpleNamespace(
+            bot_data={
+                TELEGRAM_AUTH_CONFIG_KEY: TelegramAuthorization(
+                    allowed_user_ids=frozenset({111}),
+                    allowed_chat_ids=frozenset(),
+                )
+            }
+        ),
+        bot=SimpleNamespace(send_message=lambda **_kwargs: None),
+    )
+
+    asyncio.run(permission_callback(update, context))
+
+    assert ("signal", "ticket-1", "approved") in calls
+    assert ("answer", "Approved.") in calls
+    assert any(call[0] == "edit" and "Approved ticket ticket-1" in call[1] for call in calls)
+
+
+def test_telegram_permission_callback_resumes_access_grant(monkeypatch):
+    calls = []
+
+    class Query:
+        data = f"{TELEGRAM_PERMISSION_CALLBACK_PREFIX}:grant_session:grant-1"
+
+        async def answer(self, text):
+            calls.append(("answer", text))
+
+        async def edit_message_text(self, text):
+            calls.append(("edit", text))
+
+    monkeypatch.setattr(
+        telegram_bridge,
+        "resolve_grant",
+        lambda ticket_id, decision: SimpleNamespace(id=ticket_id, decision=decision),
+    )
+    monkeypatch.setattr(
+        telegram_bridge,
+        "signal_grant_resume",
+        lambda ticket_id, decision: calls.append(("signal", ticket_id, decision)),
+    )
+
+    update = SimpleNamespace(
+        callback_query=Query(),
+        effective_chat=SimpleNamespace(id=222),
+        effective_user=SimpleNamespace(id=111),
+    )
+    context = SimpleNamespace(
+        application=SimpleNamespace(
+            bot_data={
+                TELEGRAM_AUTH_CONFIG_KEY: TelegramAuthorization(
+                    allowed_user_ids=frozenset({111}),
+                    allowed_chat_ids=frozenset(),
+                )
+            }
+        ),
+        bot=SimpleNamespace(send_message=lambda **_kwargs: None),
+    )
+
+    asyncio.run(permission_callback(update, context))
+
+    assert ("signal", "grant-1", "session") in calls
+    assert ("answer", "Granted session") in calls
+    assert any(call[0] == "edit" and "Granted session for ticket grant-1" in call[1] for call in calls)
 
 
 def test_collect_response_attachments_from_tool_output():

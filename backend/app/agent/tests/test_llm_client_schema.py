@@ -564,6 +564,120 @@ def test_openai_responses_payload_requests_reasoning_summary(monkeypatch):
     assert response.provider_messages[0]["summary"][0]["text"] == "short reasoning"
 
 
+def test_openai_responses_extracts_provider_usage(monkeypatch):
+    class FakeResponses:
+        async def create(self, **_kwargs):
+            return SimpleNamespace(
+                status="completed",
+                output=[
+                    SimpleNamespace(
+                        type="message",
+                        content=[SimpleNamespace(type="output_text", text="final answer")],
+                    ),
+                ],
+                usage=SimpleNamespace(
+                    input_tokens=100,
+                    output_tokens=20,
+                    total_tokens=130,
+                    input_tokens_details=SimpleNamespace(cached_tokens=7),
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=10),
+                ),
+            )
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **_kwargs):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+
+    client = LLMClient(provider="openai", model_name="gpt-test", api_key="openai-key")
+    response = asyncio.run(client._openai_chat([{"role": "user", "content": "hello"}], [], "", None))
+
+    assert response.usage.input_tokens == 100
+    assert response.usage.output_tokens == 20
+    assert response.usage.reasoning_tokens == 10
+    assert response.usage.cached_tokens == 7
+    assert response.usage.total_tokens == 130
+    assert response.usage.source == "provider"
+
+
+def test_deepseek_chat_extracts_openai_compatible_usage(monkeypatch):
+    class FakeCompletions:
+        async def create(self, **_kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content="ok", tool_calls=[]),
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=8,
+                    completion_tokens=4,
+                    total_tokens=12,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=3),
+                    completion_tokens_details=SimpleNamespace(reasoning_tokens=2),
+                ),
+            )
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+
+    client = LLMClient(provider="deepseek", model_name="deepseek-test", api_key="deepseek-key")
+    response = asyncio.run(client._openai_chat([{"role": "user", "content": "hello"}], [], "", None))
+
+    assert response.usage.input_tokens == 8
+    assert response.usage.output_tokens == 4
+    assert response.usage.reasoning_tokens == 2
+    assert response.usage.cached_tokens == 3
+    assert response.usage.total_tokens == 12
+    assert response.usage.source == "provider"
+
+
+def test_gemini_extracts_usage_metadata(monkeypatch):
+    response_payload = SimpleNamespace(
+        text="fallback should not be used",
+        function_calls=[],
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(
+                    parts=[SimpleNamespace(text="final answer", thought=False)]
+                )
+            )
+        ],
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=9,
+            candidates_token_count=5,
+            thoughts_token_count=4,
+            cached_content_token_count=2,
+            total_token_count=18,
+        ),
+    )
+
+    class FakeModels:
+        async def generate_content(self, **_kwargs):
+            return response_payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.aio = SimpleNamespace(models=FakeModels())
+
+    monkeypatch.setattr("google.genai.Client", FakeClient)
+
+    client = LLMClient(provider="gemini", model_name="gemini-2.5-flash", api_key="google-key")
+    response = asyncio.run(client._gemini_chat([{"role": "user", "content": "hello"}], [], "", None))
+
+    assert response.usage.input_tokens == 9
+    assert response.usage.output_tokens == 5
+    assert response.usage.reasoning_tokens == 4
+    assert response.usage.cached_tokens == 2
+    assert response.usage.total_tokens == 18
+    assert response.usage.source == "provider"
+
+
 def test_openai_responses_stream_separates_reasoning_from_answer(monkeypatch):
     streamed: list[str] = []
 

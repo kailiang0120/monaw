@@ -1,15 +1,17 @@
 from contextlib import asynccontextmanager
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.config import settings
+from app.agent.observability.recorder import get_observability_recorder, install_logging_handler
 from app.agent.workspace_instructions import ensure_workspace_instruction_file
 from app.skills.browser_use.manager import ensure_browser_use_runtime_dirs
 
 logger = logging.getLogger(__name__)
+install_logging_handler()
 
 
 def _split_csv_setting(value: str) -> list[str]:
@@ -84,6 +86,24 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api")
+
+
+@app.middleware("http")
+async def observability_exception_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        get_observability_recorder().log_error(
+            message=str(exc),
+            logger_name=__name__,
+            module="main",
+            error_type=type(exc).__name__,
+            metadata={
+                "method": request.method,
+                "path": request.url.path,
+            },
+        )
+        raise
 
 
 @app.get("/health")

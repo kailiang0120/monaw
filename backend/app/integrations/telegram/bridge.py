@@ -6,12 +6,18 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, TelegramError
 from telegram.constants import ChatAction
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import settings
+from app.agent.access_grant_broker import resolve_grant, signal_resume as signal_grant_resume
+from app.agent.approval_broker import (
+    approve_ticket,
+    reject_ticket,
+    signal_resume as signal_approval_resume,
+)
 from app.agent.identity import DEFAULT_AGENT_NAME
 from app.agent.response_attachments import register_attachment_path
 from app.agent.runtime_paths import runtime_path
@@ -43,6 +49,7 @@ COMMANDS = [
     BotCommand("modeldefault", "Use the desktop default model"),
     BotCommand("effort", "List or switch reasoning effort"),
     BotCommand("compact", "Compact this chat context"),
+    BotCommand("skill", "Open skill creator mode"),
     BotCommand("new", "Start a fresh Telegram conversation session"),
 ]
 TELEGRAM_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -50,6 +57,7 @@ TELEGRAM_MAX_PHOTO_BYTES = 10 * 1024 * 1024
 TELEGRAM_FILE_DOWNLOAD_TIMEOUT_SECONDS = 120
 TELEGRAM_AUTH_CONFIG_KEY = "telegram_authorization"
 TELEGRAM_CHAT_LOCKS_KEY = "telegram_chat_locks"
+TELEGRAM_PERMISSION_CALLBACK_PREFIX = "monawperm"
 _UNSAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 
 
@@ -157,7 +165,7 @@ def _start_message() -> str:
     return (
         f"{_agent_display_name()} AI Agent is online and connected to your laptop.\n"
         "Send a message to use the same agent runtime as the desktop app.\n"
-        "Commands: /status, /whoami, /session, /resume, /models, /modeldefault, /effort, /compact, /new, /help."
+        "Commands: /status, /whoami, /session, /resume, /models, /modeldefault, /effort, /compact, /skill creator, /new, /help."
     )
 
 
@@ -183,10 +191,65 @@ def _help_message() -> str:
         "/effort medium - Switch by effort name.\n"
         "/effort default - Clear this Telegram chat's effort override and use the desktop default.\n"
         "/compact - Compact this chat so future replies use the summary instead of earlier raw history.\n"
+        "/skill creator - Open Skill Creator mode for creating optional runtime skills.\n"
         "/new - Start a fresh Telegram conversation session.\n\n"
         "Files and photos are sent to the agent as attachments. Voice and audio messages are transcribed first. "
-        "Desktop approvals still happen in the desktop app."
+        "Permission prompts can be approved or rejected from Telegram or the desktop app."
     )
+
+
+def _callback_data(action: str, ticket_id: str) -> str:
+    return f"{TELEGRAM_PERMISSION_CALLBACK_PREFIX}:{action}:{ticket_id}"
+
+
+def _permission_keyboard(event_name: str, ticket_id: str):
+    if event_name == "approval_required":
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Approve", callback_data=_callback_data("approve", ticket_id)),
+                InlineKeyboardButton("Reject", callback_data=_callback_data("reject", ticket_id)),
+            ]
+        ])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Once", callback_data=_callback_data("grant_once", ticket_id)),
+            InlineKeyboardButton("Session", callback_data=_callback_data("grant_session", ticket_id)),
+        ],
+        [
+            InlineKeyboardButton("Always", callback_data=_callback_data("grant_always", ticket_id)),
+            InlineKeyboardButton("Deny", callback_data=_callback_data("grant_deny", ticket_id)),
+        ],
+    ])
+
+
+def _permission_notice(event: dict) -> tuple[str, object | None]:
+    event_name = str(event.get("event") or "")
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    ticket_id = str(data.get("ticket_id") or "").strip()
+    if not ticket_id:
+        return ("Permission is required, but no ticket id was provided.", None)
+
+    if event_name == "approval_required":
+        action = str(data.get("action") or "Sensitive action").strip()
+        reason = str(data.get("reason") or "").strip()
+        text = f"Approval required\nTicket: {ticket_id}\nAction: {action}"
+        if reason:
+            text += f"\nReason: {reason}"
+        return text, _permission_keyboard(event_name, ticket_id)
+
+    target = str(data.get("display_name") or data.get("target_identifier") or "Unknown target").strip()
+    target_type = str(data.get("target_type") or "target").strip()
+    action_context = str(data.get("action_context") or "").strip()
+    text = f"Access grant required\nTicket: {ticket_id}\nTarget: {target_type} {target}"
+    if action_context:
+        text += f"\nAction: {action_context}"
+    return text, _permission_keyboard(event_name, ticket_id)
+
+
+def _telegram_resolved_by(update: Update) -> str:
+    user = update.effective_user
+    user_id = getattr(user, "id", "")
+    return f"telegram:{user_id}" if user_id else "telegram"
 
 
 def _message_thread_id(update: Update) -> int | None:
@@ -826,6 +889,47 @@ async def compact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
 
 
+async def skill_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None:
+        return
+    if not await _ensure_authorized(update, context):
+        return
+
+    args = [str(arg).strip() for arg in (context.args or []) if str(arg).strip()]
+    if not args or args[0].casefold() in {"help", "?"}:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Use /skill creator to open Skill Creator mode.",
+        )
+        return
+    if args[0].casefold() != "creator":
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Unknown skill command. Use /skill creator.",
+        )
+        return
+
+    prompt = "/skill creator" if len(args) == 1 else "/skill creator " + " ".join(args[1:])
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    try:
+        result = await _agent_bridge(context).run_chat_message(
+            chat_id=update.effective_chat.id,
+            thread_id=_message_thread_id(update),
+            chat_title=_chat_title(update),
+            sender_name=_sender_name(update),
+            text=prompt,
+        )
+    except Exception as exc:
+        logger.exception("Telegram /skill creator failed.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Could not open Skill Creator mode: {exc}",
+        )
+        return
+    for chunk in split_telegram_message(result.reply):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
+
+
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None:
         return
@@ -842,6 +946,68 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         chat_id=update.effective_chat.id,
         text=f"Started a new chat: {session.title}",
     )
+
+
+async def permission_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    if update.effective_chat is None:
+        await query.answer("Missing chat context.")
+        return
+    if not await _ensure_authorized(update, context):
+        await query.answer("Unauthorized.")
+        return
+
+    data = str(query.data or "")
+    parts = data.split(":", 2)
+    if len(parts) != 3 or parts[0] != TELEGRAM_PERMISSION_CALLBACK_PREFIX:
+        await query.answer("Unknown action.")
+        return
+
+    action, ticket_id = parts[1], parts[2].strip()
+    if not ticket_id:
+        await query.answer("Missing ticket id.")
+        return
+
+    resolved_by = _telegram_resolved_by(update)
+    text = "Permission request is no longer pending."
+    answer = "Already handled."
+
+    if action == "approve":
+        ticket = approve_ticket(ticket_id, resolved_by=resolved_by)
+        if ticket is not None:
+            signal_approval_resume(ticket_id, "approved")
+            text = f"Approved ticket {ticket_id} from Telegram."
+            answer = "Approved."
+    elif action == "reject":
+        ticket = reject_ticket(ticket_id, resolved_by=resolved_by)
+        if ticket is not None:
+            signal_approval_resume(ticket_id, "rejected")
+            text = f"Rejected ticket {ticket_id} from Telegram."
+            answer = "Rejected."
+    elif action.startswith("grant_"):
+        decision = action.removeprefix("grant_")
+        if decision in {"once", "session", "always", "deny"}:
+            ticket = resolve_grant(ticket_id, decision)
+            if ticket is not None:
+                signal_grant_resume(ticket_id, decision)
+                label = "Denied" if decision == "deny" else f"Granted {decision}"
+                text = f"{label} for ticket {ticket_id} from Telegram."
+                answer = label
+        else:
+            answer = "Unknown grant."
+            text = "Unknown access grant decision."
+    else:
+        answer = "Unknown action."
+        text = "Unknown permission action."
+
+    await query.answer(answer)
+    try:
+        await query.edit_message_text(text=text)
+    except TelegramError:
+        logger.exception("Failed to update Telegram permission callback message.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -912,9 +1078,11 @@ async def _handle_authorized_message(update: Update, context: ContextTypes.DEFAU
             return
         if event.get("event") in {"approval_required", "access_grant_required"}:
             pending_notice_sent = True
+            text, reply_markup = _permission_notice(event)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="Approval is required in the desktop app before this Telegram request can continue.",
+                text=text,
+                reply_markup=reply_markup,
             )
 
     try:
@@ -974,7 +1142,12 @@ def build_application(token: str | None = None):
     application.add_handler(CommandHandler("modeldefault", modeldefault_command))
     application.add_handler(CommandHandler("effort", effort_command))
     application.add_handler(CommandHandler("compact", compact_command))
+    application.add_handler(CommandHandler("skill", skill_command))
     application.add_handler(CommandHandler("new", new_session))
+    application.add_handler(CallbackQueryHandler(
+        permission_callback,
+        pattern=rf"^{TELEGRAM_PERMISSION_CALLBACK_PREFIX}:",
+    ))
     application.add_handler(
         MessageHandler(
             (

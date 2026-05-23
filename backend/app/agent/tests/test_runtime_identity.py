@@ -7,6 +7,7 @@ import pytest
 from app.agent.prompt_loader import load_prompt_template
 from app.agent.runtime import (
     _settings_cache_key,
+    _is_skill_creator_command,
     AgentRuntime,
     build_identity_prompt,
 )
@@ -58,6 +59,13 @@ def test_identity_prompt_includes_monaw_for_default_profile():
 
     assert "Monaw" in prompt
     assert "agent_name" in prompt
+
+
+def test_skill_creator_command_matches_exact_slash_command():
+    assert _is_skill_creator_command("/skill creator")
+    assert _is_skill_creator_command("  /Skill   Creator  ")
+    assert not _is_skill_creator_command("/skill")
+    assert not _is_skill_creator_command("/skill creator create a browser skill")
 
 
 def test_base_runtime_prompt_is_loaded_from_template():

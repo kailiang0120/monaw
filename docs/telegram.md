@@ -4,9 +4,7 @@ Monaw can expose the same local agent runtime through a Telegram bot. Telegram i
 
 ## What Telegram Does
 
-Telegram messages become Monaw conversations. The bot can continue chat history, switch conversations, switch models for a Telegram chat, start new sessions, and return files produced by the agent.
-
-Desktop approvals still happen in the desktop app. If a Telegram request needs approval or an access grant, the bot tells the user to approve it in the desktop app.
+Telegram messages become Monaw conversations. The bot can continue chat history, switch conversations, switch models for a Telegram chat, start new sessions, approve permission prompts, and return files produced by the agent.
 
 ## Setup
 
@@ -72,6 +70,8 @@ Do not leave `telegram_allow_all` enabled just to discover ids.
 | `/effort 4` | Switch this Telegram chat to a listed reasoning effort. |
 | `/effort <effort name>` | Switch by effort name, for example `/effort high`. |
 | `/effort default` | Clear this Telegram chat's effort override and use the desktop default effort. |
+| `/compact` | Compact this chat so future replies use the generated summary instead of earlier raw history. |
+| `/skill creator` | Open Skill Creator mode for creating optional runtime skills. Telegram registers this as `/skill` with `creator` as the subcommand. |
 | `/new` | Start a fresh Telegram conversation session. |
 
 ## Conversation Behavior
@@ -131,6 +131,26 @@ Agent responses are simplified to plain text for Telegram. Markdown tables, code
 
 Long responses are split into safe Telegram-sized chunks.
 
+## Permission Prompts
+
+If a Telegram request hits a sensitive action approval, the bot sends inline buttons:
+
+| Button | Behavior |
+| --- | --- |
+| Approve | Approves the pending action and resumes the waiting agent turn. |
+| Reject | Rejects the pending action and resumes the waiting agent turn with denial. |
+
+If a Telegram request hits an access grant for an unknown app or path, the bot sends:
+
+| Button | Behavior |
+| --- | --- |
+| Once | Allows this one action only. |
+| Session | Allows the target for the current session. |
+| Always | Persists the target to the local allowlist. |
+| Deny | Blocks the action. |
+
+The desktop app can still approve or reject the same pending request. If either surface resolves it first, the other surface will show that the request is no longer pending.
+
 ## Attachments
 
 Incoming Telegram photos and documents become chat attachments, matching the desktop chat upload flow. Audio inputs are handled as speech-to-text instead of file attachments so the selected chat model receives text.
@@ -187,7 +207,7 @@ Keep these rules:
 | Keep the bot token private. | Anyone with the token can control the bot. |
 | Keep allowlists narrow. | Telegram is a remote control surface. |
 | Do not enable allow all. | It removes the user/chat boundary. |
-| Keep desktop approvals enabled for risky actions. | Telegram approvals are relayed to the desktop. |
+| Keep approval gates enabled for risky actions. | Telegram and desktop can both resolve the same pending permission ticket. |
 | Avoid sending secrets through Telegram. | Telegram messages are stored in conversation history. |
 
 ## Troubleshooting
@@ -197,6 +217,6 @@ Keep these rules:
 | Bot does not respond. | Confirm token, network access, backend startup, and `%USERPROFILE%\.monaw\runtime\backend.log`. |
 | Bot says chat is unauthorized. | Add the user id or chat id to the allowlist. |
 | `/models` does not show expected model. | Check local model catalog and desktop model settings. |
-| Request waits for approval. | Open the desktop app and approve or reject the pending ticket. |
+| Request waits for approval. | Use the Telegram inline buttons or approve/reject the pending ticket in the desktop app. |
 | Attachments do not send. | Check file existence and Telegram size limits. |
 | Scheduled notifications do not arrive. | Confirm the scheduled task has `notifyTelegram` and `telegramChatId`, and the bot is running. |
