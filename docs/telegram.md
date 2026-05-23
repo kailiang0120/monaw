@@ -72,6 +72,8 @@ Do not leave `telegram_allow_all` enabled just to discover ids.
 | `/effort 4` | Switch this Telegram chat to a listed reasoning effort. |
 | `/effort <effort name>` | Switch by effort name, for example `/effort high`. |
 | `/effort default` | Clear this Telegram chat's effort override and use the desktop default effort. |
+| `/compact` | Compact this chat so future replies use the generated summary instead of earlier raw history. |
+| `/skill creator` | Open Skill Creator mode for creating optional runtime skills. Telegram registers this as `/skill` with `creator` as the subcommand. |
 | `/new` | Start a fresh Telegram conversation session. |
 
 ## Conversation Behavior

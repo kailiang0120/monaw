@@ -21,6 +21,7 @@ from app.agent.llm_constants import (
     DEFAULT_VISION_FALLBACK_MAX_OUTPUT_TOKENS,
     DEFAULT_VISION_FALLBACK_MODEL,
 )
+from app.agent.observability.recorder import UsageStats
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class LLMResponse:
     finish_reason: str = "stop"  # "stop" | "tool_calls" | "length"
     reasoning_content: str = ""
     provider_messages: list[dict] = field(default_factory=list)
+    usage: UsageStats = field(default_factory=UsageStats)
 
 
 # ---------------------------------------------------------------------------
@@ -665,6 +667,77 @@ def _obj_to_dict(obj: Any) -> dict:
     return {}
 
 
+def _usage_int(obj: Any, key: str) -> int:
+    try:
+        value = _obj_get(obj, key, 0)
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _usage_nested_int(obj: Any, *path: str) -> int:
+    current = obj
+    for key in path:
+        current = _obj_get(current, key, None)
+        if current is None:
+            return 0
+    try:
+        return max(0, int(current or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _usage_from_openai(usage: Any) -> UsageStats:
+    if not usage:
+        return UsageStats()
+    input_tokens = _usage_int(usage, "input_tokens") or _usage_int(usage, "prompt_tokens")
+    output_tokens = _usage_int(usage, "output_tokens") or _usage_int(usage, "completion_tokens")
+    total_tokens = _usage_int(usage, "total_tokens")
+    cached_tokens = (
+        _usage_nested_int(usage, "input_tokens_details", "cached_tokens")
+        or _usage_nested_int(usage, "prompt_tokens_details", "cached_tokens")
+        or _usage_int(usage, "prompt_cache_hit_tokens")
+    )
+    reasoning_tokens = (
+        _usage_nested_int(usage, "output_tokens_details", "reasoning_tokens")
+        or _usage_nested_int(usage, "completion_tokens_details", "reasoning_tokens")
+    )
+    return UsageStats(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cached_tokens=cached_tokens,
+        total_tokens=total_tokens or input_tokens + output_tokens + reasoning_tokens,
+        source="provider",
+    ).normalized()
+
+
+def _usage_from_gemini_metadata(metadata: Any) -> UsageStats:
+    if not metadata:
+        return UsageStats()
+    input_tokens = _usage_int(metadata, "prompt_token_count")
+    output_tokens = _usage_int(metadata, "candidates_token_count")
+    reasoning_tokens = _usage_int(metadata, "thoughts_token_count")
+    cached_tokens = _usage_int(metadata, "cached_content_token_count")
+    total_tokens = _usage_int(metadata, "total_token_count")
+    image_tokens = _usage_int(metadata, "image_token_count")
+    return UsageStats(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cached_tokens=cached_tokens,
+        image_tokens=image_tokens,
+        total_tokens=total_tokens or input_tokens + output_tokens + reasoning_tokens + image_tokens,
+        source="provider",
+    ).normalized()
+
+
+def _usage_from_gemini_response(response: Any) -> UsageStats:
+    return _usage_from_gemini_metadata(
+        _obj_get(response, "usage_metadata", None) or _obj_get(response, "usageMetadata", None)
+    )
+
+
 def _openai_response_output_items(response: Any) -> list[Any]:
     output = _obj_get(response, "output", [])
     return list(output or []) if isinstance(output, (list, tuple)) else []
@@ -881,6 +954,7 @@ class LLMClient:
             finish_reason=finish_reason,
             reasoning_content=reasoning_content,
             provider_messages=provider_messages,
+            usage=_usage_from_gemini_response(response),
         )
 
     async def _gemini_stream(self, contents, config, stream_callback) -> LLMResponse:
@@ -896,8 +970,12 @@ class LLMClient:
         raw_function_calls = []
         raw_model_parts = []
         collected_reasoning_content = ""
+        usage = UsageStats()
 
         async for chunk in await self._genai_client.aio.models.generate_content_stream(**kwargs):
+            chunk_usage = _usage_from_gemini_response(chunk)
+            if chunk_usage.total_tokens:
+                usage = chunk_usage
             chunk_parts = _extract_gemini_model_parts(chunk)
             if chunk_parts:
                 raw_model_parts.extend(chunk_parts)
@@ -941,6 +1019,7 @@ class LLMClient:
             finish_reason=finish_reason,
             reasoning_content=collected_reasoning_content,
             provider_messages=provider_messages,
+            usage=usage,
         )
 
     # ------------------------------------------------------------------
@@ -1033,6 +1112,7 @@ class LLMClient:
             finish_reason=finish_reason,
             reasoning_content=reasoning_content,
             provider_messages=_openai_response_provider_messages(response),
+            usage=_usage_from_openai(_obj_get(response, "usage", None)),
         )
 
     async def _openai_responses_stream(
@@ -1095,6 +1175,7 @@ class LLMClient:
                 ),
                 reasoning_content=final_reasoning or collected_reasoning_content,
                 provider_messages=_openai_response_provider_messages(final_response),
+                usage=_usage_from_openai(_obj_get(final_response, "usage", None)),
             )
 
         tool_calls: list[ToolCallRequest] = []
@@ -1143,6 +1224,7 @@ class LLMClient:
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             reasoning_content=reasoning_content,
+            usage=_usage_from_openai(_obj_get(response, "usage", None)),
         )
 
     async def _openai_stream(
@@ -1155,6 +1237,7 @@ class LLMClient:
         collected_reasoning_content = ""
         finish_reason = "stop"
         tool_call_buffers: dict[int, dict] = {}
+        usage = UsageStats()
 
         try:
             stream = await self._openai_client.chat.completions.create(**kwargs)
@@ -1170,6 +1253,9 @@ class LLMClient:
             else:
                 raise
         async for chunk in stream:
+            chunk_usage = _usage_from_openai(_obj_get(chunk, "usage", None))
+            if chunk_usage.total_tokens:
+                usage = chunk_usage
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -1217,6 +1303,7 @@ class LLMClient:
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             reasoning_content=collected_reasoning_content,
+            usage=usage,
         )
 
 

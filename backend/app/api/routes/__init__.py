@@ -7,6 +7,7 @@ from app.api.routes.conversations import router as conversations_router
 from app.api.routes.diagnostics import router as diagnostics_router
 from app.api.routes.files import router as files_router
 from app.api.routes.memories import router as memories_router
+from app.api.routes.observability import router as observability_router
 from app.api.routes.sandbox import router as sandbox_router
 from app.api.routes.settings import router as settings_router
 from app.api.routes.scheduled_tasks import router as scheduled_tasks_router
@@ -21,6 +22,7 @@ router.include_router(settings_router)
 router.include_router(memories_router)
 router.include_router(approvals_router)
 router.include_router(diagnostics_router)
+router.include_router(observability_router)
 router.include_router(sandbox_router)
 router.include_router(files_router)
 router.include_router(uploads_router)

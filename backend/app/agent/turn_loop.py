@@ -27,6 +27,14 @@ from app.agent.execution_resume import resume_approved_ticket
 from app.agent.iteration_budget import IterationBudget
 from app.agent.llm_client import LLMClient, VisionDescriber, build_tool_result_message
 from app.agent.memory_manager import MemoryManager
+from app.agent.observability.recorder import (
+    UsageStats,
+    get_observability_recorder,
+    infer_source,
+    reset_current_run_id,
+    set_current_run_id,
+    usage_from_any,
+)
 from app.agent.response_attachments import collect_response_attachments
 from app.agent.observability.trajectory import get_trajectory_logger
 from app.agent.run_context import reset_current_conversation_id, set_current_conversation_id
@@ -539,6 +547,15 @@ def _parse_tool_json(tool_output: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _tool_error_code(tool_output: str) -> str:
+    payload = _parse_tool_json(tool_output)
+    for key in ("code", "reason_code", "error_code"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return "tool_error"
+
+
 def _extract_image_attachments(tool_name: str, tool_output: str) -> list[dict]:
     if tool_name not in {"browser_snapshot", "browser_screenshot", "browser_full_page_screenshot", "desktop_snapshot", "screenshot"}:
         return []
@@ -722,6 +739,7 @@ class TurnLoop:
         self.executor = ToolExecutor()
         self.policy = ToolPolicy()
         self.trajectory_logger = get_trajectory_logger()
+        self.observability = get_observability_recorder()
 
     def shutdown(self) -> None:
         self.executor.shutdown()
@@ -1025,6 +1043,8 @@ class TurnLoop:
         """Run the react loop, pushing all events into the queue. Caller is responsible for the None sentinel."""
         loop = asyncio.get_running_loop()
         context_token = set_current_conversation_id(conversation_id)
+        obs_run_id = ""
+        obs_context_token = None
         turn_started_at = time.perf_counter()
 
         def _put(event: dict) -> None:
@@ -1040,6 +1060,66 @@ class TurnLoop:
         active_tool_call: dict | None = None
         turn_persisted = False
         trajectory_finished = False
+        obs_usage_total = UsageStats()
+
+        def _obs_event(event_type: str, **kwargs) -> None:
+            if not obs_run_id:
+                return
+            try:
+                self.observability.log_event(
+                    run_id=obs_run_id,
+                    conversation_id=conversation_id,
+                    event_type=event_type,
+                    source=infer_source(conversation_id),
+                    model=str(getattr(self.llm_client, "model_name", "") or ""),
+                    provider=str(getattr(self.llm_client, "provider", "") or ""),
+                    **kwargs,
+                )
+            except Exception:
+                logger.debug("observability event failed event_type=%s", event_type, exc_info=True)
+
+        def _obs_error(message_text: str, *, error_type: str = "", metadata: dict | None = None) -> None:
+            try:
+                self.observability.log_error(
+                    run_id=obs_run_id,
+                    conversation_id=conversation_id,
+                    message=message_text,
+                    error_type=error_type,
+                    metadata=metadata or {},
+                )
+            except Exception:
+                logger.debug("observability error capture failed", exc_info=True)
+
+        def _obs_tool_start(tool_name: str, arguments: dict, call_id: str, risk: str = "") -> float:
+            started = time.perf_counter()
+            _obs_event(
+                "tool_call_started",
+                tool_name=tool_name,
+                input={"arguments": arguments, "call_id": call_id, "risk": risk},
+            )
+            return started
+
+        def _obs_tool_end(
+            tool_name: str,
+            output: str,
+            status: str,
+            call_id: str,
+            started: float,
+            *,
+            risk: str = "",
+            error_code: str = "",
+            metadata: dict | None = None,
+        ) -> None:
+            _obs_event(
+                "tool_call_finished",
+                tool_name=tool_name,
+                status=status,
+                error_code=error_code,
+                error_message=output if status not in {"ok", "complete", "success"} else "",
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                output={"output": output, "call_id": call_id, "risk": risk},
+                metadata=metadata or {},
+            )
 
         def _emit_agent_progress(text: str) -> None:
             nonlocal latest_progress_text
@@ -1132,6 +1212,15 @@ class TurnLoop:
             turn_persisted = True
 
         try:
+            obs_run_id = self.observability.start_run(
+                conversation_id=conversation_id,
+                user_message=message,
+                source=infer_source(conversation_id),
+                model=str(getattr(self.llm_client, "model_name", "") or ""),
+                provider=str(getattr(self.llm_client, "provider", "") or ""),
+                metadata={"attachment_count": len(attachments or [])},
+            )
+            obs_context_token = set_current_run_id(obs_run_id)
             self.trajectory_logger.start(
                 conversation_id,
                 model=str(getattr(self.llm_client, "model_name", "") or ""),
@@ -1228,6 +1317,14 @@ class TurnLoop:
                             "consumed": budget.consumed,
                         },
                     })
+                    _obs_event(
+                        "guardrail_triggered",
+                        level="warning",
+                        status="error",
+                        error_code="iteration_budget_exhausted",
+                        error_message=final_text,
+                        metadata={"limit": budget.max_iterations, "consumed": budget.consumed},
+                    )
                     break
 
                 streamed_answer_text = ""
@@ -1237,6 +1334,7 @@ class TurnLoop:
                     streamed_answer_text += str(delta or "")
                     _emit_response_token(delta)
 
+                llm_call_started_at = time.perf_counter()
                 try:
                     visible_tools = self.registry.get_all_tools(visible_only=True)
                     model_tools = _tools_with_final_answer(
@@ -1247,6 +1345,15 @@ class TurnLoop:
                         None
                         if structured_final_required
                         else _answer_token_cb
+                    )
+                    _obs_event(
+                        "llm_call_started",
+                        input={
+                            "message_count": len(messages),
+                            "tool_count": len(model_tools),
+                            "tool_choice": "required" if force_tool_choice_next else "auto",
+                        },
+                        metadata={"iteration": iteration_index + 1, "consumed": budget.consumed},
                     )
                     if force_tool_choice_next:
                         logger.info(
@@ -1275,6 +1382,27 @@ class TurnLoop:
                         llm_call,
                         timeout=self.max_llm_call_seconds,
                     )
+                    llm_usage = usage_from_any(getattr(llm_response, "usage", None))
+                    obs_usage_total = obs_usage_total.merge(llm_usage)
+                    _obs_event(
+                        "llm_call_finished",
+                        status="ok",
+                        duration_ms=round((time.perf_counter() - llm_call_started_at) * 1000),
+                        output={
+                            "finish_reason": llm_response.finish_reason,
+                            "content": llm_response.content,
+                            "tool_calls": [
+                                {
+                                    "call_id": call.call_id,
+                                    "tool_name": call.tool_name,
+                                    "arguments": call.arguments,
+                                }
+                                for call in llm_response.tool_calls
+                            ],
+                        },
+                        tokens=llm_usage,
+                        metadata={"iteration": iteration_index + 1},
+                    )
                 except asyncio.TimeoutError:
                     final_text = f"Timed out: LLM call exceeded {self.max_llm_call_seconds}s limit."
                     terminal_error = True
@@ -1288,6 +1416,39 @@ class TurnLoop:
                     _put({
                         "event": "error",
                         "data": {"code": "llm_timeout", "message": final_text},
+                    })
+                    _obs_event(
+                        "llm_call_finished",
+                        level="warning",
+                        status="error",
+                        duration_ms=round((time.perf_counter() - llm_call_started_at) * 1000),
+                        error_code="llm_timeout",
+                        error_message=final_text,
+                        metadata={"timeout_s": self.max_llm_call_seconds, "iteration": iteration_index + 1},
+                    )
+                    break
+                except Exception as exc:
+                    final_text = f"Provider error: {exc}"
+                    terminal_error = True
+                    incomplete_reason_code = "provider_error"
+                    logger.exception("turn_loop provider call failed conversation_id=%s", conversation_id)
+                    _obs_error(
+                        str(exc),
+                        error_type=type(exc).__name__,
+                        metadata={"phase": "llm_call", "iteration": iteration_index + 1},
+                    )
+                    _obs_event(
+                        "llm_call_finished",
+                        level="error",
+                        status="error",
+                        duration_ms=round((time.perf_counter() - llm_call_started_at) * 1000),
+                        error_code="provider_error",
+                        error_message=str(exc),
+                        metadata={"iteration": iteration_index + 1},
+                    )
+                    _put({
+                        "event": "error",
+                        "data": {"code": "provider_error", "message": final_text},
                     })
                     break
 
@@ -1320,6 +1481,14 @@ class TurnLoop:
                                 "consumed": budget.consumed,
                             },
                         })
+                        _obs_event(
+                            "guardrail_triggered",
+                            level="warning",
+                            status="error",
+                            error_code=incomplete_reason_code,
+                            error_message=final_text,
+                            metadata={"limit": budget.max_iterations, "consumed": budget.consumed},
+                        )
                     else:
                         final_tool_missing = structured_final_required and visible_tools
                         if final_tool_missing:
@@ -1549,6 +1718,18 @@ class TurnLoop:
                             "consumed": budget.consumed,
                         },
                     })
+                    _obs_event(
+                        "guardrail_triggered",
+                        level="warning",
+                        status="error",
+                        error_code=incomplete_reason_code,
+                        error_message=final_text,
+                        metadata={
+                            "limit": budget.max_iterations,
+                            "consumed": budget.consumed,
+                            "requested_tools": [str(call.get("name") or "") for call in call_dicts],
+                        },
+                    )
                     break
                 execution_plan = self._build_execution_plan(message, call_dicts)
                 plan_by_step_id = {step.step_id: step for step in execution_plan.steps}
@@ -1595,6 +1776,12 @@ class TurnLoop:
                                     "error": policy_decision.reason or f"Unknown tool '{raw_request.name}'",
                                 }
                             )
+                            obs_tool_started_at = _obs_tool_start(
+                                raw_request.name,
+                                raw_request.arguments,
+                                call_id,
+                                policy_decision.risk,
+                            )
                             _put({
                                 "event": "tool_start",
                                 "data": {
@@ -1613,6 +1800,15 @@ class TurnLoop:
                                     "call_id": call_id,
                                 },
                             })
+                            _obs_tool_end(
+                                raw_request.name,
+                                tool_output,
+                                "error",
+                                call_id,
+                                obs_tool_started_at,
+                                risk=policy_decision.risk,
+                                error_code=policy_decision.metadata.get("code", "unknown_tool"),
+                            )
                             if plan_step is not None:
                                 plan_step.status = "failed"
                                 if callable(sync_plan_progress):
@@ -1653,6 +1849,12 @@ class TurnLoop:
                                     "expected_schema": tool_dict.get("parameters", {}),
                                 }
                             )
+                            obs_tool_started_at = _obs_tool_start(
+                                tool_name,
+                                arguments,
+                                call_id,
+                                "low",
+                            )
                             _put({
                                 "event": "tool_start",
                                 "data": {
@@ -1671,6 +1873,15 @@ class TurnLoop:
                                     "call_id": call_id,
                                 },
                             })
+                            _obs_tool_end(
+                                tool_name,
+                                tool_output,
+                                "error",
+                                call_id,
+                                obs_tool_started_at,
+                                risk="low",
+                                error_code="invalid_tool_arguments",
+                            )
                             messages.append(
                                 self._build_tool_result_message(
                                     call_id=call_id,
@@ -1709,6 +1920,16 @@ class TurnLoop:
                                 },
                                 ensure_ascii=False,
                             )
+                            _obs_event(
+                                "guardrail_triggered",
+                                level="warning",
+                                status="error",
+                                tool_name=tool_name,
+                                error_code=blocked_code,
+                                error_message=policy_decision.reason,
+                                input={"arguments": arguments, "call_id": call_id},
+                                metadata={"risk": policy_decision.risk},
+                            )
                             if blocked_code == "repeated_tool_call_blocked":
                                 signature = str(
                                     policy_decision.metadata.get("signature")
@@ -1745,6 +1966,23 @@ class TurnLoop:
                                         tool_name,
                                         arguments,
                                     )
+                                    _obs_event(
+                                        "guardrail_triggered",
+                                        level="warning",
+                                        status="error",
+                                        tool_name=tool_name,
+                                        error_code="repeated_tool_call_blocked",
+                                        error_message=final_text,
+                                        input={"arguments": arguments, "call_id": call_id},
+                                        output={"last_result": last_tool_outputs_by_signature.get(signature)},
+                                        metadata={"after_recovery": True},
+                                    )
+                            obs_tool_started_at = _obs_tool_start(
+                                tool_name,
+                                arguments,
+                                call_id,
+                                policy_decision.risk,
+                            )
                             _put({
                                 "event": "tool_start",
                                 "data": {
@@ -1764,6 +2002,15 @@ class TurnLoop:
                                     "risk": policy_decision.risk,
                                 },
                             })
+                            _obs_tool_end(
+                                tool_name,
+                                tool_output,
+                                "error",
+                                call_id,
+                                obs_tool_started_at,
+                                risk=policy_decision.risk,
+                                error_code=blocked_code,
+                            )
                             if plan_step is not None:
                                 plan_step.status = "failed"
                                 if callable(sync_plan_progress):
@@ -1816,6 +2063,12 @@ class TurnLoop:
                             ),
                             "status": "cancelled",
                         }
+                        obs_tool_started_at = _obs_tool_start(
+                            tool_name,
+                            arguments,
+                            call_id,
+                            policy_decision.risk,
+                        )
                         _put({
                             "event": "tool_start",
                             "data": {
@@ -1839,6 +2092,11 @@ class TurnLoop:
                                 {"status": "error", "error": str(exc)}
                             )
                             status = "error"
+                            _obs_error(
+                                str(exc),
+                                error_type=type(exc).__name__,
+                                metadata={"phase": "tool_call", "tool": tool_name, "call_id": call_id},
+                            )
                             tool_result = ToolCallResult.from_output(
                                 call_id=call_id,
                                 name=tool_name,
@@ -1906,6 +2164,17 @@ class TurnLoop:
                                         tool_name,
                                         arguments,
                                     )
+                                    _obs_event(
+                                        "guardrail_triggered",
+                                        level="warning",
+                                        status="error",
+                                        tool_name=tool_name,
+                                        error_code="repeated_blocked_tool_result",
+                                        error_message="Repeated blocked tool result; recovery prompt inserted.",
+                                        input={"arguments": arguments, "call_id": call_id},
+                                        output={"last_result": blocked_payload},
+                                        metadata={"recovery_required": True},
+                                    )
                                 else:
                                     stop_requested = True
                                     terminal_error = True
@@ -1934,6 +2203,17 @@ class TurnLoop:
                                         conversation_id,
                                         tool_name,
                                         arguments,
+                                    )
+                                    _obs_event(
+                                        "guardrail_triggered",
+                                        level="warning",
+                                        status="error",
+                                        tool_name=tool_name,
+                                        error_code="repeated_blocked_tool_result",
+                                        error_message=final_text,
+                                        input={"arguments": arguments, "call_id": call_id},
+                                        output={"last_result": blocked_payload},
+                                        metadata={"after_recovery": True},
                                     )
                         if _is_browser_observation_action(tool_name, arguments) and status == "ok":
                             browser_repeat_counts.clear()
@@ -1973,6 +2253,17 @@ class TurnLoop:
                                         tool_name,
                                         arguments,
                                     )
+                                    _obs_event(
+                                        "guardrail_triggered",
+                                        level="warning",
+                                        status="error",
+                                        tool_name=tool_name,
+                                        error_code="stalled_repeat_detected",
+                                        error_message="Repeated browser action with unchanged page state; recovery prompt inserted.",
+                                        input={"arguments": arguments, "call_id": call_id},
+                                        output={"last_result": repeated_browser_result},
+                                        metadata={"recovery_required": True},
+                                    )
                                 else:
                                     stop_requested = True
                                     terminal_error = True
@@ -2001,6 +2292,17 @@ class TurnLoop:
                                         conversation_id,
                                         tool_name,
                                         arguments,
+                                    )
+                                    _obs_event(
+                                        "guardrail_triggered",
+                                        level="warning",
+                                        status="error",
+                                        tool_name=tool_name,
+                                        error_code="stalled_repeat_detected",
+                                        error_message=final_text,
+                                        input={"arguments": arguments, "call_id": call_id},
+                                        output={"last_result": repeated_browser_result},
+                                        metadata={"after_recovery": True},
                                     )
 
                         raw_tool_output = tool_output
@@ -2040,6 +2342,16 @@ class TurnLoop:
                                 "risk": policy_decision.risk,
                             },
                         })
+                        _obs_tool_end(
+                            tool_name,
+                            raw_tool_output,
+                            status,
+                            call_id,
+                            obs_tool_started_at,
+                            risk=policy_decision.risk,
+                            error_code=_tool_error_code(raw_tool_output) if status != "ok" else "",
+                            metadata={"vision_fallback": attempted_vision_fallback},
+                        )
                         self.trajectory_logger.add_entry(
                             conversation_id,
                             "tool",
@@ -2147,6 +2459,18 @@ class TurnLoop:
                         "last_tool": last_tool_name,
                     },
                 })
+                _obs_event(
+                    "guardrail_triggered",
+                    level="warning",
+                    status="error",
+                    error_code=incomplete_reason_code,
+                    error_message=final_text,
+                    metadata={
+                        "limit": budget.max_iterations,
+                        "consumed": budget.consumed,
+                        "last_tool": last_tool_name,
+                    },
+                )
 
             run_status = (
                 "paused"
@@ -2188,6 +2512,25 @@ class TurnLoop:
                 error=incomplete_reason_code if run_status != "complete" else "",
                 assistant_message=final_text or "Done.",
             )
+            self.observability.finish_run(
+                run_id=obs_run_id,
+                status=run_status,
+                final_output=final_text or "Done.",
+                failure_reason=incomplete_reason_code if run_status != "complete" else "",
+                duration_ms=response_duration_ms,
+                usage=obs_usage_total,
+                tool_count=len(persisted_tool_calls),
+                tool_error_count=sum(
+                    1
+                    for tool_call in persisted_tool_calls
+                    if str(tool_call.get("status") or "").lower() not in {"ok", "complete", "success"}
+                ),
+                metadata={
+                    "completed_normally": completed_normally,
+                    "budget_consumed": budget.consumed,
+                    "budget_limit": budget.max_iterations,
+                },
+            )
 
             done_data = {
                 "conversation_id": conversation_id,
@@ -2214,6 +2557,20 @@ class TurnLoop:
                     error="cancelled",
                     assistant_message=partial_text,
                 )
+                self.observability.finish_run(
+                    run_id=obs_run_id,
+                    status="paused",
+                    final_output=partial_text,
+                    failure_reason="cancelled",
+                    duration_ms=_response_duration_ms(),
+                    usage=obs_usage_total,
+                    tool_count=len(_tool_calls_for_persist()),
+                    tool_error_count=sum(
+                        1
+                        for tool_call in _tool_calls_for_persist()
+                        if str(tool_call.get("status") or "").lower() not in {"ok", "complete", "success"}
+                    ),
+                )
                 logger.info(
                     "turn_loop persisted cancelled turn conversation_id=%s tool_calls=%s last_tool=%s",
                     conversation_id,
@@ -2229,6 +2586,25 @@ class TurnLoop:
         except Exception as exc:
             logger.exception("react_worker error: %s", exc)
             _finish_trajectory(success=False, error=str(exc), assistant_message=final_text or "Error.")
+            _obs_error(
+                str(exc),
+                error_type=type(exc).__name__,
+                metadata={"phase": "turn_loop"},
+            )
+            self.observability.finish_run(
+                run_id=obs_run_id,
+                status="error",
+                final_output=final_text or "Error.",
+                failure_reason="internal_error",
+                duration_ms=_response_duration_ms(),
+                usage=obs_usage_total,
+                tool_count=len(_tool_calls_for_persist()),
+                tool_error_count=sum(
+                    1
+                    for tool_call in _tool_calls_for_persist()
+                    if str(tool_call.get("status") or "").lower() not in {"ok", "complete", "success"}
+                ),
+            )
             try:
                 _put({
                     "event": "error",
@@ -2241,6 +2617,8 @@ class TurnLoop:
             except Exception:
                 pass
         finally:
+            if obs_context_token is not None:
+                reset_current_run_id(obs_context_token)
             reset_current_conversation_id(context_token)
         # Note: the None sentinel is placed by _run_worker_with_timeout, not here,
         # so timeout-injected error events arrive before the sentinel.
@@ -2277,6 +2655,18 @@ class TurnLoop:
                         timeout=self.max_turn_seconds,
                     )
                 except asyncio.TimeoutError:
+                    self.observability.log_error(
+                        conversation_id=conversation_id,
+                        message=f"Turn exceeded {self.max_turn_seconds}s limit.",
+                        error_type="turn_timeout",
+                        metadata={"timeout_s": self.max_turn_seconds},
+                    )
+                    self.observability.finish_open_run_for_conversation(
+                        conversation_id=conversation_id,
+                        status="paused",
+                        failure_reason="turn_timeout",
+                        final_output="Timed out.",
+                    )
                     queue.put_nowait({
                         "event": "error",
                         "data": {"code": "turn_timeout", "message": f"Turn exceeded {self.max_turn_seconds}s limit."},
