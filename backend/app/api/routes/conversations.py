@@ -31,6 +31,9 @@ from app.schemas import (
 
 router = APIRouter()
 
+HISTORY_TOOL_PAYLOAD_PREVIEW_CHARS = 1200
+HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX = "\n\n[history preview truncated]"
+
 
 def _stored_response_attachments(raw_value: object) -> list[dict] | None:
     if not isinstance(raw_value, str) or not raw_value.strip():
@@ -42,6 +45,15 @@ def _stored_response_attachments(raw_value: object) -> list[dict] | None:
     if not isinstance(payload, list):
         return None
     return [item for item in payload if isinstance(item, dict)]
+
+
+def _history_tool_payload(value: object, limit: int) -> str:
+    text = str(value or "")
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX
 
 
 def _completion_protocol_text() -> str:
@@ -149,6 +161,8 @@ async def get_conversation_messages(
     conv_id: str,
     limit: int = Query(50, ge=1, le=200),
     before_id: int | None = Query(None),
+    tool_payload_limit: int = Query(HISTORY_TOOL_PAYLOAD_PREVIEW_CHARS, ge=0, le=20000),
+    include_tool_calls: bool = Query(True),
 ):
     """Retrieve messages for a conversation with cursor-based pagination."""
     db = get_db()
@@ -163,21 +177,35 @@ async def get_conversation_messages(
 
     result = []
     for msg in raw_messages:
-        tc_rows = db.fetchall(
-            "SELECT id, tool_name, input, output, status FROM tool_calls WHERE message_id = ? ORDER BY id",
-            (msg["id"],),
-        )
-        tool_calls = [
-            ToolCallOut(
-                id=tc["id"],
-                tool_name=tc["tool_name"],
-                input=tc["input"],
-                output=tc["output"],
-                status=tc["status"],
+        if include_tool_calls:
+            tc_rows = db.fetchall(
+                "SELECT id, tool_name, input, output, status FROM tool_calls WHERE message_id = ? ORDER BY id",
+                (msg["id"],),
             )
-            for tc in tc_rows
-        ]
+            tool_calls = [
+                ToolCallOut(
+                    id=tc["id"],
+                    tool_name=tc["tool_name"],
+                    input=_history_tool_payload(tc["input"], tool_payload_limit),
+                    output=_history_tool_payload(tc["output"], tool_payload_limit),
+                    status=tc["status"],
+                )
+                for tc in tc_rows
+            ]
+        else:
+            tc_rows = []
+            tool_calls = []
         stored_attachments = _stored_response_attachments(msg.get("attachments_json"))
+        attachments = stored_attachments
+        if attachments is None:
+            attachments = (
+                collect_response_attachments(
+                    content=msg["content"],
+                    tool_calls=[dict(tc) for tc in tc_rows],
+                )
+                if include_tool_calls
+                else collect_response_attachments(content=msg["content"])
+            )
         result.append(
             MessageOut(
                 id=msg["id"],
@@ -187,12 +215,7 @@ async def get_conversation_messages(
                 status=msg.get("status", "complete"),
                 response_duration_ms=msg.get("response_duration_ms"),
                 tool_calls=tool_calls,
-                attachments=stored_attachments
-                if stored_attachments is not None
-                else collect_response_attachments(
-                    content=msg["content"],
-                    tool_calls=[dict(tc) for tc in tc_rows],
-                ),
+                attachments=attachments,
                 created_at=msg["created_at"],
             )
         )

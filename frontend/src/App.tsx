@@ -46,8 +46,11 @@ export default function App() {
     messages,
     isStreaming,
     isLoadingHistory,
+    isLoadingOlderHistory,
+    hasMoreHistory,
     pendingAccessGrant,
     setPendingAccessGrant,
+    loadOlderMessages,
     sendMessage,
     refreshMessages,
     stopStreaming,
@@ -266,9 +269,12 @@ export default function App() {
           <ChatWindow
             messages={messages}
             isLoadingHistory={isLoadingHistory}
+            isLoadingOlderHistory={isLoadingOlderHistory}
+            hasMoreHistory={hasMoreHistory}
             conversationTitle={activeConversation?.title}
             isStreaming={isStreaming}
             agentName={agentName}
+            onLoadOlderMessages={loadOlderMessages}
             onRename={activeConvId ? (title) => handleRenameConversation(activeConvId, title) : undefined}
             onPromptSelect={handleSend}
           />

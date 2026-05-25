@@ -41,11 +41,14 @@ export async function fetchMessages(
   conversationId: string,
   limit = 50,
   beforeId?: number,
+  signal?: AbortSignal,
 ): Promise<MessagesResponse> {
   const params = new URLSearchParams({ limit: String(limit) })
   if (beforeId !== undefined) params.set('before_id', String(beforeId))
+  params.set('include_tool_calls', 'false')
   const res = await fetch(
     `${BASE}/api/conversations/${encodeURIComponent(conversationId)}/messages?${params}`,
+    { signal },
   )
   if (!res.ok) throw new Error('Failed to fetch messages')
   return res.json()

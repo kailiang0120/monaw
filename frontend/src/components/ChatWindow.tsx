@@ -17,9 +17,12 @@ function LivePulseDot() {
 interface Props {
   messages: Message[]
   isLoadingHistory?: boolean
+  isLoadingOlderHistory?: boolean
+  hasMoreHistory?: boolean
   conversationTitle?: string
   isStreaming?: boolean
   agentName?: string
+  onLoadOlderMessages?: () => void
   onRename?: (title: string) => void
   onPromptSelect?: (prompt: string) => void // kept for API compat
 }
@@ -27,9 +30,12 @@ interface Props {
 export function ChatWindow({
   messages,
   isLoadingHistory,
+  isLoadingOlderHistory = false,
+  hasMoreHistory = false,
   conversationTitle,
   isStreaming = false,
   agentName = DEFAULT_AGENT_NAME,
+  onLoadOlderMessages,
   onRename,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -38,10 +44,13 @@ export function ChatWindow({
   const [titleValue, setTitleValue] = useState('')
   const insights = getSessionInsights(messages)
   const assistantLabel = resolveAgentName(agentName)
+  const latestMessage = messages[messages.length - 1]
+  const latestMessageId = latestMessage?.id
+  const latestStreamingContentLength = latestMessage?.streaming ? latestMessage.content.length : 0
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [latestMessageId, latestStreamingContentLength])
 
   const startTitleEdit = () => {
     if (!conversationTitle || !onRename) return
@@ -86,7 +95,7 @@ export function ChatWindow({
         </div>
       </header>
 
-      {isLoadingHistory ? (
+      {isLoadingHistory && messages.length === 0 ? (
         <div className="flex flex-1 select-none flex-col items-center justify-center gap-3 pt-16 text-neutral-500">
           <Loader2 size={24} className="animate-spin text-neutral-500" />
           <p className="text-sm font-medium">Loading conversation</p>
@@ -107,6 +116,19 @@ export function ChatWindow({
       ) : (
         <div className={`flex-1 overflow-y-auto px-4 pt-24 ${isStreaming ? 'pb-28' : 'pb-6'}`}>
           <div className="mx-auto max-w-3xl">
+            {hasMoreHistory && (
+              <div className="mb-5 flex justify-center">
+                <button
+                  type="button"
+                  onClick={onLoadOlderMessages}
+                  disabled={isLoadingOlderHistory}
+                  className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.035] px-3 py-1.5 text-xs font-medium text-neutral-400 transition-colors hover:bg-white/[0.06] hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isLoadingOlderHistory && <Loader2 size={13} className="animate-spin" />}
+                  {isLoadingOlderHistory ? 'Loading earlier' : 'Load earlier messages'}
+                </button>
+              </div>
+            )}
             {messages.map((msg) => (
               <MessageBubble key={msg.id} message={msg} agentName={assistantLabel} />
             ))}

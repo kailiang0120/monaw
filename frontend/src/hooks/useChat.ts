@@ -7,6 +7,7 @@ import {
   type PlanStep,
   type StepEvent,
   type AccessGrantRequiredEvent,
+  type SavedMessage,
 } from '../lib/api/types'
 import type { UploadedAttachment } from '../lib/api/types'
 
@@ -17,6 +18,9 @@ const TYPEWRITER_INTERVAL_MS = 35
 const TYPEWRITER_CHARS_PER_TICK = 6
 const TYPEWRITER_FAST_BACKLOG_CHARS = 600
 const TYPEWRITER_MAX_CHARS_PER_TICK = 24
+const INITIAL_HISTORY_LIMIT = 5
+const OLDER_HISTORY_LIMIT = 60
+const HISTORY_LOAD_TIMEOUT_MS = 10_000
 
 export interface ToolCall {
   id?: string
@@ -83,61 +87,111 @@ function normalizeRunStatus(status?: string): Message['runStatus'] | undefined {
   return status && RUN_STATUSES.has(status) ? (status as Message['runStatus']) : undefined
 }
 
+function savedMessageToMessage(m: SavedMessage): Message {
+  return {
+    id: String(m.id),
+    role: m.role as 'user' | 'assistant',
+    content: m.content,
+    attachments: m.attachments?.length ? m.attachments : undefined,
+    thinking: m.thinking || undefined,
+    runStatus: m.role === 'assistant' ? normalizeRunStatus(m.status) : undefined,
+    responseDurationMs: m.response_duration_ms ?? undefined,
+    toolCalls: m.tool_calls.length
+      ? m.tool_calls.map((tc) => ({
+          id: String(tc.id),
+          tool: tc.tool_name,
+          input: tc.input,
+          output: tc.output,
+          pending: false,
+        }))
+      : undefined,
+  }
+}
+
 export function useChat(conversationId: string | null) {
   const [messages, setMessages] = useState<Message[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [isLoadingOlderHistory, setIsLoadingOlderHistory] = useState(false)
+  const [hasMoreHistory, setHasMoreHistory] = useState(false)
   const [pendingAccessGrant, setPendingAccessGrant] = useState<AccessGrantNotice | null>(null)
   const [refreshNonce, setRefreshNonce] = useState(0)
   const abortRef = useRef<(() => void) | null>(null)
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const typewriterCleanupRef = useRef<(() => void) | null>(null)
+  const conversationIdRef = useRef<string | null>(conversationId)
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId
+  }, [conversationId])
 
   // Load saved messages when conversationId changes
   useEffect(() => {
     if (!conversationId) {
       if (!isStreaming) setMessages([])
+      setHasMoreHistory(false)
+      setIsLoadingOlderHistory(false)
       return
     }
-    if (isStreaming) return
+    if (isStreaming) {
+      setIsLoadingHistory(false)
+      return
+    }
 
     let cancelled = false
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), HISTORY_LOAD_TIMEOUT_MS)
+    setMessages([])
+    setHasMoreHistory(false)
+    setIsLoadingOlderHistory(false)
     setIsLoadingHistory(true)
 
-    fetchMessages(conversationId, 100)
+    fetchMessages(conversationId, INITIAL_HISTORY_LIMIT, undefined, controller.signal)
       .then((res) => {
         if (cancelled) return
-        const loaded: Message[] = res.messages.map((m) => ({
-          id: String(m.id),
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-          attachments: m.attachments?.length ? m.attachments : undefined,
-          thinking: m.thinking || undefined,
-          runStatus: m.role === 'assistant' ? normalizeRunStatus(m.status) : undefined,
-          responseDurationMs: m.response_duration_ms ?? undefined,
-          toolCalls: m.tool_calls.length
-            ? m.tool_calls.map((tc) => ({
-                id: String(tc.id),
-                tool: tc.tool_name,
-                input: tc.input,
-                output: tc.output,
-                pending: false,
-              }))
-            : undefined,
-        }))
-        setMessages(loaded)
+        setMessages(res.messages.map(savedMessageToMessage))
+        setHasMoreHistory(res.has_more)
       })
-      .catch(() => {
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return
         if (!cancelled) setMessages([])
       })
       .finally(() => {
+        window.clearTimeout(timeoutId)
         if (!cancelled) setIsLoadingHistory(false)
       })
 
     return () => {
       cancelled = true
+      window.clearTimeout(timeoutId)
+      controller.abort()
     }
   }, [conversationId, isStreaming, refreshNonce])
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!conversationId || isStreaming || isLoadingOlderHistory || !hasMoreHistory) return
+    const targetConversationId = conversationId
+    const oldestId = Number(messages[0]?.id)
+    if (!Number.isFinite(oldestId)) return
+
+    setIsLoadingOlderHistory(true)
+    try {
+      const res = await fetchMessages(targetConversationId, OLDER_HISTORY_LIMIT, oldestId)
+      if (conversationIdRef.current !== targetConversationId) return
+      const older = res.messages.map(savedMessageToMessage)
+      setMessages((prev) => {
+        const existingIds = new Set(prev.map((message) => message.id))
+        return [...older.filter((message) => !existingIds.has(message.id)), ...prev]
+      })
+      setHasMoreHistory(res.has_more)
+    } catch {
+      // Keep the visible conversation intact; the user can retry loading older history.
+    } finally {
+      if (conversationIdRef.current === targetConversationId) {
+        setIsLoadingOlderHistory(false)
+      }
+    }
+  }, [conversationId, hasMoreHistory, isLoadingOlderHistory, isStreaming, messages])
 
   const refreshMessages = useCallback(() => {
     if (!conversationId || isStreaming) return
@@ -564,8 +618,11 @@ export function useChat(conversationId: string | null) {
     messages,
     isStreaming,
     isLoadingHistory,
+    isLoadingOlderHistory,
+    hasMoreHistory,
     pendingAccessGrant,
     setPendingAccessGrant,
+    loadOlderMessages,
     sendMessage,
     refreshMessages,
     stopStreaming,
