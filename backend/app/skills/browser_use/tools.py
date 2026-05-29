@@ -27,6 +27,7 @@ from .dom_scripts import (
     _STEALTH_EVALUATE_SCRIPT,
     _STEALTH_INIT_SCRIPT,
 )
+from .dom_inspection import inspect_page_with_upstream
 
 
 def _json_output(payload: dict[str, Any]) -> str:
@@ -133,6 +134,30 @@ _FAST_TEXT_INSERT_SCRIPT = r"""
 """
 
 
+_CACHE_REF_SELECTOR_SCRIPT = r"""
+(ref, cssSelector, xpath) => {
+  const mark = (element) => {
+    if (!element) return "";
+    element.setAttribute("data-agent-ref", ref);
+    return `[data-agent-ref="${String(ref).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
+  };
+  if (cssSelector) {
+    try {
+      const element = document.querySelector(cssSelector);
+      if (element) return mark(element);
+    } catch (_err) {}
+  }
+  if (xpath) {
+    try {
+      const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      if (result.singleNodeValue) return mark(result.singleNodeValue);
+    } catch (_err) {}
+  }
+  return "";
+}
+"""
+
+
 def _element_blob(element: dict[str, Any]) -> str:
     values: list[str] = []
     for key in (
@@ -149,6 +174,8 @@ def _element_blob(element: dict[str, Any]) -> str:
         "tag",
         "contenteditable",
         "dialog_label",
+        "ax_name",
+        "ax_description",
     ):
         value = element.get(key)
         if isinstance(value, list):
@@ -158,6 +185,12 @@ def _element_blob(element: dict[str, Any]) -> str:
     labels = element.get("labels")
     if isinstance(labels, list):
         values.extend(str(item) for item in labels)
+    states = element.get("states")
+    if isinstance(states, dict):
+        values.extend(key for key, value in states.items() if value)
+    control = element.get("control")
+    if isinstance(control, dict):
+        values.extend(str(value) for value in control.values() if value)
     return " ".join(values).lower()
 
 
@@ -170,6 +203,7 @@ def _field_candidate_kind(element: dict[str, Any]) -> str:
         tag in {"input", "textarea"}
         or role == "textbox"
         or str(element.get("contenteditable") or "").lower() in {"true", "plaintext-only"}
+        or bool((element.get("states") or {}).get("editable") if isinstance(element.get("states"), dict) else False)
     )
     is_action = tag in {"button", "a"} or role in {"button", "link"}
 
@@ -218,12 +252,25 @@ def _rank_snapshot_element(element: dict[str, Any], original_index: int) -> tupl
         score += 25
     if str(element.get("disabled")).lower() == "true":
         score -= 200
+    states = element.get("states")
+    if isinstance(states, dict):
+        if states.get("disabled"):
+            score -= 200
+        if states.get("required"):
+            score += 15
+        if states.get("invalid"):
+            score += 10
+        if states.get("editable"):
+            score += 60
+    context = element.get("context")
+    if isinstance(context, dict) and context.get("obscured_or_filtered"):
+        score -= 120
     y = int(element.get("y") or 0)
     return (-score, y, original_index)
 
 
 def _compact_field_candidate(element: dict[str, Any]) -> dict[str, Any]:
-    return {
+    compact = {
         "ref": element.get("ref", ""),
         "target_hint": element.get("target_hint", ""),
         "tag": element.get("tag", ""),
@@ -240,6 +287,11 @@ def _compact_field_candidate(element: dict[str, Any]) -> dict[str, Any]:
         "width": element.get("width", 0),
         "height": element.get("height", 0),
     }
+    for key in ("ax_name", "states", "control", "context"):
+        value = element.get(key)
+        if value not in (None, "", {}, []):
+            compact[key] = value
+    return compact
 
 
 def _prepare_snapshot(snapshot: Any, limit: int) -> dict[str, Any]:
@@ -382,6 +434,18 @@ def _write_previewable_screenshot(
 
 def _browser_id(browser: Any) -> int:
     return id(browser)
+
+
+def _invalidate_dom_cache(manager: Any, reason: str) -> None:
+    clear = getattr(manager, "clear_dom_snapshot_cache", None)
+    if callable(clear):
+        clear(reason)
+
+
+async def _store_dom_cache(manager: Any, page: Any, *, snapshot_id: str, refs: dict[str, dict[str, Any]]) -> None:
+    store = getattr(manager, "store_dom_snapshot_cache", None)
+    if callable(store):
+        await store(page, snapshot_id=snapshot_id, refs=refs)
 
 
 async def _install_stealth_init(manager, browser) -> dict[str, Any]:
@@ -560,6 +624,7 @@ async def _current_page(manager, *, mode: str = "auto", profile_directory: str =
 
 
 async def _resolve_element(
+    manager,
     page,
     *,
     ref: str = "",
@@ -569,8 +634,24 @@ async def _resolve_element(
     prefer_editable: bool = False,
 ):
     chosen_selector = selector.strip()
-    if ref.strip():
-        chosen_selector = _selector_for_ref(ref)
+    normalized_ref = ref.strip()
+    stale_ref: dict[str, Any] | None = None
+    if normalized_ref and manager is not None:
+        resolve_cached = getattr(manager, "resolve_dom_snapshot_ref", None)
+        cached_ref = await resolve_cached(page, normalized_ref) if callable(resolve_cached) else None
+        if isinstance(cached_ref, dict) and cached_ref.get("stale"):
+            stale_ref = cached_ref
+        elif isinstance(cached_ref, dict):
+            cache_selector = await page.evaluate(
+                _CACHE_REF_SELECTOR_SCRIPT,
+                normalized_ref,
+                str(cached_ref.get("css_selector") or ""),
+                str(cached_ref.get("xpath") or ""),
+            )
+            if str(cache_selector or "").strip():
+                chosen_selector = str(cache_selector).strip()
+    if normalized_ref and not chosen_selector:
+        chosen_selector = _selector_for_ref(normalized_ref)
 
     if not chosen_selector and text.strip():
         result = await page.evaluate(
@@ -589,6 +670,11 @@ async def _resolve_element(
 
     elements = await page.get_elements_by_css_selector(chosen_selector)
     if not elements:
+        if stale_ref:
+            raise RuntimeError(
+                f"Ref '{normalized_ref}' is stale after page change; call browser_snapshot again. "
+                "needs_snapshot=true"
+            )
         raise RuntimeError(f"No element matched selector '{chosen_selector}'.")
     return elements[0], chosen_selector
 
@@ -619,6 +705,52 @@ async def _fast_insert_text(page, element, selector: str, text: str, clear: bool
         "method": "element_fill_fallback",
         "fallback_reason": decoded.get("reason_code", "dom_insert_failed"),
         "chars_inserted": len(text),
+    }
+
+
+def _normalize_typed_text(value: Any) -> str:
+    return " ".join(str(value or "").replace("\u00a0", " ").split())
+
+
+def _verify_typed_value(
+    *,
+    expected: str,
+    actual: str,
+    input_method: dict[str, Any],
+    submitted: bool,
+) -> dict[str, Any]:
+    normalized_expected = _normalize_typed_text(expected)
+    normalized_actual = _normalize_typed_text(actual)
+    exact_match = actual == expected
+    normalized_match = bool(normalized_expected) and normalized_actual == normalized_expected
+    contains_match = bool(normalized_expected) and normalized_expected in normalized_actual
+    input_succeeded = input_method.get("status") == "ok"
+    if exact_match or normalized_match or contains_match:
+        return {
+            "status": "ok",
+            "verified": True,
+            "expected_value": expected,
+            "actual_value": actual,
+            "normalized_match": not exact_match,
+            "reason_code": "",
+        }
+    if submitted and input_succeeded:
+        return {
+            "status": "ok",
+            "verified": True,
+            "expected_value": expected,
+            "actual_value": actual,
+            "reason_code": "submitted_value_committed",
+            "note": "The field value changed after Enter/submit; treating successful insertion plus submit as committed.",
+        }
+    return {
+        "status": "error",
+        "verified": False,
+        "expected_value": expected,
+        "actual_value": actual,
+        "normalized_expected": normalized_expected,
+        "normalized_actual": normalized_actual,
+        "reason_code": "value_mismatch",
     }
 
 
@@ -713,6 +845,8 @@ async def browser_open(
         await page.goto(url)
         await _wait_after_navigation(page, wait_until)
     await _sleep_after_action(0.8 if url else 0.3)
+    if url or new_tab or reused_tab:
+        _invalidate_dom_cache(manager, "browser_open")
     return _json_output(
         {
             "status": "ok",
@@ -740,6 +874,7 @@ async def browser_navigate(
     await page.goto(url)
     await _wait_after_navigation(page, wait_until)
     await _sleep_after_action(0.8)
+    _invalidate_dom_cache(manager, "browser_navigate")
     return _json_output({"status": "ok", "page": await manager.page_metadata(page), "wait_until": wait_until})
 
 
@@ -747,6 +882,7 @@ async def browser_back(manager) -> str:
     page = await _current_page(manager)
     await page.go_back()
     await _sleep_after_action(0.6)
+    _invalidate_dom_cache(manager, "browser_back")
     return _json_output({"status": "ok", "page": await manager.page_metadata(page)})
 
 
@@ -754,6 +890,7 @@ async def browser_forward(manager) -> str:
     page = await _current_page(manager)
     await page.go_forward()
     await _sleep_after_action(0.6)
+    _invalidate_dom_cache(manager, "browser_forward")
     return _json_output({"status": "ok", "page": await manager.page_metadata(page)})
 
 
@@ -761,6 +898,7 @@ async def browser_reload(manager) -> str:
     page = await _current_page(manager)
     await page.reload()
     await _sleep_after_action(0.8)
+    _invalidate_dom_cache(manager, "browser_reload")
     return _json_output({"status": "ok", "page": await manager.page_metadata(page)})
 
 
@@ -781,9 +919,11 @@ async def browser_tabs(
     if normalized_action == "new":
         page = await browser.new_page(url or None)
         await _sleep_after_action(0.6)
+        _invalidate_dom_cache(manager, "browser_tabs_new")
         return _json_output({"status": "ok", "page": await manager.page_metadata(page), "tabs": await manager.tabs()})
     if normalized_action == "switch":
         page = await manager.switch_tab(target_id=target_id, index=None if selected_index < 0 else selected_index)
+        _invalidate_dom_cache(manager, "browser_tabs_switch")
         return _json_output({"status": "ok", "page": page, "tabs": await manager.tabs()})
     if normalized_action == "close":
         page = await manager.get_page(target_id=target_id, index=None if selected_index < 0 else selected_index, create_if_missing=False)
@@ -791,6 +931,7 @@ async def browser_tabs(
             raise RuntimeError("No active tab to close.")
         await browser.close_page(page)
         await _sleep_after_action(0.3)
+        _invalidate_dom_cache(manager, "browser_tabs_close")
         return _json_output({"status": "ok", "tabs": await manager.tabs()})
     raise ValueError(f"Unsupported browser_tabs action '{action}'.")
 
@@ -802,6 +943,10 @@ async def browser_snapshot(
     mode: str = "auto",
     tab_target_id: str = "",
     tab_index: int = -1,
+    engine: str = "auto",
+    include_tree: bool = False,
+    include_scroll_info: bool = True,
+    include_hidden_hints: bool = True,
 ) -> str:
     page = await _current_page(
         manager,
@@ -810,13 +955,52 @@ async def browser_snapshot(
         index=None if tab_index < 0 else tab_index,
     )
     requested_limit = max(1, min(limit, 200))
-    collection_limit = max(requested_limit * 6, 240)
-    snapshot_raw = await page.evaluate(
-        _SNAPSHOT_SCRIPT,
-        _INTERACTIVE_SELECTOR,
-        min(collection_limit, 800),
+    configured_engine = str(manager.config.get("dom_inspection_engine", "auto") or "auto").lower()
+    requested_engine = str(engine or "auto").lower()
+    snapshot_engine = configured_engine if requested_engine == "auto" else requested_engine
+    enhanced = await inspect_page_with_upstream(
+        page,
+        manager,
+        limit=requested_limit,
+        engine=snapshot_engine,
+        include_tree=include_tree,
+        include_scroll_info=include_scroll_info,
+        include_hidden_hints=include_hidden_hints,
     )
-    snapshot = _prepare_snapshot(_decode_json_string(snapshot_raw), requested_limit)
+    ref_cache: dict[str, dict[str, Any]] = {}
+    if enhanced.get("status") == "ok" and isinstance(enhanced.get("snapshot"), dict):
+        snapshot = _prepare_snapshot(enhanced["snapshot"], requested_limit)
+        ref_cache = enhanced.get("ref_cache") if isinstance(enhanced.get("ref_cache"), dict) else {}
+    else:
+        collection_limit = max(requested_limit * 6, 240)
+        snapshot_raw = await page.evaluate(
+            _SNAPSHOT_SCRIPT,
+            _INTERACTIVE_SELECTOR,
+            min(collection_limit, 800),
+        )
+        snapshot = _prepare_snapshot(_decode_json_string(snapshot_raw), requested_limit)
+        if isinstance(snapshot, dict):
+            metadata = snapshot.setdefault("inspection_metadata", {})
+            if isinstance(metadata, dict):
+                metadata.update(
+                    {
+                        "engine": "js_fallback",
+                        "fallback_reason": str(enhanced.get("reason_code") or enhanced.get("error") or "enhanced_dom_unavailable"),
+                        "requested_engine": snapshot_engine,
+                    }
+                )
+    if isinstance(snapshot, dict):
+        metadata = snapshot.setdefault("inspection_metadata", {})
+        if isinstance(metadata, dict):
+            snapshot_id = f"dom-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+            metadata.setdefault("snapshot_id", snapshot_id)
+            metadata.setdefault("engine", "js_fallback")
+            await _store_dom_cache(
+                manager,
+                page,
+                snapshot_id=str(metadata.get("snapshot_id") or snapshot_id),
+                refs=ref_cache,
+            )
     payload: dict[str, Any] = {
         "status": "ok",
         "mode": (await manager.diagnostics()).get("current_mode", ""),
@@ -873,6 +1057,7 @@ async def browser_click(
         clicked.update({"x": int(x), "y": int(y), "button": button, "clicks": max(1, clicks)})
     else:
         element, resolved_selector = await _resolve_element(
+            manager,
             page,
             ref=ref,
             selector=selector,
@@ -910,6 +1095,7 @@ async def browser_click(
             "error": "Expected a new tab after click, but tab count did not increase.",
             "reason_code": "expected_new_tab_missing",
         }
+    _invalidate_dom_cache(manager, "browser_click")
     return _json_output(
         {
             "status": "ok" if verification.get("status") == "ok" else "error",
@@ -919,6 +1105,7 @@ async def browser_click(
             "page": await manager.page_metadata(page),
             "tabs_before": before_tabs,
             "tabs_after": tabs_after,
+            "cache_invalidated": True,
         }
     )
 
@@ -945,6 +1132,7 @@ async def browser_type(
     )
     if ref or selector:
         element, resolved_selector = await _resolve_element(
+            manager,
             page,
             ref=ref,
             selector=selector,
@@ -953,6 +1141,7 @@ async def browser_type(
         )
     else:
         element, resolved_selector = await _resolve_element(
+            manager,
             page,
             text=target_text,
             exact_text=exact_text,
@@ -967,15 +1156,15 @@ async def browser_type(
     verification: dict[str, Any] = {"status": "ok", "verified": False}
     if verify_value:
         actual_value = str((target_after or {}).get("value") or (target_after or {}).get("text") or "")
-        verification = {
-            "status": "ok" if actual_value == text else "error",
-            "verified": actual_value == text,
-            "expected_value": text,
-            "actual_value": actual_value,
-            "reason_code": "" if actual_value == text else "value_mismatch",
-        }
+        verification = _verify_typed_value(
+            expected=text,
+            actual=actual_value,
+            input_method=input_method,
+            submitted=submit,
+        )
     if wait_for_text:
         verification = await _verify_browser_condition(page, text=wait_for_text, timeout_seconds=timeout_seconds)
+    _invalidate_dom_cache(manager, "browser_type")
     return _json_output(
         {
             "status": "ok" if verification.get("status") == "ok" else "error",
@@ -986,6 +1175,7 @@ async def browser_type(
             "verification": verification,
             "submitted": submit,
             "page": await manager.page_metadata(page),
+            "cache_invalidated": True,
         }
     )
 
@@ -1003,7 +1193,8 @@ async def browser_press(
     )
     await page.press(key)
     await _sleep_after_action(0.2)
-    return _json_output({"status": "ok", "key": key, "page": await manager.page_metadata(page)})
+    _invalidate_dom_cache(manager, "browser_press")
+    return _json_output({"status": "ok", "key": key, "page": await manager.page_metadata(page), "cache_invalidated": True})
 
 
 async def browser_select_option(
@@ -1019,18 +1210,20 @@ async def browser_select_option(
         target_id=tab_target_id,
         index=None if tab_index < 0 else tab_index,
     )
-    element, resolved_selector = await _resolve_element(page, ref=ref, selector=selector)
+    element, resolved_selector = await _resolve_element(manager, page, ref=ref, selector=selector)
     chosen_values: list[str] = [value for value in values if str(value).strip()]
     if not chosen_values:
         raise ValueError("Provide at least one option value.")
     await element.select_option(chosen_values)
     await _sleep_after_action(0.2)
+    _invalidate_dom_cache(manager, "browser_select_option")
     return _json_output(
         {
             "status": "ok",
             "selector": resolved_selector,
             "values": chosen_values,
             "page": await manager.page_metadata(page),
+            "cache_invalidated": True,
         }
     )
 
@@ -1052,12 +1245,14 @@ async def browser_scroll(
     mouse = await _page_mouse(page)
     await mouse.scroll(x=x, y=y, delta_x=delta_x, delta_y=delta_y)
     await _sleep_after_action(0.2)
+    _invalidate_dom_cache(manager, "browser_scroll")
     return _json_output(
         {
             "status": "ok",
             "delta_x": delta_x,
             "delta_y": delta_y,
             "page": await manager.page_metadata(page),
+            "cache_invalidated": True,
         }
     )
 
@@ -1139,6 +1334,57 @@ async def browser_find(
         if len(matches) >= max(1, min(limit, 100)):
             break
     return _json_output({"status": "ok", "count": len(matches), "matches": matches, "page": await manager.page_metadata(page)})
+
+
+async def browser_get_element(
+    manager,
+    ref: str,
+    fields: list[str] | None = None,
+    tab_target_id: str = "",
+    tab_index: int = -1,
+) -> str:
+    page = await _current_page(
+        manager,
+        target_id=tab_target_id,
+        index=None if tab_index < 0 else tab_index,
+    )
+    normalized_ref = str(ref or "").strip()
+    if not normalized_ref:
+        raise ValueError("Provide ref from browser_snapshot.")
+    cached = await manager.resolve_dom_snapshot_ref(page, normalized_ref)
+    if isinstance(cached, dict) and cached.get("stale"):
+        return _json_output(
+            {
+                "status": "error",
+                "reason_code": "stale_ref",
+                "needs_snapshot": True,
+                "ref": normalized_ref,
+                "error": "The cached ref belongs to a different page state. Call browser_snapshot again.",
+            }
+        )
+    element, resolved_selector = await _resolve_element(manager, page, ref=normalized_ref)
+    current = await _element_metadata(page, resolved_selector)
+    requested = {str(item).strip() for item in (fields or []) if str(item).strip()}
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "ref": normalized_ref,
+        "selector": resolved_selector,
+        "cached": cached or {},
+        "current": current or {},
+        "page": await manager.page_metadata(page),
+    }
+    if requested:
+        payload["cached"] = {
+            key: value
+            for key, value in (payload["cached"].get("metadata", payload["cached"]) if isinstance(payload["cached"], dict) else {}).items()
+            if key in requested
+        }
+        payload["current"] = {
+            key: value
+            for key, value in (current or {}).items()
+            if key in requested
+        }
+    return _json_output(payload)
 
 
 async def browser_extract_text(
@@ -1275,7 +1521,7 @@ async def browser_screenshot(
 
     prefix = "browser_page"
     if ref or selector:
-        element, _ = await _resolve_element(page, ref=ref, selector=selector)
+        element, _ = await _resolve_element(manager, page, ref=ref, selector=selector)
         image_data = await element.screenshot(format=normalized_format)
         prefix = "browser_element"
     else:
@@ -1597,16 +1843,24 @@ def register_tools(registry, settings) -> None:
                         "mode": {"type": "string", "enum": ["auto", "managed", "system"], "default": "auto"},
                         "tab_target_id": {"type": "string", "default": ""},
                         "tab_index": {"type": "integer", "default": -1},
+                        "engine": {"type": "string", "enum": ["auto", "enhanced", "legacy"], "default": "auto"},
+                        "include_tree": {"type": "boolean", "default": False},
+                        "include_scroll_info": {"type": "boolean", "default": True},
+                        "include_hidden_hints": {"type": "boolean", "default": True},
                     },
                     "required": [],
                 },
-                "callable": lambda include_screenshot=False, limit=40, mode="auto", tab_target_id="", tab_index=-1: browser_snapshot(
+                "callable": lambda include_screenshot=False, limit=40, mode="auto", tab_target_id="", tab_index=-1, engine="auto", include_tree=False, include_scroll_info=True, include_hidden_hints=True: browser_snapshot(
                     manager,
                     include_screenshot=include_screenshot,
                     limit=limit,
                     mode=mode,
                     tab_target_id=tab_target_id,
                     tab_index=tab_index,
+                    engine=engine,
+                    include_tree=include_tree,
+                    include_scroll_info=include_scroll_info,
+                    include_hidden_hints=include_hidden_hints,
                 ),
                 "domain": "browser",
                 "execution_mode": "async",
@@ -1825,6 +2079,30 @@ def register_tools(registry, settings) -> None:
                     role=role,
                     label=label,
                     limit=limit,
+                    tab_target_id=tab_target_id,
+                    tab_index=tab_index,
+                ),
+                "domain": "browser",
+                "execution_mode": "async",
+                "affinity_group": "browser-use",
+            },
+            {
+                "name": "browser_get_element",
+                "description": "Inspect one browser_snapshot ref and return cached enhanced DOM metadata plus current element state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string"},
+                        "fields": {"type": "array", "items": {"type": "string"}, "default": []},
+                        "tab_target_id": {"type": "string", "default": ""},
+                        "tab_index": {"type": "integer", "default": -1},
+                    },
+                    "required": ["ref"],
+                },
+                "callable": lambda ref, fields=None, tab_target_id="", tab_index=-1: browser_get_element(
+                    manager,
+                    ref=ref,
+                    fields=fields,
                     tab_target_id=tab_target_id,
                     tab_index=tab_index,
                 ),

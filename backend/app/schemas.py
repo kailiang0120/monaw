@@ -198,6 +198,11 @@ class BrowserUseSettingsPayload(BaseModel):
     enable_system_fallback: bool = True
     headless: bool = False
     keep_alive: bool = True
+    dom_inspection_engine: str = Field("auto", pattern="^(auto|enhanced|legacy)$")
+    paint_order_filtering: bool = True
+    cross_origin_iframes: bool = False
+    max_iframes: int = Field(5, ge=0, le=20)
+    max_iframe_depth: int = Field(2, ge=0, le=5)
     system_connection_strategy: str = Field("auto", pattern="^(auto|attach|launch)$")
     system_cdp_url: str = "http://127.0.0.1:9222"
     managed_profile_dir: str = ""
@@ -543,6 +548,11 @@ class BrowserUseDiagnosticsOut(BaseModel):
     current_mode: str = ""
     current_system_connection: str = ""
     fallback_enabled: bool = True
+    dom_inspection_engine: str = "auto"
+    paint_order_filtering: bool = True
+    cross_origin_iframes: bool = False
+    max_iframes: int = 5
+    max_iframe_depth: int = 2
     last_error: str = ""
     system_connection_strategy: str = "auto"
     system_cdp_url: str = ""

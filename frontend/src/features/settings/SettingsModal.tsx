@@ -1448,6 +1448,67 @@ export function SettingsModal({ onClose }: Props) {
                     />
                   </div>
 
+                  <div className="panel-muted grid gap-3 rounded-xl p-3 lg:grid-cols-[1fr_1fr_0.7fr_0.7fr]">
+                    <Field label="DOM inspection">
+                      <Dropdown<AgentSettings['browser']['dom_inspection_engine']>
+                        value={draft.browser.dom_inspection_engine}
+                        options={[
+                          { value: 'auto', label: 'Auto' },
+                          { value: 'enhanced', label: 'Enhanced' },
+                          { value: 'legacy', label: 'Legacy' },
+                        ]}
+                        onChange={(dom_inspection_engine) => updateDraft((current) => ({
+                          ...current,
+                          browser: { ...current.browser, dom_inspection_engine },
+                        }))}
+                      />
+                    </Field>
+                    <div className="grid gap-1.5 text-xs sm:grid-cols-2">
+                      <ToggleRow
+                        label="Paint-order filter"
+                        checked={draft.browser.paint_order_filtering}
+                        onChange={(paint_order_filtering) => updateDraft((current) => ({
+                          ...current,
+                          browser: { ...current.browser, paint_order_filtering },
+                        }))}
+                      />
+                      <ToggleRow
+                        label="Cross-origin frames"
+                        checked={draft.browser.cross_origin_iframes}
+                        onChange={(cross_origin_iframes) => updateDraft((current) => ({
+                          ...current,
+                          browser: { ...current.browser, cross_origin_iframes },
+                        }))}
+                      />
+                    </div>
+                    <Field label="Max frames">
+                      <input
+                        type="number"
+                        min={0}
+                        max={20}
+                        value={draft.browser.max_iframes}
+                        onChange={(e) => updateDraft((current) => ({
+                          ...current,
+                          browser: { ...current.browser, max_iframes: Number(e.target.value) },
+                        }))}
+                        className="control h-9 w-full rounded-lg px-3 text-xs"
+                      />
+                    </Field>
+                    <Field label="Frame depth">
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        value={draft.browser.max_iframe_depth}
+                        onChange={(e) => updateDraft((current) => ({
+                          ...current,
+                          browser: { ...current.browser, max_iframe_depth: Number(e.target.value) },
+                        }))}
+                        className="control h-9 w-full rounded-lg px-3 text-xs"
+                      />
+                    </Field>
+                  </div>
+
                   <div className="panel-muted space-y-3 rounded-xl p-3">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>

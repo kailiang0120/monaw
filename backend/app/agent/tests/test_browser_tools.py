@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.skills.browser_use import manager as browser_manager_module
+from app.skills.browser_use import tools as browser_tools_module
+from app.skills.browser_use.dom_inspection import normalize_serialized_state
 from app.skills.browser_use.manager import BrowserUseManager
 from app.skills.browser_use.tools import (
     _choose_reusable_tab,
@@ -16,9 +18,12 @@ from app.skills.browser_use.tools import (
     _score_reusable_tab,
     browser_click,
     browser_full_page_screenshot,
+    browser_get_element,
     browser_navigate,
+    browser_snapshot,
     browser_scroll,
     browser_type,
+    _verify_typed_value,
     register_tools,
 )
 
@@ -303,8 +308,11 @@ def test_browser_tool_schemas_accept_common_alias_arguments():
     assert "mode" in browser_snapshot_props
     assert "tab_target_id" in browser_snapshot_props
     assert "tab_index" in browser_snapshot_props
+    assert "engine" in browser_snapshot_props
+    assert "include_tree" in browser_snapshot_props
     assert "wait_for_text" in browser_click_props
     assert "verify_value" in browser_type_props
+    assert "browser_get_element" in tools
     assert "browser_fill_form" in tools
     assert "browser_network_summary" in tools
     assert "browser_full_page_screenshot" in tools
@@ -466,6 +474,185 @@ def test_prepare_snapshot_ranks_gmail_compose_fields_inside_limit():
     assert prepared["field_candidates"]["recipient"][0]["ref"] == "to"
     assert prepared["field_candidates"]["subject"][0]["ref"] == "subject"
     assert prepared["field_candidates"]["message_body"][0]["ref"] == "body"
+
+
+def test_enhanced_dom_state_normalizes_to_snapshot_shape():
+    state = SimpleNamespace(
+        selector_map={
+            7: SimpleNamespace(
+                tag_name="input",
+                attributes={
+                    "id": "email",
+                    "name": "to",
+                    "aria-label": "To recipients",
+                    "placeholder": "Recipients",
+                    "required": "true",
+                },
+                accessibility_node=SimpleNamespace(role="textbox", name="To recipients", properties={"editable": True}),
+                snapshot_node=SimpleNamespace(backend_node_id=42, bounds={"x": 10, "y": 20, "width": 300, "height": 28}),
+                xpath='//*[@id="email"]',
+                frame_id="main-frame",
+            )
+        }
+    )
+
+    snapshot, cache = normalize_serialized_state(state, limit=10)
+
+    element = snapshot["elements"][0]
+    assert snapshot["inspection_metadata"]["engine"] == "enhanced_cdp"
+    assert element["ref"] == "b1"
+    assert element["backend_node_id"] == 42
+    assert element["role"] == "textbox"
+    assert element["states"]["required"] is True
+    assert element["states"]["editable"] is True
+    assert element["bounds"]["center_x"] == 160
+    assert cache["b1"]["css_selector"] == "#email"
+
+
+def test_browser_snapshot_falls_back_to_legacy_js_when_enhanced_unavailable(monkeypatch):
+    class FakePage:
+        async def evaluate(self, script, *args):
+            return json.dumps(
+                {
+                    "elements": [
+                        {
+                            "ref": "b1",
+                            "tag": "button",
+                            "role": "button",
+                            "text": "Submit",
+                            "y": 10,
+                        }
+                    ]
+                }
+            )
+
+        async def get_url(self):
+            return "https://example.com"
+
+        async def get_title(self):
+            return "Example"
+
+        async def get_target_info(self):
+            return {"targetId": "target-1"}
+
+    class FakeManager:
+        def __init__(self):
+            self.page = FakePage()
+            self.config = {"dom_inspection_engine": "auto"}
+            self.stored_cache = None
+
+        async def ensure_browser(self, mode="auto", profile_directory=""):
+            return SimpleNamespace()
+
+        async def get_page(self, target_id="", index=None, create_if_missing=False):
+            return self.page
+
+        async def diagnostics(self):
+            return {"current_mode": "managed"}
+
+        async def page_metadata(self, page):
+            return {"target_id": "target-1", "url": await page.get_url(), "title": await page.get_title()}
+
+        async def tabs(self):
+            return []
+
+        async def store_dom_snapshot_cache(self, page, *, snapshot_id, refs):
+            self.stored_cache = {"snapshot_id": snapshot_id, "refs": refs}
+
+    async def fake_enhanced(*args, **kwargs):
+        return {"status": "error", "reason_code": "enhanced_dom_unavailable"}
+
+    monkeypatch.setattr(browser_tools_module, "inspect_page_with_upstream", fake_enhanced)
+    manager = FakeManager()
+
+    result = json.loads(asyncio.run(browser_snapshot(manager, limit=5)))
+
+    assert result["status"] == "ok"
+    assert result["snapshot"]["inspection_metadata"]["engine"] == "js_fallback"
+    assert result["snapshot"]["inspection_metadata"]["fallback_reason"] == "enhanced_dom_unavailable"
+    assert manager.stored_cache is not None
+
+
+def test_browser_get_element_uses_enhanced_cache_ref():
+    class FakeElement:
+        pass
+
+    class FakePage:
+        def __init__(self):
+            self.selectors = []
+
+        async def evaluate(self, script, *args):
+            if args and args[0] == "b1":
+                return '[data-agent-ref="b1"]'
+            return json.dumps({"tag": "input", "value": "current@example.com", "text": ""})
+
+        async def get_elements_by_css_selector(self, selector):
+            self.selectors.append(selector)
+            return [FakeElement()]
+
+        async def get_url(self):
+            return "https://example.com"
+
+        async def get_title(self):
+            return "Example"
+
+        async def get_target_info(self):
+            return {"targetId": "target-1"}
+
+    class FakeManager:
+        def __init__(self):
+            self.page = FakePage()
+
+        async def ensure_browser(self, mode="auto", profile_directory=""):
+            return SimpleNamespace()
+
+        async def get_page(self, target_id="", index=None, create_if_missing=False):
+            return self.page
+
+        async def page_metadata(self, page):
+            return {"target_id": "target-1", "url": await page.get_url(), "title": await page.get_title()}
+
+        async def resolve_dom_snapshot_ref(self, page, ref):
+            return {
+                "ref": ref,
+                "css_selector": "#email",
+                "metadata": {"ref": ref, "backend_node_id": 42, "role": "textbox"},
+            }
+
+    manager = FakeManager()
+
+    result = json.loads(asyncio.run(browser_get_element(manager, ref="b1")))
+
+    assert result["status"] == "ok"
+    assert result["selector"] == '[data-agent-ref="b1"]'
+    assert result["cached"]["metadata"]["backend_node_id"] == 42
+    assert result["current"]["value"] == "current@example.com"
+
+
+def test_browser_type_verification_accepts_gmail_contenteditable_normalization():
+    result = _verify_typed_value(
+        expected="Kai Liang 早晨！\n\n以下系 2026年5月26日 美股总结",
+        actual="Kai Liang 早晨！ 以下系 2026年5月26日 美股总结",
+        input_method={"status": "ok"},
+        submitted=False,
+    )
+
+    assert result["status"] == "ok"
+    assert result["verified"] is True
+    assert result["normalized_match"] is True
+
+
+def test_browser_type_verification_accepts_submitted_committed_value():
+    result = _verify_typed_value(
+        expected="kailiang0120@gmail.com",
+        actual="",
+        input_method={"status": "ok", "method": "dom_value"},
+        submitted=True,
+    )
+
+    assert result["status"] == "ok"
+    assert result["verified"] is True
+    assert result["reason_code"] == "submitted_value_committed"
 
 
 class _BrokenBrowser:

@@ -501,6 +501,8 @@ class BrowserUseManager:
         self._launched_chrome_proc: subprocess.Popen[bytes] | None = None
         self._restart_requested = False
         self._recent_launches: deque[dict[str, Any]] = deque(maxlen=10)
+        self._dom_snapshot_cache: dict[str, dict[str, Any]] = {}
+        self._dom_snapshot_cache_reason = ""
 
     def _record_launch(
         self,
@@ -533,6 +535,7 @@ class BrowserUseManager:
     def update(self, config: dict[str, Any]) -> None:
         if dict(config) != self.config:
             self._restart_requested = True
+            self.clear_dom_snapshot_cache("settings_changed")
         self.config = dict(config)
 
     def _preferred_mode(self) -> str:
@@ -561,6 +564,7 @@ class BrowserUseManager:
         self._current_system_connection = ""
         self._current_profile_directory = ""
         self._current_cdp_url = ""
+        self.clear_dom_snapshot_cache("browser_stopped")
         if browser is not None:
             try:
                 await browser.stop()
@@ -1085,6 +1089,48 @@ class BrowserUseManager:
                 create_if_missing=create_if_missing,
             )
 
+    def clear_dom_snapshot_cache(self, reason: str = "") -> None:
+        self._dom_snapshot_cache = {}
+        self._dom_snapshot_cache_reason = reason
+
+    async def _dom_cache_key(self, page) -> str:
+        try:
+            metadata = await self.page_metadata(page)
+        except Exception:
+            return f"page:{id(page)}"
+        target_id = str(metadata.get("target_id") or "").strip()
+        if target_id:
+            return f"target:{target_id}"
+        return f"url:{metadata.get('url', '')}"
+
+    async def store_dom_snapshot_cache(
+        self,
+        page,
+        *,
+        snapshot_id: str,
+        refs: dict[str, dict[str, Any]],
+    ) -> None:
+        self._dom_snapshot_cache = {
+            "key": await self._dom_cache_key(page),
+            "snapshot_id": snapshot_id,
+            "refs": dict(refs),
+            "reason": "",
+        }
+        self._dom_snapshot_cache_reason = ""
+
+    async def resolve_dom_snapshot_ref(self, page, ref: str) -> dict[str, Any] | None:
+        normalized_ref = str(ref or "").strip()
+        if not normalized_ref:
+            return None
+        cache = self._dom_snapshot_cache
+        refs = cache.get("refs") if isinstance(cache, dict) else None
+        if not isinstance(refs, dict) or normalized_ref not in refs:
+            return None
+        if cache.get("key") != await self._dom_cache_key(page):
+            return {"stale": True, "ref": normalized_ref, "reason": "page_changed"}
+        cached = refs.get(normalized_ref)
+        return dict(cached) if isinstance(cached, dict) else None
+
     async def page_metadata(self, page) -> dict[str, str]:
         target_info = await page.get_target_info()
         return {
@@ -1226,6 +1272,11 @@ class BrowserUseManager:
             "current_mode": self._current_mode,
             "current_system_connection": self._current_system_connection,
             "fallback_enabled": bool(self.config.get("enable_system_fallback", True)),
+            "dom_inspection_engine": str(self.config.get("dom_inspection_engine", "auto")),
+            "paint_order_filtering": bool(self.config.get("paint_order_filtering", True)),
+            "cross_origin_iframes": bool(self.config.get("cross_origin_iframes", False)),
+            "max_iframes": int(self.config.get("max_iframes", 5) or 0),
+            "max_iframe_depth": int(self.config.get("max_iframe_depth", 2) or 0),
             "last_error": self._last_error,
             "system_connection_strategy": self._system_connection_strategy(),
             "system_cdp_url": str(self.config.get("system_cdp_url", "")),
@@ -1271,6 +1322,11 @@ async def get_browser_use_diagnostics(settings) -> dict[str, Any]:
         "current_mode": "",
         "current_system_connection": "",
         "fallback_enabled": bool(config.get("enable_system_fallback", True)),
+        "dom_inspection_engine": str(config.get("dom_inspection_engine", "auto")),
+        "paint_order_filtering": bool(config.get("paint_order_filtering", True)),
+        "cross_origin_iframes": bool(config.get("cross_origin_iframes", False)),
+        "max_iframes": int(config.get("max_iframes", 5) or 0),
+        "max_iframe_depth": int(config.get("max_iframe_depth", 2) or 0),
         "last_error": "",
         "system_connection_strategy": str(config.get("system_connection_strategy", "auto")),
         "system_cdp_url": str(config.get("system_cdp_url", "")),

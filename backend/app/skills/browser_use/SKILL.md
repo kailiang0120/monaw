@@ -20,6 +20,9 @@ Preferred workflow:
 - If the previous turn stopped with `stalled_repeat_detected`, treat that as a planning checkpoint, not a lost browser session. Resume with `browser_tabs` or `browser_snapshot`; do not use `browser_session(action="use_system")`, reset, or reopen unless status proves the session is gone.
 - Use `browser_snapshot` before interacting so you get stable `ref` values for visible elements.
 - Prefer `ref` from `browser_snapshot` over raw CSS selectors when possible.
+- `browser_snapshot` may use enhanced DOM inspection. Prefer enhanced refs the same way as legacy refs; they can include accessibility role/name, state, bounds, iframe/shadow context, and control metadata.
+- If a browser action reports a stale ref or `needs_snapshot`, take a fresh `browser_snapshot` before acting again.
+- Use `browser_get_element(ref=...)` when one observed ref needs closer inspection before clicking or typing.
 - Before clicking or typing, identify the target by `ref` plus labels, role, placeholder, name, `field_candidates`, and nearby context. Do not act from position alone unless no DOM target is available.
 - If `browser_snapshot` lacks enough information, call `browser_snapshot(include_screenshot=true, limit=120)`, then use `browser_evaluate` for focused DOM inspection before mutating.
 - For forms, identify the field by `target_hint`, `field_candidates`, labels, role, placeholder, name, and nearby context before typing. Treat recipient, subject, and message body fields as separate targets and verify each one after filling.

@@ -260,6 +260,11 @@ export interface BrowserUseDiagnostics {
   current_mode: '' | 'managed' | 'system'
   current_system_connection: '' | 'attach' | 'launch'
   fallback_enabled: boolean
+  dom_inspection_engine: 'auto' | 'enhanced' | 'legacy'
+  paint_order_filtering: boolean
+  cross_origin_iframes: boolean
+  max_iframes: number
+  max_iframe_depth: number
   last_error: string
   system_connection_strategy: 'auto' | 'attach' | 'launch'
   system_cdp_url: string
@@ -631,6 +636,11 @@ export interface AgentSettings {
     enable_system_fallback: boolean
     headless: boolean
     keep_alive: boolean
+    dom_inspection_engine: 'auto' | 'enhanced' | 'legacy'
+    paint_order_filtering: boolean
+    cross_origin_iframes: boolean
+    max_iframes: number
+    max_iframe_depth: number
     system_connection_strategy: 'auto' | 'attach' | 'launch'
     system_cdp_url: string
     managed_profile_dir: string

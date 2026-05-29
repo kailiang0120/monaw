@@ -42,6 +42,11 @@ System mode does not launch your normal Chrome profile. It only attaches to an e
 | `enable_system_fallback` | Allows fallback to system connection when configured. |
 | `headless` | Runs managed Chrome without a visible window. |
 | `keep_alive` | Keeps the browser session alive between actions. |
+| `dom_inspection_engine` | `auto`, `enhanced`, or `legacy`. Auto tries enhanced upstream-style DOM inspection and falls back to legacy JS. |
+| `paint_order_filtering` | Prefer topmost clickable elements when enhanced DOM metadata is available. |
+| `cross_origin_iframes` | Allow deeper cross-origin iframe inspection when supported. Default off. |
+| `max_iframes` | Maximum iframes to inspect in enhanced mode. |
+| `max_iframe_depth` | Maximum iframe nesting depth in enhanced mode. |
 | `system_connection_strategy` | `auto`, `attach`, or `launch`. Current system mode is designed to attach, not manage the user's real Chrome profile. |
 | `system_cdp_url` | Chrome DevTools endpoint, default `http://127.0.0.1:9222`. |
 | `managed_profile_dir` | Isolated Chrome profile directory. |
@@ -72,6 +77,7 @@ Modern Chrome may block remote debugging on the default user-data-dir. If system
 | `browser_navigate` | Navigate the current tab. |
 | `browser_tabs` | List, create, switch, or close tabs. |
 | `browser_snapshot` | Capture DOM state and stable refs for visible interactive elements. |
+| `browser_get_element` | Inspect one snapshot ref with cached enhanced metadata and current element state. |
 | `browser_click` | Click by ref, selector, text, or coordinates. |
 | `browser_type` | Fill text into an input or editable element. |
 | `browser_press` | Send a key press. |
@@ -103,9 +109,24 @@ Practical rules:
 | Start with `browser_open`. | Creates or reuses the session. |
 | Use `browser_snapshot` before mutating. | Gets stable refs and visible state. |
 | Prefer refs over selectors. | Refs come from observed state and reduce selector guessing. |
+| Use `browser_get_element` when one ref is ambiguous. | Returns cached role/state/bounds data plus current value/text. |
 | Verify after every click or type. | Pages can rerender, reject input, or open new tabs. |
 | Do not repeat the same failed action. | Inspect, take a screenshot, or run doctor first. |
 | Use `browser_evaluate` only when snapshot is insufficient. | Keeps automation safer and more explainable. |
+
+## DOM Inspection
+
+`browser_snapshot` now supports three inspection engines:
+
+| Engine | Behavior |
+| --- | --- |
+| `auto` | Uses the saved setting. The default setting tries enhanced inspection first, then falls back to legacy JS. |
+| `enhanced` | Requires compatible browser-use DOM state APIs. Returns richer accessibility, frame, bounds, state, and selector metadata when available. |
+| `legacy` | Uses Monaw's existing in-page JS scanner only. |
+
+Enhanced snapshots keep the existing `snapshot.elements` and `field_candidates` shape, but may add fields such as `backend_node_id`, `frame_id`, `ax_name`, `states`, `bounds`, `scroll`, `context`, and `control`.
+
+After navigation, tab switches, reloads, clicks, typing, selecting, key presses, or scrolls, refs are treated as stale. Take a fresh `browser_snapshot` before the next DOM action.
 
 ## Screenshots And Downloads
 
@@ -149,6 +170,7 @@ Doctor output can show:
 | Browser does not open. | Confirm `browser-use` is installed and check `browser\chrome.log` under the active runtime folder. |
 | System mode cannot attach. | Open `http://127.0.0.1:9222/json/version` in a browser or PowerShell to confirm CDP is live. |
 | Actions hit the wrong field. | Use `browser_snapshot(include_screenshot=true)` and identify the target by ref, label, role, placeholder, and nearby text. |
+| A ref is stale. | Call `browser_snapshot` again; refs are invalidated after page-changing or mutating actions. |
 | Tab state is stale. | Run `browser_tabs(action="list")` and switch to the expected tab. |
 | Downloads are missing. | Check the configured `downloads_dir`, not the normal Windows Downloads folder. |
 | Repeated action fails. | Stop repeating it; inspect snapshot, screenshot, console, or network summary. |

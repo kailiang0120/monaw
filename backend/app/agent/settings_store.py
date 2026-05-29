@@ -194,6 +194,11 @@ class BrowserUseSettings(BaseModel):
     enable_system_fallback: bool = True
     headless: bool = False
     keep_alive: bool = True
+    dom_inspection_engine: Literal["auto", "enhanced", "legacy"] = "auto"
+    paint_order_filtering: bool = True
+    cross_origin_iframes: bool = False
+    max_iframes: int = Field(5, ge=0, le=20)
+    max_iframe_depth: int = Field(2, ge=0, le=5)
     system_connection_strategy: Literal["auto", "attach", "launch"] = "auto"
     system_cdp_url: str = "http://127.0.0.1:9222"
     managed_profile_dir: str = Field(
