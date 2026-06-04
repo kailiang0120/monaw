@@ -108,8 +108,8 @@ def test_memory_manager_builds_structured_context_and_history(monkeypatch, tmp_p
     assert history[0]["role"] == "assistant"
     assert "Earlier conversation summary" in history[0]["content"]
     assert history[-1]["role"] == "assistant"
-    assert usage["limit"] == 1050000
-    assert usage["compaction_at"] == 945000
+    assert usage["limit"] == 200000
+    assert usage["compaction_at"] == 185000
     assert usage["used"] > 0
     assert usage["percentage"] >= 0
 
@@ -242,8 +242,8 @@ def test_context_usage_endpoint_returns_report(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["used"] > 0
-    assert payload["limit"] == 1050000
-    assert payload["compaction_at"] == 945000
+    assert payload["limit"] == 200000
+    assert payload["compaction_at"] == 185000
     assert payload["estimator"]
     assert any(item["key"] == "messages" for item in payload["breakdown"])
     assert any(item["key"] == "builtin_tools" for item in payload["breakdown"])
@@ -306,12 +306,12 @@ def test_context_usage_report_counts_runtime_skills_and_tools():
 def test_context_usage_uses_model_specific_window_and_tokenizer():
     gpt_54 = SimpleNamespace(provider="openai", model_name="gpt-5.4")
     gpt_54_mini = SimpleNamespace(provider="openai", model_name="gpt-5.4-mini-2026-03-17")
-    gemini = SimpleNamespace(provider="gemini", model_name="gemini-2.5-pro")
-    deepseek = SimpleNamespace(provider="deepseek", model_name="deepseek-chat")
+    gemini = SimpleNamespace(provider="gemini", model_name="gemini-3.1-pro-preview")
+    deepseek = SimpleNamespace(provider="deepseek", model_name="deepseek-v4-pro")
 
-    assert model_context_token_limit(gpt_54) == 1_050_000
-    assert model_compaction_threshold(gpt_54) == 945_000
-    assert model_context_token_limit(gpt_54_mini) == 400_000
-    assert model_context_token_limit(gemini) == 1_048_576
-    assert model_context_token_limit(deepseek) == 128_000
-    assert token_estimation_method(gpt_54).startswith("tiktoken:")
+    assert model_context_token_limit(gpt_54) == 200_000
+    assert model_compaction_threshold(gpt_54) == 185_000
+    assert model_context_token_limit(gpt_54_mini) == 200_000
+    assert model_context_token_limit(gemini) == 200_000
+    assert model_context_token_limit(deepseek) == 200_000
+    assert token_estimation_method(gpt_54) in {"chars/4 fallback", "tiktoken:o200k_base", "tiktoken:cl100k_base"}

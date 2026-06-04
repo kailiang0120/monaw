@@ -51,6 +51,7 @@ DEFAULT_SKILLS = {
 LEGACY_SKILL_ALIASES = {
     "desktop-control-win": "computer-use",
 }
+REMOVED_SKILLS = frozenset({"mcp-bridge"})
 KNOWN_SKILLS = frozenset((*DEFAULT_SKILLS.keys(), *LEGACY_SKILL_ALIASES.keys(), "scheduling"))
 
 _BROWSER_RUNTIME_DIR = MONAW_HOME_DIR / "browser"
@@ -415,6 +416,8 @@ def _normalize_skill_flags(skills: dict[str, Any], *, include_defaults: bool = F
     known_skills = _local_skill_names()
     for key, value in skills.items():
         canonical_key = LEGACY_SKILL_ALIASES.get(str(key), str(key))
+        if canonical_key in REMOVED_SKILLS:
+            continue
         if canonical_key in known_skills:
             normalized[canonical_key] = bool(value)
     return normalized

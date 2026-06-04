@@ -20,7 +20,11 @@ def test_fresh_database_does_not_create_sqlite_memory_schema(tmp_path):
     assert "messages_archive" in tables
     assert "memories" not in tables
     assert "memory_audit" not in tables
-    assert "memory_candidates" not in tables
+    assert "memory_candidates" in tables
+    assert "memory_profile_fields" in tables
+    assert "memory_episodes" in tables
+    assert "memory_checkpoints" in tables
+    assert "conversation_compactions" in tables
     assert "memory_embeddings" not in tables
     assert "memory_fts" not in tables
-    assert versions == [5, 6, 7]
+    assert versions == [5, 6, 7, 8, 9]

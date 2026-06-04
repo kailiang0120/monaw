@@ -87,6 +87,8 @@ async def get_context_usage(conv_id: str):
     db = get_db()
     if db.get_conversation(conv_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    tool_call_counter = getattr(db, "count_tool_calls_for_conversation", None)
+    tool_call_count = int(tool_call_counter(conv_id)) if callable(tool_call_counter) else 0
     runtime_settings = build_runtime_namespace(settings, load_agent_settings(settings))
     runtime = get_runtime(runtime_settings)
     visible_tools = runtime.tool_registry.get_all_tools(visible_only=True)
@@ -129,7 +131,7 @@ async def get_context_usage(conv_id: str):
         long_term_context=long_term_context,
         visible_tools=visible_tools,
         hidden_tools=hidden_tools,
-        tool_call_count=db.count_tool_calls_for_conversation(conv_id),
+        tool_call_count=tool_call_count,
         limit=model_context_token_limit(runtime.llm_client),
         compaction_at=model_compaction_threshold(runtime.llm_client),
     )

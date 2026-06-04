@@ -209,7 +209,7 @@ def test_model_options_endpoint_returns_backend_model_catalog():
     assert response.status_code == 200
     payload = response.json()
     providers = {item["id"]: item for item in payload["providers"]}
-    assert providers["openai"]["models"][0] == "gpt-5"
+    assert providers["openai"]["models"][0] == "gpt-5.5"
     assert providers["gemini"]["label"] == "Google"
     assert providers["gemini"]["models"][0].startswith("gemini-3")
     assert "gemini-3.1-flash-lite-preview" in payload["vision_fallback_models"]

@@ -288,6 +288,7 @@ def test_default_skills_use_recommended_profile():
         "computer-use": True,
         "filesystem": True,
         "memory": True,
+        "skill-creator": True,
         "background-check": False,
         "browser-use": True,
     }
@@ -345,6 +346,7 @@ def test_load_settings_preserves_legacy_skill_defaults_when_keys_are_missing(tmp
         "computer-use": True,
         "filesystem": True,
         "memory": True,
+        "skill-creator": True,
         "background-check": False,
         "browser-use": True,
     }
