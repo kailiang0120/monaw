@@ -194,6 +194,43 @@ def _element_blob(element: dict[str, Any]) -> str:
     return " ".join(values).lower()
 
 
+def _normalize_match_text(value: Any) -> str:
+    return " ".join(str(value or "").lower().replace("_", " ").replace("-", " ").split())
+
+
+def _label_blob_values(element: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("aria_label", "placeholder", "name", "id", "title", "text", "ax_name", "dialog_label"):
+        value = element.get(key)
+        if isinstance(value, list):
+            values.extend(str(item) for item in value if str(item).strip())
+        elif value is not None and str(value).strip():
+            values.append(str(value))
+    labels = element.get("labels")
+    if isinstance(labels, list):
+        values.extend(str(item) for item in labels if str(item).strip())
+    return values
+
+
+def _matches_label_query(element: dict[str, Any], query: str) -> bool:
+    normalized_query = _normalize_match_text(query)
+    if not normalized_query:
+        return True
+    for value in _label_blob_values(element):
+        normalized_value = _normalize_match_text(value)
+        if not normalized_value:
+            continue
+        if normalized_value == normalized_query:
+            return True
+        tokens = normalized_value.split()
+        if len(normalized_query) <= 3:
+            if normalized_query in tokens:
+                return True
+        elif normalized_query in normalized_value:
+            return True
+    return False
+
+
 def _field_candidate_kind(element: dict[str, Any]) -> str:
     blob = _element_blob(element)
     hint = str(element.get("target_hint") or "").lower()
@@ -1319,14 +1356,17 @@ async def browser_find(
     snapshot_raw = await page.evaluate(_SNAPSHOT_SCRIPT, _INTERACTIVE_SELECTOR, 500)
     snapshot = _decode_json_string(snapshot_raw)
     elements = snapshot.get("elements", []) if isinstance(snapshot, dict) else []
-    query = " ".join(part for part in (text, label) if part).lower()
+    text_query = _normalize_match_text(text)
+    label_query = _normalize_match_text(label)
     role_query = role.strip().lower()
     matches = []
     for element in elements:
         if not isinstance(element, dict):
             continue
         blob = _element_blob(element)
-        if query and query not in blob:
+        if text_query and text_query not in blob:
+            continue
+        if label_query and not _matches_label_query(element, label_query):
             continue
         if role_query and role_query != str(element.get("role", "")).lower():
             continue
@@ -2085,6 +2125,7 @@ def register_tools(registry, settings) -> None:
                 "domain": "browser",
                 "execution_mode": "async",
                 "affinity_group": "browser-use",
+                "metadata": {"observation": True, "mutates_state": False, "risk_level": "low"},
             },
             {
                 "name": "browser_get_element",
@@ -2109,6 +2150,7 @@ def register_tools(registry, settings) -> None:
                 "domain": "browser",
                 "execution_mode": "async",
                 "affinity_group": "browser-use",
+                "metadata": {"observation": True, "mutates_state": False, "risk_level": "low"},
             },
             {
                 "name": "browser_extract_text",
@@ -2133,6 +2175,7 @@ def register_tools(registry, settings) -> None:
                 "domain": "browser",
                 "execution_mode": "async",
                 "affinity_group": "browser-use",
+                "metadata": {"observation": True, "mutates_state": False, "risk_level": "low"},
             },
             {
                 "name": "browser_fill_form",

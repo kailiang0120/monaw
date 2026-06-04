@@ -36,9 +36,12 @@ def test_load_tools_returns_enabled_skills_only():
     assert recall_tool is not None
     assert "Skip it if the injected memories already answer the question" in recall_tool["description"]
     assert "mcp_status" in tool_names
-    assert "screen_info" in tool_names
-    assert "inspect_ui" in tool_names
-    assert "precision_click" in tool_names
+    assert "computer_functions_list_apps" in tool_names
+    assert "computer_functions_get_window_state" in tool_names
+    assert "computer_functions_act" in tool_names
+    assert "screen_info" not in tool_names
+    assert "inspect_ui" not in tool_names
+    assert "precision_click" not in tool_names
 
 
 def test_load_tools_omits_mcp_feature_when_disabled():
@@ -77,6 +80,7 @@ def test_available_skill_payload_keeps_recommended_skills():
         "exec",
         "filesystem",
         "memory",
+        "skill-creator",
     }
     assert "background-check" not in {item["name"] for item in payload}
 

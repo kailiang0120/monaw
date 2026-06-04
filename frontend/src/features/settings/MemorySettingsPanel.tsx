@@ -83,6 +83,7 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
   const [rawMarkdown, setRawMarkdown] = useState('')
   const [stats, setStats] = useState(EMPTY_STATS)
   const [loading, setLoading] = useState(false)
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
   const [editWholeFile, setEditWholeFile] = useState(false)
   const [newContent, setNewContent] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -166,7 +167,10 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
         setStats(EMPTY_STATS)
       }
     } finally {
-      if (requestId === requestSeq.current && !silent) setLoading(false)
+      if (requestId === requestSeq.current && !silent) {
+        setLoading(false)
+        setHasLoadedOnce(true)
+      }
     }
   }, [activeTab, listParams])
 
@@ -194,6 +198,8 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
     const activeById = new Map((memoryFile?.sections ?? []).map((section) => [section.id, section]))
     return memories.map((memory) => activeById.get(memory.id) ?? recordToSection(memory))
   }, [memories, memoryFile, query, reviewFilter, statusFilter])
+  const showInitialSkeleton = loading && !hasLoadedOnce
+  const showSectionSkeleton = loading && (!memoryFile || memoryFile.category !== activeTab)
 
   const updateMemorySettings = (patch: Partial<AgentSettings['memory']>) => {
     updateDraft((current) => ({
@@ -400,14 +406,22 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
         </button>
       </div>
 
-      <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-        <MemoryStat label="Active" value={stats.active} />
-        <MemoryStat label="Review" value={stats.new} />
-        <MemoryStat label="Archived" value={stats.archived} />
-        <MemoryStat label="Candidates" value={stats.unresolved_candidates} />
-        <MemoryStat label="Episodes" value={stats.episodes} />
-        <MemoryStat label="Context" value={stats.active_checkpoints} />
-      </div>
+      {showInitialSkeleton ? (
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-6" aria-hidden="true">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <MemoryStatSkeleton key={index} />
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+          <MemoryStat label="Active" value={stats.active} />
+          <MemoryStat label="Review" value={stats.new} />
+          <MemoryStat label="Archived" value={stats.archived} />
+          <MemoryStat label="Candidates" value={stats.unresolved_candidates} />
+          <MemoryStat label="Episodes" value={stats.episodes} />
+          <MemoryStat label="Context" value={stats.active_checkpoints} />
+        </div>
+      )}
 
       {/* Add memory */}
       <div className="flex items-center gap-2">
@@ -465,17 +479,19 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
         </div>
       ) : (
         <div className="space-y-1.5">
-          {loading && (
-            <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] px-3 py-2.5 text-xs text-neutral-500">
-              Loading...
+          {showSectionSkeleton ? (
+            <div className="space-y-1.5" role="status" aria-label="Loading memory" data-testid="memory-loading-skeleton">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <MemorySectionSkeleton key={index} />
+              ))}
             </div>
-          )}
-          {!loading && sections.length === 0 && (
+          ) : null}
+          {!showSectionSkeleton && !loading && sections.length === 0 && (
             <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] px-3 py-2.5 text-xs text-neutral-500">
               No sections found.
             </div>
           )}
-          {sections.map((section) => {
+          {!showSectionSkeleton && sections.map((section) => {
             const expanded = expandedId === section.id
             return (
               <div key={section.id} className="rounded-xl border border-white/[0.07] bg-white/[0.025]">
@@ -584,53 +600,61 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
             </div>
           )}
           <MemoryRetrievalDebugger initialQuery={query} />
-          <div className="grid gap-2 border-t border-white/[0.06] pt-2 lg:grid-cols-2">
-            <MemoryOpsPanel title="Profile" empty="No profile fields.">
-              {profileFields.slice(0, 5).map((field) => (
-                <MemoryOpsItem key={field.field} title={field.field} meta={field.review_state}>
-                  {field.privacy_level === 'normal' ? field.value : `${field.privacy_level} value`}
-                </MemoryOpsItem>
+          {showInitialSkeleton ? (
+            <div className="grid gap-2 border-t border-white/[0.06] pt-2 lg:grid-cols-2" aria-hidden="true">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <MemoryOpsPanelSkeleton key={index} />
               ))}
-            </MemoryOpsPanel>
+            </div>
+          ) : (
+            <div className="grid gap-2 border-t border-white/[0.06] pt-2 lg:grid-cols-2">
+              <MemoryOpsPanel title="Profile" empty="No profile fields.">
+                {profileFields.slice(0, 5).map((field) => (
+                  <MemoryOpsItem key={field.field} title={field.field} meta={field.review_state}>
+                    {field.privacy_level === 'normal' ? field.value : `${field.privacy_level} value`}
+                  </MemoryOpsItem>
+                ))}
+              </MemoryOpsPanel>
 
-            <MemoryOpsPanel title="Candidates" empty="No candidates waiting.">
-              {candidates.map((candidate) => (
-                <MemoryOpsItem
-                  key={candidate.id}
-                  title={candidate.category}
-                  meta={`I${candidate.importance} · ${Math.round(candidate.confidence * 100)}%`}
-                  actions={(
-                    <>
-                      <button type="button" className="ghost-button h-6 rounded-md px-2 text-[10px]" onClick={() => resolveCandidate(candidate, false)}>
-                        Reject
-                      </button>
-                      <button type="button" className="primary-button h-6 rounded-md px-2 text-[10px]" onClick={() => resolveCandidate(candidate, true)}>
-                        Approve
-                      </button>
-                    </>
-                  )}
-                >
-                  {candidate.content}
-                </MemoryOpsItem>
-              ))}
-            </MemoryOpsPanel>
+              <MemoryOpsPanel title="Candidates" empty="No candidates waiting.">
+                {candidates.map((candidate) => (
+                  <MemoryOpsItem
+                    key={candidate.id}
+                    title={candidate.category}
+                    meta={`I${candidate.importance} · ${Math.round(candidate.confidence * 100)}%`}
+                    actions={(
+                      <>
+                        <button type="button" className="ghost-button h-6 rounded-md px-2 text-[10px]" onClick={() => resolveCandidate(candidate, false)}>
+                          Reject
+                        </button>
+                        <button type="button" className="primary-button h-6 rounded-md px-2 text-[10px]" onClick={() => resolveCandidate(candidate, true)}>
+                          Approve
+                        </button>
+                      </>
+                    )}
+                  >
+                    {candidate.content}
+                  </MemoryOpsItem>
+                ))}
+              </MemoryOpsPanel>
 
-            <MemoryOpsPanel title="Episodes" empty="No curated episodes.">
-              {episodes.map((episode) => (
-                <MemoryOpsItem key={episode.id} title={episode.conversation_id} meta={episode.channel}>
-                  {episode.summary}
-                </MemoryOpsItem>
-              ))}
-            </MemoryOpsPanel>
+              <MemoryOpsPanel title="Episodes" empty="No curated episodes.">
+                {episodes.map((episode) => (
+                  <MemoryOpsItem key={episode.id} title={episode.conversation_id} meta={episode.channel}>
+                    {episode.summary}
+                  </MemoryOpsItem>
+                ))}
+              </MemoryOpsPanel>
 
-            <MemoryOpsPanel title="Current Context" empty="No active checkpoints.">
-              {checkpoints.map((checkpoint) => (
-                <MemoryOpsItem key={checkpoint.id} title={checkpoint.scope} meta={checkpoint.status}>
-                  {checkpoint.goal || checkpoint.next_action || checkpoint.last_known_state}
-                </MemoryOpsItem>
-              ))}
-            </MemoryOpsPanel>
-          </div>
+              <MemoryOpsPanel title="Current Context" empty="No active checkpoints.">
+                {checkpoints.map((checkpoint) => (
+                  <MemoryOpsItem key={checkpoint.id} title={checkpoint.scope} meta={checkpoint.status}>
+                    {checkpoint.goal || checkpoint.next_action || checkpoint.last_known_state}
+                  </MemoryOpsItem>
+                ))}
+              </MemoryOpsPanel>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -654,6 +678,15 @@ function MemoryStat({ label, value }: { label: string; value: number }) {
   )
 }
 
+function MemoryStatSkeleton() {
+  return (
+    <div className="rounded-lg border border-white/[0.07] bg-white/[0.025] px-2.5 py-2">
+      <div className="h-2.5 w-12 animate-pulse rounded bg-white/[0.07]" />
+      <div className="mt-2 h-4 w-8 animate-pulse rounded bg-white/[0.09]" />
+    </div>
+  )
+}
+
 function MemoryOpsPanel({ title, empty, children }: { title: string; empty: string; children: ReactNode }) {
   const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children)
   return (
@@ -661,6 +694,36 @@ function MemoryOpsPanel({ title, empty, children }: { title: string; empty: stri
       <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500">{title}</p>
       <div className="mt-1.5 space-y-1.5">
         {hasChildren ? children : <p className="text-[11px] text-neutral-500">{empty}</p>}
+      </div>
+    </div>
+  )
+}
+
+function MemorySectionSkeleton() {
+  return (
+    <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] px-3 py-3" aria-hidden="true">
+      <div className="flex items-center gap-2">
+        <div className="h-3 w-40 animate-pulse rounded bg-white/[0.08]" />
+        <div className="h-4 w-8 animate-pulse rounded bg-white/[0.06]" />
+        <div className="h-2 w-2 animate-pulse rounded-full bg-white/[0.08]" />
+      </div>
+      <div className="mt-2 h-2.5 w-full animate-pulse rounded bg-white/[0.05]" />
+      <div className="mt-1.5 h-2.5 w-4/5 animate-pulse rounded bg-white/[0.05]" />
+    </div>
+  )
+}
+
+function MemoryOpsPanelSkeleton() {
+  return (
+    <div className="rounded-lg border border-white/[0.07] bg-white/[0.025] p-2" aria-hidden="true">
+      <div className="h-2.5 w-16 animate-pulse rounded bg-white/[0.07]" />
+      <div className="mt-2 space-y-1.5">
+        {Array.from({ length: 3 }).map((_, index) => (
+          <div key={index} className="rounded-md bg-black/10 px-2 py-1.5">
+            <div className="h-2.5 w-24 animate-pulse rounded bg-white/[0.07]" />
+            <div className="mt-1.5 h-2.5 w-full animate-pulse rounded bg-white/[0.05]" />
+          </div>
+        ))}
       </div>
     </div>
   )

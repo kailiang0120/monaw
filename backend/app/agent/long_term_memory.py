@@ -875,8 +875,9 @@ class LongTermMemory:
         status: str = "active",
         review_state: str = "",
         limit: int = 100,
+        include_short_term: bool = False,
     ) -> list[dict[str, Any]]:
-        records = self._all_records(include_archived=True, include_short_term=True)
+        records = self._all_records(include_archived=True, include_short_term=include_short_term)
         if category:
             wanted_category = self._normalize_category(category)
             records = [record for record in records if record["category"] == wanted_category]
@@ -967,10 +968,18 @@ class LongTermMemory:
         category: str = "",
         limit: int = 6,
         mark_used: bool = True,
+        include_short_term: bool = False,
     ) -> list[dict[str, Any]]:
         return [
             {key: value for key, value in item.items() if key not in {"score", "score_breakdown"}}
-            for item in self.score(query, category=category, include_archived=False, limit=limit, mark_used=mark_used)
+            for item in self.score(
+                query,
+                category=category,
+                include_archived=False,
+                limit=limit,
+                mark_used=mark_used,
+                include_short_term=include_short_term,
+            )
         ]
 
     def score(
@@ -982,10 +991,14 @@ class LongTermMemory:
         review_state: str = "",
         limit: int = 10,
         mark_used: bool = False,
+        include_short_term: bool = False,
     ) -> list[dict[str, Any]]:
         query_text = str(query or "").strip()
         query_tokens = set(_tokens(query_text))
-        records = self._all_records(include_archived=include_archived, include_short_term=True)
+        records = self._all_records(
+            include_archived=include_archived,
+            include_short_term=include_short_term,
+        )
         if category:
             records = [record for record in records if record["category"] == self._normalize_category(category)]
         if not include_archived:
@@ -1057,7 +1070,12 @@ class LongTermMemory:
     def retrieve_for_turn(self, query: str, *, mark_used: bool = True) -> list[dict[str, Any]]:
         if not self.enabled:
             return []
-        results = self.score(query, limit=self.retrieval_limit, mark_used=mark_used)
+        results = self.score(
+            query,
+            limit=self.retrieval_limit,
+            mark_used=mark_used,
+            include_short_term=False,
+        )
         return [item for item in results if float(item.get("score", 0)) >= self.min_relevance_score]
 
     def build_prompt(self, query: str) -> str:
@@ -1407,20 +1425,71 @@ class LongTermMemory:
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": assistant_message},
         ]
+        decisions = self._heuristic_curator_decisions(messages)
         captured: list[dict[str, Any]] = []
-        for decision in self._heuristic_curator_decisions(messages):
-            if str(decision.get("action") or "") != "remember":
+        auto_reviewed = self.write_policy == "auto_reviewed"
+
+        for decision in decisions:
+            action = str(decision.get("action") or "").strip().lower()
+            content = str(decision.get("content") or "").strip()
+            confidence = _coerce_float(decision.get("confidence"), 0.8)
+            importance = _coerce_int(decision.get("importance"), 5)
+
+            if action == "remember" and content:
+                if auto_reviewed:
+                    memory = self.remember(
+                        content,
+                        category=str(decision.get("category") or "fact"),
+                        confidence=confidence,
+                        review_state="reviewed",
+                        importance=importance,
+                        kind=str(decision.get("kind") or "fact"),
+                        source="turn_feature_extract",
+                        source_conversation_id=conversation_id,
+                    )
+                    if memory is not None:
+                        captured.append(memory)
+                else:
+                    candidate = self.add_candidate(
+                        content,
+                        category=str(decision.get("category") or "fact"),
+                        confidence=confidence,
+                        importance=importance,
+                        kind=str(decision.get("kind") or "fact"),
+                        reason="turn_feature_extract",
+                        source_conversation_id=conversation_id,
+                    )
+                    if candidate is not None:
+                        captured.append(candidate)
                 continue
-            candidate = self.add_candidate(
-                str(decision.get("content") or ""),
-                category=str(decision.get("category") or "fact"),
-                confidence=_coerce_float(decision.get("confidence"), 0.8),
-                importance=_coerce_int(decision.get("importance"), 5),
-                reason="turn_candidate",
-                source_conversation_id=conversation_id,
-            )
-            if candidate is not None:
-                captured.append(candidate)
+
+            if action == "personality_update" and content:
+                if auto_reviewed:
+                    if self._update_personality(
+                        str(decision.get("target") or "user"),
+                        content,
+                        conversation_id,
+                    ):
+                        captured.append(
+                            {
+                                "id": f"personality-{_safe_id(str(decision.get('target') or 'user'))}",
+                                "kind": "personality",
+                                "content": content,
+                            }
+                        )
+                else:
+                    candidate = self.add_candidate(
+                        content,
+                        category="fact",
+                        confidence=confidence,
+                        importance=importance,
+                        kind="fact",
+                        reason="turn_feature_extract",
+                        source_conversation_id=conversation_id,
+                    )
+                    if candidate is not None:
+                        captured.append(candidate)
+
         return captured
 
     def upsert_checkpoint(self, checkpoint_id: str, **fields: Any) -> dict[str, Any]:
@@ -1611,9 +1680,11 @@ class LongTermMemory:
         user_message: str,
         assistant_message: str,
     ) -> list[dict[str, Any]]:
-        # Per-turn learning intentionally does not write durable memory anymore.
-        # Session-close curation owns durable writes.
-        return []
+        return self.capture_turn_candidates(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+        )
 
     async def curate_session(self, conversation_id: str) -> dict[str, int]:
         return await self._curate_session(conversation_id, allow_llm=True)
@@ -1827,42 +1898,133 @@ class LongTermMemory:
             text = " ".join(str(message.get("content") or "").split())
             if self._should_skip_learning(text):
                 continue
-            lowered = text.lower()
-            content = ""
-            category = "fact"
-            importance = 5
-            if match := re.search(r"\b(?:i prefer|i like)\s+(.+?)(?:[.!?]|$)", text, re.I):
-                content = f"The user prefers {match.group(1).strip()}."
-                category = "preference"
-                importance = 7
-            elif match := re.search(r"\bplease always\s+(.+?)(?:[.!?]|$)", text, re.I):
-                content = f"The user wants the assistant to always {match.group(1).strip()}."
-                category = "behavior"
-                importance = 8
-            elif match := re.search(r"\b(?:my name is|call me)\s+(.+?)(?:[.!?]|$)", text, re.I):
-                content = f"The user's preferred name is {match.group(1).strip()}."
-                decisions.append({"action": "personality_update", "target": "user", "content": content, "confidence": 0.9, "importance": 8})
-                continue
-            elif match := re.search(r"\bi work (?:on|in|with)\s+(.+?)(?:[.!?]|$)", text, re.I):
-                content = f"The user works with {match.group(1).strip()}."
-                category = "project" if "repo" in lowered or "project" in lowered or "app" in lowered else "fact"
-                importance = 6
-            elif match := re.search(r"\buse\s+(.+?)(?:[.!?]|$)", text, re.I):
-                content = f"The user prefers using {match.group(1).strip()}."
-                category = "preference"
-                importance = 6
-            if content:
-                decisions.append(
-                    {
-                        "action": "remember",
-                        "content": content,
-                        "category": category,
-                        "confidence": 0.82,
-                        "importance": importance,
-                        "kind": "fact",
-                    }
-                )
+            decisions.extend(self._extract_user_signal_decisions(text))
         return self._dedupe_decisions(decisions)
+
+    def _extract_user_signal_decisions(self, text: str) -> list[dict[str, Any]]:
+        decisions: list[dict[str, Any]] = []
+        segments = [
+            segment.strip()
+            for segment in re.split(r"(?<=[.!?])\s+|\n+", str(text or ""))
+            if segment.strip()
+        ]
+
+        def remember(
+            content: str,
+            *,
+            category: str,
+            importance: int,
+            confidence: float = 0.82,
+            kind: str = "fact",
+        ) -> None:
+            cleaned = self._clean_signal_fragment(content)
+            if not cleaned:
+                return
+            decisions.append(
+                {
+                    "action": "remember",
+                    "content": cleaned,
+                    "category": category,
+                    "confidence": confidence,
+                    "importance": importance,
+                    "kind": kind,
+                }
+            )
+
+        def personality_update(content: str, *, importance: int = 8, confidence: float = 0.9) -> None:
+            cleaned = self._clean_signal_fragment(content)
+            if not cleaned:
+                return
+            decisions.append(
+                {
+                    "action": "personality_update",
+                    "target": "user",
+                    "content": cleaned,
+                    "confidence": confidence,
+                    "importance": importance,
+                }
+            )
+
+        for segment in segments:
+            lowered = segment.lower()
+            if self._contains_sensitive(segment):
+                continue
+
+            if match := re.search(r"\b(?:my name is|call me)\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                name = self._clean_signal_fragment(match.group(1))
+                if name:
+                    personality_update(f"The user's preferred name is {name}.", importance=8, confidence=0.9)
+
+            if match := re.search(r"\b(?:i am|i'm)\s+(?:a|an)\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                role = self._clean_signal_fragment(match.group(1))
+                if role and role.lower() not in {"okay", "ok", "ready"}:
+                    remember(f"The user is a {role}.", category="fact", importance=5, confidence=0.8)
+
+            if match := re.search(r"\b(?:i work on|i'm working on|i am working on)\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                project = self._clean_signal_fragment(match.group(1))
+                if project:
+                    remember(f"The user is currently working on {project}.", category="project", importance=7, confidence=0.84)
+
+            if match := re.search(r"\bi work (?:in|with)\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                scope = self._clean_signal_fragment(match.group(1))
+                if scope:
+                    remember(f"The user works with {scope}.", category="fact", importance=6, confidence=0.82)
+
+            if match := re.search(r"\b(?:this|current|main)\s+(?:repo|project|app)\s+(?:is|=)\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                project = self._clean_signal_fragment(match.group(1))
+                if project:
+                    remember(f"The user's current project is {project}.", category="project", importance=7, confidence=0.86)
+
+            if match := re.search(r"\bi prefer\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                preference = self._clean_signal_fragment(match.group(1))
+                if preference:
+                    remember(f"The user prefers {preference}.", category="preference", importance=7, confidence=0.84)
+
+            if match := re.search(r"\bi like\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                preference = self._clean_signal_fragment(match.group(1))
+                if preference:
+                    remember(f"The user likes {preference}.", category="preference", importance=6, confidence=0.8)
+
+            if match := re.search(r"\b(?:please\s+)?always\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                behavior = self._clean_signal_fragment(match.group(1))
+                if behavior:
+                    remember(f"The user wants the assistant to always {behavior}.", category="behavior", importance=8, confidence=0.9)
+
+            if match := re.search(r"\bask before\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                behavior = self._clean_signal_fragment(match.group(1))
+                if behavior:
+                    remember(f"The user wants the assistant to ask before {behavior}.", category="behavior", importance=8, confidence=0.9)
+
+            if match := re.search(r"\b(?:don't|do not|never|avoid)\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                behavior = self._clean_signal_fragment(match.group(1))
+                if behavior:
+                    remember(f"The user wants the assistant to avoid {behavior}.", category="behavior", importance=7, confidence=0.86)
+
+            if match := re.search(r"\bwhen i ask(?:ed)?(?:\s+for)?\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                workflow = self._clean_signal_fragment(match.group(1))
+                if workflow:
+                    remember(f"When the user asks for {workflow}, the assistant should follow that workflow consistently.", category="workflow", importance=7, confidence=0.84)
+
+            if match := re.match(r"\buse\s+(.+?)(?:[.!?]|$)", segment, re.I):
+                workflow = self._clean_signal_fragment(match.group(1))
+                if workflow:
+                    remember(f"The user wants the assistant to use {workflow}.", category="workflow", importance=6, confidence=0.8)
+
+            if (
+                any(term in lowered for term in ("reply", "response", "responses", "update", "updates", "messages"))
+                and any(term in lowered for term in ("short", "concise", "brief", "direct", "precise", "detailed", "verbose"))
+            ):
+                remember(f"The user prefers {self._clean_signal_fragment(segment)}.", category="preference", importance=7, confidence=0.84)
+
+        return decisions
+
+    def _clean_signal_fragment(self, value: str) -> str:
+        cleaned = " ".join(str(value or "").split()).strip(" \t\r\n'\"")
+        cleaned = re.sub(r"^[,;:]+", "", cleaned).strip()
+        cleaned = cleaned.rstrip(" .!?")
+        if not cleaned:
+            return ""
+        return cleaned[:240]
 
     async def _llm_curator_decisions(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         transcript = self._transcript_text(messages)
@@ -1870,6 +2032,9 @@ class LongTermMemory:
             return []
         prompt = (
             "Analyze this closed assistant session and decide what should be saved as durable memory. "
+            "Prioritize durable user preferences, working style, project context, workflow rules, and stable facts. "
+            "Do not turn the transcript into a generic recap. Use session_summary only for a short operational handoff, "
+            "not as a full conversation summary. "
             "Return only JSON with a decisions array. Each item must have action, content, category, "
             "confidence, importance, and optional target, kind, reason, memory_id. Valid actions are "
             "remember, personality_update, session_summary, skip, archive. Do not save secrets, tokens, "
@@ -2182,8 +2347,14 @@ class LongTermMemory:
             r"\bcall me\b",
             r"\bi'?m\b",
             r"\bi work\b",
+            r"\bworking on\b",
             r"\buse\b",
             r"\bremember\b",
+            r"\bask before\b",
+            r"\bavoid\b",
+            r"\bdon't\b",
+            r"\bdo not\b",
+            r"\bcurrent (?:repo|project|app)\b",
         ]
         if any(re.search(pattern, lowered) for pattern in high_signal_patterns):
             return False

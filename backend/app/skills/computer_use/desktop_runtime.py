@@ -407,7 +407,7 @@ def launch_app(alias: str, url: str = "", args: str = "", *, _bypass_gate: bool 
             return _pending_approval_result(
                 decision,
                 f"Launch app: {alias}",
-                tool_name="launch_app",
+                tool_name="computer_functions_launch_app",
                 action_type="launch_app",
                 target_app=alias,
                 payload_args={"alias": alias, "url": url, "args": args},
@@ -498,7 +498,7 @@ def _resume_launch_app(input_str: str) -> str:
     )
 
 
-register_executor("launch_app", _resume_launch_app)
+register_executor("computer_functions_launch_app", _resume_launch_app)
 
 
 def screen_info() -> str:
@@ -643,7 +643,7 @@ def focus_window(title: str = "", hwnd: int = 0, *, _bypass_gate: bool = False) 
             return _pending_approval_result(
                 decision,
                 f"Focus window: {selected['title']}",
-                tool_name="focus_window",
+                tool_name="computer_functions_activate_window",
                 action_type="click",
                 target_app=target_app,
                 payload_args={"title": title, "hwnd": target_hwnd},
@@ -701,4 +701,4 @@ def _resume_focus_window(input_str: str) -> str:
     )
 
 
-register_executor("focus_window", _resume_focus_window)
+register_executor("computer_functions_activate_window", _resume_focus_window)

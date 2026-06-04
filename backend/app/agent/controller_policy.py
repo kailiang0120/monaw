@@ -38,6 +38,9 @@ BLOCKED_PROCESSES = frozenset({
     "keepass.exe", "1password.exe", "lastpass.exe",
     "mmc.exe", "secpol.msc", "gpedit.msc",
     "regedit.exe", "taskmgr.exe", "procexp.exe",
+    "cmd.exe", "powershell.exe", "pwsh.exe",
+    "windowsterminal.exe", "wt.exe",
+    "codex.exe", "monaw.exe",
 })
 
 
@@ -608,6 +611,16 @@ def _delete_disabled_decision(policy_source: str) -> PermissionDecision:
     )
 
 
+def _path_access_grant_decision(target_path: str, policy_source: str) -> PermissionDecision:
+    return PermissionDecision(
+        allowed=False,
+        requires_access_grant=True,
+        reason=f"Path '{target_path}' is not in permitted roots. User decision required.",
+        reason_code="access_grant_required",
+        policy_source=policy_source,
+    )
+
+
 def _legacy_resolve_permission(
     action: ActionType,
     *,
@@ -880,6 +893,9 @@ def resolve_permission(
     if state is not None:
         normalized_target_app = normalize_app_alias(target_app)
         compat_app_entry = _compat_allowlisted_app(normalized_target_app, state) if normalized_target_app else None
+        canon = canonical(target_path) if target_path else ""
+        trusted_runtime_path = bool(canon and _is_trusted_runtime_path(canon))
+        path_session_granted = False
 
         if target_app and is_blocked_process_alias(target_app):
             return PermissionDecision(
@@ -891,11 +907,11 @@ def resolve_permission(
             )
 
         if target_path:
-            canon = canonical(target_path)
             blocked_by_root = _is_path_in_blocked_roots(canon, state.blocked_roots)
             if blocked_by_root and not _is_trusted_runtime_path(canon):
                 if _is_user_private_grantable_root(canon, state.blocked_roots):
-                    if not _is_state_permitted_root(canon, state.permitted_roots) and not _check_session_grant("path", target_path):
+                    path_session_granted = _check_session_grant("path", target_path)
+                    if not _is_state_permitted_root(canon, state.permitted_roots) and not path_session_granted:
                         return PermissionDecision(
                             allowed=False,
                             requires_access_grant=True,
@@ -914,6 +930,16 @@ def resolve_permission(
 
         if action == ActionType.DELETE and not state.allow_delete:
             return _delete_disabled_decision("compat_state")
+
+        if (
+            target_path
+            and state.mode != PermissionMode.FULL_ACCESS
+            and not trusted_runtime_path
+            and not _is_state_permitted_root(canon, state.permitted_roots)
+            and not path_session_granted
+            and not _check_session_grant("path", target_path)
+        ):
+            return _path_access_grant_decision(target_path, "compat_state")
 
         if (
             action == ActionType.LAUNCH_APP
@@ -984,6 +1010,7 @@ def resolve_permission(
     normalized_target_app = normalize_app_alias(target_app)
     matched_path_rule = _match_path_rule(canon_path, perms) if canon_path else None
     trusted_runtime_path = bool(canon_path and _is_trusted_runtime_path(canon_path, settings_data))
+    path_session_granted = False
 
     if normalized_target_app and is_blocked_process_alias(normalized_target_app):
         return PermissionDecision(
@@ -996,7 +1023,8 @@ def resolve_permission(
     if canon_path and _is_path_in_blocked_roots(canon_path, perms.blocked_roots) and not trusted_runtime_path:
         if _is_user_private_grantable_root(canon_path, perms.blocked_roots):
             has_persistent_grant = matched_path_rule is not None and _path_rule_allows(matched_path_rule, action)
-            if not has_persistent_grant and not _check_session_grant("path", target_path):
+            path_session_granted = _check_session_grant("path", target_path)
+            if not has_persistent_grant and not path_session_granted:
                 return PermissionDecision(
                     allowed=False,
                     requires_access_grant=True,
@@ -1023,6 +1051,16 @@ def resolve_permission(
             reason=f"Path '{target_path}' is not permitted for {action.value}.",
             reason_code="path_not_permitted",
         )
+
+    if (
+        canon_path
+        and perms.mode != "full_access"
+        and matched_path_rule is None
+        and not trusted_runtime_path
+        and not path_session_granted
+        and not _check_session_grant("path", target_path)
+    ):
+        return _path_access_grant_decision(target_path, "settings.json")
 
     if (
         action == ActionType.LAUNCH_APP

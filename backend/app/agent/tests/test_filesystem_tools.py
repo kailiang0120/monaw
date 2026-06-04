@@ -138,6 +138,21 @@ def test_filesystem_blocks_configured_blocked_roots(policy_env):
     assert result["reason_code"] == "blocked_root"
 
 
+def test_filesystem_unknown_path_requires_access_grant(policy_env):
+    settings_data = AgentSettings()
+    settings_data.permissions.mode = "default"
+    settings_data.permissions.blocked_roots = []
+    settings_data.permissions.path_rules = []
+    policy_env.save_settings(settings_data)
+    target = policy_env.root.parent / "outside.txt"
+    target.write_text("secret", encoding="utf-8")
+
+    result = json.loads(file_ops.file_read(str(target)))
+
+    assert result["status"] == "pending_access_grant"
+    assert result["reason_code"] == "access_grant_required"
+
+
 def test_filesystem_write_respects_default_confirmation(policy_env, monkeypatch):
     policy_env.save_settings(_settings_for_root(policy_env.root, mode="default"))
     monkeypatch.setattr(file_ops, "create_ticket", lambda **_kwargs: SimpleNamespace(id="ticket-123"))

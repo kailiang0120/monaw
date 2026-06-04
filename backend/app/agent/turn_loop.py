@@ -556,7 +556,12 @@ def _tool_error_code(tool_output: str) -> str:
 
 
 def _extract_image_attachments(tool_name: str, tool_output: str) -> list[dict]:
-    if tool_name not in {"browser_snapshot", "browser_screenshot", "browser_full_page_screenshot", "desktop_snapshot", "screenshot"}:
+    if tool_name not in {
+        "browser_snapshot",
+        "browser_screenshot",
+        "browser_full_page_screenshot",
+        "computer_functions_get_window_state",
+    }:
         return []
     payload = _parse_tool_json(tool_output)
     screenshot = payload.get("screenshot") if isinstance(payload.get("screenshot"), dict) else {}

@@ -1060,7 +1060,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
                 "count": len(elements),
                 "method": "uia",
                 "matched_window": matched_window,
-                "coordinate_hint": "Use element.center.x and element.center.y with click, or prefer click_ui_element.",
+                "coordinate_hint": "Use element.center.x and element.center.y with computer_functions_act, or prefer a fresh state_id UIA action.",
                 "policy_source": "settings.json",
             })
 
@@ -1097,7 +1097,7 @@ def _screen_click(x: int, y: int, button: str = "left", *, _bypass_gate: bool = 
         pending = _permission_result(
             ActionType.CLICK,
             f"Screen click at ({x}, {y})",
-            tool_name="ctrl_screen_click",
+            tool_name="computer_functions_screen_click",
             action_type="click",
             input_str=json.dumps({"x": x, "y": y, "button": button}),
             payload_args={"x": x, "y": y, "button": button},
@@ -1192,7 +1192,7 @@ def _precision_click(
         pending = _permission_result(
             ActionType.CLICK,
             f"Precision click at ({mapped['x']}, {mapped['y']}) from {mapping['coordinate_mode']} coordinates",
-            tool_name="precision_click",
+            tool_name="computer_functions_precision_click",
             action_type="click",
             input_str=json.dumps(payload_args),
             payload_args=payload_args,
@@ -1256,7 +1256,7 @@ def _screen_type(
         pending = _permission_result(
             ActionType.TYPE,
             f"Type text: {text[:40]}...",
-            tool_name="ctrl_screen_type",
+            tool_name="computer_functions_screen_type",
             action_type="type",
             input_str=json.dumps(payload_args, ensure_ascii=False, sort_keys=True),
             payload_args=payload_args,
@@ -1573,7 +1573,7 @@ def _ctrl_hotkey(
         pending = _permission_result(
             ActionType.TYPE,
             f"Send hotkey: {keys}",
-            tool_name="hotkey",
+            tool_name="computer_functions_hotkey",
             action_type="type",
             input_str=json.dumps(payload_args, ensure_ascii=False, sort_keys=True),
             payload_args=payload_args,
@@ -1711,7 +1711,7 @@ def _ctrl_window_action(
             pending = _permission_result(
                 ActionType.CLICK,
                 f"Window action '{action}' on {window_title}",
-                tool_name="window_action",
+                tool_name="computer_functions_window_action",
                 action_type="click",
                 target_app=target_app,
                 input_str=json.dumps(
@@ -1786,7 +1786,7 @@ def _ctrl_scroll(direction: str = "down", clicks: int = 3, x: int = -1, y: int =
         pending = _permission_result(
             ActionType.CLICK,
             f"Scroll {direction} by {clicks}",
-            tool_name="scroll",
+            tool_name="computer_functions_scroll",
             action_type="click",
             input_str=json.dumps({"direction": direction, "clicks": clicks, "x": x, "y": y}),
             payload_args={"direction": direction, "clicks": clicks, "x": x, "y": y},
@@ -1824,7 +1824,7 @@ def _ctrl_double_click(x: int, y: int, button: str = "left", *, _bypass_gate: bo
         pending = _permission_result(
             ActionType.CLICK,
             f"Double-click at ({x}, {y})",
-            tool_name="ctrl_screen_click",
+            tool_name="computer_functions_screen_click",
             action_type="click",
             input_str=json.dumps({"x": x, "y": y, "button": button, "clicks": 2}),
             payload_args={"x": x, "y": y, "button": button, "clicks": 2},
@@ -1867,7 +1867,7 @@ def _ctrl_clipboard(action: str = "read", text: str = "", *, _bypass_gate: bool 
         pending = _permission_result(
             permission_action,
             f"Clipboard {action}",
-            tool_name="ctrl_clipboard",
+            tool_name="computer_functions_clipboard",
             action_type=permission_action.value,
             input_str=json.dumps({"action": action, "text": text}),
             payload_args={"action": action, "text": text},
@@ -1937,7 +1937,7 @@ def _ctrl_drag(start_x: int, start_y: int, end_x: int, end_y: int, button: str =
         pending = _permission_result(
             ActionType.CLICK,
             f"Drag from ({start_x}, {start_y}) to ({end_x}, {end_y})",
-            tool_name="drag",
+            tool_name="computer_functions_drag",
             action_type="click",
             input_str=json.dumps(
                 {
@@ -2263,13 +2263,13 @@ register_executor("ctrl_copy", _resume_copy)
 register_executor("ctrl_rename", _resume_rename)
 register_executor("ctrl_delete", _resume_delete)
 register_executor("ctrl_interact_app", _resume_interact_app)
-register_executor("ctrl_screen_click", _resume_screen_click)
-register_executor("precision_click", _resume_precision_click)
-register_executor("ctrl_screen_type", _resume_screen_type)
-register_executor("hotkey", _resume_hotkey)
-register_executor("window_action", _resume_window_action)
-register_executor("scroll", _resume_scroll)
-register_executor("drag", _resume_drag)
+register_executor("computer_functions_screen_click", _resume_screen_click)
+register_executor("computer_functions_precision_click", _resume_precision_click)
+register_executor("computer_functions_screen_type", _resume_screen_type)
+register_executor("computer_functions_hotkey", _resume_hotkey)
+register_executor("computer_functions_window_action", _resume_window_action)
+register_executor("computer_functions_scroll", _resume_scroll)
+register_executor("computer_functions_drag", _resume_drag)
 
 
 def _resume_clipboard_write(input_str: str) -> str:
@@ -2281,7 +2281,7 @@ def _resume_clipboard_write(input_str: str) -> str:
     )
 
 
-register_executor("ctrl_clipboard", _resume_clipboard_write)
+register_executor("computer_functions_clipboard", _resume_clipboard_write)
 
 
 # ── Build tools ───────────────────────────────────────────────────────────────

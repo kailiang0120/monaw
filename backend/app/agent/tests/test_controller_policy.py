@@ -249,6 +249,49 @@ class TestUnifiedSettingsPermissions:
         assert dec.blocked
         assert dec.reason_code == "path_not_permitted"
 
+    @pytest.mark.parametrize("action", [ActionType.READ, ActionType.MUTATE, ActionType.EXEC])
+    def test_settings_json_unknown_path_requires_access_grant_before_action_prompt(
+        self,
+        tmp_policy,
+        tmp_path,
+        action,
+    ):
+        import app.agent.controller_policy as cp
+
+        target = tmp_path / "outside" / "secret.txt"
+        target.parent.mkdir()
+        target.write_text("secret", encoding="utf-8")
+
+        settings_data = AgentSettings()
+        settings_data.permissions.mode = "default"
+        settings_data.permissions.blocked_roots = []
+        settings_data.permissions.path_rules = []
+        save_agent_settings(settings_data, settings_path=cp._POLICY_DIR.parent / "settings.json")
+
+        dec = resolve_permission(action, target_path=str(target))
+
+        assert dec.requires_access_grant
+        assert not dec.requires_confirmation
+        assert dec.reason_code == "access_grant_required"
+
+    def test_settings_json_unknown_path_allowed_in_full_access(self, tmp_policy, tmp_path):
+        import app.agent.controller_policy as cp
+
+        target = tmp_path / "outside" / "notes.txt"
+        target.parent.mkdir()
+        target.write_text("ok", encoding="utf-8")
+
+        settings_data = AgentSettings()
+        settings_data.permissions.mode = "full_access"
+        settings_data.permissions.blocked_roots = []
+        settings_data.permissions.path_rules = []
+        save_agent_settings(settings_data, settings_path=cp._POLICY_DIR.parent / "settings.json")
+
+        dec = resolve_permission(ActionType.READ, target_path=str(target))
+
+        assert dec.allowed
+        assert not dec.requires_access_grant
+
     def test_settings_json_app_rule_blocks_launch(self, tmp_policy):
         import app.agent.controller_policy as cp
 

@@ -1,28 +1,33 @@
 ---
 name: computer-use
-description: "Windows computer use: apps, windows, processes, screenshots, mouse, keyboard, clipboard, and UI automation."
-version: 1.0.0
+description: "Windows computer use through computer_functions tools: app/window discovery, state capture, batched input, clipboard, processes, and diagnostics."
+version: 2.0.0
 enabled_by_default: true
 tier: recommended
 os:
   - windows
 ---
 
-Use these tools for Windows computer use.
+Use these tools for Windows computer-use tasks.
 
-When to use:
-- Launching or focusing applications.
-- Inspecting windows or processes.
-- Mouse, keyboard, clipboard, and screenshots.
+Preferred flow:
+- Call `computer_functions_list_apps` to inspect configured/running apps.
+- Resolve exactly one target with `computer_functions_get_window`.
+- Capture state with `computer_functions_get_window_state`; use `include_text=true` when UIA elements may help.
+- Act with one `computer_functions_act` batch, then verify with another `computer_functions_get_window_state`.
 
 Rules:
-- Prefer window and process tools before coordinate input.
-- Use screenshots before clicking unknown coordinates.
+- Use browser tools for websites. Do not use desktop control for normal browser automation.
+- Prefer window-relative coordinates and UIA element indexes from a fresh `state_id`.
+- Batch related click/type/key/scroll/drag actions in `computer_functions_act` instead of calling one tool per input.
+- Do not interact with terminal apps, Codex, Monaw, password managers, security tools, or system security/privacy dialogs.
+- If a window is ambiguous, inspect apps/windows again and choose one exact target before acting.
 
-Tips:
-- Prefer `inspect_ui(app="teams")` then `click_ui_element(...)` for Teams, Outlook, and other accessible Windows apps.
-- Use `screen_info()` or the `region` returned by `screenshot()` before pixel-based clicking.
-- Use `precision_click(coordinate_mode="screenshot" | "window" | "monitor" | "normalized", ...)` instead of raw `click()` when coordinates came from an image, window, or monitor region.
-- For scrollable panes, call `scroll(x=..., y=...)` so the wheel event is sent over the intended list.
-- Use `type_text(text="new text", clear=true)` to replace text in a field.
-- Use `hotkey(keys="f5")` to reload if a page is loading slowly.
+Action types supported by `computer_functions_act`:
+- `launch_app`: launch an app by configured alias.
+- `click`: click window-relative coordinates by default.
+- `type_text`: type text into the focused target window; use `clear=true` to replace focused text.
+- `press_key`: send a key or key chord such as `Return`, `Escape`, `Control_L+a`, or `Alt+f4`.
+- `scroll`: scroll from a window-relative point.
+- `drag`: drag between window-relative points.
+- `set_value`, `select_option`, `invoke`, `secondary_action`: use `element_index` from the latest `state_id`.

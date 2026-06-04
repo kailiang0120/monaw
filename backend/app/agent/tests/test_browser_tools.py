@@ -18,6 +18,7 @@ from app.skills.browser_use.tools import (
     _score_reusable_tab,
     browser_click,
     browser_full_page_screenshot,
+    browser_find,
     browser_get_element,
     browser_navigate,
     browser_snapshot,
@@ -81,6 +82,49 @@ def test_choose_reusable_tab_rejects_unrelated_hosts():
     ]
 
     assert _choose_reusable_tab("https://mail.google.com", tabs) is None
+
+
+def test_browser_read_only_tools_are_repeat_safe_observations():
+    registered = []
+    register_tools(registered, SimpleNamespace(browser={}))
+    by_name = {tool["name"]: tool for tool in registered}
+
+    for name in ("browser_find", "browser_get_element", "browser_extract_text"):
+        metadata = by_name[name]["metadata"]
+        assert metadata["observation"] is True
+        assert metadata["mutates_state"] is False
+        assert metadata["risk_level"] == "low"
+
+
+def test_browser_find_short_label_matches_label_token_not_substring():
+    class FakePage:
+        async def evaluate(self, script, selector, limit):  # noqa: ARG002
+            return json.dumps(
+                {
+                    "elements": [
+                        {"ref": "b1", "tag": "a", "role": "button", "aria_label": "Support", "labels": ["Support"]},
+                        {"ref": "b2", "tag": "input", "role": "textbox", "aria_label": "To", "labels": ["To"]},
+                    ]
+                }
+            )
+
+    class FakeManager:
+        def __init__(self):
+            self.page = FakePage()
+
+        async def ensure_browser(self, mode="auto", profile_directory=""):  # noqa: ARG002
+            return SimpleNamespace()
+
+        async def get_page(self, target_id="", index=None, create_if_missing=False):  # noqa: ARG002
+            return self.page
+
+        async def page_metadata(self, page):  # noqa: ARG002
+            return {"url": "https://mail.google.com"}
+
+    result = json.loads(asyncio.run(browser_find(FakeManager(), label="To")))
+
+    assert result["count"] == 1
+    assert result["matches"][0]["ref"] == "b2"
 
 
 def test_browser_navigate_honors_wait_until():

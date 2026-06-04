@@ -60,13 +60,10 @@ def _browser_tool_policy(tool_names: set[str]) -> str:
 def _computer_use_tool_policy(tool_names: set[str]) -> str:
     has_desktop = bool(
         {
-            "screen_info",
-            "inspect_ui",
-            "click_ui_element",
-            "precision_click",
-            "screenshot",
-            "click",
-            "scroll",
+            "computer_functions_list_apps",
+            "computer_functions_get_window",
+            "computer_functions_get_window_state",
+            "computer_functions_act",
         }
         & tool_names
     )
@@ -75,11 +72,11 @@ def _computer_use_tool_policy(tool_names: set[str]) -> str:
 
     lines = [
         "## Computer Use Policy",
-        "- For Windows computer-use tasks, prefer `inspect_ui` and `click_ui_element` when accessible element data is available.",
-        "- Use `screen_info` or the `screenshot` region metadata before screenshot-based coordinate clicks; account for virtual-screen origin and multi-monitor offsets.",
-        "- Use `precision_click` for screenshot, window, monitor, or normalized coordinates instead of manually converting pixels to raw `click` coordinates.",
-        "- For scrollable panes, pass `x` and `y` to `scroll` so the wheel targets the intended list or panel.",
-        "- After any computer-use click, type, or scroll, verify the new state with `inspect_ui`, `screenshot`, or `list_windows` before continuing.",
+        "- For Windows computer-use tasks, use `computer_functions_list_apps`, then resolve one window with `computer_functions_get_window`.",
+        "- Inspect with `computer_functions_get_window_state` before acting; request `include_text=true` when UIA elements are useful.",
+        "- Use `computer_functions_act` for ordered click, type, key, scroll, drag, or UIA batches against one target window.",
+        "- Prefer window-relative coordinates and fresh `state_id` values over absolute screen coordinates.",
+        "- After a computer action batch, verify with `computer_functions_get_window_state` before continuing.",
     ]
     return "\n".join(lines)
 

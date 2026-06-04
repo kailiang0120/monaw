@@ -43,13 +43,19 @@ def test_build_skill_prompt_omits_browser_policy_without_chrome_snapshot():
     assert "## Browser Tool Policy" not in prompt
 
 
-def test_build_skill_prompt_instructs_desktop_precision_clicking():
+def test_build_skill_prompt_instructs_computer_functions_flow():
     prompt = build_skill_prompt(
         [SkillSpec(slug="computer-use", name="computer-use", description="Desktop", version="1.0.0", body="", path=None)],  # type: ignore[arg-type]
-        {"screen_info", "inspect_ui", "click_ui_element", "precision_click", "scroll"},
+        {
+            "computer_functions_list_apps",
+            "computer_functions_get_window",
+            "computer_functions_get_window_state",
+            "computer_functions_act",
+        },
     )
 
     assert "## Computer Use Policy" in prompt
-    assert "inspect_ui" in prompt
-    assert "precision_click" in prompt
-    assert "pass `x` and `y` to `scroll`" in prompt
+    assert "computer_functions_list_apps" in prompt
+    assert "computer_functions_get_window_state" in prompt
+    assert "computer_functions_act" in prompt
+    assert "window-relative coordinates" in prompt

@@ -93,10 +93,9 @@ class TestResumeApprovedTicket:
         result = resume_approved_ticket(t)
         assert t.status == TicketStatus.PENDING
 
-    def test_kill_process_resume_executor_handles_legacy_payload(self, monkeypatch):
-        from app.skills.computer_use import tools as desktop_tools
+    def test_computer_functions_kill_process_resume_executor(self, monkeypatch):
+        desktop_tools = importlib.import_module("app.skills.computer_use.tools")
 
-        desktop_tools = importlib.reload(desktop_tools)
         calls = []
 
         def fake_terminate(name_or_pid: str, force: bool = False) -> str:
@@ -107,9 +106,10 @@ class TestResumeApprovedTicket:
             })
 
         monkeypatch.setattr(desktop_tools, "_terminate_process", fake_terminate)
-        assert "kill_process" in get_registered_executors()
+        register_executor("computer_functions_kill_process", desktop_tools._resume_computer_functions_kill_process)
+        assert "computer_functions_kill_process" in get_registered_executors()
 
-        t = create_ticket(tool_name="kill_process", payload={"name_or_pid": "1234", "force": True})
+        t = create_ticket(tool_name="computer_functions_kill_process", payload={"name_or_pid": "1234", "force": True})
         approve_ticket(t.id)
 
         result = resume_approved_ticket(t)

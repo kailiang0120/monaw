@@ -139,10 +139,10 @@ def test_can_parallelize_never_parallel():
     assert len(batches) == 2
 
 
-def test_precision_click_is_never_parallelized():
+def test_computer_functions_actions_are_never_parallelized():
     calls = [
-        {"name": "precision_click", "arguments": {"x": 10, "y": 20}},
-        {"name": "scroll", "arguments": {"direction": "down"}},
+        {"name": "computer_functions_act", "arguments": {"actions": [{"type": "click", "x": 10, "y": 20}]}},
+        {"name": "computer_functions_activate_window", "arguments": {"hwnd": 123}},
     ]
     batches = can_parallelize(calls)
     assert batches == [[calls[0]], [calls[1]]]

@@ -1875,10 +1875,10 @@ def test_turn_loop_appends_vision_fallback_for_text_only_model():
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def test_extract_image_attachments_supports_desktop_snapshot():
+def test_extract_image_attachments_supports_computer_window_state():
     output = json.dumps({"status": "ok", "screenshot": {"path": r"C:\tmp\desktop.png"}})
 
-    assert _extract_image_attachments("desktop_snapshot", output) == [
+    assert _extract_image_attachments("computer_functions_get_window_state", output) == [
         {"path": r"C:\tmp\desktop.png", "mime_type": "image/png"}
     ]
 
@@ -2254,7 +2254,7 @@ def test_turn_loop_allows_repeated_metadata_observation_tool_calls():
                 tool_calls=[
                     ToolCallRequest(
                         call_id=f"observe-{self.calls}",
-                        tool_name="list_windows",
+                        tool_name="computer_functions_list_apps",
                         arguments={},
                     )
                 ],
@@ -2264,10 +2264,10 @@ def test_turn_loop_allows_repeated_metadata_observation_tool_calls():
     registry = ToolRegistry(
         [
             {
-                "name": "list_windows",
+                "name": "computer_functions_list_apps",
                 "description": "List windows",
                 "parameters": {"type": "object", "properties": {}, "required": []},
-                "callable": lambda: json.dumps([{"hwnd": 1, "title": "AI Agent"}]),
+                "callable": lambda: json.dumps({"status": "ok", "apps": [{"id": "monaw", "windows": [{"hwnd": 1, "title": "AI Agent"}]}]}),
                 "domain": "desktop",
                 "execution_mode": "sync_stateless",
                 "affinity_group": None,
@@ -2295,7 +2295,7 @@ def test_turn_loop_allows_repeated_metadata_observation_tool_calls():
 
     assert llm.calls == 4
     assert len(tool_end_outputs) == 3
-    assert all(isinstance(output, list) for output in tool_end_outputs)
+    assert all(output["status"] == "ok" for output in tool_end_outputs)
     assert events[-1]["data"]["summary"] == "Window inspection complete."
 
 

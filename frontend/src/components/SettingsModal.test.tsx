@@ -9,7 +9,15 @@ import {
   updateSettings,
   updateWorkspaceInstructions,
 } from '../lib/api/settings'
-import { fetchMemories, fetchMemoryFile, fetchMemoryStats } from '../lib/api/memories'
+import {
+  fetchMemoryCandidates,
+  fetchMemoryCheckpoints,
+  fetchMemoryEpisodes,
+  fetchMemories,
+  fetchMemoryFile,
+  fetchMemoryProfile,
+  fetchMemoryStats,
+} from '../lib/api/memories'
 import { SettingsModal } from '../features/settings/SettingsModal'
 
 const mocks = vi.hoisted(() => ({
@@ -27,10 +35,15 @@ const mocks = vi.hoisted(() => ({
   fetchMemories: vi.fn(),
   fetchMemoryFile: vi.fn(),
   fetchMemoryStats: vi.fn(),
+  fetchMemoryProfile: vi.fn(),
+  fetchMemoryCandidates: vi.fn(),
+  fetchMemoryEpisodes: vi.fn(),
+  fetchMemoryCheckpoints: vi.fn(),
   searchMemories: vi.fn(),
   createMemory: vi.fn(),
   updateMemory: vi.fn(),
   deleteMemory: vi.fn(),
+  updateMemoryCandidate: vi.fn(),
 }))
 
 vi.mock('../lib/api/diagnostics', () => ({
@@ -80,12 +93,17 @@ vi.mock('../lib/api/memories', () => ({
   fetchMemories: mocks.fetchMemories,
   fetchMemoryFile: mocks.fetchMemoryFile,
   fetchMemoryStats: mocks.fetchMemoryStats,
+  fetchMemoryProfile: mocks.fetchMemoryProfile,
+  fetchMemoryCandidates: mocks.fetchMemoryCandidates,
+  fetchMemoryEpisodes: mocks.fetchMemoryEpisodes,
+  fetchMemoryCheckpoints: mocks.fetchMemoryCheckpoints,
   searchMemories: mocks.searchMemories,
   createMemory: mocks.createMemory,
   updateMemory: mocks.updateMemory,
   deleteMemory: mocks.deleteMemory,
   saveMemoryFile: vi.fn(),
   updateSection: vi.fn(),
+  updateMemoryCandidate: mocks.updateMemoryCandidate,
 }))
 
 function buildMemoryStats(overrides: Record<string, unknown> = {}) {
@@ -432,10 +450,28 @@ describe('SettingsModal', () => {
     vi.mocked(fetchMemories).mockResolvedValue([])
     vi.mocked(fetchMemoryFile).mockResolvedValue(null)
     vi.mocked(fetchMemoryStats).mockResolvedValue(buildMemoryStats() as any)
+    vi.mocked(fetchMemoryProfile).mockResolvedValue([])
+    vi.mocked(fetchMemoryCandidates).mockResolvedValue([])
+    vi.mocked(fetchMemoryEpisodes).mockResolvedValue([])
+    vi.mocked(fetchMemoryCheckpoints).mockResolvedValue([])
     mocks.searchMemories.mockResolvedValue([])
     mocks.createMemory.mockResolvedValue(buildMemoryRecord())
     mocks.updateMemory.mockResolvedValue(buildMemoryRecord())
     mocks.deleteMemory.mockResolvedValue(undefined)
+    mocks.updateMemoryCandidate.mockResolvedValue({
+      id: 'candidate-1',
+      category: 'preference',
+      content: 'Candidate memory',
+      confidence: 0.9,
+      importance: 5,
+      kind: 'fact',
+      status: 'approved',
+      reason: 'turn_feature_extract',
+      source_conversation_id: 'conv-1',
+      source_message_id: null,
+      created_at: '2026-05-08T00:00:00Z',
+      updated_at: '2026-05-08T00:00:00Z',
+    })
     delete (window as any).electronAPI
   })
 
@@ -728,15 +764,35 @@ describe('SettingsModal', () => {
 
     fireEvent.click((await screen.findAllByRole('button', { name: /Memory/i }))[0])
     expect((await screen.findAllByText('Memory one')).length).toBeGreaterThan(0)
-    expect(screen.getByText('Summaries')).toBeInTheDocument()
-    expect(screen.getByText('Profiles')).toBeInTheDocument()
-    expect(screen.getByText('Curated')).toBeInTheDocument()
+    expect(screen.getByText('Candidates')).toBeInTheDocument()
+    expect(screen.getByText('Episodes')).toBeInTheDocument()
+    expect(screen.getByText('Context')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
 
     expect((await screen.findAllByText('Memory two')).length).toBeGreaterThan(0)
     expect(fetchMemories).toHaveBeenCalledTimes(2)
     expect(fetchMemoryStats).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows a memory skeleton while the memory panel is loading', async () => {
+    let resolveMemories: ((value: any) => void) | null = null
+    vi.mocked(fetchMemories).mockReturnValue(
+      new Promise((resolve) => {
+        resolveMemories = resolve
+      }) as any,
+    )
+    vi.mocked(fetchMemoryStats).mockResolvedValue(buildMemoryStats() as any)
+    vi.mocked(fetchMemoryFile).mockResolvedValue(null as any)
+
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /Memory/i }))[0])
+    expect(await screen.findByTestId('memory-loading-skeleton')).toBeInTheDocument()
+
+    resolveMemories?.([buildMemoryRecord({ id: 'memory-loaded', content: 'Loaded memory' })])
+
+    expect((await screen.findAllByText('Loaded memory')).length).toBeGreaterThan(0)
   })
 
   it('does not submit manual memories shorter than the backend quality gate', async () => {

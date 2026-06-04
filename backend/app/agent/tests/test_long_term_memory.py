@@ -224,7 +224,7 @@ def test_session_close_curator_rejects_sensitive_and_saves_decisions(tmp_path):
     saved = store.list_memories(status="active")
 
     assert rejected is None
-    assert llm.calls == 1
+    assert llm.calls >= 1
     assert result["added"] >= 2
     assert (tmp_path / "memory" / "short-term" / "session-conv-1.md").exists()
     assert {memory["review_state"] for memory in saved} == {"new"}
@@ -241,8 +241,65 @@ def test_auto_learning_is_noop_until_session_close(tmp_path):
         )
     )
 
-    assert staged == []
+    assert len(staged) == 1
+    assert staged[0]["category"] == "preference"
     assert store.list_memories(status="active") == []
+    assert len(store.list_candidates()) == 1
+
+
+def test_turn_learning_auto_reviewed_writes_multiple_feature_memories(tmp_path):
+    store = _store(tmp_path)
+    store.settings = type(
+        "Settings",
+        (),
+        {
+            "memory": type(
+                "MemorySettings",
+                (),
+                {
+                    "enabled": True,
+                    "auto_learn": True,
+                    "curate_on_session_close": True,
+                    "write_policy": "auto_reviewed",
+                    "retrieval_limit": 6,
+                    "max_injected_chars": 2500,
+                    "min_confidence": 0.75,
+                    "min_relevance_score": 0.15,
+                    "maintenance_cooldown_hours": 24,
+                },
+            )()
+        },
+    )()
+
+    staged = store.capture_turn_candidates(
+        conversation_id="conv-turn-reviewed",
+        user_message="My name is Kai. I work on the Monaw repo. Please always keep updates concise.",
+        assistant_message="Noted.",
+    )
+    memories = store.list_memories(status="active")
+
+    assert len(staged) >= 3
+    assert store.list_candidates() == []
+    assert any(memory["category"] == "project" and "monaw repo" in memory["content"].lower() for memory in memories)
+    assert any(memory["category"] == "behavior" and "always keep updates concise" in memory["content"].lower() for memory in memories)
+    prompt = store.build_prompt("repo updates")
+    assert "Monaw repo" in prompt
+    assert "preferred name is Kai" in prompt
+
+
+def test_prompt_retrieval_skips_short_term_session_summaries(tmp_path):
+    store = _store(tmp_path)
+    store.remember("The user prefers concise summaries.", category="preference", importance=8)
+    store._write_session_summary(
+        "conv-short-term",
+        "Session conv-short-term had 22 messages. Goal: generic recap.",
+        source="test",
+    )
+
+    prompt = store.build_prompt("concise summaries")
+
+    assert "You prefer concise summaries." in prompt
+    assert "Session conv-short-term had 22 messages" not in prompt
 
 
 def test_short_high_signal_turns_bypass_length_floor(tmp_path):

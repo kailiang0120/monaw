@@ -32,6 +32,10 @@ _OBSERVATION_TOOLS = {
     "browser_screenshot",
     "browser_tabs",
     "browser_wait",
+    "computer_functions_list_apps",
+    "computer_functions_get_window",
+    "computer_functions_get_window_state",
+    "computer_functions_diagnose",
     "datetime",
     "calculator",
     "file_reader",
@@ -44,13 +48,10 @@ _OBSERVATION_TOOLS = {
 _HIGH_RISK_PREFIXES = ("mcp_",)
 _HIGH_RISK_TOOLS = {
     "exec",
-    "launch_app",
-    "kill_process",
+    "computer_functions_act",
+    "computer_functions_kill_process",
     "browser_evaluate",
-    "window_action",
-    "focus_window",
-    "click_ui_element",
-    "precision_click",
+    "computer_functions_activate_window",
 }
 _MEDIUM_RISK_TOOLS = {
     "browser_click",
@@ -147,7 +148,7 @@ class ToolPolicy:
         return "low"
 
     def requires_approval(self, tool_name: str, tool: dict | None = None) -> bool:
-        if tool_name in {"exec", "launch_app", "kill_process"}:
+        if tool_name in {"exec", "computer_functions_act", "computer_functions_kill_process"}:
             return True
         if tool and bool(tool.get("requires_approval", False)):
             return True

@@ -13,7 +13,7 @@ def _store(tmp_path) -> tuple[Database, LongTermMemory]:
     return db, LongTermMemory(db=db, memory_root=tmp_path / "memory")
 
 
-def test_close_session_archives_hot_messages_and_creates_markdown_reflection(tmp_path):
+def test_close_session_archives_hot_messages_and_keeps_session_summary_out_of_durable_results(tmp_path):
     db, store = _store(tmp_path)
     db.create_conversation("conv-close", "Close")
     for index in range(60):
@@ -33,7 +33,8 @@ def test_close_session_archives_hot_messages_and_creates_markdown_reflection(tmp
     assert set(result["maintenance"]) == {"archived_stale", "merged", "promoted", "demoted", "skipped"}
     assert result["hot_messages_after"] == 10
     assert db.count_archived_messages("conv-close") == 50
-    assert len(reflections) >= 1
+    assert reflections == []
+    assert result["reflection_id"] is not None
     assert (tmp_path / "memory" / "short-term" / "session-conv-close.md").exists()
     episodes = store.list_episodes(conversation_id="conv-close")
     assert len(episodes) == 1
