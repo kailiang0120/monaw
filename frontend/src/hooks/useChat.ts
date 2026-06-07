@@ -190,17 +190,19 @@ export function useChat(conversationId: string | null) {
       const res = await fetchMessages(targetConversationId, OLDER_HISTORY_LIMIT, beforeId)
       if (conversationIdRef.current !== targetConversationId) return
       const older = res.messages.map(savedMessageToMessage)
-      const existingIds = new Set(messages.map((message) => message.id))
-      const uniqueOlder = older.filter((message) => !existingIds.has(message.id))
       const nextCursor = Number(res.next_before_id)
+      // Drive continuation off the server's has_more plus a strictly-advancing
+      // cursor — not off how many rows were new to the current (possibly stale)
+      // `messages` snapshot, which would wrongly halt pagination on an
+      // all-duplicate page even when older history remains. The advancing-cursor
+      // check still guards against an infinite loop.
       const nextCursorAdvances = Number.isFinite(nextCursor) && nextCursor < beforeId
-      const madeProgress = uniqueOlder.length > 0 && nextCursorAdvances
       setMessages((prev) => {
         const currentIds = new Set(prev.map((message) => message.id))
         return [...older.filter((message) => !currentIds.has(message.id)), ...prev]
       })
-      historyCursorRef.current = madeProgress ? nextCursor : null
-      setHasMoreHistory(res.has_more && madeProgress)
+      historyCursorRef.current = nextCursorAdvances ? nextCursor : null
+      setHasMoreHistory(res.has_more && nextCursorAdvances)
     } catch {
       // Keep the visible conversation intact; the user can retry loading older history.
     } finally {
@@ -248,7 +250,6 @@ export function useChat(conversationId: string | null) {
         queue: '',
         timer: null as ReturnType<typeof setTimeout> | null,
         done: null as StreamDonePayload | null,
-        ready: false,
         stopped: false,
       }
 
@@ -261,9 +262,13 @@ export function useChat(conversationId: string | null) {
 
       const cleanupTypewriter = () => {
         typewriter.stopped = true
+        clearTypewriterTimer()
+        // Flush any buffered tokens into the message before discarding the queue
+        // so a stream that ends via error/timeout/stop doesn't drop the partial answer.
+        const pending = typewriter.queue
         typewriter.queue = ''
         typewriter.done = null
-        clearTypewriterTimer()
+        if (pending) appendAssistantContent(pending)
         if (typewriterCleanupRef.current === cleanupTypewriter) {
           typewriterCleanupRef.current = null
         }
@@ -342,14 +347,17 @@ export function useChat(conversationId: string | null) {
       const enqueueToken = (token: string) => {
         if (!token || typewriter.stopped) return
         typewriter.queue += token
-        if (typewriter.ready && !typewriter.timer) {
+        // Render tokens live as they stream in; the flush drains the queue and
+        // (once `done` is set) finalizes the message.
+        if (!typewriter.timer) {
           typewriter.timer = setTimeout(flushTypewriter, 0)
         }
       }
 
       const startTypewriter = () => {
         if (typewriter.stopped || typewriter.timer) return
-        typewriter.ready = true
+        // Kick a flush so a queue already fully drained before `done` arrived
+        // still triggers finalize via maybeFinalizeDone.
         typewriter.timer = setTimeout(flushTypewriter, 0)
       }
 

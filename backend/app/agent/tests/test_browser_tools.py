@@ -147,6 +147,37 @@ def test_browser_fetch_blocks_disallowed_domain():
     assert result["reason_code"] == "domain_not_allowed"
 
 
+def test_browser_fetch_blocks_loopback_host(monkeypatch):
+    # Even with no allowlist configured, SSRF guard must refuse loopback targets.
+    monkeypatch.setattr(
+        browser_tools_module,
+        "_fetch_http_with_scrapling",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fetch a blocked host")),
+    )
+    manager = SimpleNamespace(config={"allowed_domains": []})
+
+    result = json.loads(asyncio.run(browser_fetch(manager, "http://127.0.0.1:8000/admin", mode="http")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "blocked_host"
+
+
+def test_browser_fetch_blocks_cloud_metadata_ip(monkeypatch):
+    monkeypatch.setattr(
+        browser_tools_module,
+        "_fetch_http_with_scrapling",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fetch a blocked host")),
+    )
+    manager = SimpleNamespace(config={"allowed_domains": []})
+
+    result = json.loads(
+        asyncio.run(browser_fetch(manager, "http://169.254.169.254/latest/meta-data/", mode="http"))
+    )
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "blocked_host"
+
+
 def test_browser_fetch_auto_falls_back_to_dynamic_for_js_empty_page(monkeypatch):
     class StaticPage:
         status = 200

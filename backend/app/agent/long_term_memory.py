@@ -1402,7 +1402,16 @@ class LongTermMemory:
                 source_conversation_id=str(row.get("source_conversation_id") or ""),
                 source_message_id=row.get("source_message_id"),
             )
-            status = "approved" if memory is not None else "rejected"
+            # remember() returns None when the content fails the storability/safety
+            # filter. Surface that as an error rather than silently flipping a
+            # user-requested approval to "rejected"; leave the candidate as-is so
+            # the user can edit it or reject it explicitly.
+            if memory is None:
+                raise ValueError(
+                    "Candidate could not be stored: its content was rejected by the "
+                    "memory safety/quality filter."
+                )
+            status = "approved"
         with self._lock:
             self._db.execute(
                 "UPDATE memory_candidates SET status = ?, updated_at = ? WHERE id = ?",

@@ -47,6 +47,14 @@ SECRET_KEY_RE = re.compile(
 )
 BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}\b")
+# High-confidence secret/PII value patterns kept in sync with
+# long_term_memory._SENSITIVE_PATTERNS so secrets that the memory layer refuses to
+# store are not leaked verbatim into observability dumps. (key, replacement) pairs.
+_VALUE_REDACTIONS = (
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL), "[REDACTED PRIVATE KEY]"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED SSN]"),
+    (re.compile(r"\b(?:\d[ -]*?){13,16}\b"), "[REDACTED CARD]"),
+)
 
 
 @dataclass
@@ -153,6 +161,8 @@ def _to_int(value: Any) -> int:
 def _safe_preview(value: str, limit: int = MAX_TEXT_CHARS) -> str:
     text = BEARER_RE.sub("Bearer [REDACTED]", str(value or ""))
     text = OPENAI_KEY_RE.sub("sk-[REDACTED]", text)
+    for pattern, replacement in _VALUE_REDACTIONS:
+        text = pattern.sub(replacement, text)
     if len(text) > limit:
         return text[:limit] + "\n[truncated]"
     return text
@@ -232,6 +242,7 @@ class ObservabilityRecorder:
         self.db_path = root / "observability.sqlite3"
         self.pricing_path = root / "model_pricing.json"
         self._lock = threading.RLock()
+        self._connection: sqlite3.Connection | None = None
         self._ensure_dirs()
         self._init_db()
         self._ensure_pricing_file()
@@ -245,15 +256,25 @@ class ObservabilityRecorder:
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        # Reuse a single long-lived connection rather than opening/closing (and
+        # re-applying PRAGMAs) on every event. A turn fires dozens of events; the
+        # per-event connection churn was pure overhead. The RLock (held by every
+        # caller) serializes access, and busy_timeout hardens against contention.
+        with self._lock:
+            if self._connection is None:
+                conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                self._connection = conn
+            conn = self._connection
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def _init_db(self) -> None:
         with self._lock, self._connect() as conn:
@@ -385,16 +406,21 @@ class ObservabilityRecorder:
             pass
 
     def _enforce_storage_cap(self) -> None:
-        files = [path for path in self.root.rglob("*") if path.is_file() and path.name != self.db_path.name]
-        total = sum(path.stat().st_size for path in files)
+        # Stat each file once and reuse the result for the size sum, the mtime sort,
+        # and the per-file size, instead of calling stat() up to three times per file.
+        sized = [
+            (path, path.stat())
+            for path in self.root.rglob("*")
+            if path.is_file() and path.name != self.db_path.name
+        ]
+        total = sum(st.st_size for _path, st in sized)
         if total <= MAX_STORAGE_BYTES:
             return
-        for path in sorted(files, key=lambda item: item.stat().st_mtime):
+        for path, st in sorted(sized, key=lambda item: item[1].st_mtime):
             if total <= MAX_STORAGE_BYTES:
                 break
-            size = path.stat().st_size
             path.unlink(missing_ok=True)
-            total -= size
+            total -= st.st_size
 
     def start_run(
         self,
@@ -657,8 +683,10 @@ class ObservabilityRecorder:
                         ).fetchone()[0]
                     )
                 estimated_cost_usd, cost_source = self._estimate_cost(
-                    provider="",
-                    model="",
+                    # Reuse model/provider already fetched into `row` above instead of
+                    # making _estimate_cost re-SELECT the same run row.
+                    provider=str(row["provider"] or "") if row else "",
+                    model=str(row["model"] or "") if row else "",
                     usage=normalized_usage,
                     run_id=run_id,
                     conn=conn,
@@ -811,6 +839,7 @@ class ObservabilityRecorder:
             total_runs = int(totals["total_runs"] or 0)
             successful_runs = int(totals["successful_runs"] or 0)
             success_rate = (successful_runs / total_runs) if total_runs else 0
+            daily_trend = list(reversed(by_day))
             return {
                 "total_runs": total_runs,
                 "successful_runs": successful_runs,
@@ -820,8 +849,8 @@ class ObservabilityRecorder:
                 "estimated_cost_usd": float(totals["estimated_cost_usd"] or 0),
                 "average_duration_ms": int(totals["average_duration_ms"] or 0),
                 "tool_error_count": int(totals["tool_error_count"] or 0),
-                "token_usage_over_time": list(reversed(by_day)),
-                "duration_trend": list(reversed(by_day)),
+                "token_usage_over_time": daily_trend,
+                "duration_trend": daily_trend,
                 "top_error_reasons": error_reasons,
                 "top_failing_tools": failing_tools,
                 "model_usage": model_usage,
@@ -914,8 +943,8 @@ class ObservabilityRecorder:
                 )
             payload = _row_to_dict(run)
             payload["events"] = [self._decode_event(item) for item in events]
-            payload["errors"] = [self._decode_error(item) for item in errors]
-            payload["replays"] = [self._decode_replay(item) for item in replays]
+            payload["errors"] = [self._decode_metadata(item) for item in errors]
+            payload["replays"] = [self._decode_metadata(item) for item in replays]
             payload["tool_sequence"] = [
                 event.get("tool_name", "")
                 for event in payload["events"]
@@ -965,7 +994,7 @@ class ObservabilityRecorder:
                     """,
                     params,
                 )
-            return [self._decode_error(item) for item in rows]
+            return [self._decode_metadata(item) for item in rows]
         except Exception:
             return []
 
@@ -1125,24 +1154,17 @@ class ObservabilityRecorder:
         return [_row_to_dict(row) for row in conn.execute(sql, params).fetchall()]
 
     @staticmethod
-    def _decode_event(item: dict) -> dict:
+    def _decode_metadata(item: dict) -> dict:
         decoded = dict(item)
+        decoded["metadata"] = _json_loads(decoded.pop("metadata_json", "{}")) or {}
+        return decoded
+
+    @staticmethod
+    def _decode_event(item: dict) -> dict:
+        decoded = ObservabilityRecorder._decode_metadata(item)
         decoded["input"] = _json_loads(decoded.pop("input_json", ""))
         decoded["output"] = _json_loads(decoded.pop("output_json", ""))
         decoded["tokens"] = _json_loads(decoded.pop("tokens_json", ""))
-        decoded["metadata"] = _json_loads(decoded.pop("metadata_json", "{}")) or {}
-        return decoded
-
-    @staticmethod
-    def _decode_error(item: dict) -> dict:
-        decoded = dict(item)
-        decoded["metadata"] = _json_loads(decoded.pop("metadata_json", "{}")) or {}
-        return decoded
-
-    @staticmethod
-    def _decode_replay(item: dict) -> dict:
-        decoded = dict(item)
-        decoded["metadata"] = _json_loads(decoded.pop("metadata_json", "{}")) or {}
         return decoded
 
 

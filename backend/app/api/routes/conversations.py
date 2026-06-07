@@ -83,7 +83,7 @@ def _tool_call_preview(preview: object, original_length: object, limit: int) -> 
     return text.rstrip() + HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX
 
 
-def _full_tool_calls(db, *, message_id: int, limit: int | None) -> list[ToolCallOut]:
+def _full_tool_calls(rows, *, limit: int | None) -> list[ToolCallOut]:
     return [
         ToolCallOut(
             id=int(tc["id"]),
@@ -103,7 +103,7 @@ def _full_tool_calls(db, *, message_id: int, limit: int | None) -> list[ToolCall
             has_full_input=bool(str(tc.get("input") or "")),
             has_full_output=bool(str(tc.get("output") or "")),
         )
-        for tc in db.get_tool_calls_for_message(message_id)
+        for tc in rows
     ]
 
 
@@ -277,8 +277,13 @@ async def get_conversation_messages(
     result = []
     for msg in raw_messages:
         message_id = int(msg["id"])
+        # Fetch this message's full tool-call rows at most once and reuse them for
+        # both the ToolCallOut list (full mode) and attachment collection, instead
+        # of querying tool_calls twice for the same message.
+        full_tool_call_rows = None
         if resolved_tool_call_mode == TOOL_CALL_MODE_FULL:
-            tool_calls = _full_tool_calls(db, message_id=message_id, limit=tool_payload_limit)
+            full_tool_call_rows = db.get_tool_calls_for_message(message_id)
+            tool_calls = _full_tool_calls(full_tool_call_rows, limit=tool_payload_limit)
         elif resolved_tool_call_mode == TOOL_CALL_MODE_SUMMARY:
             tool_calls = _summary_tool_calls(db, message_id=message_id, limit=tool_payload_limit)
         else:
@@ -286,7 +291,9 @@ async def get_conversation_messages(
         stored_attachments = _stored_response_attachments(msg.get("attachments_json"))
         attachments = stored_attachments
         if attachments is None:
-            attachment_tool_calls = [dict(tc) for tc in db.get_tool_calls_for_message(message_id)]
+            if full_tool_call_rows is None:
+                full_tool_call_rows = db.get_tool_calls_for_message(message_id)
+            attachment_tool_calls = [dict(tc) for tc in full_tool_call_rows]
             attachments = (
                 collect_response_attachments(
                     content=msg["content"],
@@ -321,4 +328,4 @@ async def get_message_tool_calls(
     message = db.fetchone("SELECT id FROM messages WHERE id = ?", (message_id,))
     if message is None:
         raise HTTPException(status_code=404, detail="Message not found")
-    return _full_tool_calls(db, message_id=int(message["id"]), limit=None)
+    return _full_tool_calls(db.get_tool_calls_for_message(int(message["id"])), limit=None)

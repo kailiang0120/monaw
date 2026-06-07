@@ -6,7 +6,12 @@ from typing import Any
 from app.agent.access_grant_broker import create_grant_ticket
 from app.agent.approval_broker import create_ticket
 from app.agent.audit import AuditLogger
-from app.agent.controller_policy import ActionType, is_blocked_process_alias, resolve_permission
+from app.agent.controller_policy import (
+    ActionType,
+    is_blocked_process_alias,
+    is_screen_fallback_allowed,
+    resolve_permission,
+)
 from app.agent.execution_resume import register_executor
 from app.agent.settings_store import load_agent_settings
 from app.skills.computer_use import desktop_runtime, window_ops
@@ -32,14 +37,16 @@ _ACTION_METADATA = {
     "risk_level": "medium",
 }
 
-_BLOCKED_SELF_OR_TERMINAL = {
-    "cmd.exe",
-    "powershell.exe",
-    "pwsh.exe",
-    "windowsterminal.exe",
-    "wt.exe",
-    "codex.exe",
-    "monaw.exe",
+# Action kinds that _computer_functions_act dispatches through the screen-coordinate
+# primitives (precision_click/screen_type/ctrl_hotkey/ctrl_scroll/ctrl_drag). These
+# are gated by the screen-fallback policy; the UIA kinds (set_value/select_option/
+# invoke/secondary_action) go through _uia_interact_app and are gated by uia_allowed.
+_SCREEN_FALLBACK_ACTIONS = {
+    "click",
+    "type_text",
+    "press_key",
+    "scroll",
+    "drag",
 }
 
 
@@ -70,11 +77,35 @@ def _normalize_app_id(value: str) -> str:
 
 
 def _is_blocked_app(value: str) -> bool:
+    # controller_policy.BLOCKED_PROCESSES (via is_blocked_process_alias) is the single
+    # source of truth for blocked terminals/self processes; it handles basename and
+    # .exe-suffix matching internally.
     normalized = _normalize_app_id(value)
     if not normalized:
         return False
-    basename = normalized.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
-    return basename in _BLOCKED_SELF_OR_TERMINAL or is_blocked_process_alias(normalized)
+    return is_blocked_process_alias(normalized)
+
+
+# Title substrings that identify a blocked terminal/shell window when its owning
+# process name is unavailable (e.g. elevated/admin windows psutil cannot introspect,
+# which surface with process_name == "").
+_BLOCKED_TITLE_PATTERNS = (
+    "command prompt",
+    "powershell",
+    "windows terminal",
+)
+
+
+def _is_blocked_window(process_name: str, title: str = "") -> bool:
+    """Block by process name, falling back to terminal title patterns when the
+    process name could not be resolved, so an elevated shell window is not
+    surfaced as a targetable app/window."""
+    if _is_blocked_app(process_name):
+        return True
+    if not _normalize_app_id(process_name):
+        lowered = str(title or "").lower()
+        return any(pattern in lowered for pattern in _BLOCKED_TITLE_PATTERNS)
+    return False
 
 
 def _window_from_rect_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -118,7 +149,7 @@ def _computer_functions_list_apps(include_windows: bool = True) -> str:
     windows = _list_visible_windows() if include_windows else []
     for window in windows:
         app_id = _normalize_app_id(window.get("process_name") or window.get("title") or "unknown")
-        if _is_blocked_app(app_id):
+        if _is_blocked_window(str(window.get("process_name") or ""), str(window.get("title") or "")):
             continue
         app = apps.setdefault(
             app_id,
@@ -152,12 +183,12 @@ def _computer_functions_get_window(
             return json.dumps(result, ensure_ascii=False)
         window = _window_from_rect_payload(result)
         process = str(window.get("process_name") or window.get("app") or "")
-        if _is_blocked_app(process):
+        if _is_blocked_window(process, str(window.get("title") or "")):
             return json.dumps(
                 {
                     "status": "blocked",
                     "reason_code": "blocked_app",
-                    "error": f"Blocked app target: {process}",
+                    "error": f"Blocked app target: {process or window.get('title') or ''}",
                 },
                 ensure_ascii=False,
             )
@@ -173,7 +204,7 @@ def _computer_functions_get_window(
             continue
         if query_app and query_app not in process and query_app not in window_title:
             continue
-        if _is_blocked_app(process):
+        if _is_blocked_window(process, str(window.get("title") or "")):
             continue
         matches.append(_window_from_rect_payload(window))
 
@@ -321,8 +352,25 @@ def _permission_for_batch(
 ) -> dict[str, Any] | None:
     window = dict(window or {})
     target_app = str(target_app or window.get("process_name") or window.get("app") or window.get("title") or "")
-    if _is_blocked_app(target_app):
+    if _is_blocked_app(target_app) or _is_blocked_window(
+        str(window.get("process_name") or window.get("app") or ""), str(window.get("title") or "")
+    ):
         return {"status": "blocked", "reason_code": "blocked_app", "error": f"Blocked app target: {target_app}"}
+
+    # The act loop dispatches the screen-coordinate primitives with _bypass_gate=True,
+    # so the screen-fallback guard those primitives enforce never runs there. Re-check
+    # it here for any action that uses the screen-coordinate path.
+    uses_screen_fallback = any(
+        str(action.get("type") or "").strip().lower() in _SCREEN_FALLBACK_ACTIONS
+        for action in actions
+    )
+    if uses_screen_fallback and not is_screen_fallback_allowed(target_app or None):
+        return {
+            "status": "blocked",
+            "reason": "Screen fallback is disabled in settings.",
+            "reason_code": "screen_fallback_disabled",
+            "policy_source": "settings.json",
+        }
 
     needed: list[ActionType] = []
     for action in actions:

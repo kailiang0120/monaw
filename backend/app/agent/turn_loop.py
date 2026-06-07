@@ -9,7 +9,7 @@ import logging
 import mimetypes
 import time
 from collections import defaultdict
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable
 from urllib.parse import urlparse
 
 from app.agent.access_grant_broker import (
@@ -382,6 +382,17 @@ def _strip_json_fence(text: str) -> str:
     return "\n".join(lines[1:-1]).strip()
 
 
+def _coerce_final_answer_args(arguments: Any) -> dict | None:
+    """Return the arguments dict for a final_answer payload, decoding a JSON string
+    if needed; None when the payload is not a usable dict."""
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = {}
+    return arguments if isinstance(arguments, dict) else None
+
+
 def _json_text_as_final_answer(text: str) -> str | None:
     """Accept plain-text JSON only when it matches the final_answer schema."""
     content = _strip_json_fence(text)
@@ -403,24 +414,14 @@ def _json_text_as_final_answer(text: str) -> str | None:
 
     tool_name = str(payload.get("tool_name") or payload.get("name") or "").strip()
     if tool_name == FINAL_ANSWER_TOOL_NAME:
-        arguments = payload.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                arguments = {}
-        if isinstance(arguments, dict):
+        arguments = _coerce_final_answer_args(payload.get("arguments"))
+        if arguments is not None:
             return _final_answer_text(arguments, content)
 
     function_payload = payload.get("function")
     if isinstance(function_payload, dict) and str(function_payload.get("name") or "") == FINAL_ANSWER_TOOL_NAME:
-        arguments = function_payload.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                arguments = {}
-        if isinstance(arguments, dict):
+        arguments = _coerce_final_answer_args(function_payload.get("arguments"))
+        if arguments is not None:
             return _final_answer_text(arguments, content)
 
     return None
@@ -2466,13 +2467,6 @@ class TurnLoop:
                 status=run_status,
                 response_attachments=response_attachments,
             )
-            schedule_long_term_learning = getattr(self.memory, "schedule_long_term_learning", None)
-            if callable(schedule_long_term_learning):
-                schedule_long_term_learning(
-                    conversation_id=conversation_id,
-                    user_message=message,
-                    assistant_message=final_text,
-                )
             if completed_normally and not iteration_limit_hit and not budget_exhausted:
                 self.memory.clear_task_progress(conversation_id)
             self.observability.finish_run(
@@ -2511,6 +2505,21 @@ class TurnLoop:
                 "event": "done",
                 "data": done_data,
             })
+
+            # Per-turn long-term learning runs heuristic extraction plus blocking
+            # SQLite writes. Run it after the user-visible `done` and off the event
+            # loop so it neither delays completion nor stalls other conversations.
+            schedule_long_term_learning = getattr(self.memory, "schedule_long_term_learning", None)
+            if callable(schedule_long_term_learning):
+                try:
+                    await asyncio.to_thread(
+                        schedule_long_term_learning,
+                        conversation_id=conversation_id,
+                        user_message=message,
+                        assistant_message=final_text,
+                    )
+                except Exception:
+                    logger.exception("schedule_long_term_learning failed")
         except asyncio.CancelledError:
             partial_text = _assistant_message_on_cancel()
             try:

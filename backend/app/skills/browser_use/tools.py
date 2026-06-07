@@ -4,8 +4,10 @@ import asyncio
 import base64
 import html
 import inspect
+import ipaddress
 import json
 import re
+import socket
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -540,6 +542,51 @@ def _truncate_fetch_content(value: str, max_chars: int) -> tuple[str, bool]:
     return value[:limit], True
 
 
+def _ip_is_blocked_target(ip: ipaddress._BaseAddress) -> bool:
+    """Reject addresses that point at the host itself or internal networks
+    (loopback, link-local incl. cloud-metadata 169.254.169.254, private,
+    reserved, multicast, unspecified)."""
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _assert_fetch_host_public(host: str) -> None:
+    """Block SSRF: refuse hosts that are, or resolve to, non-public addresses."""
+    cleaned = (host or "").strip().lower().strip("[]")
+    if not cleaned:
+        raise ValueError("URL must include a host.")
+    # IP literal: check directly without a DNS lookup.
+    try:
+        if _ip_is_blocked_target(ipaddress.ip_address(cleaned)):
+            raise ValueError("URL host resolves to a non-public address.")
+        return
+    except ValueError as exc:
+        if "non-public" in str(exc):
+            raise
+    # Hostname: resolve and reject if ANY resolved address is non-public.
+    try:
+        infos = socket.getaddrinfo(cleaned, None, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise ValueError(f"Could not resolve URL host: {cleaned}") from exc
+    for info in infos:
+        sockaddr = info[4]
+        try:
+            if _ip_is_blocked_target(ipaddress.ip_address(sockaddr[0])):
+                raise ValueError("URL host resolves to a non-public address.")
+        except ValueError as exc:
+            if "non-public" in str(exc):
+                raise
+
+
 def _normalize_fetch_url(raw_url: str) -> str:
     value = str(raw_url or "").strip()
     if not value:
@@ -808,6 +855,19 @@ def _browser_fetch_sync(
             "url": normalized_url,
             "allowed_domains": allowed_domains,
             "error": "URL host is not in Settings -> Browser allowed domains.",
+        }
+
+    # SSRF guard: refuse hosts that resolve to internal/non-public addresses. Done
+    # after the (cheap, DNS-free) allowlist check and for every mode, so it covers
+    # the browser-render path too.
+    try:
+        _assert_fetch_host_public(urlparse(normalized_url).hostname or "")
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "reason_code": "blocked_host",
+            "url": normalized_url,
+            "error": str(exc),
         }
 
     normalized_mode = str(mode or "auto").strip().lower()

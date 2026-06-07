@@ -409,13 +409,14 @@ class MemoryManager:
                 "tokens_after": 0,
             }
         if not messages and existing_summary:
+            existing_summary_tokens = count_text_tokens(existing_summary, llm_client=self.llm_client)
             return {
                 "status": "unchanged",
                 "summary": existing_summary,
                 "message_count": 0,
                 "source_message_id": previous_source_id,
-                "tokens_before": count_text_tokens(existing_summary, llm_client=self.llm_client),
-                "tokens_after": count_text_tokens(existing_summary, llm_client=self.llm_client),
+                "tokens_before": existing_summary_tokens,
+                "tokens_after": existing_summary_tokens,
             }
 
         transcript = self._format_messages_for_compaction(messages)

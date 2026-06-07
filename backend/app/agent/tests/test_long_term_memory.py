@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from app.agent.database import Database
 from app.agent.long_term_memory import LongTermMemory, _write_markdown
 from app.skills.memory import tools as memory_tools
@@ -382,3 +384,25 @@ def test_approving_candidate_promotes_to_reviewed_memory(tmp_path):
     assert updated["status"] == "approved"
     assert len(memories) == 1
     assert memories[0]["review_state"] == "reviewed"
+
+
+def test_approving_filtered_candidate_raises_instead_of_silent_reject(tmp_path):
+    store = _store(tmp_path)
+    candidate = store.add_candidate(
+        "The user prefers concise summaries.",
+        category="preference",
+        confidence=0.9,
+        importance=8,
+        source_conversation_id="conv-filtered",
+    )
+    assert candidate is not None
+
+    # Simulate remember() rejecting the content at approval time (e.g. the safety/
+    # quality filter or a raised confidence threshold), so it returns None.
+    store.remember = lambda *args, **kwargs: None  # type: ignore[assignment]
+
+    with pytest.raises(ValueError):
+        store.update_candidate(candidate["id"], status="approved", approve=True)
+
+    # The candidate must not be silently flipped to rejected; it stays as-is.
+    assert store.list_candidates(status="new")[0]["id"] == candidate["id"]

@@ -585,7 +585,7 @@ function RunDetail({
       {run.errors.length > 0 && (
         <div className="mt-3">
           <p className="section-label mb-2">Errors</p>
-          <ErrorsList errors={run.errors} compact />
+          <ErrorsList errors={run.errors} />
         </div>
       )}
     </div>
@@ -613,17 +613,15 @@ function TextBlock({ title, value }: { title: string; value: string }) {
 function ErrorsList({
   errors,
   loading = false,
-  compact = false,
 }: {
   errors: ObservabilityError[]
   loading?: boolean
-  compact?: boolean
 }) {
   if (errors.length === 0 && !loading) {
     return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">No structured errors recorded.</div>
   }
   return (
-    <div className={compact ? 'space-y-2' : 'space-y-2'}>
+    <div className="space-y-2">
       {errors.map((item) => (
         <details key={item.error_id} className="rounded-xl border border-red-400/15 bg-red-400/5 px-3 py-2">
           <summary className="cursor-pointer">

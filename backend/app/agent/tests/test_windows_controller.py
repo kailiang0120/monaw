@@ -98,6 +98,39 @@ def test_computer_functions_act_batches_after_one_focus(monkeypatch):
     assert events == [("focus", 123), ("click", 20.0, 30.0), ("type", "hello")]
 
 
+def test_computer_functions_act_blocks_coordinate_action_when_screen_fallback_disabled(monkeypatch):
+    window = {"hwnd": 123, "title": "Notepad", "process_name": "notepad.exe"}
+    monkeypatch.setattr(computer_tools, "_resolve_window", lambda **_kwargs: {"status": "ok", "window": window})
+    monkeypatch.setattr(computer_tools, "is_screen_fallback_allowed", lambda *_a, **_k: False)
+    # The coordinate primitive is dispatched with _bypass_gate=True, so if the batch
+    # gate failed to re-check screen fallback this click would execute.
+    monkeypatch.setattr(
+        computer_tools.window_ops,
+        "_precision_click",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("click must be gated by screen fallback")),
+    )
+
+    result = json.loads(
+        computer_tools._computer_functions_act(
+            window=window,
+            actions=[{"type": "click", "x": 1, "y": 2}],
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "screen_fallback_disabled"
+
+
+def test_is_blocked_window_uses_title_when_process_name_missing():
+    # Elevated/admin windows surface with an empty process_name; the terminal must
+    # still be blocked via its title rather than escaping the blocklist.
+    assert computer_tools._is_blocked_window("", "Administrator: Command Prompt") is True
+    assert computer_tools._is_blocked_window("", "Windows PowerShell") is True
+    assert computer_tools._is_blocked_window("", "Untitled - Notepad") is False
+    assert computer_tools._is_blocked_window("cmd.exe", "") is True
+    assert computer_tools._is_blocked_window("notepad.exe", "Command Prompt") is False
+
+
 def test_computer_functions_act_rejects_stale_state_id():
     result = json.loads(
         computer_tools._computer_functions_act(
