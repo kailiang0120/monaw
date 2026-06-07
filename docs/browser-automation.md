@@ -1,6 +1,6 @@
 # Browser Automation
 
-Monaw uses the `browser-use` skill for browser automation. It can open pages, inspect DOM state, click, type, switch tabs, take screenshots, extract text, and run focused JavaScript.
+Monaw uses the `browser-use` skill for browser automation. It can fetch known URLs, open pages, inspect DOM state, click, type, switch tabs, take screenshots, extract text, and run focused JavaScript.
 
 ## Where To Configure
 
@@ -73,6 +73,7 @@ Modern Chrome may block remote debugging on the default user-data-dir. If system
 | Tool | Purpose |
 | --- | --- |
 | `browser_session` | Inspect, doctor, reset, stop, list profiles, or one-off switch modes. |
+| `browser_fetch` | Read-only URL fetch and extraction. Tries local HTTP plus Scrapling parsing first, with dynamic and explicit stealth modes through Monaw's browser session. |
 | `browser_open` | Start or reuse a browser session and optionally open a URL. |
 | `browser_navigate` | Navigate the current tab. |
 | `browser_tabs` | List, create, switch, or close tabs. |
@@ -102,11 +103,18 @@ Use this flow for reliable browser work:
 open -> snapshot -> decide -> act -> verify
 ```
 
+For read-only page retrieval, use this lighter flow first:
+
+```text
+fetch -> extract -> answer
+```
+
 Practical rules:
 
 | Rule | Reason |
 | --- | --- |
 | Start with `browser_open`. | Creates or reuses the session. |
+| Start with `browser_fetch` for known public URLs. | Avoids launching Chrome when the task is only extraction or summarization. |
 | Use `browser_snapshot` before mutating. | Gets stable refs and visible state. |
 | Prefer refs over selectors. | Refs come from observed state and reduce selector guessing. |
 | Use `browser_get_element` when one ref is ambiguous. | Returns cached role/state/bounds data plus current value/text. |
@@ -127,6 +135,21 @@ Practical rules:
 Enhanced snapshots keep the existing `snapshot.elements` and `field_candidates` shape, but may add fields such as `backend_node_id`, `frame_id`, `ax_name`, `states`, `bounds`, `scroll`, `context`, and `control`.
 
 After navigation, tab switches, reloads, clicks, typing, selecting, key presses, or scrolls, refs are treated as stale. Take a fresh `browser_snapshot` before the next DOM action.
+
+## Browser Fetch
+
+`browser_fetch` is the preferred tool when the user gives a URL and only needs text, links, metadata, HTML, or CSS-selector extraction. It uses Scrapling locally for parsing and returns structured JSON with `status`, `url`, `final_url`, `fetcher`, `http_status`, `title`, `content`, `links`, `metadata`, and `truncated`.
+
+Modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `auto` | Try HTTP first, then dynamic rendering if the page appears empty, blocked, or JavaScript-dependent. |
+| `http` | Fast non-browser fetch. Best for static pages and documentation. |
+| `dynamic` | Browser-rendered fetch for JavaScript pages through Monaw's existing browser session. |
+| `stealth` | Browser-rendered fetch with Monaw's stealth init scripts. Use only when requested or when safer modes report blockers. |
+
+If Scrapling is missing, `browser_fetch` returns `reason_code: missing_browser_dependencies` and a setup command. Existing browser tools continue working even if this happens.
 
 ## Screenshots And Downloads
 

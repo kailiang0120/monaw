@@ -116,6 +116,9 @@ export interface SavedMessage {
     input: string
     output: string
     status: string
+    preview_only?: boolean
+    has_full_input?: boolean
+    has_full_output?: boolean
   }[]
   created_at: string
 }
@@ -123,6 +126,7 @@ export interface SavedMessage {
 export interface MessagesResponse {
   messages: SavedMessage[]
   has_more: boolean
+  next_before_id?: number | null
 }
 
 export interface AccessGrantTicket {

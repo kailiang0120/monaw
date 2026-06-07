@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -26,6 +26,7 @@ import mascotStart from '../assets/mascots/start.png'
 import mascotThinking from '../assets/mascots/thinking.gif'
 import { PlanProgress } from './PlanProgress'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
+import { fetchMessageToolCalls } from '../lib/api/conversations'
 import { filePreviewUrl, fileUrl } from '../lib/api/files'
 import { formatAgentResponse } from '../lib/formatAgentResponse'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
@@ -286,6 +287,7 @@ export function MessageBubble({ message, agentName = DEFAULT_AGENT_NAME }: { mes
 
         {showExecutionSummary && (
           <ExecutionSummary
+            messageId={message.id}
             steps={message.stepProgress ?? []}
             toolCalls={message.toolCalls ?? []}
           />
@@ -660,6 +662,9 @@ function toolCallKey(toolCall: ToolCall, index: number): string {
 
 function toolCallStatus(toolCall: ToolCall): 'running' | 'error' | 'finished' | 'waiting' {
   if (toolCall.pending === true) return 'running'
+  const normalizedStatus = String(toolCall.status || '').toLowerCase()
+  if (normalizedStatus === 'error') return 'error'
+  if (normalizedStatus && normalizedStatus !== 'pending') return 'finished'
   const done = toolCall.output !== undefined
   if (done && (toolCall.output?.startsWith('Error:') || toolCall.output?.startsWith('error:'))) {
     return 'error'
@@ -697,12 +702,79 @@ function toolInputSummary(toolCall: ToolCall): string {
 
 const INITIAL_VISIBLE = 3
 
-function ToolCallScroller({ toolCalls }: { toolCalls: ToolCall[] }) {
+function ToolCallScroller({
+  messageId,
+  toolCalls,
+}: {
+  messageId?: string
+  toolCalls: ToolCall[]
+}) {
+  const [resolvedCalls, setResolvedCalls] = useState(toolCalls)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [showAll, setShowAll] = useState(false)
-  const hasRunning = toolCalls.some((t) => t.pending)
-  const visibleCalls = showAll ? toolCalls : toolCalls.slice(0, INITIAL_VISIBLE)
-  const hiddenCount = Math.max(0, toolCalls.length - INITIAL_VISIBLE)
+  const [loadingDetails, setLoadingDetails] = useState(false)
+  const [detailsError, setDetailsError] = useState('')
+  const detailsRequestedRef = useRef(false)
+  const hasRunning = resolvedCalls.some((t) => t.pending)
+  const visibleCalls = showAll ? resolvedCalls : resolvedCalls.slice(0, INITIAL_VISIBLE)
+  const hiddenCount = Math.max(0, resolvedCalls.length - INITIAL_VISIBLE)
+  const expandedToolCall = resolvedCalls.find((toolCall, index) => toolCallKey(toolCall, index) === expandedId)
+
+  useEffect(() => {
+    setResolvedCalls(toolCalls)
+    setExpandedId(null)
+    setDetailsError('')
+    setLoadingDetails(false)
+    detailsRequestedRef.current = false
+  }, [toolCalls])
+
+  useEffect(() => {
+    if (
+      messageId === undefined
+      || expandedToolCall?.previewOnly !== true
+      || detailsRequestedRef.current
+    ) {
+      return
+    }
+    const numericMessageId = Number(messageId)
+    if (!Number.isFinite(numericMessageId)) {
+      return
+    }
+
+    const abortController = new AbortController()
+    let cancelled = false
+    detailsRequestedRef.current = true
+    setLoadingDetails(true)
+    setDetailsError('')
+    void fetchMessageToolCalls(numericMessageId, abortController.signal)
+      .then((toolCallRows) => {
+        if (cancelled) return
+        setResolvedCalls(
+          toolCallRows.map((toolCall) => ({
+            id: String(toolCall.id),
+            tool: toolCall.tool_name,
+            input: toolCall.input,
+            output: toolCall.output,
+            pending: false,
+            status: toolCall.status,
+            previewOnly: false,
+          })),
+        )
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        detailsRequestedRef.current = false
+        setDetailsError(error instanceof Error ? error.message : 'Failed to load tool details')
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDetails(false)
+      })
+    return () => {
+      cancelled = true
+      abortController.abort()
+    }
+  }, [expandedToolCall?.previewOnly, messageId])
 
   return (
     <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.025] text-xs">
@@ -712,15 +784,15 @@ function ToolCallScroller({ toolCalls }: { toolCalls: ToolCall[] }) {
           {hasRunning ? 'Running tools' : 'Tools'}
         </span>
         <span className="status-pill border-white/[0.08] bg-white/[0.03] text-neutral-500">
-          {toolCalls.length}
+          {resolvedCalls.length}
         </span>
       </div>
       <div className="activity-tool-scroll max-h-[132px] overflow-y-auto" role="tablist" aria-label="Tool calls">
-        {visibleCalls.map((toolCall, index) => {
-          const key = toolCallKey(toolCall, index)
-          const status = toolCallStatus(toolCall)
-          const isExpanded = expandedId === key || (toolCall.pending === true)
-          const summary = toolInputSummary(toolCall)
+          {visibleCalls.map((toolCall, index) => {
+            const key = toolCallKey(toolCall, index)
+            const status = toolCallStatus(toolCall)
+            const isExpanded = expandedId === key || (toolCall.pending === true)
+            const summary = toolInputSummary(toolCall)
 
           return (
             <div key={key} className="border-t border-white/[0.06]">
@@ -747,6 +819,12 @@ function ToolCallScroller({ toolCalls }: { toolCalls: ToolCall[] }) {
               </button>
               {isExpanded && (
                 <div className="space-y-2 border-t border-white/[0.04] bg-black/15 px-3 py-2.5">
+                  {toolCall.previewOnly && loadingDetails && (
+                    <p className="text-[11px] italic text-neutral-500">Loading full tool details...</p>
+                  )}
+                  {detailsError && (
+                    <p className="text-[11px] text-amber-300">{detailsError}</p>
+                  )}
                   {toolCall.input && <ToolPayloadInline label="Input" value={toolCall.input} />}
                   {toolCall.output !== undefined ? (
                     <ToolPayloadInline label="Result" value={toolCall.output} />
@@ -796,9 +874,11 @@ function ToolPayloadInline({ label, value }: { label: string; value: string }) {
 }
 
 function ExecutionSummary({
+  messageId,
   steps,
   toolCalls,
 }: {
+  messageId: string
   steps: NonNullable<Message['stepProgress']>
   toolCalls: NonNullable<Message['toolCalls']>
 }) {
@@ -826,7 +906,7 @@ function ExecutionSummary({
         <div className="space-y-3 border-t border-white/[0.08] p-3">
           {steps.length > 0 && <PlanProgress steps={steps} />}
           {toolCalls.length > 0 && (
-            <ToolCallScroller toolCalls={toolCalls} />
+            <ToolCallScroller messageId={messageId} toolCalls={toolCalls} />
           )}
         </div>
       )}

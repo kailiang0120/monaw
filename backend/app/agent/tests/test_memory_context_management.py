@@ -250,6 +250,89 @@ def test_context_usage_endpoint_returns_report(monkeypatch):
     assert any(item["key"] == "deferred_tools" for item in payload["breakdown"])
 
 
+def test_messages_endpoint_returns_preview_tool_calls_and_detail_endpoint(monkeypatch, tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    db.create_conversation("conv-tools", "Tool history")
+    user_message_id = db.add_message("conv-tools", "user", "Inspect the page")
+    assistant_message_id = db.add_message("conv-tools", "assistant", "Done.")
+    assert user_message_id > 0
+    long_input = '{"url":"' + ("https://example.com/" + ("a" * 1400)) + '"}'
+    long_output = "snapshot:" + ("b" * 1500)
+    db.add_tool_call(
+        message_id=assistant_message_id,
+        conv_id="conv-tools",
+        tool_name="browser_snapshot",
+        tool_input=long_input,
+        tool_output=long_output,
+        status="complete",
+    )
+
+    monkeypatch.setattr(routes_mod, "get_db", lambda: db)
+
+    client = TestClient(app)
+    history = client.get("/api/conversations/conv-tools/messages?tool_call_mode=summary")
+
+    assert history.status_code == 200
+    payload = history.json()
+    tool_call = payload["messages"][-1]["tool_calls"][0]
+    assert tool_call["tool_name"] == "browser_snapshot"
+    assert tool_call["preview_only"] is True
+    assert tool_call["has_full_input"] is True
+    assert tool_call["has_full_output"] is True
+    assert tool_call["input"].endswith("[history preview truncated]")
+    assert tool_call["output"].endswith("[history preview truncated]")
+
+    detail = client.get(f"/api/messages/{assistant_message_id}/tool-calls")
+
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert detail_payload[0]["preview_only"] is False
+    assert detail_payload[0]["input"] == long_input
+    assert detail_payload[0]["output"] == long_output
+
+
+def test_messages_endpoint_returns_stable_pagination_cursor(monkeypatch, tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    db.create_conversation("conv-pages", "Paged history")
+    message_ids = [
+        db.add_message("conv-pages", "user" if index % 2 == 0 else "assistant", f"message {index}")
+        for index in range(8)
+    ]
+
+    monkeypatch.setattr(routes_mod, "get_db", lambda: db)
+
+    client = TestClient(app)
+    first = client.get("/api/conversations/conv-pages/messages?limit=3&tool_call_mode=none")
+
+    assert first.status_code == 200
+    first_payload = first.json()
+    assert [message["id"] for message in first_payload["messages"]] == message_ids[-3:]
+    assert first_payload["has_more"] is True
+    assert first_payload["next_before_id"] == message_ids[-3]
+
+    second = client.get(
+        f"/api/conversations/conv-pages/messages?limit=3&before_id={first_payload['next_before_id']}&tool_call_mode=none"
+    )
+
+    assert second.status_code == 200
+    second_payload = second.json()
+    assert [message["id"] for message in second_payload["messages"]] == message_ids[-6:-3]
+    assert second_payload["has_more"] is True
+    assert second_payload["next_before_id"] == message_ids[-6]
+
+    final = client.get(
+        f"/api/conversations/conv-pages/messages?limit=3&before_id={second_payload['next_before_id']}&tool_call_mode=none"
+    )
+
+    assert final.status_code == 200
+    final_payload = final.json()
+    assert [message["id"] for message in final_payload["messages"]] == message_ids[:2]
+    assert final_payload["has_more"] is False
+    assert final_payload["next_before_id"] == message_ids[0]
+
+
 def test_context_usage_report_counts_runtime_skills_and_tools():
     llm = RecordingLLM()
     manager = MemoryManager(llm)

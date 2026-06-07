@@ -16,6 +16,7 @@ from app.skills.browser_use.tools import (
     _normalize_url_for_compare,
     _prepare_snapshot,
     _score_reusable_tab,
+    browser_fetch,
     browser_click,
     browser_full_page_screenshot,
     browser_find,
@@ -89,11 +90,105 @@ def test_browser_read_only_tools_are_repeat_safe_observations():
     register_tools(registered, SimpleNamespace(browser={}))
     by_name = {tool["name"]: tool for tool in registered}
 
-    for name in ("browser_find", "browser_get_element", "browser_extract_text"):
+    for name in ("browser_find", "browser_get_element", "browser_fetch", "browser_extract_text"):
         metadata = by_name[name]["metadata"]
         assert metadata["observation"] is True
         assert metadata["mutates_state"] is False
         assert metadata["risk_level"] == "low"
+
+
+def test_browser_fetch_extracts_http_page(monkeypatch):
+    class FakeSelection:
+        def __init__(self, value):
+            self.value = value
+
+        def getall(self):
+            return [self.value]
+
+    class FakePage:
+        status = 200
+        url = "https://example.com/"
+        headers = {"content-type": "text/html"}
+        body = b"<html><head><title>Example</title></head><body><main>Hello <a href='/next'>Next</a></main></body></html>"
+        encoding = "utf-8"
+
+        def css(self, selector):
+            if selector == "title::text":
+                return FakeSelection("Example")
+            if selector == "main":
+                return FakeSelection("Hello")
+            return FakeSelection("")
+
+    calls = []
+    monkeypatch.setattr(
+        browser_tools_module,
+        "_fetch_http_with_scrapling",
+        lambda url, *, timeout_ms: calls.append((url, timeout_ms)) or (FakePage(), "http"),
+    )
+
+    manager = SimpleNamespace(config={"allowed_domains": []})
+
+    result = json.loads(asyncio.run(browser_fetch(manager, "example.com", mode="http", selector="main")))
+
+    assert result["status"] == "ok"
+    assert result["fetcher"] == "http"
+    assert result["title"] == "Example"
+    assert result["content"] == "Hello"
+    assert result["links"] == [{"url": "https://example.com/next", "text": "Next"}]
+    assert calls[0][0] == "https://example.com"
+
+
+def test_browser_fetch_blocks_disallowed_domain():
+    manager = SimpleNamespace(config={"allowed_domains": ["docs.example.com"]})
+
+    result = json.loads(asyncio.run(browser_fetch(manager, "https://evil.example.net", mode="http")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "domain_not_allowed"
+
+
+def test_browser_fetch_auto_falls_back_to_dynamic_for_js_empty_page(monkeypatch):
+    class StaticPage:
+        status = 200
+        url = "https://example.com/app"
+        body = b"<html><head><title>App</title><script src='app.js'></script></head><body></body></html>"
+        encoding = "utf-8"
+
+        def css(self, selector):
+            return []
+
+    calls = []
+    monkeypatch.setattr(
+        browser_tools_module,
+        "_fetch_http_with_scrapling",
+        lambda url, *, timeout_ms: calls.append(("http", url, timeout_ms)) or (StaticPage(), "http"),
+    )
+
+    async def fake_rendered(manager, **kwargs):
+        calls.append(("dynamic", kwargs["url"], kwargs["timeout_ms"]))
+        return {
+            "status": "ok",
+            "url": kwargs["url"],
+            "final_url": kwargs["url"],
+            "fetcher": kwargs["fetcher"],
+            "http_status": 0,
+            "title": "App",
+            "content": "Rendered content",
+            "links": [],
+            "metadata": {},
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(browser_tools_module, "_browser_fetch_rendered", fake_rendered)
+
+    manager = SimpleNamespace(config={"allowed_domains": []})
+
+    result = json.loads(asyncio.run(browser_fetch(manager, "https://example.com/app", mode="auto")))
+
+    assert result["status"] == "ok"
+    assert result["fetcher"] == "dynamic"
+    assert "Rendered content" in result["content"]
+    assert [call[0] for call in calls] == ["http", "dynamic"]
 
 
 def test_browser_find_short_label_matches_label_token_not_substring():

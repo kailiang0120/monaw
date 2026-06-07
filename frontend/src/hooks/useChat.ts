@@ -19,7 +19,7 @@ const TYPEWRITER_CHARS_PER_TICK = 6
 const TYPEWRITER_FAST_BACKLOG_CHARS = 600
 const TYPEWRITER_MAX_CHARS_PER_TICK = 24
 const INITIAL_HISTORY_LIMIT = 5
-const OLDER_HISTORY_LIMIT = 60
+const OLDER_HISTORY_LIMIT = 30
 const HISTORY_LOAD_TIMEOUT_MS = 10_000
 
 export interface ToolCall {
@@ -28,6 +28,8 @@ export interface ToolCall {
   input: string
   output?: string
   pending?: boolean
+  status?: string
+  previewOnly?: boolean
 }
 
 export type ActivityItem =
@@ -103,6 +105,8 @@ function savedMessageToMessage(m: SavedMessage): Message {
           input: tc.input,
           output: tc.output,
           pending: false,
+          status: tc.status,
+          previewOnly: tc.preview_only ?? false,
         }))
       : undefined,
   }
@@ -120,6 +124,7 @@ export function useChat(conversationId: string | null) {
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const typewriterCleanupRef = useRef<(() => void) | null>(null)
   const conversationIdRef = useRef<string | null>(conversationId)
+  const historyCursorRef = useRef<number | null>(null)
 
   useEffect(() => {
     conversationIdRef.current = conversationId
@@ -131,6 +136,7 @@ export function useChat(conversationId: string | null) {
       if (!isStreaming) setMessages([])
       setHasMoreHistory(false)
       setIsLoadingOlderHistory(false)
+      historyCursorRef.current = null
       return
     }
     if (isStreaming) {
@@ -144,13 +150,17 @@ export function useChat(conversationId: string | null) {
     setMessages([])
     setHasMoreHistory(false)
     setIsLoadingOlderHistory(false)
+    historyCursorRef.current = null
     setIsLoadingHistory(true)
 
     fetchMessages(conversationId, INITIAL_HISTORY_LIMIT, undefined, controller.signal)
       .then((res) => {
         if (cancelled) return
-        setMessages(res.messages.map(savedMessageToMessage))
-        setHasMoreHistory(res.has_more)
+        const loaded = res.messages.map(savedMessageToMessage)
+        const nextCursor = Number(res.next_before_id)
+        historyCursorRef.current = Number.isFinite(nextCursor) ? nextCursor : null
+        setMessages(loaded)
+        setHasMoreHistory(res.has_more && historyCursorRef.current !== null && loaded.length > 0)
       })
       .catch((err) => {
         if (err instanceof DOMException && err.name === 'AbortError') return
@@ -171,19 +181,26 @@ export function useChat(conversationId: string | null) {
   const loadOlderMessages = useCallback(async () => {
     if (!conversationId || isStreaming || isLoadingOlderHistory || !hasMoreHistory) return
     const targetConversationId = conversationId
-    const oldestId = Number(messages[0]?.id)
-    if (!Number.isFinite(oldestId)) return
+    const inferredOldestId = Number(messages[0]?.id)
+    const beforeId = historyCursorRef.current ?? inferredOldestId
+    if (!Number.isFinite(beforeId)) return
 
     setIsLoadingOlderHistory(true)
     try {
-      const res = await fetchMessages(targetConversationId, OLDER_HISTORY_LIMIT, oldestId)
+      const res = await fetchMessages(targetConversationId, OLDER_HISTORY_LIMIT, beforeId)
       if (conversationIdRef.current !== targetConversationId) return
       const older = res.messages.map(savedMessageToMessage)
+      const existingIds = new Set(messages.map((message) => message.id))
+      const uniqueOlder = older.filter((message) => !existingIds.has(message.id))
+      const nextCursor = Number(res.next_before_id)
+      const nextCursorAdvances = Number.isFinite(nextCursor) && nextCursor < beforeId
+      const madeProgress = uniqueOlder.length > 0 && nextCursorAdvances
       setMessages((prev) => {
-        const existingIds = new Set(prev.map((message) => message.id))
-        return [...older.filter((message) => !existingIds.has(message.id)), ...prev]
+        const currentIds = new Set(prev.map((message) => message.id))
+        return [...older.filter((message) => !currentIds.has(message.id)), ...prev]
       })
-      setHasMoreHistory(res.has_more)
+      historyCursorRef.current = madeProgress ? nextCursor : null
+      setHasMoreHistory(res.has_more && madeProgress)
     } catch {
       // Keep the visible conversation intact; the user can retry loading older history.
     } finally {
@@ -612,6 +629,8 @@ export function useChat(conversationId: string | null) {
     typewriterCleanupRef.current?.()
     setMessages([])
     setIsStreaming(false)
+    setHasMoreHistory(false)
+    historyCursorRef.current = null
   }, [])
 
   return {

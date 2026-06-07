@@ -1,5 +1,5 @@
 import { BASE, JSON_HEADERS } from './client'
-import type { ContextUsage, Conversation, MessagesResponse } from './types'
+import type { ContextUsage, Conversation, MessagesResponse, SavedMessage } from './types'
 
 export async function fetchConversations(): Promise<Conversation[]> {
   const res = await fetch(`${BASE}/api/conversations`)
@@ -45,11 +45,23 @@ export async function fetchMessages(
 ): Promise<MessagesResponse> {
   const params = new URLSearchParams({ limit: String(limit) })
   if (beforeId !== undefined) params.set('before_id', String(beforeId))
-  params.set('include_tool_calls', 'false')
+  params.set('tool_call_mode', 'summary')
   const res = await fetch(
     `${BASE}/api/conversations/${encodeURIComponent(conversationId)}/messages?${params}`,
     { signal },
   )
   if (!res.ok) throw new Error('Failed to fetch messages')
+  return res.json()
+}
+
+export async function fetchMessageToolCalls(
+  messageId: number,
+  signal?: AbortSignal,
+): Promise<SavedMessage['tool_calls']> {
+  const res = await fetch(
+    `${BASE}/api/messages/${encodeURIComponent(String(messageId))}/tool-calls`,
+    { signal },
+  )
+  if (!res.ok) throw new Error('Failed to fetch message tool calls')
   return res.json()
 }

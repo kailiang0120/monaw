@@ -437,6 +437,9 @@ class ToolCallOut(BaseModel):
     input: str = ""
     output: str = ""
     status: str = "complete"
+    preview_only: bool = False
+    has_full_input: bool = False
+    has_full_output: bool = False
 
 
 class MessageOut(BaseModel):
@@ -454,6 +457,7 @@ class MessageOut(BaseModel):
 class MessagesResponse(BaseModel):
     messages: list[MessageOut]
     has_more: bool
+    next_before_id: int | None = None
 
 
 # ── Access grant schemas ──────────────────────────────────────────────────────

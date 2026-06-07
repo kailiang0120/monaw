@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import inspect
 import json
+import re
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 from app.agent.response_attachments import (
     MAX_GENERATED_SCREENSHOT_DIMENSION_PX,
@@ -428,6 +433,423 @@ def _write_screenshot_bytes(data: bytes, directory: str, prefix: str, image_form
     output_path = _screenshot_path(directory, prefix, image_format)
     output_path.write_bytes(data)
     return str(output_path)
+
+
+class _FetchTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_stack: list[str] = []
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.lower()
+        if normalized in {"script", "style", "noscript", "svg"}:
+            self._skip_stack.append(normalized)
+        if normalized in {"p", "br", "div", "section", "article", "li", "tr", "h1", "h2", "h3"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized = tag.lower()
+        if self._skip_stack and self._skip_stack[-1] == normalized:
+            self._skip_stack.pop()
+        if normalized in {"p", "div", "section", "article", "li", "tr", "h1", "h2", "h3"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        text = data.strip()
+        if text:
+            self.parts.append(text)
+
+
+class _FetchLinkExtractor(HTMLParser):
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.links: list[dict[str, str]] = []
+        self._active_href = ""
+        self._active_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        attr_map = {str(key).lower(): value or "" for key, value in attrs}
+        href = attr_map.get("href", "").strip()
+        if not href:
+            return
+        self._active_href = urljoin(self.base_url, href)
+        self._active_text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._active_href:
+            self._active_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or not self._active_href:
+            return
+        self.links.append({"url": self._active_href, "text": _compact_fetch_text(" ".join(self._active_text))[:300]})
+        self._active_href = ""
+        self._active_text = []
+
+
+class _ScraplingParsedPage:
+    def __init__(
+        self,
+        *,
+        body: bytes,
+        url: str,
+        status: int = 0,
+        reason: str = "",
+        headers: dict[str, str] | None = None,
+        encoding: str = "utf-8",
+    ) -> None:
+        self.body = body
+        self.url = url
+        self.status = status
+        self.reason = reason
+        self.headers = headers or {}
+        self.encoding = encoding or "utf-8"
+        markup = body.decode(self.encoding, errors="replace")
+        self._selector = _create_scrapling_selector(markup, url=url)
+
+    def css(self, selector: str) -> Any:
+        return self._selector.css(selector)
+
+
+def _compact_fetch_text(value: Any) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def _fetch_html_to_text(markup: str) -> str:
+    parser = _FetchTextExtractor()
+    try:
+        parser.feed(markup or "")
+    except Exception:
+        return _compact_fetch_text(re.sub(r"<[^>]+>", " ", markup or ""))
+    return _compact_fetch_text(" ".join(parser.parts))
+
+
+def _truncate_fetch_content(value: str, max_chars: int) -> tuple[str, bool]:
+    limit = max(500, min(int(max_chars or 20000), 200000))
+    if len(value) <= limit:
+        return value, False
+    return value[:limit], True
+
+
+def _normalize_fetch_url(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    if not value:
+        raise ValueError("URL is required.")
+    parsed = urlparse(value)
+    if not parsed.scheme:
+        value = f"https://{value}"
+        parsed = urlparse(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("URL must be an http or https URL.")
+    return value
+
+
+def _fetch_domain_allowed(url: str, allowed_domains: list[str]) -> bool:
+    if not allowed_domains:
+        return True
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    for raw_domain in allowed_domains:
+        parsed = urlparse(raw_domain if "://" in raw_domain else f"https://{raw_domain}")
+        allowed = (parsed.hostname or raw_domain).lower().lstrip(".")
+        if host == allowed or host.endswith(f".{allowed}"):
+            return True
+    return False
+
+
+def _first_fetch_attr(obj: Any, names: tuple[str, ...], default: Any = "") -> Any:
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            return obj[name]
+        if hasattr(obj, name):
+            value = getattr(obj, name)
+            if value is not None:
+                return value
+    return default
+
+
+def _call_fetch_noarg(obj: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        method = getattr(obj, name, None)
+        if callable(method):
+            try:
+                return method()
+            except Exception:
+                continue
+    return None
+
+
+def _fetch_selection_to_text(selection: Any) -> str:
+    if selection is None:
+        return ""
+    called = _call_fetch_noarg(selection, ("getall", "get_all", "extract"))
+    if isinstance(called, list):
+        return _compact_fetch_text("\n".join(str(item) for item in called))
+    if called is not None:
+        return _compact_fetch_text(called)
+    if isinstance(selection, list):
+        values: list[str] = []
+        for item in selection:
+            item_called = _call_fetch_noarg(item, ("get", "text", "extract"))
+            values.append(str(item_called if item_called is not None else item))
+        return _compact_fetch_text("\n".join(values))
+    return _compact_fetch_text(selection)
+
+
+def _fetch_response_html(page: Any) -> str:
+    for name in ("html", "content", "text"):
+        value = _first_fetch_attr(page, (name,), "")
+        if isinstance(value, str) and "<" in value and ">" in value:
+            return value
+    body = _first_fetch_attr(page, ("body", "raw_body"), b"")
+    if isinstance(body, bytes):
+        encoding = str(_first_fetch_attr(page, ("encoding",), "utf-8") or "utf-8")
+        return body.decode(encoding, errors="replace")
+    if isinstance(body, str):
+        return body
+    called = _call_fetch_noarg(page, ("get", "extract"))
+    if isinstance(called, str):
+        return called
+    return ""
+
+
+def _extract_fetch_title(page: Any, markup: str) -> str:
+    css = getattr(page, "css", None)
+    if callable(css):
+        try:
+            title = _fetch_selection_to_text(css("title::text"))
+            if title:
+                return title[:300]
+        except Exception:
+            pass
+    match = re.search(r"<title[^>]*>(.*?)</title>", markup or "", flags=re.I | re.S)
+    return _compact_fetch_text(match.group(1))[:300] if match else ""
+
+
+def _extract_fetch_links(markup: str, base_url: str, max_links: int = 200) -> list[dict[str, str]]:
+    parser = _FetchLinkExtractor(base_url)
+    try:
+        parser.feed(markup or "")
+    except Exception:
+        return []
+    seen: set[str] = set()
+    links: list[dict[str, str]] = []
+    for link in parser.links:
+        url = link.get("url", "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        links.append(link)
+        if len(links) >= max_links:
+            break
+    return links
+
+
+def _fetch_looks_blocked_or_js_empty(content: str, markup: str, status: int) -> bool:
+    lowered = f"{content}\n{markup[:2000]}".lower()
+    if status in {401, 403, 429, 503}:
+        return True
+    blockers = (
+        "enable javascript",
+        "checking your browser",
+        "verify you are human",
+        "cloudflare",
+        "access denied",
+        "captcha",
+    )
+    if any(item in lowered for item in blockers):
+        return True
+    return len(content.strip()) < 120 and bool(re.search(r"<script\b", markup or "", flags=re.I))
+
+
+def _create_scrapling_selector(markup: str, *, url: str) -> Any:
+    try:
+        from scrapling import Selector
+    except ImportError:
+        from scrapling.parser import Selector
+
+    try:
+        return Selector(markup, url=url)
+    except TypeError:
+        return Selector(markup)
+
+
+def _fetch_http_with_scrapling(url: str, *, timeout_ms: int) -> tuple[Any, str]:
+    timeout = max(1000, min(int(timeout_ms or 30000), 120000))
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/143.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout / 1000) as response:
+            body = response.read()
+            headers = {str(key).lower(): str(value) for key, value in dict(response.headers).items()}
+            charset = response.headers.get_content_charset() or "utf-8"
+            final_url = response.geturl() or url
+            page = _ScraplingParsedPage(
+                body=body,
+                url=final_url,
+                status=int(getattr(response, "status", 0) or 0),
+                reason=str(getattr(response, "reason", "") or ""),
+                headers=headers,
+                encoding=charset,
+            )
+            return page, "http"
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        headers = {str(key).lower(): str(value) for key, value in dict(exc.headers).items()} if exc.headers else {}
+        charset = exc.headers.get_content_charset() if exc.headers else None
+        page = _ScraplingParsedPage(
+            body=body,
+            url=exc.geturl() or url,
+            status=int(exc.code or 0),
+            reason=str(exc.reason or ""),
+            headers=headers,
+            encoding=charset or "utf-8",
+        )
+        return page, "http"
+
+
+def _render_fetch_response(
+    page: Any,
+    *,
+    url: str,
+    fetcher: str,
+    selector: str,
+    output: str,
+    max_chars: int,
+) -> dict[str, Any]:
+    markup = _fetch_response_html(page)
+    status = int(_first_fetch_attr(page, ("status", "status_code"), 0) or 0)
+    final_url = str(_first_fetch_attr(page, ("url", "final_url"), url) or url)
+    headers = _first_fetch_attr(page, ("headers",), {}) or {}
+    reason = str(_first_fetch_attr(page, ("reason",), "") or "")
+    title = _extract_fetch_title(page, markup)
+
+    selected_text = ""
+    if selector:
+        css = getattr(page, "css", None)
+        if callable(css):
+            selected_text = _fetch_selection_to_text(css(selector))
+        if not selected_text:
+            selected_text = _fetch_html_to_text(markup)
+
+    text_content = selected_text if selector else _fetch_html_to_text(markup)
+    links = _extract_fetch_links(markup, final_url)
+
+    normalized_output = output if output in {"text", "markdown", "html", "links", "metadata"} else "text"
+    if normalized_output == "html":
+        content = markup
+    elif normalized_output in {"links", "metadata"}:
+        content = ""
+    else:
+        content = text_content
+
+    content, truncated = _truncate_fetch_content(content, max_chars)
+    return {
+        "status": "ok",
+        "url": url,
+        "final_url": final_url,
+        "fetcher": fetcher,
+        "http_status": status,
+        "reason": reason,
+        "title": title,
+        "content": content,
+        "links": links if normalized_output in {"links", "metadata"} else links[:20],
+        "metadata": {
+            "selector": selector,
+            "output": normalized_output,
+            "content_type": headers.get("content-type", "") if isinstance(headers, dict) else "",
+            "content_length": len(content),
+            "link_count": len(links),
+        },
+        "truncated": truncated,
+    }
+
+
+def _browser_fetch_sync(
+    manager: Any,
+    *,
+    url: str,
+    mode: str,
+    selector: str,
+    output: str,
+    max_chars: int,
+    wait_selector: str,
+    network_idle: bool,
+    timeout_ms: int,
+) -> dict[str, Any]:
+    normalized_url = _normalize_fetch_url(url)
+    allowed_domains = [
+        str(item).strip().lower()
+        for item in (getattr(manager, "config", {}) or {}).get("allowed_domains", [])
+        if str(item).strip()
+    ]
+    if not _fetch_domain_allowed(normalized_url, allowed_domains):
+        return {
+            "status": "error",
+            "reason_code": "domain_not_allowed",
+            "url": normalized_url,
+            "allowed_domains": allowed_domains,
+            "error": "URL host is not in Settings -> Browser allowed domains.",
+        }
+
+    normalized_mode = str(mode or "auto").strip().lower()
+    if normalized_mode not in {"auto", "http", "dynamic", "stealth"}:
+        normalized_mode = "auto"
+    if normalized_mode in {"dynamic", "stealth"}:
+        return {
+            "status": "needs_browser_render",
+            "url": normalized_url,
+            "fetcher": normalized_mode,
+        }
+
+    try:
+        page, fetcher = _fetch_http_with_scrapling(normalized_url, timeout_ms=timeout_ms)
+        result = _render_fetch_response(
+            page,
+            url=normalized_url,
+            fetcher=fetcher,
+            selector=selector,
+            output=output,
+            max_chars=max_chars,
+        )
+        if normalized_mode == "auto" and _fetch_looks_blocked_or_js_empty(result["content"], _fetch_response_html(page), result["http_status"]):
+            result["status"] = "needs_browser_render"
+            result["fallback_reason"] = "http_content_empty_blocked_or_javascript_dependent"
+        return result
+    except ImportError as exc:
+        return {
+            "status": "error",
+            "reason_code": "missing_browser_dependencies",
+            "url": normalized_url,
+            "error": str(exc),
+            "setup": 'pip install "scrapling>=0.4.8,<0.5.0"',
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "reason_code": "fetch_failed",
+            "url": normalized_url,
+            "fetcher": normalized_mode,
+            "error": str(exc),
+        }
 
 
 def _discard_invalid_screenshot(path: str | Path) -> dict[str, Any] | None:
@@ -1427,6 +1849,133 @@ async def browser_get_element(
     return _json_output(payload)
 
 
+async def _wait_for_fetch_selector(page: Any, selector: str, timeout_ms: int) -> None:
+    if not selector:
+        return
+    deadline = asyncio.get_running_loop().time() + max(1.0, min(float(timeout_ms or 30000) / 1000, 120.0))
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            exists = await page.evaluate("(selector) => !!document.querySelector(selector)", selector)
+            if exists:
+                return
+        except Exception:
+            pass
+        await asyncio.sleep(0.25)
+    raise TimeoutError(f"Timed out waiting for selector '{selector}'.")
+
+
+async def _browser_fetch_rendered(
+    manager,
+    *,
+    url: str,
+    fetcher: str,
+    selector: str,
+    output: str,
+    max_chars: int,
+    wait_selector: str,
+    network_idle: bool,
+    timeout_ms: int,
+    stealth: bool,
+) -> dict[str, Any]:
+    normalized_url = _normalize_fetch_url(url)
+    browser = await manager.ensure_browser("auto")
+    page = None
+    try:
+        if stealth:
+            await _install_stealth_init(manager, browser)
+        page = await browser.new_page(normalized_url)
+        wait_state = "networkidle" if network_idle else "domcontentloaded"
+        try:
+            await page.wait_for_load_state(wait_state, timeout=max(1000, min(int(timeout_ms or 30000), 120000)))
+        except Exception:
+            pass
+        await _wait_for_fetch_selector(page, wait_selector, timeout_ms)
+        markup = await page.evaluate("() => document.documentElement ? document.documentElement.outerHTML : (document.body ? document.body.innerHTML : '')")
+        current_url = await page.get_url() if hasattr(page, "get_url") else normalized_url
+        parsed = _ScraplingParsedPage(
+            body=str(markup or "").encode("utf-8", errors="replace"),
+            url=str(current_url or normalized_url),
+            status=0,
+            reason="",
+            headers={"content-type": "text/html; charset=utf-8"},
+            encoding="utf-8",
+        )
+        result = _render_fetch_response(
+            parsed,
+            url=normalized_url,
+            fetcher=fetcher,
+            selector=selector,
+            output=output,
+            max_chars=max_chars,
+        )
+        result["http_status"] = 0
+        return result
+    except ImportError as exc:
+        return {
+            "status": "error",
+            "reason_code": "missing_browser_dependencies",
+            "url": normalized_url,
+            "error": str(exc),
+            "setup": 'pip install "scrapling>=0.4.8,<0.5.0"',
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "reason_code": "browser_render_failed",
+            "url": normalized_url,
+            "fetcher": fetcher,
+            "error": str(exc),
+        }
+    finally:
+        if page is not None:
+            try:
+                await browser.close_page(page)
+            except Exception:
+                pass
+
+
+async def browser_fetch(
+    manager,
+    url: str,
+    mode: str = "auto",
+    selector: str = "",
+    output: str = "text",
+    max_chars: int = 20000,
+    wait_selector: str = "",
+    network_idle: bool = False,
+    timeout_ms: int = 30000,
+) -> str:
+    result = await asyncio.to_thread(
+        _browser_fetch_sync,
+        manager,
+        url=url,
+        mode=mode,
+        selector=selector,
+        output=output,
+        max_chars=max_chars,
+        wait_selector=wait_selector,
+        network_idle=network_idle,
+        timeout_ms=timeout_ms,
+    )
+    if result.get("status") == "needs_browser_render":
+        rendered = await _browser_fetch_rendered(
+            manager,
+            url=str(result.get("url") or url),
+            fetcher="stealth" if str(mode or "").lower() == "stealth" else "dynamic",
+            selector=selector,
+            output=output,
+            max_chars=max_chars,
+            wait_selector=wait_selector,
+            network_idle=network_idle,
+            timeout_ms=timeout_ms,
+            stealth=str(mode or "").lower() == "stealth",
+        )
+        if "fallback_reason" in result:
+            rendered.setdefault("metadata", {})["fallback_reason"] = result["fallback_reason"]
+        return _json_output(rendered)
+    return _json_output(result)
+
+
 async def browser_extract_text(
     manager,
     selector: str = "",
@@ -2151,6 +2700,49 @@ def register_tools(registry, settings) -> None:
                 "execution_mode": "async",
                 "affinity_group": "browser-use",
                 "metadata": {"observation": True, "mutates_state": False, "risk_level": "low"},
+            },
+            {
+                "name": "browser_fetch",
+                "description": (
+                    "Read-only fetch and extract a URL with Scrapling. Use for known URLs before opening a browser; "
+                    "supports HTTP, dynamic rendered, and explicit stealth modes."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "mode": {"type": "string", "enum": ["auto", "http", "dynamic", "stealth"], "default": "auto"},
+                        "selector": {"type": "string", "default": ""},
+                        "output": {"type": "string", "enum": ["text", "markdown", "html", "links", "metadata"], "default": "text"},
+                        "max_chars": {"type": "integer", "default": 20000},
+                        "wait_selector": {"type": "string", "default": ""},
+                        "network_idle": {"type": "boolean", "default": False},
+                        "timeout_ms": {"type": "integer", "default": 30000},
+                    },
+                    "required": ["url"],
+                },
+                "callable": lambda url, mode="auto", selector="", output="text", max_chars=20000, wait_selector="", network_idle=False, timeout_ms=30000: browser_fetch(
+                    manager,
+                    url=url,
+                    mode=mode,
+                    selector=selector,
+                    output=output,
+                    max_chars=max_chars,
+                    wait_selector=wait_selector,
+                    network_idle=network_idle,
+                    timeout_ms=timeout_ms,
+                ),
+                "domain": "browser",
+                "execution_mode": "async",
+                "affinity_group": "browser-use",
+                "metadata": {
+                    "observation": True,
+                    "mutates_state": False,
+                    "risk_level": "low",
+                    "parallel_safe": True,
+                    "resource_locks": [],
+                    "repeat_safe": True,
+                },
             },
             {
                 "name": "browser_extract_text",

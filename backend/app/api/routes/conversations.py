@@ -33,6 +33,9 @@ router = APIRouter()
 
 HISTORY_TOOL_PAYLOAD_PREVIEW_CHARS = 1200
 HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX = "\n\n[history preview truncated]"
+TOOL_CALL_MODE_NONE = "none"
+TOOL_CALL_MODE_SUMMARY = "summary"
+TOOL_CALL_MODE_FULL = "full"
 
 
 def _stored_response_attachments(raw_value: object) -> list[dict] | None:
@@ -54,6 +57,92 @@ def _history_tool_payload(value: object, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX
+
+
+def _tool_call_mode(
+    *,
+    include_tool_calls: bool,
+    tool_call_mode: str | None,
+) -> str:
+    requested = str(tool_call_mode or "").strip().lower()
+    if requested in {TOOL_CALL_MODE_NONE, TOOL_CALL_MODE_SUMMARY, TOOL_CALL_MODE_FULL}:
+        return requested
+    return TOOL_CALL_MODE_FULL if include_tool_calls else TOOL_CALL_MODE_NONE
+
+
+def _tool_call_preview(preview: object, original_length: object, limit: int) -> str:
+    text = str(preview or "")
+    try:
+        length = max(0, int(original_length or 0))
+    except (TypeError, ValueError):
+        length = len(text)
+    if limit <= 0:
+        return ""
+    if length <= limit:
+        return text
+    return text.rstrip() + HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX
+
+
+def _full_tool_calls(db, *, message_id: int, limit: int | None) -> list[ToolCallOut]:
+    return [
+        ToolCallOut(
+            id=int(tc["id"]),
+            tool_name=str(tc["tool_name"]),
+            input=(
+                str(tc.get("input") or "")
+                if limit is None
+                else _history_tool_payload(tc["input"], limit)
+            ),
+            output=(
+                str(tc.get("output") or "")
+                if limit is None
+                else _history_tool_payload(tc["output"], limit)
+            ),
+            status=str(tc["status"]),
+            preview_only=False,
+            has_full_input=bool(str(tc.get("input") or "")),
+            has_full_output=bool(str(tc.get("output") or "")),
+        )
+        for tc in db.get_tool_calls_for_message(message_id)
+    ]
+
+
+def _summary_tool_calls(db, *, message_id: int, limit: int) -> list[ToolCallOut]:
+    rows = db.fetchall(
+        """
+        SELECT
+            id,
+            tool_name,
+            status,
+            CASE
+                WHEN ? <= 0 THEN ''
+                ELSE substr(COALESCE(input, ''), 1, ?)
+            END AS input_preview,
+            CASE
+                WHEN ? <= 0 THEN ''
+                ELSE substr(COALESCE(output, ''), 1, ?)
+            END AS output_preview,
+            length(COALESCE(input, '')) AS input_length,
+            length(COALESCE(output, '')) AS output_length
+        FROM tool_calls
+        WHERE message_id = ?
+        ORDER BY id
+        """,
+        (limit, limit, limit, limit, message_id),
+    )
+    return [
+        ToolCallOut(
+            id=int(row["id"]),
+            tool_name=str(row["tool_name"]),
+            input=_tool_call_preview(row["input_preview"], row["input_length"], limit),
+            output=_tool_call_preview(row["output_preview"], row["output_length"], limit),
+            status=str(row["status"]),
+            preview_only=True,
+            has_full_input=int(row["input_length"] or 0) > len(str(row["input_preview"] or "")),
+            has_full_output=int(row["output_length"] or 0) > len(str(row["output_preview"] or "")),
+        )
+        for row in rows
+    ]
 
 
 def _completion_protocol_text() -> str:
@@ -165,12 +254,20 @@ async def get_conversation_messages(
     before_id: int | None = Query(None),
     tool_payload_limit: int = Query(HISTORY_TOOL_PAYLOAD_PREVIEW_CHARS, ge=0, le=20000),
     include_tool_calls: bool = Query(True),
+    tool_call_mode: str | None = Query(
+        None,
+        pattern="^(none|summary|full)$",
+    ),
 ):
     """Retrieve messages for a conversation with cursor-based pagination."""
     db = get_db()
     conv = db.get_conversation(conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    resolved_tool_call_mode = _tool_call_mode(
+        include_tool_calls=include_tool_calls,
+        tool_call_mode=tool_call_mode,
+    )
 
     raw_messages = db.get_messages(conv_id, limit=limit + 1, before_id=before_id)
     has_more = len(raw_messages) > limit
@@ -179,38 +276,28 @@ async def get_conversation_messages(
 
     result = []
     for msg in raw_messages:
-        if include_tool_calls:
-            tc_rows = db.fetchall(
-                "SELECT id, tool_name, input, output, status FROM tool_calls WHERE message_id = ? ORDER BY id",
-                (msg["id"],),
-            )
-            tool_calls = [
-                ToolCallOut(
-                    id=tc["id"],
-                    tool_name=tc["tool_name"],
-                    input=_history_tool_payload(tc["input"], tool_payload_limit),
-                    output=_history_tool_payload(tc["output"], tool_payload_limit),
-                    status=tc["status"],
-                )
-                for tc in tc_rows
-            ]
+        message_id = int(msg["id"])
+        if resolved_tool_call_mode == TOOL_CALL_MODE_FULL:
+            tool_calls = _full_tool_calls(db, message_id=message_id, limit=tool_payload_limit)
+        elif resolved_tool_call_mode == TOOL_CALL_MODE_SUMMARY:
+            tool_calls = _summary_tool_calls(db, message_id=message_id, limit=tool_payload_limit)
         else:
-            tc_rows = []
             tool_calls = []
         stored_attachments = _stored_response_attachments(msg.get("attachments_json"))
         attachments = stored_attachments
         if attachments is None:
+            attachment_tool_calls = [dict(tc) for tc in db.get_tool_calls_for_message(message_id)]
             attachments = (
                 collect_response_attachments(
                     content=msg["content"],
-                    tool_calls=[dict(tc) for tc in tc_rows],
+                    tool_calls=attachment_tool_calls,
                 )
-                if include_tool_calls
+                if attachment_tool_calls
                 else collect_response_attachments(content=msg["content"])
             )
         result.append(
             MessageOut(
-                id=msg["id"],
+                id=message_id,
                 role=msg["role"],
                 content=msg["content"],
                 thinking=msg.get("thinking", ""),
@@ -222,4 +309,16 @@ async def get_conversation_messages(
             )
         )
 
-    return MessagesResponse(messages=result, has_more=has_more)
+    next_before_id = result[0].id if result else None
+    return MessagesResponse(messages=result, has_more=has_more, next_before_id=next_before_id)
+
+
+@router.get("/messages/{message_id}/tool-calls", response_model=list[ToolCallOut])
+async def get_message_tool_calls(
+    message_id: int,
+):
+    db = get_db()
+    message = db.fetchone("SELECT id FROM messages WHERE id = ?", (message_id,))
+    if message is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return _full_tool_calls(db, message_id=int(message["id"]), limit=None)

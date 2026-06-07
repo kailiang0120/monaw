@@ -11,9 +11,10 @@ metadata:
         - browser_use
 ---
 
-Use these tools for website and browser automation tasks.
+Use these tools for website fetching and browser automation tasks.
 
 Preferred workflow:
+- For read-only URL retrieval, extraction, or summarization, use `browser_fetch` before opening a browser tab. It uses local HTTP plus Scrapling parsing first, with optional rendering through Monaw's browser session.
 - Start with `browser_open` to create or reuse the browser session.
 - Always use `observe -> decide -> act -> verify`: inspect state, choose one safe next action, execute it, then verify before continuing.
 - When the user asks to resume, continue, or return to a browser task, inspect `browser_tabs` or `browser_snapshot` first. Switch to a relevant existing tab instead of opening or navigating away from a page that may contain in-progress work.
@@ -30,6 +31,7 @@ Preferred workflow:
 - Use `browser_click`, `browser_type`, `browser_press`, `browser_select_option`, and `browser_wait` to complete the flow.
 - Use `browser_screenshot` or `browser_snapshot(include_screenshot=true)` for evidence or visual confirmation when the structured snapshot is incomplete or ambiguous.
 - Use `browser_full_page_screenshot` when full-page webpage evidence is needed. It applies stealth-oriented browser settings, removes common fixed/sticky banners and popups, unlocks scrolling, and can return archive/proxy fallback URLs when public content remains obscured.
+- Use `browser_fetch(mode="dynamic")` when a read-only page needs JavaScript rendering. Use `browser_fetch(mode="stealth")` only when the user explicitly asks for a stealth/protected-page fetch or a normal/dynamic fetch reports a blocker.
 - Do not repeat the same browser action with the same arguments after an unchanged result. Inspect status/tabs/snapshot, use screenshot evidence, or report the blocker.
 - If a browser tool returns `status: error`, do not retry the same call first. Call `browser_session(action="doctor")` to inspect `last_error`, `cdp_endpoint_alive`, and `recent_launches`.
 - For `reason_code: managed_cdp_timeout` or `managed_chrome_exited`, call `browser_session(action="reset")` once, then retry the original intent. Do not loop more than once.
@@ -46,6 +48,7 @@ Session behavior:
 
 Rules:
 - Do not use desktop-control tools for websites when browser-use tools can do the job directly.
+- Do not open a browser tab just to read a public URL if `browser_fetch` can retrieve the needed text or selector content.
 - Do not guess selectors if `browser_snapshot` can give you a `ref`.
 - Use `browser_evaluate` only when the structured snapshot is not enough.
 - If multiple visible fields could match, do not type yet. Take another snapshot, use `browser_evaluate` to inspect labels/attributes, or click only after the correct field is clear.

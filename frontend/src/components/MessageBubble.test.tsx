@@ -1,7 +1,12 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { fetchMessageToolCalls } from '../lib/api/conversations'
 import { MessageBubble } from './MessageBubble'
+
+vi.mock('../lib/api/conversations', () => ({
+  fetchMessageToolCalls: vi.fn(),
+}))
 
 describe('MessageBubble', () => {
   afterEach(() => {
@@ -243,6 +248,47 @@ const answer = 42
     fireEvent.click(screen.getByRole('tab', { name: /browser_tabs/ }))
 
     expect(screen.getByText('tabs ok')).toBeInTheDocument()
+  })
+
+  it('loads full tool details on demand for preview-only history rows', async () => {
+    vi.mocked(fetchMessageToolCalls).mockResolvedValue([
+      {
+        id: 42,
+        tool_name: 'browser_snapshot',
+        input: '{"url":"https://example.com/very/long/path"}',
+        output: 'full snapshot payload',
+        status: 'complete',
+        preview_only: false,
+        has_full_input: false,
+        has_full_output: false,
+      },
+    ] as any)
+
+    render(
+      <MessageBubble
+        message={{
+          id: '42',
+          role: 'assistant',
+          content: 'Done.',
+          toolCalls: [
+            {
+              id: '42',
+              tool: 'browser_snapshot',
+              input: '{"url":"https://example.com/preview"}',
+              output: 'preview result',
+              status: 'complete',
+              previewOnly: true,
+            },
+          ],
+        }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /expand to see all/i }))
+    fireEvent.click(screen.getByRole('tab', { name: /browser_snapshot/ }))
+
+    expect(await screen.findByText('full snapshot payload')).toBeInTheDocument()
+    expect(fetchMessageToolCalls).toHaveBeenCalledWith(42, expect.any(AbortSignal))
   })
 
   it('keeps the reasoning trace collapsed behind a Trace toggle until clicked', () => {
