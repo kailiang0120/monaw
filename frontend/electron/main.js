@@ -351,13 +351,15 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      devTools: false,
+      devTools: isDev && process.env.MONAW_DEVTOOLS === '1',
     },
   })
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5275')
-    mainWindow.webContents.openDevTools()
+    if (process.env.MONAW_DEVTOOLS === '1') {
+      mainWindow.webContents.openDevTools({ mode: 'detach' })
+    }
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
@@ -387,14 +389,11 @@ app.whenReady().then(async () => {
     backendPythonCommand = await pickBackendPython()
   }
   spawnBackend()
-
-  try {
-    await waitForBackend()
-  } catch (err) {
-    console.error('[main] Backend did not start in time:', err.message)
-  }
-
   createWindow()
+
+  waitForBackend().catch((err) => {
+    console.error('[main] Backend did not start in time:', err.message)
+  })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

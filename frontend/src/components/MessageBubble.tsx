@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -118,7 +118,13 @@ function formatResponseDuration(durationMs: number): string {
   return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
 }
 
-export function MessageBubble({ message, agentName = DEFAULT_AGENT_NAME }: { message: Message; agentName?: string }) {
+export const MessageBubble = memo(function MessageBubble({
+  message,
+  agentName = DEFAULT_AGENT_NAME,
+}: {
+  message: Message
+  agentName?: string
+}) {
   const isUser = message.role === 'user'
   const assistantLabel = resolveAgentName(agentName)
 
@@ -135,7 +141,10 @@ export function MessageBubble({ message, agentName = DEFAULT_AGENT_NAME }: { mes
 
   const status = streamingStatus(message)
   const hasBody = message.content.trim().length > 0
-  const formattedContent = hasBody ? formatAgentResponse(message.content) : ''
+  const formattedContent = useMemo(
+    () => (hasBody ? formatAgentResponse(message.content) : ''),
+    [hasBody, message.content],
+  )
   const showToolCalls = message.toolCalls && message.toolCalls.length > 0
   const showThinking = !message.streaming && isDisplayableThinking(message.thinking)
   const showPlan = message.stepProgress && message.stepProgress.length > 0
@@ -299,7 +308,7 @@ export function MessageBubble({ message, agentName = DEFAULT_AGENT_NAME }: { mes
       </div>
     </article>
   )
-}
+})
 
 function ResponseTimer({
   startedAtMs,

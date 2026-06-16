@@ -10,7 +10,6 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.agent.database import get_db
-from app.agent.runtime import run_agent_stream
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +56,13 @@ def set_scheduled_task_service(service: "ScheduledTaskService | None") -> None:
 
 def get_scheduled_task_service() -> "ScheduledTaskService | None":
     return _SERVICE
+
+
+async def run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+    from app.agent.runtime import run_agent_stream as runtime_run_agent_stream
+
+    async for event in runtime_run_agent_stream(*args, **kwargs):
+        yield event
 
 
 class ScheduledTaskService:

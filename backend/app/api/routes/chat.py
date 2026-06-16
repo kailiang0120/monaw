@@ -6,7 +6,6 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.agent.job_manager import cancel_job, create_job, get_job, list_jobs, run_job
-from app.agent.runtime import run_agent_stream
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
 from app.config import settings
 from app.debug_ndjson import dbg_log
@@ -54,6 +53,7 @@ async def chat(req: ChatRequest):
         )
 
         merged = build_runtime_namespace(settings, load_agent_settings(settings))
+        from app.agent.runtime import run_agent_stream
 
         try:
             async for event_dict in run_agent_stream(

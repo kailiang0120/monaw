@@ -131,7 +131,7 @@ export function ContextUsageBar({ usage }: Props) {
                 <p className="mt-0.5 text-[11px] font-medium tabular-nums text-neutral-300">
                   {formatTokens(row.value)}
                 </p>
-                {'toolCalls' in row && row.toolCalls > 0 && (
+                {'toolCalls' in row && (row.toolCalls ?? 0) > 0 && (
                   <p className="mt-0.5 text-[9px] font-medium tabular-nums text-neutral-600">
                     {row.toolCalls} calls
                   </p>

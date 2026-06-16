@@ -12,7 +12,6 @@ from typing import Any
 from app.agent.llm_constants import CHAT_MODELS_BY_PROVIDER
 from app.agent.database import get_db
 from app.agent.response_attachments import collect_response_attachments
-from app.agent.runtime import run_agent_stream
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
 from app.config import settings as app_settings
 from app.integrations.telegram.session import TelegramSessionStore
@@ -72,6 +71,13 @@ class TelegramEffortSummary:
 
 def build_runtime_settings():
     return build_runtime_namespace(app_settings, load_agent_settings(app_settings))
+
+
+async def run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[dict]:
+    from app.agent.runtime import run_agent_stream as runtime_run_agent_stream
+
+    async for event in runtime_run_agent_stream(*args, **kwargs):
+        yield event
 
 
 def split_telegram_message(text: str, *, max_length: int = TELEGRAM_SAFE_CHUNK_SIZE) -> list[str]:

@@ -12,7 +12,6 @@ from app.agent.controller_policy import (
     save_policy,
     set_permission_mode,
 )
-from app.agent.runtime import reset_runtime_cache
 from app.agent.model_catalog import model_options_payload
 from app.agent.settings_store import (
     api_settings_payload,
@@ -44,6 +43,12 @@ from app.skills.mcp_bridge.connection import restart_enabled_mcp_servers
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def reset_runtime_cache(*, reset_mcp: bool = True, reset_browser: bool = False) -> None:
+    from app.agent.runtime import reset_runtime_cache as runtime_reset
+
+    runtime_reset(reset_mcp=reset_mcp, reset_browser=reset_browser)
 
 
 def _normalize_permission_mode(value: str) -> str:

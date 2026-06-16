@@ -448,7 +448,7 @@ describe('SettingsModal', () => {
     })
     vi.mocked(updateSettings).mockResolvedValue(buildSettings() as any)
     vi.mocked(fetchMemories).mockResolvedValue([])
-    vi.mocked(fetchMemoryFile).mockResolvedValue(null)
+    vi.mocked(fetchMemoryFile).mockResolvedValue(null as any)
     vi.mocked(fetchMemoryStats).mockResolvedValue(buildMemoryStats() as any)
     vi.mocked(fetchMemoryProfile).mockResolvedValue([])
     vi.mocked(fetchMemoryCandidates).mockResolvedValue([])
@@ -776,7 +776,9 @@ describe('SettingsModal', () => {
   })
 
   it('shows a memory skeleton while the memory panel is loading', async () => {
-    let resolveMemories: ((value: any) => void) | null = null
+    let resolveMemories: (value: any) => void = (_value: any) => {
+      throw new Error('Expected memory resolver to be captured')
+    }
     vi.mocked(fetchMemories).mockReturnValue(
       new Promise((resolve) => {
         resolveMemories = resolve
@@ -790,7 +792,7 @@ describe('SettingsModal', () => {
     fireEvent.click((await screen.findAllByRole('button', { name: /Memory/i }))[0])
     expect(await screen.findByTestId('memory-loading-skeleton')).toBeInTheDocument()
 
-    resolveMemories?.([buildMemoryRecord({ id: 'memory-loaded', content: 'Loaded memory' })])
+    resolveMemories([buildMemoryRecord({ id: 'memory-loaded', content: 'Loaded memory' })])
 
     expect((await screen.findAllByText('Loaded memory')).length).toBeGreaterThan(0)
   })

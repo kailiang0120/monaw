@@ -3,7 +3,6 @@ import uuid
 from fastapi import APIRouter, HTTPException
 
 from app.agent.observability.recorder import get_observability_recorder
-from app.agent.runtime import run_agent_stream
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
 from app.config import settings
 
@@ -62,6 +61,8 @@ async def replay_observability_run(run_id: str):
 
     conversation_id = f"replay_{uuid.uuid4().hex[:20]}"
     runtime_settings = build_runtime_namespace(settings, load_agent_settings(settings))
+    from app.agent.runtime import run_agent_stream
+
     summary = ""
     status = "complete"
     errors: list[str] = []

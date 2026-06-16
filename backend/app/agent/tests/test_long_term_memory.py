@@ -159,6 +159,42 @@ def test_memory_lexical_search_is_deterministic(tmp_path):
     assert set(run_one[0]["score_breakdown"]) == {"exact", "token", "category", "recency", "importance", "use"}
 
 
+def test_memory_records_cache_reuses_parsed_sections_and_detects_file_changes(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    saved = store.remember(
+        "The user prefers concise implementation summaries.",
+        category="preference",
+        review_state="reviewed",
+    )
+    assert saved is not None
+
+    load_count = 0
+    original_load_sections = store._load_sections
+
+    def counted_load_sections(category, *, archived=False):
+        nonlocal load_count
+        load_count += 1
+        return original_load_sections(category, archived=archived)
+
+    monkeypatch.setattr(store, "_load_sections", counted_load_sections)
+
+    first = store.list_memories(category="preference", status="active")
+    first[0]["content"] = "mutated copy"
+    first_load_count = load_count
+    second = store.list_memories(category="preference", status="active")
+
+    assert load_count == first_load_count
+    assert second[0]["content"] == "- The user prefers concise implementation summaries."
+
+    memory_file = tmp_path / "memory" / "long-term" / "preference.md"
+    raw = memory_file.read_text(encoding="utf-8")
+    memory_file.write_text(raw.replace("concise", "very concise"), encoding="utf-8")
+    third = store.list_memories(category="preference", status="active")
+
+    assert load_count > first_load_count
+    assert third[0]["content"] == "- The user prefers very concise implementation summaries."
+
+
 def test_memory_prompt_includes_personality_and_relevant_markdown(tmp_path):
     store = _store(tmp_path)
     store.settings = type(

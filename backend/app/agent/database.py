@@ -182,6 +182,7 @@ class Database:
                     "INSERT INTO schema_version (version) VALUES (?)",
                     (_SCHEMA_VERSION,),
                 )
+            self.conn.execute("PRAGMA optimize")
             self.conn.commit()
 
     def _migrate(self, current_version: int) -> None:

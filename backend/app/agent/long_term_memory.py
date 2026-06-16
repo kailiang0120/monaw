@@ -143,6 +143,17 @@ class Section:
     body: str
 
 
+@dataclass
+class SearchDocument:
+    record: dict[str, Any]
+    haystack: str
+    tokens: frozenset[str]
+    category: str
+    importance_score: float
+    use_score: float
+    recency_score: float
+
+
 def _table_exists(db: Database, table: str) -> bool:
     row = db.fetchone(
         "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
@@ -166,6 +177,9 @@ class LongTermMemory:
         self.settings = settings
         self.root = Path(memory_root or default_memory_root())
         self._lock = threading.RLock()
+        self._records_cache: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        self._search_documents_cache: dict[tuple[Any, ...], list[SearchDocument]] = {}
+        self._tokenized_record_cache: dict[tuple[str, str, str, str], tuple[str, frozenset[str]]] = {}
         self._ensure_layout()
 
     @property
@@ -451,6 +465,7 @@ class LongTermMemory:
         tmp = path.with_name(f"{path.name}.tmp")
         tmp.write_text(self._dump_sectioned(category, sections), encoding="utf-8")
         tmp.replace(path)
+        self._invalidate_records_cache()
 
     def _section_to_record(
         self,
@@ -557,6 +572,27 @@ class LongTermMemory:
                 paths.extend(sorted(root.rglob("*.md")))
         return paths
 
+    def _invalidate_records_cache(self) -> None:
+        self._records_cache.clear()
+        self._search_documents_cache.clear()
+
+    def _file_signature(self, path: Path) -> tuple[str, int, int]:
+        try:
+            stat = path.stat()
+        except OSError:
+            return (str(path), 0, 0)
+        return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+    def _records_cache_signature(self, *, include_archived: bool, include_short_term: bool) -> tuple[Any, ...]:
+        files: list[tuple[str, int, int]] = []
+        for category in VALID_CATEGORIES:
+            files.append(self._file_signature(self._category_file(category)))
+            if include_archived:
+                files.append(self._file_signature(self._archive_category_file(category)))
+        if include_short_term:
+            files.extend(self._file_signature(path) for path in self._memory_files(include_short_term=True))
+        return (include_archived, include_short_term, tuple(files))
+
     def _load_record(self, path: Path) -> dict[str, Any] | None:
         try:
             meta, content = _read_markdown(path)
@@ -591,26 +627,56 @@ class LongTermMemory:
         return dict(row) if row is not None else None
 
     def _all_records(self, *, include_archived: bool = True, include_short_term: bool = True) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
-        for category in VALID_CATEGORIES:
-            active_path = self._category_file(category)
-            records.extend(
-                self._section_to_record(section, category, status="active", path=active_path)
-                for section in self._load_sections(category)
+        with self._lock:
+            cache_key = self._records_cache_signature(
+                include_archived=include_archived,
+                include_short_term=include_short_term,
             )
-            if include_archived:
-                archive_path = self._archive_category_file(category)
+            cached = self._records_cache.get(cache_key)
+            if cached is not None:
+                return [dict(record) for record in cached]
+
+            records: list[dict[str, Any]] = []
+            for category in VALID_CATEGORIES:
+                active_path = self._category_file(category)
                 records.extend(
-                    self._section_to_record(section, category, status="archived", path=archive_path)
-                    for section in self._load_sections(category, archived=True)
+                    self._section_to_record(section, category, status="active", path=active_path)
+                    for section in self._load_sections(category)
                 )
-        if include_short_term:
-            records.extend(
-                record
-                for path in self._memory_files(include_archived=False, include_short_term=True)
-                if (record := self._load_record(path)) is not None
+                if include_archived:
+                    archive_path = self._archive_category_file(category)
+                    records.extend(
+                        self._section_to_record(section, category, status="archived", path=archive_path)
+                        for section in self._load_sections(category, archived=True)
+                    )
+            if include_short_term:
+                records.extend(
+                    record
+                    for path in self._memory_files(include_archived=False, include_short_term=True)
+                    if (record := self._load_record(path)) is not None
+                )
+            records = sorted(records, key=lambda item: (item["updated_at"], item["id"]), reverse=True)
+            self._records_cache[cache_key] = [dict(record) for record in records]
+            return [dict(record) for record in records]
+
+    def _search_documents(self, *, include_archived: bool, include_short_term: bool) -> list[SearchDocument]:
+        with self._lock:
+            cache_key = self._records_cache_signature(
+                include_archived=include_archived,
+                include_short_term=include_short_term,
             )
-        return sorted(records, key=lambda item: (item["updated_at"], item["id"]), reverse=True)
+            cached = self._search_documents_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            documents: list[SearchDocument] = []
+            for record in self._all_records(
+                include_archived=include_archived,
+                include_short_term=include_short_term,
+            ):
+                documents.append(self._search_document(record))
+            self._search_documents_cache[cache_key] = documents
+            return documents
 
     def _write_record(self, record: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -625,6 +691,7 @@ class LongTermMemory:
             if str(record.get("collection") or "") == "short-term":
                 target = self.root / "short-term" / f"{record['id']}.md"
                 _write_markdown(target, self._record_meta(record), str(record.get("content") or ""))
+                self._invalidate_records_cache()
                 record["_path"] = target
                 return self._public(record)
             archived = record["status"] == "archived"
@@ -995,23 +1062,24 @@ class LongTermMemory:
     ) -> list[dict[str, Any]]:
         query_text = str(query or "").strip()
         query_tokens = set(_tokens(query_text))
-        records = self._all_records(
+        documents = self._search_documents(
             include_archived=include_archived,
             include_short_term=include_short_term,
         )
         if category:
-            records = [record for record in records if record["category"] == self._normalize_category(category)]
+            normalized_category = self._normalize_category(category)
+            documents = [document for document in documents if document.record["category"] == normalized_category]
         if not include_archived:
-            records = [record for record in records if record["status"] == "active"]
+            documents = [document for document in documents if document.record["status"] == "active"]
         if review_state:
-            records = [record for record in records if record["review_state"] == review_state]
+            documents = [document for document in documents if document.record["review_state"] == review_state]
 
         scored: list[dict[str, Any]] = []
-        for record in records:
-            score, breakdown = self._score_record(query_text, query_tokens, record)
+        for document in documents:
+            score, breakdown = self._score_document(query_text, query_tokens, document)
             if query_text and score <= 0:
                 continue
-            item = self._public(record)
+            item = self._public(document.record)
             item["score"] = round(score, 6)
             item["score_breakdown"] = {key: round(value, 6) for key, value in breakdown.items()}
             scored.append(item)
@@ -1022,41 +1090,75 @@ class LongTermMemory:
             self.mark_used([item["id"] for item in result])
         return result
 
+    def _record_haystack(self, record: dict[str, Any]) -> str:
+        content = str(record.get("content") or "")
+        return f"{record.get('category', '')} {record.get('kind', '')} {content}".lower()
+
+    def _tokenized_record(self, record: dict[str, Any]) -> tuple[str, frozenset[str]]:
+        key = (
+            str(record.get("id") or ""),
+            str(record.get("category") or ""),
+            str(record.get("kind") or ""),
+            str(record.get("content") or ""),
+        )
+        cached = self._tokenized_record_cache.get(key)
+        if cached is not None:
+            return cached
+        haystack = self._record_haystack(record)
+        tokenized = (haystack, frozenset(_tokens(haystack)))
+        self._tokenized_record_cache[key] = tokenized
+        return tokenized
+
+    def _search_document(self, record: dict[str, Any]) -> SearchDocument:
+        haystack, tokens = self._tokenized_record(record)
+        return SearchDocument(
+            record=record,
+            haystack=haystack,
+            tokens=tokens,
+            category=str(record.get("category") or ""),
+            importance_score=max(0.0, min(1.0, _coerce_int(record.get("importance"), 5) / 10)),
+            use_score=max(0.0, min(1.0, _coerce_int(record.get("use_count"), 0) / 10)),
+            recency_score=self._recency_score(str(record.get("updated_at") or record.get("created_at") or "")),
+        )
+
     def _score_record(
         self,
         query: str,
         query_tokens: set[str],
         record: dict[str, Any],
     ) -> tuple[float, dict[str, float]]:
-        content = str(record.get("content") or "")
-        haystack = f"{record.get('category', '')} {record.get('kind', '')} {content}".lower()
+        return self._score_document(query, query_tokens, self._search_document(record))
+
+    def _score_document(
+        self,
+        query: str,
+        query_tokens: set[str],
+        document: SearchDocument,
+    ) -> tuple[float, dict[str, float]]:
+        record = document.record
         if not query:
             exact_score = 0.0
             token_score = 0.0
         else:
-            exact_score = 1.0 if query.lower() in haystack else 0.0
-            content_tokens = set(_tokens(haystack))
-            token_score = len(query_tokens & content_tokens) / max(1, len(query_tokens))
+            exact_score = 1.0 if query.lower() in document.haystack else 0.0
+            token_score = len(query_tokens & document.tokens) / max(1, len(query_tokens))
 
-        category_score = 1.0 if record.get("category") in query_tokens else 0.0
-        importance_score = max(0.0, min(1.0, _coerce_int(record.get("importance"), 5) / 10))
-        use_score = max(0.0, min(1.0, _coerce_int(record.get("use_count"), 0) / 10))
-        recency_score = self._recency_score(str(record.get("updated_at") or record.get("created_at") or ""))
+        category_score = 1.0 if document.category in query_tokens else 0.0
         score = (
             exact_score * 0.35
             + token_score * 0.35
             + category_score * 0.05
-            + recency_score * 0.10
-            + importance_score * 0.10
-            + use_score * 0.05
+            + document.recency_score * 0.10
+            + document.importance_score * 0.10
+            + document.use_score * 0.05
         )
         return score, {
             "exact": exact_score,
             "token": token_score,
             "category": category_score,
-            "recency": recency_score,
-            "importance": importance_score,
-            "use": use_score,
+            "recency": document.recency_score,
+            "importance": document.importance_score,
+            "use": document.use_score,
         }
 
     def _recency_score(self, value: str) -> float:
@@ -1651,14 +1753,22 @@ class LongTermMemory:
         short_term = list((self.root / "short-term").glob("*.md"))
         personalities = list((self.root / "personalities").glob("*.md"))
         curated_sessions = list((self.root / ".system" / "curated").glob("*.json"))
-        candidate_rows = self._db_rows("SELECT status FROM memory_candidates")
-        checkpoint_rows = self._db_rows("SELECT status FROM memory_checkpoints")
-        episode_rows = self._db_rows("SELECT id FROM memory_episodes")
-        profile_rows = self._db_rows("SELECT field FROM memory_profile_fields")
+        candidate_counts = {
+            str(row.get("status") or ""): int(row.get("count") or 0)
+            for row in self._db_rows("SELECT status, COUNT(*) AS count FROM memory_candidates GROUP BY status")
+        }
+        checkpoint_counts = {
+            str(row.get("status") or ""): int(row.get("count") or 0)
+            for row in self._db_rows("SELECT status, COUNT(*) AS count FROM memory_checkpoints GROUP BY status")
+        }
+        episode_count = int((self._db_one("SELECT COUNT(*) AS count FROM memory_episodes") or {}).get("count") or 0)
+        profile_count = int((self._db_one("SELECT COUNT(*) AS count FROM memory_profile_fields") or {}).get("count") or 0)
         category_counts = {
             category: len([record for record in active if record["category"] == category])
             for category in VALID_CATEGORIES
         }
+        candidate_count = sum(candidate_counts.values())
+        unresolved_count = int(candidate_counts.get("new", 0))
         return {
             "total": len(records),
             "active": len(active),
@@ -1669,16 +1779,16 @@ class LongTermMemory:
             **category_counts,
             "fact": len([record for record in records if record["kind"] == "fact"]),
             "reflection": len([record for record in records if record["kind"] == "reflection"]),
-            "candidates": len(candidate_rows) or len([row for row in audits if row["action"] in {"SKIP", "CURATE", "MIGRATE_CANDIDATE"}]),
-            "unresolved_candidates": len([row for row in candidate_rows if row.get("status") == "new"]) or len([row for row in audits if row["action"] == "SKIP"]),
+            "candidates": candidate_count or len([row for row in audits if row["action"] in {"SKIP", "CURATE", "MIGRATE_CANDIDATE"}]),
+            "unresolved_candidates": unresolved_count or len([row for row in audits if row["action"] == "SKIP"]),
             "short_term": len(short_term),
             "personalities": len(personalities),
             "curated_sessions": len(curated_sessions),
             "audit_events": len(audits),
             "archived_messages": self._db.count_archived_messages(),
-            "episodes": len(episode_rows),
-            "active_checkpoints": len([row for row in checkpoint_rows if row.get("status") == "active"]),
-            "profile_fields": len(profile_rows),
+            "episodes": episode_count,
+            "active_checkpoints": int(checkpoint_counts.get("active", 0)),
+            "profile_fields": profile_count,
             "memory_root": str(self.root),
         }
 

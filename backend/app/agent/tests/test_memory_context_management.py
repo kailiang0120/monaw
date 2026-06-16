@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.agent.context_usage import (
@@ -48,6 +49,18 @@ class RecordingLLM:
 class ExplodingLLM:
     async def chat(self, *args, **kwargs):
         raise AssertionError("LLM fallback should not be used for this classification")
+
+
+@pytest.fixture(autouse=True)
+def isolated_memory_db(monkeypatch, tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    monkeypatch.setattr(memory_manager_mod, "get_db", lambda: db)
+    monkeypatch.setattr(routes_mod, "get_db", lambda: db)
+    memory_manager_mod.delete_memory()
+    yield db
+    memory_manager_mod.delete_memory()
+    db.close()
 
 
 def _patch_memory_dirs(monkeypatch, tmp_path: Path) -> None:

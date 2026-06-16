@@ -14,10 +14,10 @@ import type { UploadedAttachment } from '../lib/api/types'
 /** After this many ms with no transport activity while streaming, auto-stop. */
 const IDLE_TIMEOUT_MS = 600_000
 const RUN_STATUSES = new Set(['streaming', 'complete', 'paused', 'error'])
-const TYPEWRITER_INTERVAL_MS = 35
-const TYPEWRITER_CHARS_PER_TICK = 6
-const TYPEWRITER_FAST_BACKLOG_CHARS = 600
-const TYPEWRITER_MAX_CHARS_PER_TICK = 24
+const TYPEWRITER_INTERVAL_MS = 24
+const TYPEWRITER_CHARS_PER_TICK = 18
+const TYPEWRITER_FAST_BACKLOG_CHARS = 900
+const TYPEWRITER_MAX_CHARS_PER_TICK = 72
 const INITIAL_HISTORY_LIMIT = 5
 const OLDER_HISTORY_LIMIT = 30
 const HISTORY_LOAD_TIMEOUT_MS = 10_000

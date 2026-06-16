@@ -339,7 +339,14 @@ const answer = 42
           role: 'assistant',
           content: 'The answer is now typing.',
           streaming: true,
-          plan: [{ step_id: 'step-1', description: 'Prepare response' }],
+          plan: [{
+            step_id: 'step-1',
+            description: 'Prepare response',
+            tool_hints: [],
+            depends_on: [],
+            success_criteria: '',
+            status: 'active',
+          }],
           stepProgress: [{ step_id: 'step-1', description: 'Prepare response', status: 'active' }],
         }}
       />,

@@ -13,11 +13,11 @@ from app.agent.context_usage import (
 from app.agent.memory_manager import (
     create_conversation_file,
     delete_conversation_file,
+    list_conversation_metadata,
+    peek_memory_manager,
 )
 from app.agent.response_attachments import collect_response_attachments
-from app.agent.runtime import build_identity_prompt, get_runtime
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
-from app.agent.skill_prompt import build_skill_prompt_sections
 from app.config import settings
 from app.schemas import (
     ConversationCreate,
@@ -36,6 +36,24 @@ HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX = "\n\n[history preview truncated]"
 TOOL_CALL_MODE_NONE = "none"
 TOOL_CALL_MODE_SUMMARY = "summary"
 TOOL_CALL_MODE_FULL = "full"
+
+
+def get_runtime(runtime_settings):
+    from app.agent.runtime import get_runtime as runtime_get_runtime
+
+    return runtime_get_runtime(runtime_settings)
+
+
+def build_identity_prompt(runtime_settings) -> str:
+    from app.agent.runtime import build_identity_prompt as runtime_build_identity_prompt
+
+    return runtime_build_identity_prompt(runtime_settings)
+
+
+def build_skill_prompt_sections(skills, visible_tool_names: set[str]) -> dict[str, str]:
+    from app.agent.skill_prompt import build_skill_prompt_sections as skill_build_prompt_sections
+
+    return skill_build_prompt_sections(skills, visible_tool_names)
 
 
 def _stored_response_attachments(raw_value: object) -> list[dict] | None:
@@ -160,9 +178,7 @@ def _completion_protocol_text() -> str:
 
 @router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations():
-    runtime_settings = build_runtime_namespace(settings, load_agent_settings(settings))
-    runtime = get_runtime(runtime_settings)
-    return runtime.memory.list_conversations_metadata()
+    return list_conversation_metadata()
 
 
 @router.post("/conversations", response_model=ConversationOut)
@@ -238,11 +254,9 @@ async def rename_conversation(conv_id: str, body: ConversationRename):
 
 @router.delete("/conversations/{conv_id}")
 async def delete_conversation(conv_id: str):
-    runtime_settings = build_runtime_namespace(settings, load_agent_settings(settings))
-    runtime = get_runtime(runtime_settings)
-    found_memory = runtime.memory.delete(conv_id)
-    found_file = delete_conversation_file(conv_id)
-    if not found_memory and not found_file:
+    memory_manager = peek_memory_manager()
+    found = memory_manager.delete(conv_id) if memory_manager is not None else delete_conversation_file(conv_id)
+    if not found:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"ok": True}
 

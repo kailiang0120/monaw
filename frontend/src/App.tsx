@@ -1,11 +1,9 @@
-import { useState, useEffect, useCallback } from 'react'
+import { Suspense, lazy, useState, useEffect, useCallback } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { ChatWindow } from './components/ChatWindow'
 import { InputBar } from './components/InputBar'
-import { SettingsModal } from './features/settings/SettingsModal'
 import { ApprovalToast } from './components/ApprovalToast'
 import { AccessGrantDialog } from './components/AccessGrantDialog'
-import { ScheduledTaskDialog } from './components/scheduling/ScheduledTaskDialog'
 import { useChat } from './hooks/useChat'
 import { deleteConversation, fetchConversations, renameConversation } from './lib/api/conversations'
 import {
@@ -23,10 +21,36 @@ type ApprovalMode = AgentSettings['permissions']['mode']
 type ThemeMode = 'dark' | 'light'
 
 const THEME_STORAGE_KEY = 'agent_theme'
+const STARTUP_REFRESH_RETRIES = 20
+const STARTUP_REFRESH_DELAY_MS = 1000
+
+const SettingsModal = lazy(() =>
+  import('./features/settings/SettingsModal').then((module) => ({ default: module.SettingsModal })),
+)
+const ScheduledTaskDialog = lazy(() =>
+  import('./components/scheduling/ScheduledTaskDialog').then((module) => ({
+    default: module.ScheduledTaskDialog,
+  })),
+)
 
 function initialTheme(): ThemeMode {
   if (typeof window === 'undefined') return 'dark'
   return window.localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'
+}
+
+function sameConversations(a: Conversation[], b: Conversation[]): boolean {
+  return a.length === b.length && a.every((item, index) => {
+    const other = b[index]
+    return other !== undefined
+      && item.id === other.id
+      && item.title === other.title
+      && item.created_at === other.created_at
+  })
+}
+
+function sameScheduledTasks(a: ScheduledTask[], b: ScheduledTask[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((item, index) => JSON.stringify(item) === JSON.stringify(b[index]))
 }
 
 export default function App() {
@@ -60,73 +84,89 @@ export default function App() {
   const loadConversations = useCallback(async () => {
     try {
       const convs = await fetchConversations()
-      setConversations(convs.sort((a, b) => b.created_at.localeCompare(a.created_at)))
+      const sorted = [...convs].sort((a, b) => b.created_at.localeCompare(a.created_at))
+      setConversations((current) => (sameConversations(current, sorted) ? current : sorted))
+      return true
     } catch {
       // Backend may not be ready yet
+      return false
     }
   }, [])
 
   const loadScheduledTasks = useCallback(async () => {
     try {
       const tasks = await fetchScheduledTasks()
-      setScheduledTasks(tasks)
+      setScheduledTasks((current) => (sameScheduledTasks(current, tasks) ? current : tasks))
+      return true
     } catch {
       // Backend may not be ready yet.
+      return false
     }
   }, [])
 
+  const loadVisibleSettings = useCallback(async () => {
+    try {
+      const settings = await fetchSettings()
+      setApprovalMode(settings.permissions.mode)
+      setAgentName(resolveAgentName(settings.identity?.agent_name))
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
+  const refreshVisibleSettings = async () => {
+    await loadVisibleSettings()
+  }
+
   useEffect(() => {
     syncStoredApiKeysToBackendWithRetry()
-    loadConversations()
-    loadScheduledTasks()
-    const interval = setInterval(loadConversations, 5000)
-    const scheduledInterval = setInterval(loadScheduledTasks, 15000)
-    return () => {
-      clearInterval(interval)
-      clearInterval(scheduledInterval)
+
+    let cancelled = false
+    let retryTimer: number | null = null
+    let attempts = 0
+
+    const refreshStartupData = async () => {
+      const [conversationsOk, scheduledTasksOk, settingsOk] = await Promise.all([
+        loadConversations(),
+        loadScheduledTasks(),
+        loadVisibleSettings(),
+      ])
+      if (cancelled || (conversationsOk && scheduledTasksOk && settingsOk)) return
+      if (attempts >= STARTUP_REFRESH_RETRIES) return
+      attempts += 1
+      retryTimer = window.setTimeout(refreshStartupData, STARTUP_REFRESH_DELAY_MS)
     }
-  }, [loadConversations, loadScheduledTasks])
+
+    void refreshStartupData()
+    const refreshConversationsWhenVisible = () => {
+      if (document.visibilityState !== 'hidden') void loadConversations()
+    }
+    const refreshScheduledTasksWhenVisible = () => {
+      if (document.visibilityState !== 'hidden') void loadScheduledTasks()
+    }
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      void loadConversations()
+      void loadScheduledTasks()
+    }
+    const interval = window.setInterval(refreshConversationsWhenVisible, 5000)
+    const scheduledInterval = window.setInterval(refreshScheduledTasksWhenVisible, 15000)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      cancelled = true
+      if (retryTimer) window.clearTimeout(retryTimer)
+      window.clearInterval(interval)
+      window.clearInterval(scheduledInterval)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [loadConversations, loadScheduledTasks, loadVisibleSettings])
 
   useEffect(() => {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme)
     document.documentElement.style.colorScheme = theme
     void window.electronAPI?.setTheme?.(theme)
   }, [theme])
-
-  useEffect(() => {
-    let cancelled = false
-
-    const loadSettings = async () => {
-      try {
-        const settings = await fetchSettings()
-        if (!cancelled) {
-          setApprovalMode(settings.permissions.mode)
-          setAgentName(resolveAgentName(settings.identity?.agent_name))
-        }
-      } catch {
-        if (!cancelled) {
-          setApprovalMode('default')
-          setAgentName(DEFAULT_AGENT_NAME)
-        }
-      }
-    }
-
-    loadSettings()
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  const refreshVisibleSettings = async () => {
-    try {
-      const settings = await fetchSettings()
-      setApprovalMode(settings.permissions.mode)
-      setAgentName(resolveAgentName(settings.identity?.agent_name))
-    } catch {
-      // Keep the last visible settings if refresh fails.
-    }
-  }
 
   const handleApprovalModeChange = async (mode: ApprovalMode) => {
     if (mode === approvalMode || savingApprovalMode) return
@@ -302,30 +342,34 @@ export default function App() {
       )}
 
       {showSettings && (
-        <SettingsModal
-          onClose={() => {
-            setShowSettings(false)
-            void refreshVisibleSettings()
-          }}
-        />
+        <Suspense fallback={null}>
+          <SettingsModal
+            onClose={() => {
+              setShowSettings(false)
+              void refreshVisibleSettings()
+            }}
+          />
+        </Suspense>
       )}
 
       {showScheduledTaskDialog && (
-        <ScheduledTaskDialog
-          task={editingScheduledTask}
-          onClose={() => {
-            setShowScheduledTaskDialog(false)
-            setEditingScheduledTaskId(null)
-          }}
-          onSaved={() => {
-            void loadScheduledTasks()
-            void loadConversations()
-          }}
-          onRunConversation={(conversationId) => {
-            setActiveConvId(conversationId)
-            void loadConversations()
-          }}
-        />
+        <Suspense fallback={null}>
+          <ScheduledTaskDialog
+            task={editingScheduledTask}
+            onClose={() => {
+              setShowScheduledTaskDialog(false)
+              setEditingScheduledTaskId(null)
+            }}
+            onSaved={() => {
+              void loadScheduledTasks()
+              void loadConversations()
+            }}
+            onRunConversation={(conversationId) => {
+              setActiveConvId(conversationId)
+              void loadConversations()
+            }}
+          />
+        </Suspense>
       )}
     </div>
   )
