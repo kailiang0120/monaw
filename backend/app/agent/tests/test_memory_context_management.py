@@ -51,6 +51,15 @@ class ExplodingLLM:
         raise AssertionError("LLM fallback should not be used for this classification")
 
 
+class FailingCompactionLLM(RecordingLLM):
+    async def chat(self, messages, system_prompt: str = "", stream_callback=None):
+        self.calls.append({
+            "messages": messages,
+            "system_prompt": system_prompt,
+        })
+        raise RuntimeError("compaction unavailable")
+
+
 @pytest.fixture(autouse=True)
 def isolated_memory_db(monkeypatch, tmp_path):
     db = Database(tmp_path / "agent.db")
@@ -169,6 +178,27 @@ def test_manual_compact_replaces_prior_raw_history_with_checkpoint(monkeypatch, 
     assert "New request after compact." in joined
     assert "Raw old user line that should be replaced." not in joined
     assert "Raw old assistant line that should be replaced." not in joined
+
+
+def test_manual_compact_failure_keeps_existing_history(monkeypatch, tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    db.create_conversation("conv-manual-compact-fail", "Manual compact fail")
+    monkeypatch.setattr(memory_manager_mod, "get_db", lambda: db)
+
+    db.add_message("conv-manual-compact-fail", "user", "First raw line should stay visible.")
+    db.add_message("conv-manual-compact-fail", "assistant", "Second raw line should stay visible.")
+    manager = MemoryManager(FailingCompactionLLM())
+
+    result = asyncio.run(manager.compact_conversation("conv-manual-compact-fail"))
+    history = manager.build_llm_messages("conv-manual-compact-fail")
+    joined = "\n".join(item["content"] for item in history)
+
+    assert result["status"] == "failed"
+    assert result["source_message_id"] == 0
+    assert db.get_conversation_compaction("conv-manual-compact-fail") is None
+    assert "First raw line should stay visible." in joined
+    assert "Second raw line should stay visible." in joined
 
 
 def test_memory_manager_compaction_prompt_preserves_task_critical_facts(monkeypatch, tmp_path):
@@ -303,6 +333,38 @@ def test_messages_endpoint_returns_preview_tool_calls_and_detail_endpoint(monkey
     assert detail_payload[0]["preview_only"] is False
     assert detail_payload[0]["input"] == long_input
     assert detail_payload[0]["output"] == long_output
+
+
+def test_messages_endpoint_returns_full_tool_calls_by_default(monkeypatch, tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    db.create_conversation("conv-tools-default", "Tool history default")
+    db.add_message("conv-tools-default", "user", "Inspect the page")
+    assistant_message_id = db.add_message("conv-tools-default", "assistant", "Done.")
+    long_input = '{"url":"' + ("https://example.com/" + ("a" * 1400)) + '"}'
+    long_output = "snapshot:" + ("b" * 1500)
+    db.add_tool_call(
+        message_id=assistant_message_id,
+        conv_id="conv-tools-default",
+        tool_name="browser_snapshot",
+        tool_input=long_input,
+        tool_output=long_output,
+        status="complete",
+    )
+
+    monkeypatch.setattr(routes_mod, "get_db", lambda: db)
+
+    client = TestClient(app)
+    history = client.get("/api/conversations/conv-tools-default/messages")
+
+    assert history.status_code == 200
+    payload = history.json()
+    tool_call = payload["messages"][-1]["tool_calls"][0]
+    assert tool_call["preview_only"] is False
+    assert tool_call["has_full_input"] is True
+    assert tool_call["has_full_output"] is True
+    assert tool_call["input"] == long_input
+    assert tool_call["output"] == long_output
 
 
 def test_messages_endpoint_returns_stable_pagination_cursor(monkeypatch, tmp_path):

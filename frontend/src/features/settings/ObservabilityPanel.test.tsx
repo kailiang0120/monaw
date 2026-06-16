@@ -130,4 +130,24 @@ describe('ObservabilityPanel', () => {
     expect(screen.getByText('tool_call_finished')).toBeInTheDocument()
     expect(screen.getAllByText('repeated_tool_call_blocked').length).toBeGreaterThan(0)
   })
+
+  it('reloads view-specific data when switching panels', async () => {
+    render(<ObservabilityPanel />)
+
+    expect(await screen.findByText('Total runs')).toBeInTheDocument()
+
+    vi.clearAllMocks()
+    fireEvent.click(screen.getByRole('button', { name: 'Errors' }))
+
+    await waitFor(() => {
+      expect(fetchObservabilityErrors).toHaveBeenCalledWith({ q: '', limit: 100 })
+    })
+
+    vi.clearAllMocks()
+    fireEvent.click(screen.getByRole('button', { name: 'Backend log' }))
+
+    await waitFor(() => {
+      expect(fetchBackendLogTail).toHaveBeenCalledWith(500)
+    })
+  })
 })

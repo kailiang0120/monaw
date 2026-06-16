@@ -18,9 +18,12 @@ def test_observability_recorder_writes_jsonl_sqlite_and_redacts_secrets(tmp_path
         run_id=run_id,
         conversation_id="conv-1",
         event_type="llm_call_finished",
-        error_message="failed with Bearer abcdefghijklmnopqrstuvwxyz and sk-secretsecretsecretsecret",
-        input={"api_key": "sk-secretsecretsecretsecret", "prompt": "hello"},
-        output={"authorization": "Bearer abcdefghijklmnopqrstuvwxyz", "text": "done"},
+        error_message=(
+            "failed with Bearer abcdefghijklmnopqrstuvwxyz and sk-secretsecretsecretsecret "
+            "password=hunter2 cookie=sessionid=abc123 ghp_abcdefghijklmnopqrstuvwxyz123456"
+        ),
+        input={"api_key": "sk-secretsecretsecretsecret", "prompt": "hello", "password": "hunter2"},
+        output={"authorization": "Bearer abcdefghijklmnopqrstuvwxyz", "text": "cookie=sessionid=abc123"},
         tokens=UsageStats(input_tokens=10, output_tokens=5, total_tokens=15, source="provider"),
     )
     recorder.finish_run(
@@ -34,14 +37,22 @@ def test_observability_recorder_writes_jsonl_sqlite_and_redacts_secrets(tmp_path
     assert detail is not None
     assert detail["status"] == "complete"
     assert detail["events"][1]["input"]["api_key"] == "[REDACTED]"
+    assert detail["events"][1]["input"]["password"] == "[REDACTED]"
     assert detail["events"][1]["output"]["authorization"] == "[REDACTED]"
-    assert detail["events"][1]["error_message"] == "failed with Bearer [REDACTED] and sk-[REDACTED]"
+    assert detail["events"][1]["output"]["text"] == "cookie=[REDACTED]"
+    assert detail["events"][1]["error_message"] == (
+        "failed with Bearer [REDACTED] and sk-[REDACTED] "
+        "password=[REDACTED] cookie=[REDACTED] [REDACTED GITHUB TOKEN]"
+    )
 
     event_files = list((tmp_path / "events").glob("*.jsonl"))
     assert event_files
     event_lines = [json.loads(line) for line in event_files[0].read_text(encoding="utf-8").splitlines()]
     assert event_lines[1]["input"]["api_key"] == "[REDACTED]"
-    assert event_lines[1]["error_message"] == "failed with Bearer [REDACTED] and sk-[REDACTED]"
+    assert event_lines[1]["error_message"] == (
+        "failed with Bearer [REDACTED] and sk-[REDACTED] "
+        "password=[REDACTED] cookie=[REDACTED] [REDACTED GITHUB TOKEN]"
+    )
 
 
 def test_turn_timeout_can_override_wait_for_cancelled_run(tmp_path):
@@ -117,3 +128,23 @@ def test_observability_recorder_stores_replay_comparison(tmp_path):
         row = conn.execute("SELECT * FROM observability_replays WHERE replay_id = ?", (result["replay_id"],)).fetchone()
     assert row["status_change"] == "paused->complete"
     assert row["token_delta"] == 42
+
+
+def test_backend_log_tail_redacts_inline_secrets(tmp_path, monkeypatch):
+    log_path = tmp_path / "backend.log"
+    log_path.write_text(
+        "ok\npassword=hunter2\ncookie=sessionid=abc123\nghp_abcdefghijklmnopqrstuvwxyz123456\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(recorder_module, "BACKEND_LOG_PATH", log_path)
+
+    recorder = ObservabilityRecorder(root=tmp_path / "obs")
+    payload = recorder.read_backend_log_tail(tail=10)
+
+    assert payload["exists"] is True
+    assert payload["lines"] == [
+        "ok",
+        "password=[REDACTED]",
+        "cookie=[REDACTED]",
+        "[REDACTED GITHUB TOKEN]",
+    ]

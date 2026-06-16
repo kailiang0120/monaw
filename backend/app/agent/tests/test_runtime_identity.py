@@ -1,5 +1,6 @@
 """Tests for runtime identity prompt wiring."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -61,11 +62,109 @@ def test_identity_prompt_includes_monaw_for_default_profile():
     assert "agent_name" in prompt
 
 
-def test_skill_creator_command_matches_exact_slash_command():
+def test_skill_creator_command_accepts_optional_inline_args():
     assert _is_skill_creator_command("/skill creator")
     assert _is_skill_creator_command("  /Skill   Creator  ")
+    assert _is_skill_creator_command("/skill creator create a browser skill")
     assert not _is_skill_creator_command("/skill")
-    assert not _is_skill_creator_command("/skill creator create a browser skill")
+
+
+def test_special_runtime_commands_emit_conversation_id_in_done_payload():
+    persisted_turns: list[tuple[str, str, str, list]] = []
+
+    async def compact_conversation(_conversation_id: str) -> dict[str, object]:
+        return {
+            "status": "compacted",
+            "summary": "Compacted summary",
+            "message_count": 2,
+            "source_message_id": 0,
+            "tokens_before": 20,
+            "tokens_after": 10,
+        }
+
+    async def persist_turn(conversation_id: str, user_message: str, assistant_message: str, tool_calls: list) -> None:
+        persisted_turns.append((conversation_id, user_message, assistant_message, tool_calls))
+
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime._active_runs = 0
+    runtime._retired = False
+    runtime.shutdown = lambda: None
+    runtime.memory = SimpleNamespace(
+        compact_conversation=compact_conversation,
+        persist_turn=persist_turn,
+        _db=SimpleNamespace(
+            get_last_message_id=lambda _conv_id: 0,
+            upsert_conversation_compaction=lambda **_kwargs: None,
+        ),
+    )
+
+    async def collect_events() -> list[dict]:
+        return [event async for event in runtime.run("/compact", "conv-123")]
+
+    events = asyncio.run(collect_events())
+
+    assert persisted_turns == [
+        (
+            "conv-123",
+            "/compact",
+            "Compacted this chat. Future turns will use the compacted context instead of the earlier raw history.\n\nMessages compacted: 2\nContext estimate: 20 -> 10 tokens (10 saved)",
+            [],
+        )
+    ]
+    assert events[-1] == {
+        "event": "done",
+        "data": {
+            "conversation_id": "conv-123",
+            "summary": "Compacted this chat. Future turns will use the compacted context instead of the earlier raw history.\n\nMessages compacted: 2\nContext estimate: 20 -> 10 tokens (10 saved)",
+            "status": "complete",
+            "attachments": [],
+        },
+    }
+
+
+def test_compact_command_reports_failure_without_claiming_success():
+    async def compact_conversation(_conversation_id: str) -> dict[str, object]:
+        return {
+            "status": "failed",
+            "summary": "",
+            "message_count": 2,
+            "source_message_id": 0,
+            "tokens_before": 20,
+            "tokens_after": 20,
+        }
+
+    persisted_turns: list[tuple[str, str, str, list]] = []
+
+    async def persist_turn(conversation_id: str, user_message: str, assistant_message: str, tool_calls: list) -> None:
+        persisted_turns.append((conversation_id, user_message, assistant_message, tool_calls))
+
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime._active_runs = 0
+    runtime._retired = False
+    runtime.shutdown = lambda: None
+    runtime.memory = SimpleNamespace(
+        compact_conversation=compact_conversation,
+        persist_turn=persist_turn,
+        _db=SimpleNamespace(
+            get_last_message_id=lambda _conv_id: 0,
+            upsert_conversation_compaction=lambda **_kwargs: None,
+        ),
+    )
+
+    async def collect_events() -> list[dict]:
+        return [event async for event in runtime.run("/compact", "conv-456")]
+
+    events = asyncio.run(collect_events())
+
+    assert persisted_turns == [
+        (
+            "conv-456",
+            "/compact",
+            "Couldn't compact this chat right now, so the existing conversation history is unchanged. Try /compact again in a moment.",
+            [],
+        )
+    ]
+    assert events[-1]["data"]["summary"] == persisted_turns[0][2]
 
 
 def test_base_runtime_prompt_is_loaded_from_template():

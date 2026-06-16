@@ -28,7 +28,8 @@ def _is_compact_command(message: str) -> bool:
 
 
 def _is_skill_creator_command(message: str) -> bool:
-    return " ".join(str(message or "").strip().split()).casefold() == "/skill creator"
+    normalized = " ".join(str(message or "").strip().split()).casefold()
+    return normalized == "/skill creator" or normalized.startswith("/skill creator ")
 
 
 def _format_compact_reply(result: dict) -> str:
@@ -37,6 +38,11 @@ def _format_compact_reply(result: dict) -> str:
         return "Nothing to compact yet."
     if status == "unchanged":
         return "Already compacted. No new messages since the last /compact."
+    if status == "failed":
+        return (
+            "Couldn't compact this chat right now, so the existing conversation history is unchanged. "
+            "Try /compact again in a moment."
+        )
 
     message_count = int(result.get("message_count") or 0)
     tokens_before = int(result.get("tokens_before") or 0)
@@ -201,6 +207,7 @@ class AgentRuntime:
                 yield {
                     "event": "done",
                     "data": {
+                        "conversation_id": conversation_id,
                         "summary": reply,
                         "status": "complete",
                         "attachments": [],
@@ -219,6 +226,7 @@ class AgentRuntime:
                 yield {
                     "event": "done",
                     "data": {
+                        "conversation_id": conversation_id,
                         "summary": reply,
                         "status": "complete",
                         "attachments": [],

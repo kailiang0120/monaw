@@ -58,6 +58,7 @@ export default function App() {
   const [activeConvId, setActiveConvId] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+  const [isBackendReady, setIsBackendReady] = useState(() => typeof window === 'undefined' || !window.electronAPI?.isElectron)
   const [theme, setTheme] = useState<ThemeMode>(() => initialTheme())
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('default')
   const [agentName, setAgentName] = useState(DEFAULT_AGENT_NAME)
@@ -85,6 +86,7 @@ export default function App() {
     try {
       const convs = await fetchConversations()
       const sorted = [...convs].sort((a, b) => b.created_at.localeCompare(a.created_at))
+      setIsBackendReady(true)
       setConversations((current) => (sameConversations(current, sorted) ? current : sorted))
       return true
     } catch {
@@ -96,6 +98,7 @@ export default function App() {
   const loadScheduledTasks = useCallback(async () => {
     try {
       const tasks = await fetchScheduledTasks()
+      setIsBackendReady(true)
       setScheduledTasks((current) => (sameScheduledTasks(current, tasks) ? current : tasks))
       return true
     } catch {
@@ -107,6 +110,7 @@ export default function App() {
   const loadVisibleSettings = useCallback(async () => {
     try {
       const settings = await fetchSettings()
+      setIsBackendReady(true)
       setApprovalMode(settings.permissions.mode)
       setAgentName(resolveAgentName(settings.identity?.agent_name))
       return true
@@ -324,7 +328,8 @@ export default function App() {
             isStreaming={isStreaming}
             conversationId={activeConvId}
             contextRefreshKey={messages.length}
-            disabled={isLoadingHistory}
+            disabled={isLoadingHistory || !isBackendReady}
+            disabledReason={!isBackendReady ? 'Waiting for the local backend to finish starting…' : undefined}
             approvalMode={approvalMode}
             approvalModeDisabled={savingApprovalMode}
             onApprovalModeChange={handleApprovalModeChange}

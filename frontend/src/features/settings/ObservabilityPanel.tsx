@@ -158,14 +158,31 @@ export function ObservabilityPanel() {
   useEffect(() => {
     void (async () => {
       try {
-        await loadRuns()
-        if (view === 'errors') await loadErrors()
+        if (view === 'runs') {
+          await loadRuns()
+          return
+        }
+        if (view === 'errors') {
+          await loadErrors()
+        }
       } catch (exc) {
         setError(exc instanceof Error ? exc.message : 'Failed to apply filters')
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter, sourceFilter, query])
+  }, [statusFilter, sourceFilter, query, view])
+
+  useEffect(() => {
+    if (view !== 'backend') return
+    void (async () => {
+      try {
+        await loadBackendLog()
+      } catch (exc) {
+        setError(exc instanceof Error ? exc.message : 'Failed to load backend log')
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view])
 
   const selectRun = async (runId: string) => {
     setSelectedRunId(runId)

@@ -42,6 +42,7 @@ interface Props {
   conversationId: string | null
   contextRefreshKey: number
   disabled?: boolean
+  disabledReason?: string
   approvalMode: ApprovalMode
   approvalModeDisabled?: boolean
   onApprovalModeChange: (mode: ApprovalMode) => void
@@ -54,6 +55,7 @@ export function InputBar({
   conversationId,
   contextRefreshKey,
   disabled,
+  disabledReason,
   approvalMode,
   approvalModeDisabled,
   onApprovalModeChange,
@@ -87,6 +89,9 @@ export function InputBar({
   const voiceTranscriptQueueRef = useRef<Map<number, string>>(new Map())
   const voiceStopRequestedRef = useRef(false)
   const activeApprovalLabel = APPROVAL_OPTIONS.find((o) => o.value === approvalMode)?.label ?? approvalMode
+  const placeholder = disabled && disabledReason
+    ? disabledReason
+    : 'Ask the agent to investigate, edit files, automate the browser, or explain a result…'
   const slashQuery = value.startsWith('/') && !value.includes('\n') && !value.includes(' ')
     ? value.slice(1).toLowerCase()
     : ''
@@ -534,7 +539,7 @@ export function InputBar({
                 onChange={(e) => setValue(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onInput={handleInput}
-                placeholder="Ask the agent to investigate, edit files, automate the browser, or explain a result…"
+                placeholder={placeholder}
                 rows={1}
                 disabled={disabled}
                 className="w-full min-h-9 max-h-44 resize-none bg-transparent text-sm leading-relaxed text-neutral-100 outline-none placeholder:text-neutral-600 disabled:opacity-50"
@@ -576,7 +581,7 @@ export function InputBar({
           {/* Bottom action row — hint left, permission + send right */}
           <div className="flex items-center justify-between gap-3 px-3 pb-3 pt-1.5">
             <span className="text-[10px] text-neutral-700 select-none">
-              Enter sends · Shift+Enter newline
+              {disabled && disabledReason ? disabledReason : 'Enter sends · Shift+Enter newline'}
             </span>
 
             <div className="flex items-center gap-2">

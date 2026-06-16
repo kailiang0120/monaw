@@ -47,6 +47,12 @@ SECRET_KEY_RE = re.compile(
 )
 BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}\b")
+GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
+GOOGLE_API_KEY_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{20,}\b")
+INLINE_SECRET_RE = re.compile(
+    r"\b(api[_-]?key|token|secret|password|authorization|cookie|session(?:id)?|bearer)\b(\s*[:=]\s*)([^\s,;]+)",
+    re.IGNORECASE,
+)
 # High-confidence secret/PII value patterns kept in sync with
 # long_term_memory._SENSITIVE_PATTERNS so secrets that the memory layer refuses to
 # store are not leaked verbatim into observability dumps. (key, replacement) pairs.
@@ -158,11 +164,19 @@ def _to_int(value: Any) -> int:
         return 0
 
 
-def _safe_preview(value: str, limit: int = MAX_TEXT_CHARS) -> str:
+def _redact_text(value: str) -> str:
     text = BEARER_RE.sub("Bearer [REDACTED]", str(value or ""))
     text = OPENAI_KEY_RE.sub("sk-[REDACTED]", text)
+    text = GITHUB_TOKEN_RE.sub("[REDACTED GITHUB TOKEN]", text)
+    text = GOOGLE_API_KEY_RE.sub("[REDACTED GOOGLE API KEY]", text)
+    text = INLINE_SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
     for pattern, replacement in _VALUE_REDACTIONS:
         text = pattern.sub(replacement, text)
+    return text
+
+
+def _safe_preview(value: str, limit: int = MAX_TEXT_CHARS) -> str:
+    text = _redact_text(str(value or ""))
     if len(text) > limit:
         return text[:limit] + "\n[truncated]"
     return text
@@ -1013,7 +1027,7 @@ class ObservabilityRecorder:
                     chunk = handle.read()
                     truncated = False
             text = chunk.decode("utf-8", errors="replace")
-            lines = text.splitlines()[-line_limit:]
+            lines = _redact_text(text).splitlines()[-line_limit:]
             return {
                 "path": str(BACKEND_LOG_PATH),
                 "exists": True,

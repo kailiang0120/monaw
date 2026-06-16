@@ -102,27 +102,25 @@ def _tool_call_preview(preview: object, original_length: object, limit: int) -> 
 
 
 def _full_tool_calls(rows, *, limit: int | None) -> list[ToolCallOut]:
-    return [
-        ToolCallOut(
-            id=int(tc["id"]),
-            tool_name=str(tc["tool_name"]),
-            input=(
-                str(tc.get("input") or "")
-                if limit is None
-                else _history_tool_payload(tc["input"], limit)
-            ),
-            output=(
-                str(tc.get("output") or "")
-                if limit is None
-                else _history_tool_payload(tc["output"], limit)
-            ),
-            status=str(tc["status"]),
-            preview_only=False,
-            has_full_input=bool(str(tc.get("input") or "")),
-            has_full_output=bool(str(tc.get("output") or "")),
+    tool_calls: list[ToolCallOut] = []
+    for tc in rows:
+        input_text = str(tc.get("input") or "")
+        output_text = str(tc.get("output") or "")
+        input_truncated = limit is not None and len(input_text) > limit
+        output_truncated = limit is not None and len(output_text) > limit
+        tool_calls.append(
+            ToolCallOut(
+                id=int(tc["id"]),
+                tool_name=str(tc["tool_name"]),
+                input=input_text if limit is None else _history_tool_payload(input_text, limit),
+                output=output_text if limit is None else _history_tool_payload(output_text, limit),
+                status=str(tc["status"]),
+                preview_only=input_truncated or output_truncated,
+                has_full_input=not input_truncated,
+                has_full_output=not output_truncated,
+            )
         )
-        for tc in rows
-    ]
+    return tool_calls
 
 
 def _summary_tool_calls(db, *, message_id: int, limit: int) -> list[ToolCallOut]:
@@ -266,7 +264,7 @@ async def get_conversation_messages(
     conv_id: str,
     limit: int = Query(50, ge=1, le=200),
     before_id: int | None = Query(None),
-    tool_payload_limit: int = Query(HISTORY_TOOL_PAYLOAD_PREVIEW_CHARS, ge=0, le=20000),
+    tool_payload_limit: int | None = Query(None, ge=0, le=20000),
     include_tool_calls: bool = Query(True),
     tool_call_mode: str | None = Query(
         None,
@@ -281,6 +279,11 @@ async def get_conversation_messages(
     resolved_tool_call_mode = _tool_call_mode(
         include_tool_calls=include_tool_calls,
         tool_call_mode=tool_call_mode,
+    )
+    preview_tool_payload_limit = (
+        HISTORY_TOOL_PAYLOAD_PREVIEW_CHARS
+        if tool_payload_limit is None
+        else tool_payload_limit
     )
 
     raw_messages = db.get_messages(conv_id, limit=limit + 1, before_id=before_id)
@@ -297,9 +300,9 @@ async def get_conversation_messages(
         full_tool_call_rows = None
         if resolved_tool_call_mode == TOOL_CALL_MODE_FULL:
             full_tool_call_rows = db.get_tool_calls_for_message(message_id)
-            tool_calls = _full_tool_calls(full_tool_call_rows, limit=tool_payload_limit)
+            tool_calls = _full_tool_calls(full_tool_call_rows, limit=None)
         elif resolved_tool_call_mode == TOOL_CALL_MODE_SUMMARY:
-            tool_calls = _summary_tool_calls(db, message_id=message_id, limit=tool_payload_limit)
+            tool_calls = _summary_tool_calls(db, message_id=message_id, limit=preview_tool_payload_limit)
         else:
             tool_calls = []
         stored_attachments = _stored_response_attachments(msg.get("attachments_json"))

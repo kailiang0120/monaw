@@ -366,29 +366,6 @@ class MemoryManager:
                 )
         return "\n\n".join(parts).strip()
 
-    def _fallback_compaction_summary(
-        self,
-        *,
-        existing_summary: str,
-        messages: list[dict],
-    ) -> str:
-        lines = [
-            "Current goal: Continue the conversation from the compacted checkpoint.",
-            "User preferences and constraints: Preserve the user's latest instructions and any explicit constraints from the conversation.",
-        ]
-        if existing_summary.strip():
-            lines.append(f"Prior compacted context: {existing_summary.strip()}")
-        tail = messages[-12:]
-        if tail:
-            lines.append("Recent state and next steps:")
-            for message in tail:
-                role = str(message.get("role") or "user")
-                content = " ".join(str(message.get("content") or "").split())
-                if len(content) > 500:
-                    content = content[:500].rstrip() + "..."
-                lines.append(f"- {role}: {content}")
-        return "\n".join(lines).strip()
-
     async def compact_conversation(self, conversation_id: str) -> dict:
         """Create a durable /compact checkpoint for future turns."""
         self.get_or_create(conversation_id)
@@ -429,23 +406,6 @@ class MemoryManager:
             ])
         prompt_parts.extend(["", "Conversation segment to compact:", transcript])
         prompt = "\n".join(prompt_parts).strip()
-
-        try:
-            summary = await self.llm_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt=MANUAL_COMPACT_SYSTEM_PROMPT,
-            )
-            summary = str(summary or "").strip()
-        except Exception as exc:
-            logger.warning("/compact summarization failed; using fallback summary: %s", exc)
-            summary = ""
-        if not summary:
-            summary = self._fallback_compaction_summary(
-                existing_summary=existing_summary,
-                messages=messages,
-            )
-
-        source_message_id = int(messages[-1].get("id") or previous_source_id)
         tokens_before = count_text_tokens(
             "\n\n".join(
                 part
@@ -454,6 +414,28 @@ class MemoryManager:
             ),
             llm_client=self.llm_client,
         )
+
+        try:
+            summary = await self.llm_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt=MANUAL_COMPACT_SYSTEM_PROMPT,
+            )
+            summary = str(summary or "").strip()
+        except Exception as exc:
+            logger.warning("/compact summarization failed; leaving history unchanged: %s", exc)
+            summary = ""
+        if not summary:
+            tokens_after = count_text_tokens(existing_summary, llm_client=self.llm_client) if existing_summary else 0
+            return {
+                "status": "failed",
+                "summary": existing_summary,
+                "message_count": len(messages),
+                "source_message_id": previous_source_id,
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_after,
+            }
+
+        source_message_id = int(messages[-1].get("id") or previous_source_id)
         tokens_after = count_text_tokens(summary, llm_client=self.llm_client)
         compaction = self._db.upsert_conversation_compaction(
             conv_id=conversation_id,
