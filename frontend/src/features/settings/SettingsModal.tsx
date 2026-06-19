@@ -129,7 +129,6 @@ export function SettingsModal({ onClose }: Props) {
   const [telegramAllowedUserIds, setTelegramAllowedUserIds] = useState('')
   const [telegramAllowedChatIds, setTelegramAllowedChatIds] = useState('')
   const [dirtySecrets, setDirtySecrets] = useState<Set<ConnectionSecretId>>(() => new Set())
-  const [dirtyTelegramAllowlist, setDirtyTelegramAllowlist] = useState(false)
   const [showKey, setShowKey] = useState(false)
   const [activeConnectionPortal, setActiveConnectionPortal] = useState<ConnectionPortalId>(DEFAULT_CONNECTION_PORTAL)
   const [mcpTemplate, setMcpTemplate] = useState<MCPServerTemplateKey>('filesystem')
@@ -231,6 +230,8 @@ export function SettingsModal({ onClose }: Props) {
         if (!cancelled) {
           setLoadError('')
           setDraft(settings)
+          setTelegramAllowedUserIds(settings.telegram_allowed_user_ids)
+          setTelegramAllowedChatIds(settings.telegram_allowed_chat_ids)
         }
       } catch (error) {
         console.error('[settings] Failed to load settings', error)
@@ -250,45 +251,24 @@ export function SettingsModal({ onClose }: Props) {
 
       if (window.electronAPI) {
         try {
-          const {
-            openaiKey: oai,
-            deepseekKey: dsk,
-            googleKey: ggl,
-            tavilyKey: tvly,
-            telegramBotToken: tbot,
-            telegramAllowedUserIds: tUsers,
-            telegramAllowedChatIds: tChats,
-          } = await syncStoredApiKeysToBackend()
+          const credentialStatus = await syncStoredApiKeysToBackend()
           if (cancelled) return
-          setOpenaiKey(oai)
-          setDeepseekKey(dsk)
-          setGoogleKey(ggl)
-          setTavilyKey(tvly)
-          setTelegramBotToken(tbot)
-          setTelegramAllowedUserIds(tUsers)
-          setTelegramAllowedChatIds(tChats)
           setDirtySecrets(new Set())
-          setDirtyTelegramAllowlist(false)
           setDraft((current) => current ? {
             ...current,
-            telegram_allowed_user_ids: tUsers || current.telegram_allowed_user_ids,
-            telegram_allowed_chat_ids: tChats || current.telegram_allowed_chat_ids,
             api_keys: {
               ...current.api_keys,
-              has_openai_key: current.api_keys.has_openai_key || Boolean(oai),
-              has_deepseek_key: current.api_keys.has_deepseek_key || Boolean(dsk),
-              has_google_key: current.api_keys.has_google_key || Boolean(ggl),
-              has_tavily_key: current.api_keys.has_tavily_key || Boolean(tvly),
-              has_telegram_bot_token: current.api_keys.has_telegram_bot_token || Boolean(tbot),
-              has_telegram_allowlist: current.api_keys.has_telegram_allowlist || Boolean(tUsers || tChats),
+              has_openai_key: current.api_keys.has_openai_key || credentialStatus.openai,
+              has_deepseek_key: current.api_keys.has_deepseek_key || credentialStatus.deepseek,
+              has_google_key: current.api_keys.has_google_key || credentialStatus.google,
+              has_tavily_key: current.api_keys.has_tavily_key || credentialStatus.tavily,
+              has_telegram_bot_token:
+                current.api_keys.has_telegram_bot_token || credentialStatus.telegramBot,
             },
           } : current)
         } catch {
           // Stored key sync should not prevent the settings UI from opening.
         }
-      } else if (settings) {
-        setTelegramAllowedUserIds(settings.telegram_allowed_user_ids)
-        setTelegramAllowedChatIds(settings.telegram_allowed_chat_ids)
       }
     }
     load()
@@ -455,27 +435,20 @@ export function SettingsModal({ onClose }: Props) {
   }
 
   const saveKeys = async () => {
-    if (!window.electronAPI) return
-    const writes: Array<[ConnectionSecretId, string, string]> = [
-      ['openai', 'openai_api_key', openaiKey],
-      ['deepseek', 'deepseek_api_key', deepseekKey],
-      ['google', 'google_api_key', googleKey],
-      ['tavily', 'tavily_api_key', tavilyKey],
-      ['telegramBot', 'telegram_bot_token', telegramBotToken],
+    if (!window.electronAPI) return null
+    const writes: Array<[ConnectionSecretId, string]> = [
+      ['openai', openaiKey],
+      ['deepseek', deepseekKey],
+      ['google', googleKey],
+      ['tavily', tavilyKey],
+      ['telegramBot', telegramBotToken],
     ]
-    for (const [secret, storeKey, value] of writes) {
+    for (const [secret, value] of writes) {
       if (!dirtySecrets.has(secret)) continue
-      if (value) await window.electronAPI.storeSet(storeKey, value)
-      else await window.electronAPI.storeDelete(storeKey)
+      if (value) await window.electronAPI.setCredential(secret, value)
+      else await window.electronAPI.deleteCredential(secret)
     }
-    if (dirtyTelegramAllowlist) {
-      const userIds = telegramAllowedUserIds.trim()
-      const chatIds = telegramAllowedChatIds.trim()
-      if (userIds) await window.electronAPI.storeSet('telegram_allowed_user_ids', userIds)
-      else await window.electronAPI.storeDelete('telegram_allowed_user_ids')
-      if (chatIds) await window.electronAPI.storeSet('telegram_allowed_chat_ids', chatIds)
-      else await window.electronAPI.storeDelete('telegram_allowed_chat_ids')
-    }
+    return window.electronAPI.applyStoredCredentials()
   }
 
   const updateConnectionSecret = (secret: ConnectionSecretId, value: string) => {
@@ -507,18 +480,20 @@ export function SettingsModal({ onClose }: Props) {
     if (duplicateMcpServerNames(draft.mcp.servers).length > 0) return
     setSaving(true)
     try {
-      const secretPayload: {
+      const browserSecretPayload: {
         openai_api_key?: string
         deepseek_api_key?: string
         google_api_key?: string
         tavily_api_key?: string
         telegram_bot_token?: string
       } = {}
-      if (dirtySecrets.has('openai')) secretPayload.openai_api_key = openaiKey
-      if (dirtySecrets.has('deepseek')) secretPayload.deepseek_api_key = deepseekKey
-      if (dirtySecrets.has('google')) secretPayload.google_api_key = googleKey
-      if (dirtySecrets.has('tavily')) secretPayload.tavily_api_key = tavilyKey
-      if (dirtySecrets.has('telegramBot')) secretPayload.telegram_bot_token = telegramBotToken
+      if (!window.electronAPI) {
+        if (dirtySecrets.has('openai')) browserSecretPayload.openai_api_key = openaiKey
+        if (dirtySecrets.has('deepseek')) browserSecretPayload.deepseek_api_key = deepseekKey
+        if (dirtySecrets.has('google')) browserSecretPayload.google_api_key = googleKey
+        if (dirtySecrets.has('tavily')) browserSecretPayload.tavily_api_key = tavilyKey
+        if (dirtySecrets.has('telegramBot')) browserSecretPayload.telegram_bot_token = telegramBotToken
+      }
 
       const savedSettings = await updateSettings({
         llm: draft.llm,
@@ -533,15 +508,24 @@ export function SettingsModal({ onClose }: Props) {
         deepseek_base_url: 'https://api.deepseek.com',
         telegram_allowed_user_ids: telegramAllowedUserIds.trim(),
         telegram_allowed_chat_ids: telegramAllowedChatIds.trim(),
-        ...secretPayload,
+        ...browserSecretPayload,
       })
       const normalizedSavedSettings = normalizeDraft(savedSettings, modelOptions)
-      setDraft(normalizedSavedSettings)
+      const credentialStatus = await saveKeys()
+      setDraft(credentialStatus ? {
+        ...normalizedSavedSettings,
+        api_keys: {
+          ...normalizedSavedSettings.api_keys,
+          has_openai_key: credentialStatus.openai,
+          has_deepseek_key: credentialStatus.deepseek,
+          has_google_key: credentialStatus.google,
+          has_tavily_key: credentialStatus.tavily,
+          has_telegram_bot_token: credentialStatus.telegramBot,
+        },
+      } : normalizedSavedSettings)
       setTelegramAllowedUserIds(normalizedSavedSettings.telegram_allowed_user_ids)
       setTelegramAllowedChatIds(normalizedSavedSettings.telegram_allowed_chat_ids)
-      await saveKeys()
       setDirtySecrets(new Set())
-      setDirtyTelegramAllowlist(false)
       await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
@@ -1078,7 +1062,6 @@ export function SettingsModal({ onClose }: Props) {
                           value={telegramAllowedUserIds}
                           onChange={(e) => {
                             setTelegramAllowedUserIds(e.target.value)
-                            setDirtyTelegramAllowlist(true)
                           }}
                           placeholder="123456789, 987654321"
                           className="control w-full rounded-xl px-3 py-2 text-sm"
@@ -1089,7 +1072,6 @@ export function SettingsModal({ onClose }: Props) {
                           value={telegramAllowedChatIds}
                           onChange={(e) => {
                             setTelegramAllowedChatIds(e.target.value)
-                            setDirtyTelegramAllowlist(true)
                           }}
                           placeholder="-1001234567890"
                           className="control w-full rounded-xl px-3 py-2 text-sm"

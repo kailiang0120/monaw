@@ -27,7 +27,7 @@ import mascotThinking from '../assets/mascots/thinking.gif'
 import { PlanProgress } from './PlanProgress'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
 import { fetchMessageToolCalls } from '../lib/api/conversations'
-import { filePreviewUrl, fileUrl } from '../lib/api/files'
+import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
 import { formatAgentResponse } from '../lib/formatAgentResponse'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
 import type { UploadedAttachment } from '../lib/api/types'
@@ -496,12 +496,10 @@ function AttachmentStrip({
       {files.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {files.map((attachment) => (
-            <a
+            <button
+              type="button"
               key={attachment.id}
-              href={fileUrl(attachment)}
-              target="_blank"
-              rel="noreferrer"
-              download={attachment.name}
+              onClick={() => void downloadAttachment(attachment)}
               className={`inline-flex max-w-[240px] items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] transition-colors ${
                 compact
                   ? 'bg-black/15 text-white/85 hover:bg-black/25'
@@ -512,7 +510,7 @@ function AttachmentStrip({
               <FileText size={12} className="shrink-0" />
               <span className="truncate">{attachment.name}</span>
               {!compact && <Download size={11} className="shrink-0 text-neutral-600" />}
-            </a>
+            </button>
           ))}
         </div>
       )}
@@ -536,16 +534,31 @@ function ImageAttachmentCard({
 }) {
   const [previewFailed, setPreviewFailed] = useState(false)
   const [tooSmall, setTooSmall] = useState(false)
-  const href = fileUrl(attachment)
-  const previewHref = filePreviewUrl(attachment)
+  const [previewHref, setPreviewHref] = useState('')
+
+  useEffect(() => {
+    let active = true
+    let objectUrl = ''
+    void fetchAttachmentObjectUrl(attachment, true)
+      .then((value) => {
+        objectUrl = value
+        if (active) setPreviewHref(value)
+      })
+      .catch(() => {
+        if (active) setPreviewFailed(true)
+      })
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [attachment])
 
   if (tooSmall) return null
 
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
+    <button
+      type="button"
+      onClick={() => void downloadAttachment(attachment)}
       className={`group block shrink-0 overflow-hidden rounded-xl border transition-colors ${
         compact
           ? 'w-36 border-white/15 bg-black/10 hover:bg-black/15'
@@ -559,7 +572,7 @@ function ImageAttachmentCard({
           compact ? 'h-24' : 'h-32'
         }`}
       >
-        {!previewFailed ? (
+        {!previewFailed && previewHref ? (
           <img
             src={previewHref}
             alt={attachment.name}
@@ -578,13 +591,15 @@ function ImageAttachmentCard({
             }}
             onError={() => setPreviewFailed(true)}
           />
-        ) : (
+        ) : previewFailed ? (
           <span className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center">
             <Image size={24} className={compact ? 'text-white/70' : 'text-neutral-500'} aria-hidden />
             <span className={compact ? 'text-[11px] text-white/80' : 'text-[11px] text-neutral-400'}>
               Preview unavailable
             </span>
           </span>
+        ) : (
+          <Loader2 size={20} className="animate-spin text-neutral-500" aria-label="Loading preview" />
         )}
       </span>
       <span
@@ -602,7 +617,7 @@ function ImageAttachmentCard({
           </span>
         )}
       </span>
-    </a>
+    </button>
   )
 }
 

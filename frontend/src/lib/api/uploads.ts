@@ -1,4 +1,4 @@
-import { BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS } from './client'
 import type { UploadedAttachment } from './types'
 
 function fileToBase64(file: File): Promise<string> {
@@ -18,7 +18,7 @@ export async function uploadAttachment(
   conversationId: string | null,
 ): Promise<UploadedAttachment> {
   const dataBase64 = await fileToBase64(file)
-  const res = await fetch(`${BASE}/api/uploads`, {
+  const res = await apiFetch(`${BASE}/api/uploads`, {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify({

@@ -1,4 +1,4 @@
-import { BASE } from './client'
+import { apiFetch, BASE } from './client'
 import type {
   BrowserUseDiagnostics,
   DiagnosticsSummary,
@@ -13,25 +13,25 @@ import type {
 } from './types'
 
 export async function fetchDiagnosticsSummary(): Promise<DiagnosticsSummary> {
-  const res = await fetch(`${BASE}/api/diagnostics/summary`)
+  const res = await apiFetch(`${BASE}/api/diagnostics/summary`)
   if (!res.ok) throw new Error('Failed to fetch diagnostics summary')
   return res.json()
 }
 
 export async function fetchMCPDiagnostics(): Promise<MCPServerDiagnostics[]> {
-  const res = await fetch(`${BASE}/api/diagnostics/mcp`)
+  const res = await apiFetch(`${BASE}/api/diagnostics/mcp`)
   if (!res.ok) throw new Error('Failed to fetch MCP diagnostics')
   return res.json()
 }
 
 export async function fetchBrowserUseDiagnostics(): Promise<BrowserUseDiagnostics> {
-  const res = await fetch(`${BASE}/api/diagnostics/browser-use`)
+  const res = await apiFetch(`${BASE}/api/diagnostics/browser-use`)
   if (!res.ok) throw new Error('Failed to fetch browser-use diagnostics')
   return res.json()
 }
 
 export async function resetBrowserUseSession(): Promise<BrowserUseDiagnostics> {
-  const res = await fetch(`${BASE}/api/diagnostics/browser-use/reset`, {
+  const res = await apiFetch(`${BASE}/api/diagnostics/browser-use/reset`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error('Failed to reset browser-use session')
@@ -39,7 +39,7 @@ export async function resetBrowserUseSession(): Promise<BrowserUseDiagnostics> {
 }
 
 export async function reconnectMCPServer(name: string): Promise<MCPServerDiagnostics> {
-  const res = await fetch(`${BASE}/api/diagnostics/mcp/${encodeURIComponent(name)}/reconnect`, {
+  const res = await apiFetch(`${BASE}/api/diagnostics/mcp/${encodeURIComponent(name)}/reconnect`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error('Failed to reconnect MCP server')
@@ -47,7 +47,7 @@ export async function reconnectMCPServer(name: string): Promise<MCPServerDiagnos
 }
 
 export async function fetchObservabilitySummary(): Promise<ObservabilitySummary> {
-  const res = await fetch(`${BASE}/api/observability/summary`)
+  const res = await apiFetch(`${BASE}/api/observability/summary`)
   if (!res.ok) throw new Error('Failed to fetch observability summary')
   return res.json()
 }
@@ -65,13 +65,13 @@ export async function fetchObservabilityRuns(filters: {
   if (filters.model) params.set('model', filters.model)
   if (filters.q) params.set('q', filters.q)
   params.set('limit', String(filters.limit ?? 100))
-  const res = await fetch(`${BASE}/api/observability/runs?${params}`)
+  const res = await apiFetch(`${BASE}/api/observability/runs?${params}`)
   if (!res.ok) throw new Error('Failed to fetch observability runs')
   return res.json()
 }
 
 export async function fetchObservabilityRun(runId: string): Promise<ObservabilityRunDetail> {
-  const res = await fetch(`${BASE}/api/observability/runs/${encodeURIComponent(runId)}`)
+  const res = await apiFetch(`${BASE}/api/observability/runs/${encodeURIComponent(runId)}`)
   if (!res.ok) throw new Error('Failed to fetch observability run')
   return res.json()
 }
@@ -85,20 +85,20 @@ export async function fetchObservabilityErrors(filters: {
   if (filters.level) params.set('level', filters.level)
   if (filters.q) params.set('q', filters.q)
   params.set('limit', String(filters.limit ?? 100))
-  const res = await fetch(`${BASE}/api/observability/errors?${params}`)
+  const res = await apiFetch(`${BASE}/api/observability/errors?${params}`)
   if (!res.ok) throw new Error('Failed to fetch observability errors')
   return res.json()
 }
 
 export async function fetchBackendLogTail(tail = 400): Promise<ObservabilityBackendLog> {
   const params = new URLSearchParams({ tail: String(tail) })
-  const res = await fetch(`${BASE}/api/observability/logs/backend?${params}`)
+  const res = await apiFetch(`${BASE}/api/observability/logs/backend?${params}`)
   if (!res.ok) throw new Error('Failed to fetch backend log')
   return res.json()
 }
 
 export async function replayObservabilityRun(runId: string): Promise<ObservabilityReplayResult> {
-  const res = await fetch(`${BASE}/api/observability/runs/${encodeURIComponent(runId)}/replay`, {
+  const res = await apiFetch(`${BASE}/api/observability/runs/${encodeURIComponent(runId)}/replay`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error('Failed to replay observability run')
@@ -106,7 +106,7 @@ export async function replayObservabilityRun(runId: string): Promise<Observabili
 }
 
 export async function exportObservabilityDebugBundle(runId: string): Promise<ObservabilityDebugBundle> {
-  const res = await fetch(`${BASE}/api/observability/runs/${encodeURIComponent(runId)}/export-debug-bundle`, {
+  const res = await apiFetch(`${BASE}/api/observability/runs/${encodeURIComponent(runId)}/export-debug-bundle`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error('Failed to export debug bundle')

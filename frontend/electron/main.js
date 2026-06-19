@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme, safeStorage } = require('electron')
 const path = require('path')
 const os = require('os')
 const { spawn } = require('child_process')
@@ -6,15 +6,23 @@ const http = require('http')
 const fs = require('fs')
 const { fileURLToPath } = require('url')
 const runtimeConfig = require('../config/runtime.json')
+const {
+  generateControlSecret,
+  mintControlSession,
+  normalizeBackendHost,
+} = require('./control-auth')
+const { SECRET_FIELDS, createCredentialVault } = require('./credential-vault')
 
-const BACKEND_HOST = runtimeConfig.backendHost || '127.0.0.1'
+const BACKEND_HOST = normalizeBackendHost(
+  runtimeConfig.backendHost,
+  process.env.MONAW_ALLOW_UNSAFE_BACKEND_HOST === '1'
+)
 const BACKEND_PORT = runtimeConfig.backendPort || 8420
 const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`
+const CONTROL_SECRET = generateControlSecret()
 const BACKEND_RESTART_EXIT_CODE = 78
 const isDev = !app.isPackaged
 const APP_USER_MODEL_ID = 'com.monaw.agent'
-const STORE_KEYS = Array.isArray(runtimeConfig.allowedStoreKeys) ? runtimeConfig.allowedStoreKeys : []
-const ALLOWED_STORE_KEYS = new Set(STORE_KEYS)
 const LEGACY_USER_DATA_DIR_NAMES = ['AI Agent', 'ai-agent']
 const APP_THEME_COLORS = {
   dark: '#111b13',
@@ -31,20 +39,6 @@ function getBackendPath() {
     return path.join(__dirname, '../../backend')
   }
   return path.join(process.resourcesPath, 'backend')
-}
-
-function assertAllowedStoreKey(key) {
-  if (typeof key !== 'string' || !ALLOWED_STORE_KEYS.has(key)) {
-    throw new Error(`Unsupported store key: ${String(key)}`)
-  }
-  return key
-}
-
-function assertStoreValue(value) {
-  if (typeof value !== 'string') {
-    throw new Error('Stored values must be strings')
-  }
-  return value
 }
 
 function getMonawHomeDir() {
@@ -102,7 +96,7 @@ function attachBackendLogging(runtimeDir, proc) {
       console.log('[main] Backend requested restart; respawning')
       setTimeout(() => {
         spawnBackend()
-        waitForBackend().catch((err) => {
+        waitForBackend().then(applyStoredCredentialsToBackend).catch((err) => {
           console.error('[main] Backend restart did not become ready:', err.message)
         })
       }, 500)
@@ -129,6 +123,12 @@ function spawnBackend() {
       env: {
         ...process.env,
         BACKEND_PYTHON_COMMAND: cmd,
+        MONAW_CONTROL_SECRET: CONTROL_SECRET,
+        MONAW_ALLOW_DEVELOPMENT_TOKEN: '0',
+        CORS_ALLOW_ORIGINS: isDev
+          ? 'http://localhost:5275,http://127.0.0.1:5275'
+          : 'null',
+        CORS_ALLOW_ORIGIN_REGEX: '',
         AGENT_RUNTIME_DIR: process.env.AGENT_RUNTIME_DIR || runtimeDir,
         AGENT_WORKSPACE_DIR: process.env.AGENT_WORKSPACE_DIR || workspaceDir,
       },
@@ -286,6 +286,46 @@ function isTrustedRenderer(webContents, value) {
   return isTrustedRendererUrl(value || webContents.getURL())
 }
 
+function updateBackendSettings(payload) {
+  return new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify(payload), 'utf8')
+    const session = mintControlSession(CONTROL_SECRET)
+    const request = http.request(
+      `${BACKEND_BASE_URL}/api/settings`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${session.token}`,
+          'Content-Type': 'application/json',
+          'Content-Length': String(body.length),
+        },
+      },
+      (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(chunk))
+        response.on('end', () => {
+          if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+            resolve()
+            return
+          }
+          const detail = Buffer.concat(chunks).toString('utf8').slice(0, 500)
+          reject(new Error(`Backend credential sync failed (${response.statusCode}): ${detail}`))
+        })
+      },
+    )
+    request.setTimeout(10_000, () => request.destroy(new Error('Backend credential sync timed out')))
+    request.on('error', reject)
+    request.on('finish', () => body.fill(0))
+    request.end(body)
+  })
+}
+
+function assertTrustedIpcSender(event) {
+  if (!event?.sender || !isTrustedRenderer(event.sender, event.senderFrame?.url)) {
+    throw new Error('IPC request rejected from untrusted renderer')
+  }
+}
+
 function isExternalOpenableUrl(value) {
   try {
     const url = new URL(value)
@@ -391,8 +431,8 @@ app.whenReady().then(async () => {
   spawnBackend()
   createWindow()
 
-  waitForBackend().catch((err) => {
-    console.error('[main] Backend did not start in time:', err.message)
+  waitForBackend().then(applyStoredCredentialsToBackend).catch((err) => {
+    console.error('[main] Backend startup or credential sync failed:', err.message)
   })
 
   app.on('activate', () => {
@@ -454,62 +494,83 @@ function deleteLegacyStoreKey(key) {
   }
 }
 
-function migrateLegacySecrets(currentStore) {
-  const legacyData = readLegacyStoreData()
-  if (!legacyData) return
-  let migrated = false
-  for (const key of STORE_KEYS) {
-    const currentValue = currentStore.get(key)
-    const legacyValue = legacyData[key]
-    if (typeof currentValue === 'undefined' && typeof legacyValue === 'string' && legacyValue) {
-      currentStore.set(key, legacyValue)
-      migrated = true
-    }
-  }
-  if (migrated) {
-    console.log('[main] Migrated saved API keys from legacy app data store')
-  }
-}
-
 async function getStore() {
   if (!store) {
     const { default: Store } = await import('electron-store')
     store = new Store()
-    migrateLegacySecrets(store)
   }
   return store
 }
 
-ipcMain.handle('store:get', async (_, key) => {
-  const s = await getStore()
-  const safeKey = assertAllowedStoreKey(key)
-  return s.get(safeKey)
-})
-
-ipcMain.handle('store:set', async (_, key, value) => {
-  const s = await getStore()
-  const safeKey = assertAllowedStoreKey(key)
-  const safeValue = assertStoreValue(value)
-  if (safeValue === '') {
-    s.delete(safeKey)
-    deleteLegacyStoreKey(safeKey)
-    return
+let credentialVault = null
+async function getCredentialVault() {
+  if (!credentialVault) {
+    const currentStore = await getStore()
+    const candidate = createCredentialVault({
+      safeStorage,
+      store: currentStore,
+      legacyData: readLegacyStoreData() || {},
+      deleteLegacyValue: deleteLegacyStoreKey,
+    })
+    candidate.migrate()
+    credentialVault = candidate
   }
-  s.set(safeKey, safeValue)
+  return credentialVault
+}
+
+async function applyStoredCredentialsToBackend() {
+  const vault = await getCredentialVault()
+  const payload = vault.backendPayload()
+  try {
+    if (Object.keys(payload).length > 0) {
+      await updateBackendSettings(payload)
+    }
+    return vault.status()
+  } finally {
+    for (const key of Object.keys(payload)) {
+      payload[key] = ''
+    }
+  }
+}
+
+ipcMain.handle('control:get-session', async (event) => {
+  assertTrustedIpcSender(event)
+  return mintControlSession(CONTROL_SECRET)
 })
 
-ipcMain.handle('store:delete', async (_, key) => {
-  const s = await getStore()
-  const safeKey = assertAllowedStoreKey(key)
-  s.delete(safeKey)
-  deleteLegacyStoreKey(safeKey)
+ipcMain.handle('credentials:status', async (event) => {
+  assertTrustedIpcSender(event)
+  return (await getCredentialVault()).status()
 })
 
-ipcMain.handle('theme:set', async (_, theme) => {
+ipcMain.handle('credentials:set', async (event, id, value) => {
+  assertTrustedIpcSender(event)
+  const vault = await getCredentialVault()
+  vault.setCredential(id, value)
+  await updateBackendSettings({ [SECRET_FIELDS[id].backendField]: value })
+  return vault.status()
+})
+
+ipcMain.handle('credentials:delete', async (event, id) => {
+  assertTrustedIpcSender(event)
+  const vault = await getCredentialVault()
+  vault.deleteCredential(id)
+  await updateBackendSettings({ [SECRET_FIELDS[id].backendField]: '' })
+  return vault.status()
+})
+
+ipcMain.handle('credentials:apply', async (event) => {
+  assertTrustedIpcSender(event)
+  return applyStoredCredentialsToBackend()
+})
+
+ipcMain.handle('theme:set', async (event, theme) => {
+  assertTrustedIpcSender(event)
   applyNativeTheme(theme)
 })
 
-ipcMain.handle('dialog:select-directory', async (_, defaultPath) => {
+ipcMain.handle('dialog:select-directory', async (event, defaultPath) => {
+  assertTrustedIpcSender(event)
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Choose output folder',
     defaultPath: defaultPath || undefined,

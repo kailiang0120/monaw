@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from app.config import settings
 from app.agent.observability.recorder import get_observability_recorder, install_logging_handler
 from app.agent.workspace_instructions import ensure_workspace_instruction_file
 from app.skills.browser_use.manager import ensure_browser_use_runtime_dirs
+from app.security.request_limits import RequestSizeLimitMiddleware
 
 logger = logging.getLogger(__name__)
 install_logging_handler()
@@ -74,24 +76,36 @@ async def lifespan(app: FastAPI):
                 logger.exception("Telegram bot shutdown failed.")
 
 
-app = FastAPI(title="Monaw Agent API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Monaw Agent API",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_split_csv_setting(settings.cors_allow_origins),
     allow_origin_regex=settings.cors_allow_origin_regex or None,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+app.add_middleware(RequestSizeLimitMiddleware)
 
 app.include_router(router, prefix="/api")
 
 
 @app.middleware("http")
 async def observability_exception_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", "").strip()[:128] or uuid.uuid4().hex
+    request.state.request_id = request_id
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
     except Exception as exc:
         get_observability_recorder().log_error(
             message=str(exc),
@@ -108,7 +122,7 @@ async def observability_exception_middleware(request: Request, call_next):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "port": settings.port}
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":

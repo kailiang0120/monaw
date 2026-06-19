@@ -2,10 +2,16 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { fetchMessageToolCalls } from '../lib/api/conversations'
+import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
 import { MessageBubble } from './MessageBubble'
 
 vi.mock('../lib/api/conversations', () => ({
   fetchMessageToolCalls: vi.fn(),
+}))
+
+vi.mock('../lib/api/files', () => ({
+  downloadAttachment: vi.fn(),
+  fetchAttachmentObjectUrl: vi.fn(() => Promise.resolve('blob:attachment-preview')),
 }))
 
 describe('MessageBubble', () => {
@@ -142,7 +148,7 @@ const answer = 42
     expect(screen.getByRole('link', { name: 'Open website' })).toHaveAttribute('rel', 'noreferrer')
   })
 
-  it('renders assistant response attachments as downloadable files and image previews', () => {
+  it('renders assistant response attachments as authenticated files and image previews', async () => {
     render(
       <MessageBubble
         message={{
@@ -169,11 +175,16 @@ const answer = 42
       />,
     )
 
-    expect(screen.getByRole('img', { name: 'chart.png' })).toHaveAttribute(
+    expect(await screen.findByRole('img', { name: 'chart.png' })).toHaveAttribute(
       'src',
-      expect.stringContaining('/api/files/image-1/preview'),
+      'blob:attachment-preview',
     )
-    expect(screen.getByRole('link', { name: /report.pdf/i })).toHaveAttribute('download', 'report.pdf')
+    fireEvent.click(screen.getByRole('button', { name: /report.pdf/i }))
+    expect(downloadAttachment).toHaveBeenCalledWith(expect.objectContaining({ id: 'file-1' }))
+    expect(fetchAttachmentObjectUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'image-1' }),
+      true,
+    )
   })
 
   it('does not render image preview cards for tiny screenshot attachments', () => {

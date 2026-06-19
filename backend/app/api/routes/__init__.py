@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.api.routes.access_grants import router as access_grants_router
 from app.api.routes.approvals import router as approvals_router
@@ -13,8 +13,9 @@ from app.api.routes.settings import router as settings_router
 from app.api.routes.scheduled_tasks import router as scheduled_tasks_router
 from app.api.routes.speech_to_text import router as speech_to_text_router
 from app.api.routes.uploads import router as uploads_router
+from app.security.control_plane import require_control_session
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_control_session)])
 router.include_router(chat_router)
 router.include_router(conversations_router)
 router.include_router(access_grants_router)

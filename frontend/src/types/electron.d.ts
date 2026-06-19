@@ -1,11 +1,16 @@
 export {}
 
+type CredentialId = 'openai' | 'deepseek' | 'google' | 'tavily' | 'telegramBot'
+type CredentialStatus = Record<CredentialId, boolean>
+
 declare global {
   interface Window {
     electronAPI?: {
-      storeGet: (key: string) => Promise<unknown>
-      storeSet: (key: string, value: string) => Promise<void>
-      storeDelete: (key: string) => Promise<void>
+      getControlSession: () => Promise<{ token: string; expiresAt: number }>
+      credentialStatus: () => Promise<CredentialStatus>
+      setCredential: (id: CredentialId, value: string) => Promise<CredentialStatus>
+      deleteCredential: (id: CredentialId) => Promise<CredentialStatus>
+      applyStoredCredentials: () => Promise<CredentialStatus>
       selectDirectory?: (defaultPath?: string) => Promise<string>
       setTheme?: (theme: 'dark' | 'light') => Promise<void>
       backendBaseUrl: string

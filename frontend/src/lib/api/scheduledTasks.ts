@@ -1,4 +1,4 @@
-import { BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS } from './client'
 import type {
   SchedulePreviewRequest,
   ScheduledTask,
@@ -8,13 +8,13 @@ import type {
 } from './types'
 
 export async function fetchScheduledTasks(): Promise<ScheduledTask[]> {
-  const res = await fetch(`${BASE}/api/scheduled-tasks`)
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks`)
   if (!res.ok) throw new Error('Failed to fetch scheduled tasks')
   return res.json()
 }
 
 export async function createScheduledTask(input: ScheduledTaskInput): Promise<ScheduledTask> {
-  const res = await fetch(`${BASE}/api/scheduled-tasks`, {
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks`, {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify(input),
@@ -27,7 +27,7 @@ export async function updateScheduledTask(
   id: string,
   patch: Partial<ScheduledTaskInput>,
 ): Promise<ScheduledTask> {
-  const res = await fetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: JSON_HEADERS,
     body: JSON.stringify(patch),
@@ -37,14 +37,14 @@ export async function updateScheduledTask(
 }
 
 export async function deleteScheduledTask(id: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   })
   if (!res.ok) throw new Error('Failed to delete scheduled task')
 }
 
 export async function runScheduledTaskNow(id: string): Promise<{ runId: number; conversationId: string }> {
-  const res = await fetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}/run`, {
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}/run`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(await errorText(res, 'Failed to run scheduled task'))
@@ -53,13 +53,13 @@ export async function runScheduledTaskNow(id: string): Promise<{ runId: number; 
 
 export async function fetchScheduledTaskRuns(id: string, limit = 20): Promise<ScheduledTaskRun[]> {
   const params = new URLSearchParams({ limit: String(limit) })
-  const res = await fetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}/runs?${params}`)
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}/runs?${params}`)
   if (!res.ok) throw new Error('Failed to fetch scheduled task runs')
   return res.json()
 }
 
 export async function previewSchedule(input: SchedulePreviewRequest): Promise<{ next: string[] }> {
-  const res = await fetch(`${BASE}/api/scheduled-tasks/preview`, {
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks/preview`, {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify(input),
@@ -69,7 +69,7 @@ export async function previewSchedule(input: SchedulePreviewRequest): Promise<{ 
 }
 
 export async function fetchTelegramChats(): Promise<TelegramChatTarget[]> {
-  const res = await fetch(`${BASE}/api/scheduled-tasks/telegram-chats`)
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks/telegram-chats`)
   if (!res.ok) return []
   const payload = await res.json()
   if (Array.isArray(payload.chats)) {

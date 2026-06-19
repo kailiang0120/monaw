@@ -1,4 +1,4 @@
-import { BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS } from './client'
 import type {
   AccessGrantRequiredEvent,
   ApprovalEvent,
@@ -269,7 +269,7 @@ export function chatStream(
     }
 
     try {
-      const res = await fetch(`${BASE}/api/chat`, {
+      const res = await apiFetch(`${BASE}/api/chat`, {
         method: 'POST',
         headers: JSON_HEADERS,
         body: JSON.stringify({ message, conversation_id: conversationId, attachments }),

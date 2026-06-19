@@ -1,4 +1,4 @@
-import { BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS } from './client'
 import type {
   MemoryAuditRecord,
   MemoryCandidate,
@@ -47,25 +47,25 @@ async function errorMessage(res: Response, fallback: string) {
 
 export async function fetchMemories(params: MemoryListParams = {}): Promise<MemoryRecord[]> {
   const query = paramsToSearch(params)
-  const res = await fetch(`${BASE}/api/memories${query ? `?${query}` : ''}`)
+  const res = await apiFetch(`${BASE}/api/memories${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memories'))
   return res.json()
 }
 
 export async function fetchMemoryStats(): Promise<MemoryStats> {
-  const res = await fetch(`${BASE}/api/memories/stats`)
+  const res = await apiFetch(`${BASE}/api/memories/stats`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory stats'))
   return res.json()
 }
 
 export async function fetchMemoryFile(category: MemoryCategory): Promise<MemoryFileRecord> {
-  const res = await fetch(`${BASE}/api/memories/files/${category}`)
+  const res = await apiFetch(`${BASE}/api/memories/files/${category}`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory file'))
   return res.json()
 }
 
 export async function saveMemoryFile(category: MemoryCategory, raw_markdown: string): Promise<MemoryFileRecord> {
-  const res = await fetch(`${BASE}/api/memories/files/${category}`, {
+  const res = await apiFetch(`${BASE}/api/memories/files/${category}`, {
     method: 'PUT',
     headers: JSON_HEADERS,
     body: JSON.stringify({ raw_markdown }),
@@ -78,7 +78,7 @@ export async function updateSection(
   sectionId: string,
   body: Partial<Pick<MemoryFileRecord['sections'][number], 'title' | 'body' | 'importance' | 'review_state'>>,
 ): Promise<MemoryFileRecord['sections'][number]> {
-  const res = await fetch(`${BASE}/api/memories/sections/${sectionId}`, {
+  const res = await apiFetch(`${BASE}/api/memories/sections/${sectionId}`, {
     method: 'PATCH',
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
@@ -95,7 +95,7 @@ export async function searchMemories(params: {
   limit?: number
 }): Promise<MemorySearchRecord[]> {
   const query = paramsToSearch(params)
-  const res = await fetch(`${BASE}/api/memories/search?${query}`)
+  const res = await apiFetch(`${BASE}/api/memories/search?${query}`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to search memories'))
   return res.json()
 }
@@ -106,7 +106,7 @@ export async function fetchMemoryAudit(params: {
   limit?: number
 } = {}): Promise<MemoryAuditRecord[]> {
   const query = paramsToSearch(params)
-  const res = await fetch(`${BASE}/api/memories/audit${query ? `?${query}` : ''}`)
+  const res = await apiFetch(`${BASE}/api/memories/audit${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory audit'))
   return res.json()
 }
@@ -120,7 +120,7 @@ export async function closeMemorySession(conversation_id: string): Promise<{
   hot_messages_after: number
   reflection_id: string | null
 }> {
-  const res = await fetch(`${BASE}/api/memories/session/close`, {
+  const res = await apiFetch(`${BASE}/api/memories/session/close`, {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify({ conversation_id }),
@@ -130,7 +130,7 @@ export async function closeMemorySession(conversation_id: string): Promise<{
 }
 
 export async function fetchMemoryProfile(): Promise<MemoryProfileField[]> {
-  const res = await fetch(`${BASE}/api/memories/profile`)
+  const res = await apiFetch(`${BASE}/api/memories/profile`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory profile'))
   return res.json()
 }
@@ -142,7 +142,7 @@ export async function updateMemoryProfileField(
     source_message_id?: number | null
   },
 ): Promise<MemoryProfileField> {
-  const res = await fetch(`${BASE}/api/memories/profile/${encodeURIComponent(field)}`, {
+  const res = await apiFetch(`${BASE}/api/memories/profile/${encodeURIComponent(field)}`, {
     method: 'PATCH',
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
@@ -156,7 +156,7 @@ export async function fetchMemoryCandidates(params: {
   limit?: number
 } = {}): Promise<MemoryCandidate[]> {
   const query = paramsToSearch(params)
-  const res = await fetch(`${BASE}/api/memories/candidates${query ? `?${query}` : ''}`)
+  const res = await apiFetch(`${BASE}/api/memories/candidates${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory candidates'))
   return res.json()
 }
@@ -165,7 +165,7 @@ export async function updateMemoryCandidate(
   id: string,
   body: { status: MemoryCandidate['status']; approve?: boolean },
 ): Promise<MemoryCandidate> {
-  const res = await fetch(`${BASE}/api/memories/candidates/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`${BASE}/api/memories/candidates/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
@@ -179,7 +179,7 @@ export async function fetchMemoryEpisodes(params: {
   limit?: number
 } = {}): Promise<MemoryEpisode[]> {
   const query = paramsToSearch(params)
-  const res = await fetch(`${BASE}/api/memories/episodes${query ? `?${query}` : ''}`)
+  const res = await apiFetch(`${BASE}/api/memories/episodes${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory episodes'))
   return res.json()
 }
@@ -189,7 +189,7 @@ export async function fetchMemoryCheckpoints(params: {
   limit?: number
 } = {}): Promise<MemoryCheckpoint[]> {
   const query = paramsToSearch(params)
-  const res = await fetch(`${BASE}/api/memories/checkpoints${query ? `?${query}` : ''}`)
+  const res = await apiFetch(`${BASE}/api/memories/checkpoints${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to fetch memory checkpoints'))
   return res.json()
 }
@@ -202,7 +202,7 @@ export async function createMemory(body: {
   importance?: number
   kind?: MemoryKind
 }): Promise<MemoryRecord> {
-  const res = await fetch(`${BASE}/api/memories`, {
+  const res = await apiFetch(`${BASE}/api/memories`, {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
@@ -215,7 +215,7 @@ export async function updateMemory(
   id: string,
   body: Partial<Pick<MemoryRecord, 'content' | 'category' | 'status' | 'review_state' | 'confidence' | 'importance' | 'kind'>>,
 ): Promise<MemoryRecord> {
-  const res = await fetch(`${BASE}/api/memories/${id}`, {
+  const res = await apiFetch(`${BASE}/api/memories/${id}`, {
     method: 'PATCH',
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
@@ -225,6 +225,6 @@ export async function updateMemory(
 }
 
 export async function deleteMemory(id: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/memories/${id}`, { method: 'DELETE' })
+  const res = await apiFetch(`${BASE}/api/memories/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await errorMessage(res, 'Failed to delete memory'))
 }

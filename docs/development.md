@@ -39,6 +39,7 @@ Run only the backend:
 
 ```powershell
 cd backend
+$env:MONAW_CONTROL_SECRET = 'replace-with-at-least-32-random-characters'
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8435 --reload
 ```
 
@@ -47,6 +48,36 @@ Health check:
 ```powershell
 Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8435/health
 ```
+
+All `/api` endpoints require a short-lived bearer session issued by Electron.
+The `/health` endpoint is the only unauthenticated runtime endpoint. Browser-only
+development must explicitly opt into a development token:
+
+```powershell
+$env:MONAW_CONTROL_SECRET = 'replace-with-at-least-32-random-characters'
+$env:MONAW_ALLOW_DEVELOPMENT_TOKEN = '1'
+$env:VITE_MONAW_CONTROL_TOKEN = $env:MONAW_CONTROL_SECRET
+```
+
+Do not expose the backend through port forwarding, a reverse proxy, a tunnel, or
+a non-loopback bind. Electron rejects non-loopback backend hosts unless
+`MONAW_ALLOW_UNSAFE_BACKEND_HOST=1` is deliberately set.
+
+## Credential Storage
+
+Provider API keys and the Telegram bot token are encrypted in Electron main
+using the operating system's credential encryption through `safeStorage`.
+Renderer JavaScript can set, delete, apply, and read boolean status for a
+credential, but it cannot retrieve a stored plaintext value.
+
+On first launch after upgrading, Electron migrates legacy plaintext values from
+the existing Electron store. It encrypts and verifies each value before removing
+the legacy plaintext. If OS encryption is unavailable or verification fails,
+credential operations fail and the original value is retained.
+
+Browser-only development does not have OS-backed Electron storage. Credentials
+entered in that mode are sent directly to the authenticated backend for the
+current process and should be treated as development-only configuration.
 
 Frontend npm commands must run from `frontend`, not the repo root.
 
@@ -223,23 +254,48 @@ See `docs\sandboxing.md` for backend behavior and limitations.
 
 ## Testing
 
-Backend tests:
+Run the complete local verification workflow from the repository root:
 
 ```powershell
-cd backend
-python -m pytest
+.\scripts\verify.ps1
 ```
 
-Frontend tests:
+Backend tests are divided into independent groups:
+
+```powershell
+.\scripts\test-backend.ps1 -Group api
+.\scripts\test-backend.ps1 -Group runtime
+.\scripts\test-backend.ps1 -Group policy
+.\scripts\test-backend.ps1 -Group sandbox
+.\scripts\test-backend.ps1 -Group skills
+.\scripts\test-backend.ps1 -Group memory
+.\scripts\test-backend.ps1 -Group integrations
+```
+
+Use `-Group all` to run the complete backend suite. Each individual test has a
+120-second timeout, and the wrapper applies a 15-minute timeout to the suite.
+New backend test files must be assigned to exactly one group in
+`backend/conftest.py`.
+
+Frontend verification:
 
 ```powershell
 cd frontend
-npm test
+npm run verify
 ```
 
-Frontend build smoke:
+This runs Vitest, TypeScript type checking, and the renderer production build.
+
+Capture repeatable test and bundle baselines:
 
 ```powershell
-cd frontend
-npm run build:renderer
+.\scripts\measure-baseline.ps1
 ```
+
+Baseline JSON is written under `.artifacts/baselines/` and is intentionally not
+committed because timings and paths are machine-specific. Startup time, idle API
+request rate, and representative database growth remain explicit manual fields
+until provider-independent application harnesses are available.
+
+GitHub Actions runs each backend group as a separate Windows job and runs the
+frontend verification workflow on every push and pull request.
