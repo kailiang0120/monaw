@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 from app.agent.access_grant_broker import (
     cleanup_resume as cleanup_grant_resume,
     get_resume_decision as get_grant_resume_decision,
+    get_grant_ticket,
+    grant_validation_error,
     register_pending_resume as register_grant_resume,
 )
 from app.agent.approval_broker import (
@@ -36,7 +38,13 @@ from app.agent.observability.recorder import (
     usage_from_any,
 )
 from app.agent.response_attachments import collect_response_attachments
-from app.agent.run_context import reset_current_conversation_id, set_current_conversation_id
+from app.agent.run_context import (
+    current_control_session_id,
+    current_conversation_id,
+    current_execution_source,
+    reset_current_conversation_id,
+    set_current_conversation_id,
+)
 from app.agent.state import ExecutionPlan, PlanStep
 from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.harness.tool_policy import ToolPolicy, tool_call_signature
@@ -1020,10 +1028,26 @@ class TurnLoop:
                             {"status": "ok", "ticket_id": ticket_id}
                         )
                 else:
-                    # Access grant: the grant already mutated policy, so a normal re-run
-                    # of the tool will now pass the gate.
-                    resumed_arguments = dict(arguments)
-                    resumed_output = await self._execute_tool(budget, tool_dict, resumed_arguments)
+                    grant_ticket = get_grant_ticket(ticket_id)
+                    validation_error = (
+                        "ticket not found"
+                        if grant_ticket is None
+                        else grant_validation_error(
+                            grant_ticket,
+                            expected_session_id=current_control_session_id(),
+                            expected_conversation_id=current_conversation_id(),
+                            expected_execution_source=current_execution_source(),
+                            require_granted=True,
+                        )
+                    )
+                    if validation_error:
+                        resumed_output = json.dumps(
+                            {"status": "error", "error": f"Access grant invalidated: {validation_error}"}
+                        )
+                    else:
+                        # The exact-context grant has mutated policy, so re-run the original tool.
+                        resumed_arguments = dict(arguments)
+                        resumed_output = await self._execute_tool(budget, tool_dict, resumed_arguments)
             except Exception as exc:
                 resumed_output = json.dumps({"status": "error", "error": str(exc)})
 

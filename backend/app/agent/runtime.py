@@ -19,6 +19,18 @@ from app.agent.workspace_instructions import (
     build_workspace_instruction_prompt,
     workspace_instruction_fingerprint,
 )
+from app.agent.run_context import (
+    reset_current_control_session_id,
+    reset_current_execution_source,
+    reset_current_interactive,
+    reset_current_permission_profile_id,
+    reset_current_principal_id,
+    set_current_control_session_id,
+    set_current_execution_source,
+    set_current_interactive,
+    set_current_permission_profile_id,
+    set_current_principal_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -383,7 +395,24 @@ async def run_agent_stream(
     conversation_id: str,
     settings,
     attachments: list[dict] | None = None,
+    control_session_id: str = "",
+    execution_source: str = "desktop",
+    principal_id: str = "",
+    permission_profile_id: str = "",
+    interactive: bool = True,
 ):
-    runtime = get_runtime(settings)
-    async for event in runtime.run(message, conversation_id, attachments=attachments):
-        yield event
+    session_token = set_current_control_session_id(control_session_id)
+    source_token = set_current_execution_source(execution_source)
+    principal_token = set_current_principal_id(principal_id or control_session_id)
+    profile_token = set_current_permission_profile_id(permission_profile_id)
+    interactive_token = set_current_interactive(interactive)
+    try:
+        runtime = get_runtime(settings)
+        async for event in runtime.run(message, conversation_id, attachments=attachments):
+            yield event
+    finally:
+        reset_current_interactive(interactive_token)
+        reset_current_permission_profile_id(profile_token)
+        reset_current_principal_id(principal_token)
+        reset_current_execution_source(source_token)
+        reset_current_control_session_id(session_token)

@@ -83,77 +83,84 @@ class SandboxPolicy:
         )
         network = self._network_mode(request.network)
         write_strategy = request.write_strategy or self.settings.default_write_strategy
+        trust_class = "untrusted" if profile == "untrusted" else "trusted"
 
         if request.elevated:
             return self._blocked(profile, network, write_strategy, "Elevated execution is blocked", "elevated_blocked")
         if profile == "blocked":
             return self._blocked(profile, network, write_strategy, "Command matches a blocked sandbox pattern", "command_blocked")
         if not self.settings.enabled or self.settings.mode in {"off", "disabled"}:
+            return self._blocked(
+                profile,
+                network,
+                write_strategy,
+                "Shell execution is disabled by sandbox policy",
+                "shell_execution_disabled",
+            )
+
+        backend_mode = request.requested_backend or self.settings.mode
+        backend = self._select_backend(backend_mode, profile)
+        if backend is None:
+            reason = "No strong sandbox backend is available for this command"
+            if profile == "host_required":
+                reason = "Host-required commands need explicit host mode"
+            return self._blocked(profile, network, write_strategy, reason, "sandbox_backend_unavailable")
+
+        if backend == "local_direct":
             return SandboxDecision(
                 allowed=True,
                 required=False,
+                trust_class=trust_class,
+                required_isolation="none",
                 profile=profile,
-                backend="none",
+                backend=backend,
                 mode=self.settings.mode,
                 security_label="none",
                 network=network,
                 network_enforcement="none",
                 write_strategy=write_strategy,
-                reason="Sandbox disabled",
+                filesystem_policy="host",
+                explicit_approval_required=True,
+                reason="This command will run directly on the host without isolation",
+                reason_code="host_execution_approval_required",
             )
-
-        backend_mode = request.requested_backend or self.settings.mode
-        backend = self._select_backend(backend_mode, profile)
-        if backend == "none":
-            return SandboxDecision(
-                allowed=True,
-                required=False,
-                profile=profile,
-                backend="none",
-                mode="off",
-                security_label="none",
-                network=network,
-                network_enforcement="none",
-                write_strategy=write_strategy,
-                reason="Sandbox disabled for this run",
-            )
-        if backend is None:
-            reason = "No available sandbox backend can satisfy this command"
-            if profile == "untrusted" and self.settings.require_strong_for_untrusted:
-                reason = "Strong sandbox required for untrusted command, but no strong backend is available"
-            return self._blocked(profile, network, write_strategy, reason, "sandbox_backend_unavailable")
 
         capability = self.capabilities.for_backend(backend)
         if capability is None or not capability.available:
-            if backend == "local_direct":
-                return SandboxDecision(
-                    allowed=True,
-                    required=False,
-                    profile=profile,
-                    backend="local_direct",
-                    mode=self.settings.mode,
-                    security_label="none",
-                    network=network,
-                    network_enforcement="none",
-                    write_strategy=write_strategy,
-                    reason="Sandbox policy allowed local direct compatibility execution",
-                )
             return self._blocked(
                 profile,
                 network,
                 write_strategy,
-                f"Sandbox backend {backend} is unavailable",
+                f"Execution backend {backend} is unavailable",
                 "sandbox_backend_unavailable",
             )
-        if profile == "untrusted" and self.settings.require_strong_for_untrusted and capability.security_label != "strong":
+        if backend not in {"local_restricted"} and capability.security_label != "strong":
             return self._blocked(
                 profile,
                 network,
                 write_strategy,
-                "Strong sandbox required for untrusted command",
+                "Strong sandbox isolation is required",
                 "strong_sandbox_required",
             )
-        if profile == "untrusted" and network == "deny" and capability.network_enforcement != "enforced":
+        if backend == "local_restricted":
+            return SandboxDecision(
+                allowed=True,
+                required=False,
+                trust_class=trust_class,
+                required_isolation="none",
+                profile=profile,
+                backend=backend,
+                mode=self.settings.mode,
+                security_label="advisory",
+                network=network,
+                network_enforcement="advisory",
+                write_strategy=write_strategy,
+                filesystem_policy="host",
+                explicit_approval_required=True,
+                reason="This command will use the advisory host runner",
+                reason_code="host_execution_approval_required",
+            )
+        if network == "deny" and capability.network_enforcement != "enforced":
             return self._blocked(
                 profile,
                 network,
@@ -165,6 +172,8 @@ class SandboxPolicy:
         return SandboxDecision(
             allowed=True,
             required=True,
+            trust_class=trust_class,
+            required_isolation="strong",
             profile=profile,
             backend=backend,
             mode=self.settings.mode,
@@ -172,35 +181,30 @@ class SandboxPolicy:
             network=network,
             network_enforcement=capability.network_enforcement,
             write_strategy=write_strategy,
-            reason="Sandbox policy allowed the command",
+            filesystem_policy="container",
+            explicit_approval_required=False,
+            reason="Strong sandbox policy allowed the command",
         )
 
     def _select_backend(self, mode: SandboxMode, profile: SandboxProfile) -> SandboxBackend | None:
         if mode in {"off", "disabled"}:
-            return "none"
-        if mode in {"docker", "local_restricted", "wsl"}:
+            return None
+        if mode == "host":
+            return "local_restricted" if self.capabilities.local_restricted.available else "local_direct"
+        if mode == "local_restricted":
+            return "local_restricted" if self.capabilities.local_restricted.available else None
+        if mode in {"docker", "wsl"}:
             capability = self.capabilities.for_backend(mode)
             return mode if capability and capability.available else None
         if mode == "enforce":
-            capability = self.capabilities.for_backend("docker")
-            return "docker" if capability and capability.available else None
+            return "docker" if self.capabilities.docker.available else None
         if profile == "untrusted":
-            if self.capabilities.docker.available:
-                return "docker"
-            if self.settings.require_strong_for_untrusted:
-                return None
-            if self.capabilities.local_restricted.available:
-                return "local_restricted"
-            if self.capabilities.wsl.available:
-                return "wsl"
-            return "local_direct"
+            return "docker" if self.capabilities.docker.available else None
         if profile == "host_required":
             return "local_restricted" if self.capabilities.local_restricted.available else "local_direct"
-        if self.capabilities.local_restricted.available:
-            return "local_restricted"
-        if self.capabilities.wsl.available:
-            return "wsl"
-        return "local_direct"
+        if self.capabilities.docker.available:
+            return "docker"
+        return "local_restricted" if self.capabilities.local_restricted.available else "local_direct"
 
     def _network_mode(self, requested: SandboxNetworkMode | None) -> SandboxNetworkMode:
         if requested is not None:
@@ -217,7 +221,9 @@ class SandboxPolicy:
     ) -> SandboxDecision:
         return SandboxDecision(
             allowed=False,
-            required=self.settings.enabled and self.settings.mode != "off",
+            required=self.settings.enabled and self.settings.mode not in {"off", "disabled", "host"},
+            trust_class=("blocked" if profile == "blocked" else "untrusted" if profile == "untrusted" else "trusted"),
+            required_isolation="strong" if self.settings.mode not in {"off", "disabled", "host"} else "none",
             profile=profile,
             backend="none",
             mode=self.settings.mode,
@@ -225,6 +231,7 @@ class SandboxPolicy:
             network=network,
             network_enforcement="none",
             write_strategy=write_strategy,
+            filesystem_policy="none",
             reason=reason,
             reason_code=reason_code,
         )

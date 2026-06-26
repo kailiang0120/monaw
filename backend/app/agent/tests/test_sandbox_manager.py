@@ -251,25 +251,24 @@ def test_approval_preview_matches_execution_decision(monkeypatch, tmp_path):
         assert preview[key] == actual[key]
 
 
-def test_auto_mode_uses_local_direct_when_no_real_backend_available():
+def test_auto_mode_blocks_when_no_strong_backend_is_selected_directly():
     result = SandboxManager(
         AgentSettings().sandbox,
         capabilities=_capabilities(local=False),
     ).run(_request())
 
-    assert result.status in {"ok", "error"}
-    assert result.sandbox["backend"] == "local_direct"
-    assert result.sandbox["security_label"] == "none"
+    assert result.status == "blocked"
+    assert result.reason_code == "sandbox_backend_unavailable"
 
 
-def test_disabled_mode_uses_local_direct():
+def test_off_mode_disables_execution():
     settings = AgentSettings()
-    settings.sandbox.mode = "disabled"
+    settings.sandbox.mode = "off"
 
     result = SandboxManager(settings.sandbox, capabilities=_capabilities()).run(_request())
 
-    assert result.status in {"ok", "error"}
-    assert result.sandbox["backend"] == "local_direct"
+    assert result.status == "blocked"
+    assert result.reason_code == "sandbox_backend_unavailable"
 
 
 def test_enforce_mode_blocks_without_real_backend():
@@ -294,15 +293,14 @@ def test_requested_docker_backend_unavailable_before_implementation():
     assert result.sandbox["selected_backend"] == "docker"
 
 
-def test_auto_can_select_local_restricted_when_configured():
+def test_auto_manager_does_not_implicitly_select_advisory_host_runner():
     result = SandboxManager(
         AgentSettings().sandbox,
         capabilities=_capabilities(local=True),
     ).run(_request())
 
-    assert result.status in {"ok", "error"}
-    assert result.sandbox["backend"] == "local_restricted"
-    assert result.sandbox["security_label"] == "advisory"
+    assert result.status == "blocked"
+    assert result.reason_code == "sandbox_backend_unavailable"
 
 
 def test_enforce_strong_does_not_accept_advisory_backend():

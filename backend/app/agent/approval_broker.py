@@ -18,7 +18,7 @@ import json
 import os
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,14 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.agent.runtime_paths import RUNTIME_DIR
-from app.agent.run_context import current_conversation_id
+from app.agent.run_context import (
+    current_control_session_id,
+    current_conversation_id,
+    current_execution_source,
+    current_interactive,
+    current_permission_profile_id,
+    current_principal_id,
+)
 
 _APPROVALS_DIR = RUNTIME_DIR / "approvals"
 _APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,11 +55,17 @@ class TicketStatus(str, Enum):
     CANCELLED = "cancelled"
     APPLIED = "applied"
     FAILED = "failed"
+    SUPERSEDED = "superseded"
 
 
 class ApprovalTicket(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     conversation_id: str = ""
+    control_session_id: str = ""
+    execution_source: str = "desktop"
+    principal_id: str = ""
+    permission_profile_id: str = ""
+    interactive: bool = True
     action_type: str = ""
     tool_name: str = ""
     target_path: str = ""
@@ -66,12 +79,16 @@ class ApprovalTicket(BaseModel):
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    expires_at: str = Field(
+        default_factory=lambda: (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    )
+    superseded_by: str = ""
     resolved_at: str = ""
     resolved_by: str = ""
     execution_result: str = ""
 
     def compute_hash(self) -> str:
-        raw = json.dumps(self.payload, sort_keys=True, default=str)
+        raw = json.dumps(self.payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -196,6 +213,11 @@ _load_tickets_from_disk()
 def create_ticket(
     *,
     conversation_id: str = "",
+    control_session_id: str = "",
+    execution_source: str = "",
+    principal_id: str = "",
+    permission_profile_id: str = "",
+    interactive: bool | None = None,
     action_type: str = "",
     tool_name: str = "",
     target_path: str = "",
@@ -208,6 +230,11 @@ def create_ticket(
     """Create and persist a new pending approval ticket."""
     ticket = ApprovalTicket(
         conversation_id=conversation_id or current_conversation_id(),
+        control_session_id=control_session_id or current_control_session_id(),
+        execution_source=execution_source or current_execution_source(),
+        principal_id=principal_id or current_principal_id(),
+        permission_profile_id=permission_profile_id or current_permission_profile_id(),
+        interactive=current_interactive() if interactive is None else bool(interactive),
         action_type=action_type,
         tool_name=tool_name,
         target_path=target_path,
@@ -219,6 +246,19 @@ def create_ticket(
     )
     ticket.payload_hash = ticket.compute_hash()
     with _state_lock:
+        for existing in list(_pending_index.values()):
+            if (
+                (ticket.tool_name or ticket.action_type)
+                and existing.conversation_id == ticket.conversation_id
+                and existing.control_session_id == ticket.control_session_id
+                and existing.execution_source == ticket.execution_source
+                and existing.tool_name == ticket.tool_name
+                and existing.action_type == ticket.action_type
+            ):
+                existing.status = TicketStatus.SUPERSEDED
+                existing.superseded_by = ticket.id
+                existing.resolved_at = datetime.now(timezone.utc).isoformat()
+                _pending_index.pop(existing.id, None)
         _all_tickets[ticket.id] = ticket
         _pending_index[ticket.id] = ticket
         _append_ticket(ticket)
@@ -236,6 +276,33 @@ def get_pending_tickets(conversation_id: str = "") -> list[ApprovalTicket]:
     if conversation_id:
         tickets = [t for t in tickets if t.conversation_id == conversation_id]
     return sorted(tickets, key=lambda t: t.created_at)
+
+
+def ticket_validation_error(
+    ticket: ApprovalTicket,
+    *,
+    expected_session_id: str = "",
+    expected_conversation_id: str = "",
+    expected_execution_source: str = "",
+    require_approved: bool = False,
+) -> str:
+    expected_status = TicketStatus.APPROVED if require_approved else TicketStatus.PENDING
+    if ticket.status != expected_status:
+        return f"ticket is {ticket.status.value}"
+    try:
+        if datetime.fromisoformat(ticket.expires_at) <= datetime.now(timezone.utc):
+            return "ticket is expired"
+    except ValueError:
+        return "ticket expiry is invalid"
+    if expected_session_id and ticket.control_session_id != expected_session_id:
+        return "ticket belongs to another control session"
+    if expected_conversation_id and ticket.conversation_id != expected_conversation_id:
+        return "ticket belongs to another conversation"
+    if expected_execution_source and ticket.execution_source != expected_execution_source:
+        return "ticket belongs to another execution source"
+    if ticket.compute_hash() != ticket.payload_hash:
+        return "ticket payload hash mismatch"
+    return ""
 
 
 def approve_ticket(ticket_id: str, resolved_by: str = "user") -> ApprovalTicket | None:
@@ -300,7 +367,7 @@ def get_history(
     """Return resolved tickets (most recent first)."""
     tickets = [
         t for t in _all_tickets.values()
-        if t.status != TicketStatus.PENDING
+        if t.status not in {TicketStatus.PENDING, TicketStatus.SUPERSEDED}
     ]
     if conversation_id:
         tickets = [t for t in tickets if t.conversation_id == conversation_id]

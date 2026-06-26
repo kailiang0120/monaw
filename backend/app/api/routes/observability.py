@@ -1,10 +1,15 @@
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.agent.observability.recorder import get_observability_recorder
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
 from app.config import settings
+from app.security.support_mode import (
+    disable_support_mode,
+    enable_support_mode,
+    support_mode_status,
+)
 
 router = APIRouter()
 
@@ -44,15 +49,55 @@ async def observability_errors(level: str = "", q: str = "", limit: int = 100):
     return get_observability_recorder().list_errors(level=level, q=q, limit=limit)
 
 
+def _support_mode_payload(request: Request) -> dict:
+    status = support_mode_status(request.state.control_session.session_id)
+    return {
+        "enabled": status.enabled,
+        "expires_at_epoch": status.expires_at_epoch,
+        "remaining_seconds": status.remaining_seconds,
+    }
+
+
+def _require_support_mode(request: Request) -> None:
+    if not support_mode_status(request.state.control_session.session_id).enabled:
+        raise HTTPException(status_code=403, detail="Support mode is required for detailed diagnostics")
+
+
+@router.get("/observability/support-mode")
+async def observability_support_mode_status(request: Request):
+    return _support_mode_payload(request)
+
+
+@router.post("/observability/support-mode")
+async def observability_enable_support_mode(request: Request, duration_seconds: int = 300):
+    status = enable_support_mode(request.state.control_session.session_id, duration_seconds)
+    return {
+        "enabled": status.enabled,
+        "expires_at_epoch": status.expires_at_epoch,
+        "remaining_seconds": status.remaining_seconds,
+    }
+
+
+@router.delete("/observability/support-mode")
+async def observability_disable_support_mode(request: Request):
+    status = disable_support_mode(request.state.control_session.session_id)
+    return {
+        "enabled": status.enabled,
+        "expires_at_epoch": status.expires_at_epoch,
+        "remaining_seconds": status.remaining_seconds,
+    }
+
+
 @router.get("/observability/logs/backend")
-async def observability_backend_log(tail: int = 400):
+async def observability_backend_log(request: Request, tail: int = 400):
+    _require_support_mode(request)
     return get_observability_recorder().read_backend_log_tail(tail=tail)
 
 
 @router.post("/observability/runs/{run_id}/replay")
 async def replay_observability_run(run_id: str):
     recorder = get_observability_recorder()
-    source_run = recorder.get_run(run_id)
+    source_run = recorder.get_run(run_id, include_sensitive=True)
     if source_run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     message = str(source_run.get("user_message") or "").strip()
@@ -71,6 +116,11 @@ async def replay_observability_run(run_id: str):
         conversation_id=conversation_id,
         settings=runtime_settings,
         attachments=None,
+        control_session_id=request.state.control_session.session_id,
+        execution_source="replay",
+        principal_id=f"replay:{request.state.control_session.session_id}",
+        permission_profile_id="replay-restricted",
+        interactive=False,
     ):
         event_name = str(event.get("event") or "")
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -123,7 +173,8 @@ async def replay_observability_run(run_id: str):
 
 
 @router.post("/observability/runs/{run_id}/export-debug-bundle")
-async def export_observability_debug_bundle(run_id: str):
+async def export_observability_debug_bundle(run_id: str, request: Request):
+    _require_support_mode(request)
     try:
         return get_observability_recorder().export_debug_bundle(run_id)
     except KeyError:

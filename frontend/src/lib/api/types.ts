@@ -462,7 +462,7 @@ export interface ObservabilityReplayResult {
 }
 
 export interface ObservabilityDebugBundle {
-  path: string
+  filename: string
   run_id: string
   size_bytes: number
 }
@@ -681,7 +681,7 @@ export interface AgentSettings {
   }
   sandbox: {
     enabled: boolean
-    mode: 'off' | 'disabled' | 'auto' | 'enforce' | 'docker' | 'local_restricted' | 'wsl'
+    mode: 'off' | 'disabled' | 'auto' | 'enforce' | 'host' | 'docker' | 'local_restricted' | 'wsl'
     default_profile: 'standard' | 'untrusted' | 'project_write' | 'host_required'
     require_strong_for_untrusted: boolean
     default_write_strategy: 'discard' | 'copy_out' | 'direct_rw'

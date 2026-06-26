@@ -47,6 +47,7 @@ TEST_GROUPS = {
         "test_exec_tool.py",
         "test_filesystem_tools.py",
         "test_mcp_bridge.py",
+        "test_skill_creator_hardening.py",
         "test_windows_controller.py",
     },
     "memory": {

@@ -399,6 +399,8 @@ class ControllerPolicyOut(BaseModel):
 class ApprovalTicketOut(BaseModel):
     id: str
     conversation_id: str
+    control_session_id: str = ""
+    execution_source: str = "desktop"
     action_type: str
     tool_name: str
     target_path: str
@@ -410,6 +412,8 @@ class ApprovalTicketOut(BaseModel):
     payload_hash: str
     status: str
     created_at: str
+    expires_at: str = ""
+    superseded_by: str = ""
     resolved_at: str
     resolved_by: str
     execution_result: str
@@ -466,12 +470,17 @@ class MessagesResponse(BaseModel):
 class AccessGrantTicketOut(BaseModel):
     id: str
     conversation_id: str
+    control_session_id: str = ""
+    execution_source: str = "desktop"
     target_type: str
     target_identifier: str
     display_name: str
     action_context: str
     status: str
     created_at: str
+    expires_at: str = ""
+    payload_hash: str = ""
+    superseded_by: str = ""
     resolved_at: str = ""
 
 

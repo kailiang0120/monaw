@@ -87,6 +87,11 @@ def test_get_mcp_diagnostics_endpoint_returns_status(monkeypatch):
     assert payload[0]["state"] == "connected"
     assert payload[0]["startup_phase"] == "ready"
     assert payload[0]["reflected_tool_names"] == ["mcp__filesystem__list_directory"]
+    assert payload[0]["command"] == ""
+    assert payload[0]["args"] == []
+    assert payload[0]["cwd"] == ""
+    assert payload[0]["resolved_executable"] == ""
+    assert payload[0]["pid"] is None
     assert payload[0]["feature_enabled"] is True
     assert payload[0]["feature_available"] is False
     assert payload[0]["feature_unavailable_reason"] == "missing_backend_dependency"
@@ -123,6 +128,34 @@ def test_reconnect_mcp_endpoint_rejects_when_feature_disabled(monkeypatch):
     response = client.post("/api/diagnostics/mcp/filesystem/reconnect")
 
     assert response.status_code == 409
+
+
+def test_observability_detailed_exports_require_support_mode(monkeypatch, tmp_path):
+    from app.agent.observability import recorder as recorder_module
+    from app.agent.observability.recorder import ObservabilityRecorder
+
+    recorder = ObservabilityRecorder(root=tmp_path / "obs")
+    run_id = recorder.start_run(
+        conversation_id="conv-support",
+        user_message="support prompt",
+        model="gpt-test",
+        provider="openai",
+    )
+    recorder.finish_run(run_id=run_id, status="complete", final_output="support output")
+    monkeypatch.setattr(recorder_module, "_RECORDER", recorder)
+
+    client = TestClient(app)
+    denied_log = client.get("/api/observability/logs/backend")
+    denied_export = client.post(f"/api/observability/runs/{run_id}/export-debug-bundle")
+    enabled = client.post("/api/observability/support-mode?duration_seconds=60")
+    allowed_export = client.post(f"/api/observability/runs/{run_id}/export-debug-bundle")
+
+    assert denied_log.status_code == 403
+    assert denied_export.status_code == 403
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+    assert allowed_export.status_code == 200
+    assert allowed_export.json()["run_id"] == run_id
 
 
 def test_update_settings_restarts_enabled_mcp_servers_after_save(monkeypatch):

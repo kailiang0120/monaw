@@ -1809,11 +1809,12 @@ export function SettingsModal({ onClose }: Props) {
                           className="w-40"
                           value={draft.sandbox.mode}
                           options={[
-                            { value: 'disabled', label: 'Disabled' },
+                            { value: 'off', label: 'Off (shell disabled)' },
                             { value: 'auto', label: 'Auto' },
-                            { value: 'enforce', label: 'Enforce' },
+                            { value: 'enforce', label: 'Enforce strong isolation' },
+                            { value: 'host', label: 'Host (approval required)' },
                             { value: 'docker', label: 'Docker' },
-                            { value: 'local_restricted', label: 'Local restricted' },
+                            { value: 'local_restricted', label: 'Host advisory (approval)' },
                           ]}
                           onChange={(mode) => updateDraft((current) => ({
                             ...current,
@@ -1866,7 +1867,7 @@ export function SettingsModal({ onClose }: Props) {
                     <div className="panel-muted rounded-xl p-3">
                       <p className="mb-2 text-xs font-semibold text-neutral-200">Backends</p>
                       <div className="space-y-2 text-xs">
-                        {['docker', 'local_restricted', 'wsl'].map((backend) => {
+                        {['docker', 'local_restricted', 'host', 'wsl'].map((backend) => {
                           const status = sandboxStatus?.backends?.[backend]
                           return (
                             <div key={backend} className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-black/10 px-3 py-2">
@@ -1897,7 +1898,7 @@ export function SettingsModal({ onClose }: Props) {
                               docker: { ...current.sandbox.docker, image: e.target.value },
                             },
                           }))}
-                          placeholder="Docker image"
+                          placeholder="Docker image pinned with @sha256:..."
                           className="control w-full rounded-xl px-3 py-2 text-sm"
                         />
                         <ToggleRow

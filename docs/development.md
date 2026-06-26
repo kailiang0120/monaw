@@ -243,11 +243,12 @@ Approvals and access grants run before tool execution. Shell execution then rout
 Sandbox modes include:
 
 ```text
-off / disabled
-auto
-enforce
+off (shell disabled)
+auto (strong isolation or explicit host approval)
+enforce (strong isolation required)
+host (unsandboxed, approval required)
 docker
-local_restricted
+local_restricted (advisory host runner, approval required)
 ```
 
 See `docs\sandboxing.md` for backend behavior and limitations.

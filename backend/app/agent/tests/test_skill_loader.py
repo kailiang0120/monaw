@@ -27,6 +27,7 @@ def test_load_tools_returns_enabled_skills_only():
     assert "core" in names
     assert "exec" in names
     assert "mcp-bridge" not in names
+    assert "skill-creator" not in names
     assert "exec" in tool_names
     assert "memory" in names
     assert "calculator" in tool_names
@@ -80,7 +81,6 @@ def test_available_skill_payload_keeps_recommended_skills():
         "exec",
         "filesystem",
         "memory",
-        "skill-creator",
     }
     assert "background-check" not in {item["name"] for item in payload}
 

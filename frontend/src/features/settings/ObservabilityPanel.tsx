@@ -218,7 +218,7 @@ export function ObservabilityPanel() {
     setError('')
     try {
       const result = await exportObservabilityDebugBundle(runId)
-      setNotice(`Debug bundle exported to ${result.path}.`)
+      setNotice(`Debug bundle exported: ${result.filename}.`)
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : 'Export failed')
     } finally {

@@ -3,21 +3,48 @@ from __future__ import annotations
 import json
 
 from app.agent.long_term_memory import get_long_term_memory
+from app.agent.run_context import current_execution_principal, current_interactive
+
+_MAX_MEMORY_QUERY_CHARS = 500
+_MAX_MEMORY_RETRIEVAL_BATCH = 12
 
 
 def _json(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _bounded_memory_query(query: str) -> tuple[str, bool]:
+    value = str(query or "").strip()
+    if len(value) <= _MAX_MEMORY_QUERY_CHARS:
+        return value, False
+    return value[:_MAX_MEMORY_QUERY_CHARS], True
+
+
+def _bounded_memory_limit(limit: int) -> int:
+    return max(1, min(_MAX_MEMORY_RETRIEVAL_BATCH, int(limit)))
+
+
 def _memory_search(query: str, category: str = "", limit: int = 6) -> str:
     store = get_long_term_memory()
+    bounded_query, query_truncated = _bounded_memory_query(query)
+    bounded_limit = _bounded_memory_limit(limit)
     memories = store.search(
-        query,
+        bounded_query,
         category=category,
-        limit=max(1, min(20, int(limit))),
+        limit=bounded_limit,
         mark_used=False,
     )
-    return _json({"status": "ok", "memories": memories, "count": len(memories)})
+    return _json({
+        "status": "ok",
+        "memories": memories,
+        "count": len(memories),
+        "budget": {
+            "query_chars": len(bounded_query),
+            "query_truncated": query_truncated,
+            "limit": bounded_limit,
+            "max_limit": _MAX_MEMORY_RETRIEVAL_BATCH,
+        },
+    })
 
 
 def _recall_memory(query: str, category: str = "", limit: int = 6) -> str:
@@ -29,9 +56,9 @@ def _recall_memory(query: str, category: str = "", limit: int = 6) -> str:
         candidate_content=json.dumps(
             {
                 "recall_memory_called": True,
-                "query": str(query or "")[:200],
+                "query": _bounded_memory_query(query)[0][:200],
                 "category": str(category or ""),
-                "limit": max(1, min(20, int(limit))),
+                "limit": _bounded_memory_limit(limit),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -48,12 +75,19 @@ def _memory_get(id: str) -> str:
 
 
 def _memory_remember(content: str, category: str = "fact") -> str:
+    if not current_interactive():
+        return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Memory writes require an interactive session."})
+    principal = current_execution_principal()
     memory = get_long_term_memory().remember(
         content,
         category=category,
         confidence=1.0,
         review_state="reviewed",
         source="tool",
+        source_conversation_id=principal.conversation_id,
+        source_principal_id=principal.principal_id,
+        source_permission_profile_id=principal.permission_profile_id,
+        source_execution_source=principal.source,
     )
     if memory is None:
         return _json({"status": "error", "error": "Memory was rejected by safety filters."})
@@ -61,13 +95,26 @@ def _memory_remember(content: str, category: str = "fact") -> str:
 
 
 def _memory_forget(id: str) -> str:
+    if not current_interactive():
+        return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Memory deletes require an interactive session."})
     memory = get_long_term_memory().archive(str(id))
     if memory is None:
         return _json({"status": "error", "error": f"Memory {id} not found."})
     return _json({"status": "ok", "memory": memory})
 
 
+def _memory_delete(id: str) -> str:
+    if not current_interactive():
+        return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Permanent memory deletion requires an interactive session."})
+    deleted = get_long_term_memory().delete(str(id))
+    if not deleted:
+        return _json({"status": "error", "error": f"Memory {id} not found."})
+    return _json({"status": "ok", "deleted": True, "id": str(id)})
+
+
 def _memory_curate_session(conversation_id: str) -> str:
+    if not current_interactive():
+        return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Memory curation requires an interactive session."})
     result = get_long_term_memory().reconcile_session(str(conversation_id))
     return _json({"status": "ok", "conversation_id": conversation_id, "result": result})
 
@@ -174,6 +221,20 @@ def register_tools(registry, _settings=None) -> None:
                 "execution_mode": "sync_stateless",
                 "affinity_group": None,
                 "metadata": {"parallel_safe": False, "resource_locks": ["long_term_memory"], "mutates_state": True, "risk_level": "low"},
+            },
+            {
+                "name": "memory_delete",
+                "description": "Permanently delete a durable user memory by id. Use only when the user explicitly asks to delete it permanently.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string", "description": "Memory id to permanently delete."}},
+                    "required": ["id"],
+                },
+                "callable": _memory_delete,
+                "domain": "general",
+                "execution_mode": "sync_stateless",
+                "affinity_group": None,
+                "metadata": {"parallel_safe": False, "resource_locks": ["long_term_memory"], "mutates_state": True, "risk_level": "medium"},
             },
             {
                 "name": "memory_curate_session",

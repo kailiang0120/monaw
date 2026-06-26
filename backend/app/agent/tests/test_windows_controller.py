@@ -82,6 +82,7 @@ def test_computer_functions_act_batches_after_one_focus(monkeypatch):
         "_screen_type",
         lambda text, **_kwargs: events.append(("type", text)) or json.dumps({"status": "ok"}),
     )
+    monkeypatch.setattr(computer_tools, "_active_window", lambda: {"hwnd": 123})
 
     result = json.loads(
         computer_tools._computer_functions_act(
@@ -160,6 +161,7 @@ def test_computer_functions_act_approval_payload_contains_batch(monkeypatch):
     window = {"hwnd": 123, "title": "Notepad", "process_name": "notepad.exe"}
     captured = {}
     monkeypatch.setattr(computer_tools, "_resolve_window", lambda **_kwargs: {"status": "ok", "window": window})
+    monkeypatch.setattr(computer_tools, "is_screen_fallback_allowed", lambda *_a, **_k: True)
     monkeypatch.setattr(
         computer_tools,
         "resolve_permission",
@@ -226,3 +228,61 @@ def test_computer_functions_act_launch_uses_batch_approval(monkeypatch):
     assert captured["target_app"] == "notepad"
     assert captured["payload"]["args"]["actions"] == [{"type": "launch_app", "app": "notepad"}]
     assert launch_calls == []
+
+
+
+def test_computer_functions_act_enforces_batch_limit(monkeypatch):
+    actions = [{"type": "press_key", "key": "tab"} for _ in range(computer_tools._MAX_ACTIONS_PER_BATCH + 1)]
+
+    result = json.loads(computer_tools._computer_functions_act(actions=actions, _bypass_gate=True))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "action_batch_limit_exceeded"
+
+
+def test_computer_functions_act_blocks_credential_like_text_entry():
+    result = json.loads(
+        computer_tools._computer_functions_act(
+            actions=[{"type": "type_text", "text": "secret", "label": "Password"}],
+            _bypass_gate=True,
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "credential_entry_restricted"
+
+
+def test_computer_functions_clipboard_blocks_non_interactive(monkeypatch):
+    monkeypatch.setattr(computer_tools, "current_interactive", lambda: False)
+    monkeypatch.setattr(
+        computer_tools.window_ops,
+        "_ctrl_clipboard",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("clipboard should be blocked")),
+    )
+
+    result = json.loads(computer_tools._computer_functions_clipboard("read"))
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "clipboard_non_interactive_restricted"
+
+
+def test_computer_functions_act_invalidates_on_focus_change(monkeypatch):
+    window = {"hwnd": 123, "title": "Notepad", "process_name": "notepad.exe"}
+    monkeypatch.setattr(computer_tools, "_resolve_window", lambda **_kwargs: {"status": "ok", "window": window})
+    monkeypatch.setattr(
+        computer_tools.desktop_runtime,
+        "focus_window",
+        lambda **_kwargs: json.dumps({"status": "focused"}),
+    )
+    monkeypatch.setattr(computer_tools, "_active_window", lambda: {"hwnd": 999})
+
+    result = json.loads(
+        computer_tools._computer_functions_act(
+            window=window,
+            actions=[{"type": "click", "x": 1, "y": 2}],
+            _bypass_gate=True,
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["results"][0]["reason_code"] == "target_focus_changed"

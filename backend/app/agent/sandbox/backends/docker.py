@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import time
@@ -9,6 +10,13 @@ from app.agent.sandbox.backends.local_direct import _format_output, _run_command
 from app.agent.sandbox.models import SandboxExecutionRequest, SandboxExecutionResult, SandboxRunMetadata
 from app.agent.sandbox.path_policy import write_artifact_manifest
 from app.agent.settings_store import SandboxSettings
+
+
+_PINNED_IMAGE_RE = re.compile(r"^[^@\s]+@sha256:[0-9a-fA-F]{64}$")
+
+
+def is_pinned_docker_image(image: str) -> bool:
+    return bool(_PINNED_IMAGE_RE.fullmatch(str(image or "").strip()))
 
 
 class DockerRunner:
@@ -68,6 +76,21 @@ class DockerRunner:
 
     def run(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
         started_at = time.monotonic()
+        if not is_pinned_docker_image(self.settings.docker.image):
+            return SandboxExecutionResult(
+                status="blocked",
+                reason="Docker sandbox images must be pinned with an @sha256 digest.",
+                reason_code="docker_image_not_pinned",
+                shell=request.shell,
+                workdir=request.workdir,
+                sandbox={
+                    **request.env_metadata,
+                    "backend": self.backend_name,
+                    "selected_backend": self.backend_name,
+                    "security_label": "none",
+                    "reason_code": "docker_image_not_pinned",
+                },
+            )
         metadata = SandboxRunMetadata(
             backend=self.backend_name,
             selected_backend=self.backend_name,

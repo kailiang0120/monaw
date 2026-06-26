@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -41,6 +42,15 @@ def probe_docker(settings: SandboxSettings) -> SandboxBackendCapability:
             security_label="strong",
             network_enforcement="enforced",
             reason="disabled",
+        )
+    if not re.fullmatch(r"[^@\s]+@sha256:[0-9a-fA-F]{64}", settings.docker.image.strip()):
+        return SandboxBackendCapability(
+            backend="docker",
+            enabled=True,
+            available=False,
+            security_label="strong",
+            network_enforcement="enforced",
+            reason="docker_image_not_pinned",
         )
     if shutil.which("docker") is None:
         return SandboxBackendCapability(
@@ -143,6 +153,15 @@ def get_sandbox_status(
         backends={
             "docker": probed.docker.model_dump(),
             "local_restricted": probed.local_restricted.model_dump(),
+            "host": {
+                "backend": "local_direct",
+                "enabled": settings.enabled and settings.mode == "host",
+                "available": True,
+                "security_label": "none",
+                "network_enforcement": "none",
+                "version": "",
+                "reason": "explicit_approval_required",
+            },
             "wsl": probed.wsl.model_dump(),
         },
     )

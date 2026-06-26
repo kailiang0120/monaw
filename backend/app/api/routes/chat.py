@@ -2,7 +2,7 @@ import asyncio
 import json
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.agent.job_manager import cancel_job, create_job, get_job, list_jobs, run_job
@@ -40,9 +40,10 @@ def _message_with_attachments(req: ChatRequest) -> str:
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     conv_id = req.conversation_id or str(uuid.uuid4())
     message = _message_with_attachments(req)
+    control_session_id = request.state.control_session.session_id
 
     async def stream():
         dbg_log(
@@ -61,6 +62,11 @@ async def chat(req: ChatRequest):
                 conversation_id=conv_id,
                 settings=merged,
                 attachments=[attachment.model_dump() for attachment in req.attachments],
+                control_session_id=control_session_id,
+                execution_source="desktop",
+                principal_id=control_session_id,
+                permission_profile_id="desktop-current",
+                interactive=True,
             ):
                 event_name = event_dict.get("event", "message")
                 event_data = json.dumps(event_dict.get("data", {}))
@@ -80,15 +86,25 @@ async def chat(req: ChatRequest):
 
 
 @router.post("/chat/jobs")
-async def create_chat_job(req: ChatRequest):
+async def create_chat_job(req: ChatRequest, request: Request):
     """Start a detached background job. Returns job_id immediately."""
     conv_id = req.conversation_id or str(uuid.uuid4())
     message = _message_with_attachments(req)
     job = create_job(conv_id)
     merged = build_runtime_namespace(settings, load_agent_settings(settings))
+    control_session_id = request.state.control_session.session_id
 
     async def _start():
-        await run_job(job, message, merged)
+        await run_job(
+            job,
+            message,
+            merged,
+            control_session_id=control_session_id,
+            execution_source="desktop",
+            principal_id=control_session_id,
+            permission_profile_id="desktop-current",
+            interactive=True,
+        )
 
     asyncio.create_task(_start())
     return {"job_id": job.job_id, "conversation_id": conv_id}

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.runtime_paths import RUNTIME_DIR
-from app.agent.run_context import current_conversation_id
+from app.agent.run_context import current_conversation_id, current_execution_principal
 
 
 OBSERVABILITY_DIR = RUNTIME_DIR / "observability"
@@ -49,6 +49,9 @@ BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}\b")
 GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 GOOGLE_API_KEY_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{20,}\b")
+WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/](?:[^\s\"'<>|]+[\\/]?)+")
+USER_POSIX_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])/(?:Users|home)/[^\s\"'<>|]+")
+
 INLINE_SECRET_RE = re.compile(
     r"\b(api[_-]?key|token|secret|password|authorization|cookie|session(?:id)?|bearer)\b(\s*[:=]\s*)([^\s,;]+)",
     re.IGNORECASE,
@@ -165,7 +168,9 @@ def _to_int(value: Any) -> int:
 
 
 def _redact_text(value: str) -> str:
-    text = BEARER_RE.sub("Bearer [REDACTED]", str(value or ""))
+    text = WINDOWS_ABSOLUTE_PATH_RE.sub("[REDACTED PATH]", str(value or ""))
+    text = USER_POSIX_PATH_RE.sub("[REDACTED PATH]", text)
+    text = BEARER_RE.sub("Bearer [REDACTED]", text)
     text = OPENAI_KEY_RE.sub("sk-[REDACTED]", text)
     text = GITHUB_TOKEN_RE.sub("[REDACTED GITHUB TOKEN]", text)
     text = GOOGLE_API_KEY_RE.sub("[REDACTED GOOGLE API KEY]", text)
@@ -183,6 +188,8 @@ def _safe_preview(value: str, limit: int = MAX_TEXT_CHARS) -> str:
 
 
 def redact(value: Any) -> Any:
+    if isinstance(value, Path):
+        return _redact_text(str(value))
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
@@ -201,23 +208,54 @@ def redact(value: Any) -> Any:
     return value
 
 
+def _without_sensitive_run_content(row: dict) -> dict:
+    payload = redact(dict(row))
+    payload["user_message"] = ""
+    payload["final_output"] = ""
+    payload["metadata_json"] = ""
+    return payload
+
+
+def _without_sensitive_event_content(event: dict) -> dict:
+    payload = redact(dict(event))
+    payload["input"] = None
+    payload["output"] = None
+    if "input_json" in payload:
+        payload["input_json"] = ""
+    if "output_json" in payload:
+        payload["output_json"] = ""
+    return payload
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
-        return model_dump(exclude_none=True)
+        return redact(model_dump(exclude_none=True))
     if hasattr(value, "__dict__"):
-        return {
+        return redact({
             key: item
             for key, item in vars(value).items()
             if not key.startswith("_")
-        }
-    return str(value)
+        })
+    return _redact_text(str(value))
 
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(redact(value), ensure_ascii=False, default=_json_default)
+
+
+def _execution_metadata(metadata: dict | None = None) -> dict[str, Any]:
+    principal = current_execution_principal()
+    merged = dict(metadata or {})
+    merged.setdefault("execution_source", principal.source)
+    merged.setdefault("principal_id", principal.principal_id)
+    merged.setdefault("permission_profile_id", principal.permission_profile_id)
+    merged.setdefault("interactive", principal.interactive)
+    if principal.conversation_id:
+        merged.setdefault("context_conversation_id", principal.conversation_id)
+    return merged
 
 
 def classify_failure(reason: str, status: str = "") -> str:
@@ -420,21 +458,29 @@ class ObservabilityRecorder:
             pass
 
     def _enforce_storage_cap(self) -> None:
-        # Stat each file once and reuse the result for the size sum, the mtime sort,
-        # and the per-file size, instead of calling stat() up to three times per file.
-        sized = [
-            (path, path.stat())
-            for path in self.root.rglob("*")
-            if path.is_file() and path.name != self.db_path.name
-        ]
-        total = sum(st.st_size for _path, st in sized)
+        all_sized = [(path, path.stat()) for path in self.root.rglob("*") if path.is_file()]
+        total = sum(st.st_size for _path, st in all_sized)
         if total <= MAX_STORAGE_BYTES:
             return
-        for path, st in sorted(sized, key=lambda item: item[1].st_mtime):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        candidates = [
+            (path, st)
+            for path, st in all_sized
+            if (
+                self.exports_dir in path.parents
+                or (self.errors_dir in path.parents and path.stem != today)
+                or (self.events_dir in path.parents and path.stem != today)
+            )
+        ]
+        for path, st in sorted(candidates, key=lambda item: item[1].st_mtime):
             if total <= MAX_STORAGE_BYTES:
                 break
             path.unlink(missing_ok=True)
             total -= st.st_size
+
+    def enforce_retention(self) -> None:
+        """Apply age and storage retention without deleting active-day event files."""
+        self._cleanup_retention()
 
     def start_run(
         self,
@@ -450,6 +496,7 @@ class ObservabilityRecorder:
         run_id = f"run_{uuid.uuid4().hex}"
         created_at = now_iso()
         resolved_source = source or infer_source(conversation_id)
+        run_metadata = _execution_metadata(metadata)
         try:
             with self._lock, self._connect() as conn:
                 conn.execute(
@@ -468,7 +515,7 @@ class ObservabilityRecorder:
                         provider,
                         created_at,
                         _safe_preview(user_message),
-                        _json_dumps(metadata or {}),
+                        _json_dumps(run_metadata),
                     ),
                 )
             self.log_event(
@@ -480,7 +527,7 @@ class ObservabilityRecorder:
                 model=model,
                 provider=provider,
                 input={"user_message": user_message},
-                metadata=metadata or {},
+                metadata=run_metadata,
             )
         except Exception:
             return run_id
@@ -510,6 +557,7 @@ class ObservabilityRecorder:
         event_id = f"evt_{uuid.uuid4().hex}"
         created_at = now_iso()
         usage = usage_from_any(tokens)
+        event_metadata = _execution_metadata(metadata)
         safe_error_code = _safe_preview(str(redact(error_code))) if error_code else ""
         safe_error_message = _safe_preview(str(redact(error_message))) if error_message else ""
         payload = {
@@ -530,7 +578,7 @@ class ObservabilityRecorder:
             "input": input,
             "output": output,
             "tokens": usage.to_dict(),
-            "metadata": metadata or {},
+            "metadata": event_metadata,
             "created_at": created_at,
         }
         try:
@@ -562,7 +610,7 @@ class ObservabilityRecorder:
                         _json_dumps(input) if input is not None else "",
                         _json_dumps(output) if output is not None else "",
                         _json_dumps(usage.to_dict()) if usage.total_tokens else "",
-                        _json_dumps(metadata or {}),
+                        _json_dumps(event_metadata),
                         created_at,
                     ),
                 )
@@ -868,7 +916,7 @@ class ObservabilityRecorder:
                 "top_error_reasons": error_reasons,
                 "top_failing_tools": failing_tools,
                 "model_usage": model_usage,
-                "storage_path": str(self.root),
+                "storage_path": "",
             }
         except Exception:
             return {
@@ -885,7 +933,7 @@ class ObservabilityRecorder:
                 "top_error_reasons": [],
                 "top_failing_tools": [],
                 "model_usage": [],
-                "storage_path": str(self.root),
+                "storage_path": "",
             }
 
     def list_runs(
@@ -918,7 +966,7 @@ class ObservabilityRecorder:
         params.append(max(1, min(int(limit or 100), 500)))
         try:
             with self._lock, self._connect() as conn:
-                return self._fetch_all(
+                rows = self._fetch_all(
                     conn,
                     f"""
                     SELECT * FROM observability_runs
@@ -928,10 +976,11 @@ class ObservabilityRecorder:
                     """,
                     params,
                 )
+            return [_without_sensitive_run_content(row) for row in rows]
         except Exception:
             return []
 
-    def get_run(self, run_id: str) -> dict | None:
+    def get_run(self, run_id: str, *, include_sensitive: bool = False) -> dict | None:
         try:
             with self._lock, self._connect() as conn:
                 run = conn.execute(
@@ -955,10 +1004,14 @@ class ObservabilityRecorder:
                     "SELECT * FROM observability_replays WHERE source_run_id = ? ORDER BY created_at DESC",
                     (run_id,),
                 )
-            payload = _row_to_dict(run)
+            run_payload = _row_to_dict(run)
+            payload = redact(run_payload) if include_sensitive else _without_sensitive_run_content(run_payload)
+            payload["metadata"] = _json_loads(str(payload.pop("metadata_json", "{}") or "{}")) or {}
             payload["events"] = [self._decode_event(item) for item in events]
             payload["errors"] = [self._decode_metadata(item) for item in errors]
             payload["replays"] = [self._decode_metadata(item) for item in replays]
+            if not include_sensitive:
+                payload["events"] = [_without_sensitive_event_content(item) for item in payload["events"]]
             payload["tool_sequence"] = [
                 event.get("tool_name", "")
                 for event in payload["events"]
@@ -1015,7 +1068,7 @@ class ObservabilityRecorder:
     def read_backend_log_tail(self, tail: int = 400) -> dict:
         line_limit = max(1, min(int(tail or 400), 5000))
         if not BACKEND_LOG_PATH.exists():
-            return {"path": str(BACKEND_LOG_PATH), "exists": False, "lines": [], "truncated": False}
+            return {"path": "", "exists": False, "lines": [], "truncated": False}
         try:
             size = BACKEND_LOG_PATH.stat().st_size
             with BACKEND_LOG_PATH.open("rb") as handle:
@@ -1029,7 +1082,7 @@ class ObservabilityRecorder:
             text = chunk.decode("utf-8", errors="replace")
             lines = _redact_text(text).splitlines()[-line_limit:]
             return {
-                "path": str(BACKEND_LOG_PATH),
+                "path": "",
                 "exists": True,
                 "size_bytes": size,
                 "lines": lines,
@@ -1037,7 +1090,7 @@ class ObservabilityRecorder:
             }
         except Exception as exc:
             return {
-                "path": str(BACKEND_LOG_PATH),
+                "path": "",
                 "exists": True,
                 "lines": [],
                 "truncated": False,
@@ -1101,7 +1154,7 @@ class ObservabilityRecorder:
         return payload
 
     def export_debug_bundle(self, run_id: str) -> dict:
-        run = self.get_run(run_id)
+        run = self.get_run(run_id, include_sensitive=True)
         if run is None:
             raise KeyError(run_id)
         payload = {
@@ -1111,7 +1164,7 @@ class ObservabilityRecorder:
         }
         path = self.exports_dir / f"{run_id}.json"
         path.write_text(json.dumps(redact(payload), ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"path": str(path), "run_id": run_id, "size_bytes": path.stat().st_size}
+        return {"filename": path.name, "run_id": run_id, "size_bytes": path.stat().st_size}
 
     def _estimate_cost(
         self,

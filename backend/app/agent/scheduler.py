@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import inspect
@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 AgentRunner = Callable[..., AsyncIterator[dict[str, Any]]]
 SettingsFactory = Callable[[], Any]
+
+_SCHEDULER_LEASE_SECONDS = 15 * 60
+_DEFAULT_MAX_GLOBAL_CONCURRENCY = 4
+_DEFAULT_MAX_PER_TASK_CONCURRENCY = 1
 
 _SERVICE: "ScheduledTaskService | None" = None
 
@@ -61,6 +65,11 @@ def get_scheduled_task_service() -> "ScheduledTaskService | None":
 async def run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
     from app.agent.runtime import run_agent_stream as runtime_run_agent_stream
 
+    kwargs.setdefault("execution_source", "scheduled")
+    kwargs.setdefault("control_session_id", "scheduler")
+    kwargs.setdefault("principal_id", "scheduler")
+    kwargs.setdefault("permission_profile_id", "scheduler-restricted")
+    kwargs.setdefault("interactive", False)
     async for event in runtime_run_agent_stream(*args, **kwargs):
         yield event
 
@@ -72,10 +81,15 @@ class ScheduledTaskService:
         settings_factory: SettingsFactory,
         runner: AgentRunner = run_agent_stream,
         tick_interval: float = 30.0,
+        max_global_concurrency: int = _DEFAULT_MAX_GLOBAL_CONCURRENCY,
+        max_per_task_concurrency: int = _DEFAULT_MAX_PER_TASK_CONCURRENCY,
     ) -> None:
         self.settings_factory = settings_factory
         self.runner = runner
         self._tick_interval = float(tick_interval)
+        self._max_global_concurrency = max(1, int(max_global_concurrency))
+        self._max_per_task_concurrency = max(1, int(max_per_task_concurrency))
+        self._lease_owner = f"scheduler:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._inflight: dict[str, list[asyncio.Task]] = {}
         self._stop = asyncio.Event()
@@ -84,6 +98,7 @@ class ScheduledTaskService:
         if self._task is not None and not self._task.done():
             return
         self._stop.clear()
+        get_db().recover_expired_scheduled_task_runs(_iso_utc(_utc_now()))
         self._task = asyncio.create_task(self._tick_loop(), name="scheduled-task-service")
         set_scheduled_task_service(self)
         logger.info("scheduled-tasks: service started")
@@ -154,6 +169,12 @@ class ScheduledTaskService:
                 now_iso=now_iso,
             ):
                 continue
+            if self._global_inflight_count() >= self._max_global_concurrency:
+                await self._skip_throttled_run(row, reason="global_concurrency_limit")
+                continue
+            if len(self._tasks_for(task_id)) >= self._max_per_task_concurrency:
+                await self._skip_throttled_run(row, reason="per_task_concurrency_limit")
+                continue
             previous = self._latest_inflight(task_id)
 
             policy = str(row.get("overlap_policy") or "skip")
@@ -180,6 +201,12 @@ class ScheduledTaskService:
                 name=f"scheduled-task-run-{task_id}",
             )
             self._track_inflight(task_id, task)
+
+    def _global_inflight_count(self) -> int:
+        return sum(1 for tasks in self._inflight.values() for item in tasks if not item.done())
+
+    def _lease_expires_at(self) -> str:
+        return _iso_utc(_utc_now() + timedelta(seconds=_SCHEDULER_LEASE_SECONDS))
 
     def _track_inflight(self, task_id: str, task: asyncio.Task) -> None:
         self._inflight.setdefault(task_id, []).append(task)
@@ -235,12 +262,18 @@ class ScheduledTaskService:
         latest = get_db().get_scheduled_task(task_id) or row
         await self._run_prepared_task(latest, run)
 
+    async def _skip_throttled_run(self, row: dict[str, Any], *, reason: str) -> None:
+        await self._mark_task_skipped(row, reason=reason)
+
     async def _skip_overlapping_run(self, row: dict[str, Any]) -> None:
+        await self._mark_task_skipped(row, reason="skipped")
+
+    async def _mark_task_skipped(self, row: dict[str, Any], *, reason: str) -> None:
         now = _utc_now()
         next_run = self.compute_next_run(row, after=now)
         fields: dict[str, Any] = {
             "last_run_at": _iso_utc(now),
-            "last_run_status": "skipped",
+            "last_run_status": reason,
             "next_run_at": _iso_utc(next_run) if next_run else "",
         }
         if next_run is None and str(row.get("schedule_kind")) == "once":
@@ -260,10 +293,14 @@ class ScheduledTaskService:
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             conversation_title = f"Scheduled: {title} - {timestamp}"
         get_db().create_conversation(conversation_id, conversation_title)
+        idempotency_source = uuid.uuid4().hex if manual else str(row.get("next_run_at") or started_at)
         run_id = get_db().create_scheduled_task_run(
             task_id=task_id,
             conversation_id=conversation_id,
             started_at=started_at,
+            idempotency_key=f"{task_id}:{idempotency_source}",
+            lease_owner=self._lease_owner,
+            lease_expires_at=self._lease_expires_at(),
         )
         return {
             "run_id": run_id,
@@ -288,6 +325,15 @@ class ScheduledTaskService:
                 conversation_id=conversation_id,
                 settings=settings,
                 attachments=None,
+                execution_source="scheduled",
+                control_session_id="scheduler",
+                principal_id=str(row.get("owner_principal_id") or f"scheduled-task:{task_id}"),
+                permission_profile_id=(
+                    str(row.get("permission_profile_id") or "")
+                    if str(row.get("owner_principal_id") or "")
+                    else f"scheduled-task:{task_id}:restricted"
+                ),
+                interactive=False,
             ):
                 event_name = str(event.get("event") or "")
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -436,3 +482,4 @@ class ScheduledTaskService:
             return run_at.astimezone(timezone.utc)
 
         return None
+

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.agent.database import get_db
+from app.agent.run_context import current_execution_principal
 from app.agent.scheduler import ScheduledTaskService, get_scheduled_task_service
 
 
@@ -96,6 +97,7 @@ def scheduled_task_create(
             cron_expr = ""
             interval_seconds = 0
 
+        principal = current_execution_principal()
         fields = {
             "id": uuid.uuid4().hex,
             "title": title,
@@ -110,6 +112,19 @@ def scheduled_task_create(
             "notify_telegram": 1 if notify_telegram else 0,
             "telegram_chat_id": telegram_chat_id.strip(),
             "reuse_conversation": 1 if reuse_conversation else 0,
+            "owner_principal_id": principal.principal_id,
+            "permission_profile_id": f"scheduled-task:{principal.principal_id or 'unknown'}:restricted",
+            "permission_profile_snapshot": json.dumps(
+                {
+                    "source": "scheduled",
+                    "owner_principal_id": principal.principal_id,
+                    "created_from_source": principal.source,
+                    "interactive": False,
+                    "profile": "scheduled-restricted",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
         }
         fields["next_run_at"] = _compute_next_run(fields, initial=True)
         task = get_db().create_scheduled_task(fields)

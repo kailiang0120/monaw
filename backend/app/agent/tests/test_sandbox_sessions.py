@@ -39,7 +39,7 @@ def test_exec_start_uses_session_registry(monkeypatch, tmp_path):
     _allow_exec(monkeypatch)
     shell, command = _python_command("print('session-ok')")
 
-    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path)))
+    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
     command_id = started["command_id"]
 
     for _ in range(30):
@@ -57,7 +57,7 @@ def test_exec_write_stdin_works_for_local_session(monkeypatch, tmp_path):
     _allow_exec(monkeypatch)
     shell, command = _python_command("import sys; print(sys.stdin.readline().strip())")
 
-    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path)))
+    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
     command_id = started["command_id"]
     written = json.loads(exec_tools.exec_write_stdin(command_id, "hello\n"))
 
@@ -75,7 +75,7 @@ def test_exec_stop_cleans_backend_session(monkeypatch, tmp_path):
     _allow_exec(monkeypatch)
     shell, command = _python_command("import time; time.sleep(5)")
 
-    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path)))
+    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
     stopped = json.loads(exec_tools.exec_stop(started["command_id"], signal="kill"))
     polled = json.loads(exec_tools.exec_poll(started["command_id"]))
 

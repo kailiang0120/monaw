@@ -271,6 +271,8 @@ Relevant code:
 
 ## Phase 3: Fail-Closed Sandbox Enforcement
 
+Status: implemented and verified on June 23, 2026.
+
 ### Finding
 
 `auto` mode can select `local_direct`, and disabled modes explicitly run on the
@@ -345,6 +347,8 @@ resource controls.
 
 ## Phase 4: Lock Down Administrative and Diagnostic APIs
 
+Status: implemented and locally verified on June 25, 2026. Diagnostic controls and debug exports are gated by `diagnostics:control` plus time-limited support mode, normal diagnostics are path/process redacted, approval and access-grant tickets are session/conversation/source/payload bound, and observability retention/redaction paths are covered by regression tests.
+
 ### Finding
 
 Diagnostics and observability expose runtime paths, MCP process details,
@@ -398,6 +402,18 @@ Relevant code:
 - Support exports are redacted and time bounded.
 
 ## Phase 5: High-Risk Capability Hardening
+
+Status: partially implemented and locally verified on June 25-26, 2026. `skill-creator`
+is disabled by default, mutating skill-creator operations are approval-gated,
+generated skills are staged and activated disabled without same-turn runtime
+loading, and reflected MCP tools now require approval by default unless
+explicitly trusted by server configuration. MCP approvals include a reflected
+schema hash and argument budgets. Additional June 26 hardening covers filesystem
+path shape checks, recursive/symlink/write budgets, browser non-interactive
+domain policy, DNS/host checks, and external-protocol rejection, computer-use batch/focus/clipboard
+limits, memory provenance and injection-resistant prompt rendering, and restricted
+scheduled-task permission snapshots. A full shared capability-gate service and
+some deeper browser redirect/download approval work remain tracked below.
 
 ### 5.1 Skill Creator
 
@@ -516,6 +532,23 @@ Relevant code:
    current caller.
 
 ## Phase 6: Source-Aware Execution Policy
+
+Status: partially implemented and locally verified on June 25-26, 2026. Agent
+runs now carry a structured execution context with source, principal,
+conversation, permission-profile id, and interactivity. Desktop/API runs use
+the authenticated control session, scheduled runs persist and reuse restricted
+permission snapshot identity, Telegram runs use chat/sender-derived principals
+with per-chat/per-user rate limits, and replay uses a dedicated non-interactive
+replay source. Approval/access-grant tickets record the execution principal,
+session grants are scoped by principal/profile/source, non-interactive tickets
+cannot create session or permanent grants, and observability run/event metadata
+now records execution source, principal, profile, and interactivity. Follow-up
+hardening added typed job run states, bounded stream overflow accounting,
+browser redirect SSRF validation, bounded memory retrieval plus permanent
+memory deletion, and scheduler run leases/idempotency/restart recovery with
+global/per-task concurrency limits. Remaining work includes a central
+execution-gate service, provider-adapter separation, and renderer/token storage
+hardening.
 
 ### Finding
 
@@ -931,92 +964,92 @@ Relevant code:
 - [ ] Standard error envelope
 - [ ] Pagination and payload limits
 - [ ] Session-bound files, approvals, and grants
-- [ ] Redacted diagnostics and observability
+- [x] Redacted diagnostics and observability
 
 ### Agent runtime
 
-- [ ] Typed run state machine
-- [ ] Source and principal in run context
+- [x] Typed run state machine
+- [x] Source and principal in run context
 - [ ] Central execution-gate service
-- [ ] Bounded streaming queues
-- [ ] Explicit cancellation and timeout behavior
+- [x] Bounded streaming queues
+- [x] Explicit cancellation and timeout behavior
 - [ ] Provider adapters separated from orchestration
 
 ### Security and control subsystems
 
-- [ ] Fail-closed sandbox selection
-- [ ] Exact-action approval binding
-- [ ] Access-grant expiry and ownership
-- [ ] Central recursive redaction
-- [ ] Audit records include source, principal, policy, and backend
+- [x] Fail-closed sandbox selection
+- [x] Exact-action approval binding
+- [x] Access-grant expiry and ownership
+- [x] Central recursive redaction
+- [x] Audit records include source, principal, policy, and backend
 - [ ] Prompt injection cannot modify policy state
 
 ### Exec skill
 
-- [ ] Strong isolation for untrusted commands
-- [ ] Explicit host-execution mode
-- [ ] Environment, output, process, and time limits
-- [ ] No implicit fallback
+- [x] Strong isolation for untrusted commands
+- [x] Explicit host-execution mode
+- [x] Environment, output, process, and time limits
+- [x] No implicit fallback
 
 ### Filesystem skill
 
-- [ ] Canonical typed paths
-- [ ] Symlink and junction defense
-- [ ] TOCTOU-resistant mutation checks
-- [ ] Traversal and size budgets
+- [x] Canonical typed paths
+- [x] Symlink and junction defense
+- [x] TOCTOU-resistant mutation checks
+- [x] Traversal and size budgets
 
 ### Browser-use skill
 
-- [ ] Deny-by-default domain policy for non-interactive sources
-- [ ] DNS and redirect SSRF checks
-- [ ] Download, upload, and external-protocol approvals
-- [ ] DOM, screenshot, and response budgets
+- [x] Deny-by-default domain policy for non-interactive sources
+- [x] DNS and redirect SSRF checks
+- [ ] Download, upload, and file-chooser approvals; external protocols rejected
+- [x] DOM, screenshot, and response budgets
 
 ### Computer-use skill
 
-- [ ] Approval bound to target window identity
-- [ ] Focus-change invalidation
-- [ ] Action-batch limits
-- [ ] Clipboard and credential-entry restrictions
+- [x] Approval bound to target window identity
+- [x] Focus-change invalidation
+- [x] Action-batch limits
+- [x] Clipboard and credential-entry restrictions
 
 ### MCP bridge
 
-- [ ] Per-server trust policy
-- [ ] Default approval requirement
-- [ ] Schema-hash approval binding
-- [ ] Argument, response, timeout, and concurrency limits
+- [x] Per-server trust policy
+- [x] Default approval requirement
+- [x] Schema-hash approval binding
+- [x] Argument, response, timeout, and concurrency limits
 
 ### Memory
 
-- [ ] Principal and provenance isolation
-- [ ] Sensitive-content classification
-- [ ] Injection-resistant retrieval
-- [ ] Retention and deletion
-- [ ] Bounded and batched retrieval pipeline
+- [x] Principal and provenance isolation
+- [x] Sensitive-content classification
+- [x] Injection-resistant retrieval
+- [x] Retention and deletion
+- [x] Bounded and batched retrieval pipeline
 
 ### Scheduling
 
-- [ ] Restricted saved permission profile
-- [ ] Durable queue and leases
-- [ ] Restart recovery
-- [ ] Idempotency keys and retry policy
-- [ ] Global and per-task concurrency limits
+- [x] Restricted saved permission profile
+- [x] Durable queue and leases
+- [x] Restart recovery
+- [x] Idempotency keys and retry policy
+- [x] Global and per-task concurrency limits
 
 ### Telegram
 
-- [ ] User and chat principal propagation
-- [ ] Per-user and per-chat rate limits
-- [ ] Restricted default capability profile
-- [ ] Local confirmation for persistent grants
+- [x] User and chat principal propagation
+- [x] Per-user and per-chat rate limits
+- [x] Restricted default capability profile
+- [x] Local confirmation for persistent grants
 - [ ] Token stored outside renderer-accessible storage
 
 ### Skill creator
 
-- [ ] Disabled by default
-- [ ] Administrator-only activation
-- [ ] Staged validation and atomic install
-- [ ] Audit trail and rollback
-- [ ] No same-turn auto-loading
+- [x] Disabled by default
+- [x] Administrator-only activation
+- [x] Staged validation and atomic install
+- [x] Audit trail and rollback
+- [x] No same-turn auto-loading
 
 ### Electron
 

@@ -209,3 +209,40 @@ def test_batch_results_surfaces_pending_permission():
     assert result["status"] == "pending_access_grant"
     assert result["ticket_id"] == "ticket-123"
     assert result["count"] == 1
+
+
+
+def test_filesystem_rejects_parent_traversal_segments(policy_env):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+
+    result = json.loads(file_ops.file_read(str(policy_env.root / "nested" / ".." / "notes.txt")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "path_traversal_rejected"
+
+
+def test_filesystem_write_enforces_byte_budget(policy_env, monkeypatch):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    monkeypatch.setattr(file_ops, "_MAX_WRITE_BYTES", 4)
+
+    result = json.loads(file_ops.file_write(str(policy_env.root / "large.txt"), "12345", overwrite=True))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "write_size_limit_exceeded"
+
+
+def test_filesystem_recursive_copy_rejects_symlink(policy_env):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    source = policy_env.root / "source"
+    source.mkdir()
+    (source / "payload.txt").write_text("payload", encoding="utf-8")
+    link = source / "linked.txt"
+    try:
+        link.symlink_to(source / "payload.txt")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    result = json.loads(file_ops.fs_copy(str(source), str(policy_env.root / "copy")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "symlink_target_rejected"

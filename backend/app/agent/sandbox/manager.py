@@ -78,14 +78,16 @@ class SandboxManager:
         if requested_backend:
             return requested_backend
         if not self.settings.enabled:
-            return "local_direct"
+            return "unavailable"
         mode = str(self.settings.mode or "auto")
         if mode in {"off", "disabled"}:
-            return "local_direct"
-        if mode == "auto":
+            return "unavailable"
+        if mode == "host":
             if self.capabilities.local_restricted.available:
                 return "local_restricted"
             return "local_direct"
+        if mode == "auto":
+            return "docker" if self.capabilities.docker.available else "unavailable"
         if mode == "enforce":
             return "docker" if self.capabilities.docker.available else "unavailable"
         return mode

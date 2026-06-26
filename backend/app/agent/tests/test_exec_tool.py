@@ -3,6 +3,7 @@ import os
 import time
 from types import SimpleNamespace
 
+from app.agent.sandbox.models import SandboxDecision
 from app.skills.exec import tools as exec_tools
 
 
@@ -77,6 +78,22 @@ def test_exec_approval_ticket_redacts_env_values(monkeypatch):
 def test_exec_tool_runs_command(monkeypatch, tmp_path):
     monkeypatch.setattr(
         exec_tools,
+        "build_sandbox_decision",
+        lambda **_kwargs: SandboxDecision(
+            allowed=True,
+            required=False,
+            profile="standard",
+            backend="local_direct",
+            mode="host",
+            security_label="none",
+            network="deny",
+            network_enforcement="none",
+            write_strategy="direct_rw",
+            reason_code="allowed",
+        ),
+    )
+    monkeypatch.setattr(
+        exec_tools,
         "resolve_permission",
         lambda *_args, **_kwargs: SimpleNamespace(
             blocked=False,
@@ -129,6 +146,22 @@ def test_exec_resume_bypasses_confirmation_gate(monkeypatch, tmp_path):
 
 
 def test_exec_session_start_poll_and_stop(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        exec_tools,
+        "build_sandbox_decision",
+        lambda **_kwargs: SandboxDecision(
+            allowed=True,
+            required=False,
+            profile="standard",
+            backend="local_direct",
+            mode="host",
+            security_label="none",
+            network="deny",
+            network_enforcement="none",
+            write_strategy="direct_rw",
+            reason_code="allowed",
+        ),
+    )
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",

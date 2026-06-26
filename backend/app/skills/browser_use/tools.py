@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
+from app.agent.run_context import current_interactive
 from app.agent.response_attachments import (
     MAX_GENERATED_SCREENSHOT_DIMENSION_PX,
     MAX_GENERATED_SCREENSHOT_PIXELS,
@@ -614,6 +615,91 @@ def _fetch_domain_allowed(url: str, allowed_domains: list[str]) -> bool:
     return False
 
 
+def _validate_fetch_final_url(
+    requested_url: str,
+    final_url: str,
+    allowed_domains: list[str],
+) -> dict[str, Any] | None:
+    try:
+        normalized_final = _normalize_fetch_url(final_url or requested_url)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "reason_code": "invalid_final_url",
+            "url": requested_url,
+            "final_url": str(final_url or ""),
+            "error": str(exc),
+        }
+    if not _fetch_domain_allowed(normalized_final, allowed_domains):
+        return {
+            "status": "error",
+            "reason_code": "redirect_domain_not_allowed",
+            "url": requested_url,
+            "final_url": normalized_final,
+            "allowed_domains": allowed_domains,
+            "error": "Redirect target host is not in Settings -> Browser allowed domains.",
+        }
+    try:
+        _assert_fetch_host_public(urlparse(normalized_final).hostname or "")
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "reason_code": "blocked_redirect_host",
+            "url": requested_url,
+            "final_url": normalized_final,
+            "error": str(exc),
+        }
+    return None
+
+
+def _allowed_domains(manager: Any) -> list[str]:
+    return [
+        str(item).strip().lower()
+        for item in (getattr(manager, "config", {}) or {}).get("allowed_domains", [])
+        if str(item).strip()
+    ]
+
+
+def _browser_url_policy(manager: Any, raw_url: str, *, action: str) -> tuple[str, dict[str, Any] | None]:
+    try:
+        normalized_url = _normalize_fetch_url(raw_url)
+    except ValueError as exc:
+        return "", {
+            "status": "error",
+            "reason_code": "invalid_url",
+            "url": str(raw_url or ""),
+            "error": str(exc),
+        }
+    allowed_domains = _allowed_domains(manager)
+    if not _fetch_domain_allowed(normalized_url, allowed_domains):
+        return normalized_url, {
+            "status": "error",
+            "reason_code": "domain_not_allowed",
+            "url": normalized_url,
+            "allowed_domains": allowed_domains,
+            "error": "URL host is not in Settings -> Browser allowed domains.",
+        }
+    if not current_interactive() and not allowed_domains:
+        return normalized_url, {
+            "status": "blocked",
+            "reason_code": "non_interactive_domain_policy_required",
+            "url": normalized_url,
+            "action": action,
+            "error": "Non-interactive browser network actions require an explicit allowed domain policy.",
+        }
+    if not current_interactive():
+        try:
+            _assert_fetch_host_public(urlparse(normalized_url).hostname or "")
+        except ValueError as exc:
+            return normalized_url, {
+                "status": "error",
+                "reason_code": "blocked_host",
+                "url": normalized_url,
+                "error": str(exc),
+            }
+    return normalized_url, None
+
+
 def _first_fetch_attr(obj: Any, names: tuple[str, ...], default: Any = "") -> Any:
     for name in names:
         if isinstance(obj, dict) and name in obj:
@@ -843,11 +929,7 @@ def _browser_fetch_sync(
     timeout_ms: int,
 ) -> dict[str, Any]:
     normalized_url = _normalize_fetch_url(url)
-    allowed_domains = [
-        str(item).strip().lower()
-        for item in (getattr(manager, "config", {}) or {}).get("allowed_domains", [])
-        if str(item).strip()
-    ]
+    allowed_domains = _allowed_domains(manager)
     if not _fetch_domain_allowed(normalized_url, allowed_domains):
         return {
             "status": "error",
@@ -855,6 +937,13 @@ def _browser_fetch_sync(
             "url": normalized_url,
             "allowed_domains": allowed_domains,
             "error": "URL host is not in Settings -> Browser allowed domains.",
+        }
+    if not current_interactive() and not allowed_domains:
+        return {
+            "status": "blocked",
+            "reason_code": "non_interactive_domain_policy_required",
+            "url": normalized_url,
+            "error": "Non-interactive browser fetch requires an explicit allowed domain policy.",
         }
 
     # SSRF guard: refuse hosts that resolve to internal/non-public addresses. Done
@@ -890,6 +979,13 @@ def _browser_fetch_sync(
             output=output,
             max_chars=max_chars,
         )
+        final_url_error = _validate_fetch_final_url(
+            normalized_url,
+            str(result.get("final_url") or normalized_url),
+            allowed_domains,
+        )
+        if final_url_error is not None:
+            return final_url_error
         if normalized_mode == "auto" and _fetch_looks_blocked_or_js_empty(result["content"], _fetch_response_html(page), result["http_status"]):
             result["status"] = "needs_browser_render"
             result["fallback_reason"] = "http_content_empty_blocked_or_javascript_dependent"
@@ -1335,6 +1431,10 @@ async def browser_open(
     reuse_existing: bool = True,
     wait_until: str = "domcontentloaded",
 ) -> str:
+    if url:
+        url, policy_error = _browser_url_policy(manager, url, action="browser_open")
+        if policy_error:
+            return _json_output(policy_error)
     browser = await manager.ensure_browser(mode, profile_directory)
     page = await _current_page(
         manager,
@@ -1384,6 +1484,9 @@ async def browser_navigate(
     tab_index: int = -1,
     wait_until: str = "domcontentloaded",
 ) -> str:
+    url, policy_error = _browser_url_policy(manager, url, action="browser_navigate")
+    if policy_error:
+        return _json_output(policy_error)
     page = await _current_page(
         manager,
         target_id=tab_target_id,

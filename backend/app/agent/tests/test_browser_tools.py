@@ -178,6 +178,50 @@ def test_browser_fetch_blocks_cloud_metadata_ip(monkeypatch):
     assert result["reason_code"] == "blocked_host"
 
 
+
+
+def test_browser_fetch_blocks_redirect_to_loopback_host(monkeypatch):
+    class RedirectedPage:
+        status = 200
+        url = "http://127.0.0.1/admin"
+        body = b"<html><body>internal</body></html>"
+        encoding = "utf-8"
+        headers = {"content-type": "text/html"}
+
+    monkeypatch.setattr(
+        browser_tools_module,
+        "_fetch_http_with_scrapling",
+        lambda url, *, timeout_ms: (RedirectedPage(), "http"),
+    )
+    manager = SimpleNamespace(config={"allowed_domains": []})
+
+    result = json.loads(asyncio.run(browser_fetch(manager, "https://example.com", mode="http")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "blocked_redirect_host"
+    assert result["final_url"] == "http://127.0.0.1/admin"
+
+
+def test_browser_fetch_blocks_redirect_outside_allowed_domain(monkeypatch):
+    class RedirectedPage:
+        status = 200
+        url = "https://evil.example.net/"
+        body = b"<html><body>evil</body></html>"
+        encoding = "utf-8"
+        headers = {"content-type": "text/html"}
+
+    monkeypatch.setattr(
+        browser_tools_module,
+        "_fetch_http_with_scrapling",
+        lambda url, *, timeout_ms: (RedirectedPage(), "http"),
+    )
+    manager = SimpleNamespace(config={"allowed_domains": ["example.com"]})
+
+    result = json.loads(asyncio.run(browser_fetch(manager, "https://example.com", mode="http")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "redirect_domain_not_allowed"
+
 def test_browser_fetch_auto_falls_back_to_dynamic_for_js_empty_page(monkeypatch):
     class StaticPage:
         status = 200
@@ -1350,3 +1394,34 @@ def test_wait_for_cdp_endpoint_bails_when_process_exits(monkeypatch):
 
     assert resolved == ""
     assert probe_calls == []
+
+
+
+def test_browser_navigate_blocks_non_interactive_without_allowed_domains(monkeypatch):
+    monkeypatch.setattr(browser_tools_module, "current_interactive", lambda: False)
+
+    class FakeManager:
+        config = {"allowed_domains": []}
+
+        async def get_page(self, *args, **kwargs):
+            raise AssertionError("navigation should be blocked before opening a page")
+
+    result = json.loads(asyncio.run(browser_navigate(FakeManager(), "https://example.com")))
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "non_interactive_domain_policy_required"
+
+
+def test_browser_open_rejects_external_protocol_before_session_start(monkeypatch):
+    monkeypatch.setattr(browser_tools_module, "current_interactive", lambda: True)
+
+    class FakeManager:
+        config = {"allowed_domains": []}
+
+        async def ensure_browser(self, *args, **kwargs):
+            raise AssertionError("invalid URL should be rejected before browser startup")
+
+    result = json.loads(asyncio.run(browser_tools_module.browser_open(FakeManager(), "file:///C:/Windows/win.ini")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "invalid_url"

@@ -13,6 +13,7 @@ from app.agent.controller_policy import (
     resolve_permission,
 )
 from app.agent.execution_resume import register_executor
+from app.agent.run_context import current_interactive
 from app.agent.settings_store import load_agent_settings
 from app.skills.computer_use import desktop_runtime, window_ops
 from app.skills.computer_use.screen_geometry import get_window_rect
@@ -48,6 +49,9 @@ _SCREEN_FALLBACK_ACTIONS = {
     "scroll",
     "drag",
 }
+_MAX_ACTIONS_PER_BATCH = 20
+_MAX_TYPED_TEXT_CHARS = 4000
+_CREDENTIAL_TEXT_HINTS = ("password", "passcode", "otp", "2fa", "mfa", "secret", "token", "api key", "apikey")
 
 
 def _json_loads(value: str, fallback: Any) -> Any:
@@ -307,6 +311,47 @@ def _map_window_point(window: dict[str, Any], x: float, y: float) -> tuple[int, 
     return int(rect.get("x", 0)) + round(float(x)), int(rect.get("y", 0)) + round(float(y))
 
 
+def _action_batch_budget_error(actions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if len(actions) > _MAX_ACTIONS_PER_BATCH:
+        return {
+            "status": "error",
+            "reason_code": "action_batch_limit_exceeded",
+            "error": "Computer action batch exceeds the maximum allowed action count.",
+            "max_actions": _MAX_ACTIONS_PER_BATCH,
+        }
+    for index, action in enumerate(actions):
+        kind = str(action.get("type") or "").strip().lower()
+        if kind != "type_text":
+            continue
+        text = str(action.get("text") or "")
+        if len(text) > _MAX_TYPED_TEXT_CHARS:
+            return {
+                "status": "error",
+                "reason_code": "typed_text_limit_exceeded",
+                "error": "Typed text exceeds the maximum allowed character count.",
+                "action_index": index,
+                "max_chars": _MAX_TYPED_TEXT_CHARS,
+            }
+        label = " ".join(str(action.get(key) or "") for key in ("field", "name", "label", "target_text", "description")).lower()
+        if any(hint in label for hint in _CREDENTIAL_TEXT_HINTS):
+            return {
+                "status": "blocked",
+                "reason_code": "credential_entry_restricted",
+                "error": "Credential-like text entry requires direct local user control.",
+                "action_index": index,
+            }
+    return None
+
+
+def _active_window_matches(window: dict[str, Any]) -> bool:
+    expected_hwnd = int(window.get("hwnd") or 0)
+    if not expected_hwnd:
+        return True
+    active = _active_window()
+    active_hwnd = int(active.get("hwnd") or 0)
+    return not active_hwnd or active_hwnd == expected_hwnd
+
+
 def _normalize_key_chord(keys: str) -> str:
     aliases = {
         "control_l": "ctrl",
@@ -439,6 +484,9 @@ def _computer_functions_act(
 ) -> str:
     if not isinstance(actions, list) or not actions:
         return json.dumps({"status": "error", "error": "actions must be a non-empty array."})
+    budget_error = _action_batch_budget_error(actions)
+    if budget_error is not None:
+        return json.dumps(budget_error, ensure_ascii=False)
 
     launch_only = all(str(action.get("type") or "").lower() == "launch_app" for action in actions)
     selected: dict[str, Any] = {}
@@ -478,6 +526,16 @@ def _computer_functions_act(
     results: list[dict[str, Any]] = []
     for index, action in enumerate(actions):
         kind = str(action.get("type") or "").strip().lower()
+        if selected and kind in _SCREEN_FALLBACK_ACTIONS and not _active_window_matches(selected):
+            result = {
+                "status": "blocked",
+                "reason_code": "target_focus_changed",
+                "error": "Target window focus changed before the approved action batch completed.",
+            }
+            result.setdefault("action_index", index)
+            result.setdefault("action_type", kind)
+            results.append(result)
+            return json.dumps({"status": "blocked", "window": selected, "results": results}, ensure_ascii=False)
         if kind == "launch_app":
             alias = str(action.get("app") or action.get("alias") or "")
             if _is_blocked_app(alias):
@@ -584,6 +642,26 @@ def _computer_functions_act(
 
 
 def _computer_functions_clipboard(action: str = "read", text: str = "") -> str:
+    if not current_interactive():
+        return json.dumps(
+            {
+                "status": "blocked",
+                "reason_code": "clipboard_non_interactive_restricted",
+                "error": "Clipboard access requires an interactive desktop session.",
+            },
+            ensure_ascii=False,
+        )
+    if action in {"write", "clear"}:
+        lowered = str(text or "").lower()
+        if any(hint in lowered for hint in _CREDENTIAL_TEXT_HINTS):
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "reason_code": "credential_clipboard_restricted",
+                    "error": "Credential-like clipboard writes require direct local user control.",
+                },
+                ensure_ascii=False,
+            )
     return window_ops._ctrl_clipboard(action=action, text=text)
 
 

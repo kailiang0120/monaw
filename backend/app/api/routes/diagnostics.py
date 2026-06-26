@@ -9,6 +9,7 @@ from app.agent.scheduler import get_scheduled_task_service
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
 from app.agent.skill_loader import available_skill_payload
 from app.config import settings
+from app.agent.observability.recorder import redact
 from app.schemas import BrowserUseDiagnosticsOut
 from app.skills.browser_use.manager import (
     ensure_browser_use_runtime_dirs,
@@ -23,10 +24,46 @@ router = APIRouter()
 def _runtime_file_status(path: Path) -> dict:
     exists = path.exists()
     return {
-        "path": str(path),
+        "path": "",
         "exists": exists,
         "size_bytes": path.stat().st_size if exists and path.is_file() else 0,
     }
+
+
+def _safe_mcp_entry(entry: dict) -> dict:
+    safe = redact(entry)
+    for key in (
+        "command",
+        "cwd",
+        "url",
+        "resolved_executable",
+        "stderr_tail",
+    ):
+        safe[key] = ""
+    safe["args"] = []
+    safe["pid"] = None
+    safe["remote_tool_names"] = []
+    return safe
+
+
+def _safe_browser_diagnostics(diagnostics: dict) -> dict:
+    safe = redact(diagnostics)
+    for key in (
+        "system_cdp_url",
+        "managed_profile_dir",
+        "downloads_dir",
+        "screenshots_dir",
+        "traces_dir",
+        "system_profile_directory",
+        "chrome_executable",
+    ):
+        safe[key] = ""
+    profiles = safe.get("available_system_profiles")
+    if isinstance(profiles, list):
+        for profile in profiles:
+            if isinstance(profile, dict):
+                profile["directory"] = ""
+    return safe
 
 
 @router.get("/diagnostics/summary")
@@ -60,7 +97,7 @@ async def get_diagnostics_summary(request: Request):
             "name": "Monaw Agent API",
             "version": "1.0.0",
             "port": settings.port,
-            "runtime_dir": str(RUNTIME_DIR),
+            "runtime_dir": "",
             "database": _runtime_file_status(db_path),
         },
         "scheduler": scheduler_state,
@@ -157,7 +194,7 @@ async def get_mcp_diagnostics():
         entry["skill_available"] = feature_available
         entry["skill_unavailable_reason"] = feature_unavailable_reason
         entry["login_capable"] = "chrome" in name.lower() or "devtools" in description.lower()
-        payload.append(entry)
+        payload.append(_safe_mcp_entry(entry))
         seen.add(name)
 
     for name, entry in diagnostics.items():
@@ -172,7 +209,7 @@ async def get_mcp_diagnostics():
         entry["skill_unavailable_reason"] = feature_unavailable_reason
         description = str(entry.get("description", "") or "")
         entry["login_capable"] = "chrome" in name.lower() or "devtools" in description.lower()
-        payload.append(entry)
+        payload.append(_safe_mcp_entry(entry))
 
     return payload
 
@@ -202,7 +239,7 @@ async def get_browser_use_status():
     diagnostics["skill_enabled"] = bool(runtime_settings.tools.skills.get("browser-use", False))
     diagnostics["skill_available"] = bool(browser_skill.get("available", False))
     diagnostics["skill_unavailable_reason"] = str(browser_skill.get("unavailable_reason", "") or "")
-    return diagnostics
+    return _safe_browser_diagnostics(diagnostics)
 
 
 @router.post("/diagnostics/browser-use/reset", response_model=BrowserUseDiagnosticsOut)

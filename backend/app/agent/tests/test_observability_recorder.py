@@ -1,6 +1,8 @@
 import json
 import logging
 
+from app.agent import run_context
+
 from app.agent.observability import recorder as recorder_module
 from app.agent.observability.recorder import ObservabilityLoggingHandler, ObservabilityRecorder, UsageStats
 
@@ -33,7 +35,7 @@ def test_observability_recorder_writes_jsonl_sqlite_and_redacts_secrets(tmp_path
         usage=UsageStats(input_tokens=10, output_tokens=5, total_tokens=15, source="provider"),
     )
 
-    detail = recorder.get_run(run_id)
+    detail = recorder.get_run(run_id, include_sensitive=True)
     assert detail is not None
     assert detail["status"] == "complete"
     assert detail["events"][1]["input"]["api_key"] == "[REDACTED]"
@@ -53,6 +55,37 @@ def test_observability_recorder_writes_jsonl_sqlite_and_redacts_secrets(tmp_path
         "failed with Bearer [REDACTED] and sk-[REDACTED] "
         "password=[REDACTED] cookie=[REDACTED] [REDACTED GITHUB TOKEN]"
     )
+
+
+def test_observability_default_run_detail_omits_prompt_and_tool_bodies(tmp_path):
+    recorder = ObservabilityRecorder(root=tmp_path)
+
+    run_id = recorder.start_run(
+        conversation_id="conv-sensitive",
+        user_message="secret prompt",
+        model="gpt-test",
+        provider="openai",
+    )
+    recorder.log_event(
+        run_id=run_id,
+        conversation_id="conv-sensitive",
+        event_type="tool_call_finished",
+        tool_name="example",
+        input={"prompt": "secret prompt"},
+        output={"text": "raw tool output"},
+    )
+    recorder.finish_run(run_id=run_id, status="complete", final_output="final secret")
+
+    detail = recorder.get_run(run_id)
+    runs = recorder.list_runs()
+
+    assert detail is not None
+    assert detail["user_message"] == ""
+    assert detail["final_output"] == ""
+    assert detail["events"][1]["input"] is None
+    assert detail["events"][1]["output"] is None
+    assert runs[0]["user_message"] == ""
+    assert runs[0]["final_output"] == ""
 
 
 def test_turn_timeout_can_override_wait_for_cancelled_run(tmp_path):
@@ -148,3 +181,41 @@ def test_backend_log_tail_redacts_inline_secrets(tmp_path, monkeypatch):
         "cookie=[REDACTED]",
         "[REDACTED GITHUB TOKEN]",
     ]
+
+
+
+def test_observability_records_execution_principal_metadata(tmp_path):
+    recorder = ObservabilityRecorder(root=tmp_path)
+    tokens = [
+        (run_context.reset_current_interactive, run_context.set_current_interactive(False)),
+        (run_context.reset_current_execution_source, run_context.set_current_execution_source("telegram")),
+        (run_context.reset_current_conversation_id, run_context.set_current_conversation_id("conv-telegram")),
+        (run_context.reset_current_principal_id, run_context.set_current_principal_id("telegram:1:kai")),
+        (run_context.reset_current_permission_profile_id, run_context.set_current_permission_profile_id("telegram:1:restricted")),
+    ]
+    try:
+        run_id = recorder.start_run(
+            conversation_id="conv-telegram",
+            user_message="hello",
+            source="telegram",
+            metadata={"custom": "value"},
+        )
+        recorder.log_event(
+            run_id=run_id,
+            conversation_id="conv-telegram",
+            event_type="tool_call_finished",
+            metadata={"policy": "restricted"},
+        )
+    finally:
+        for reset, token in reversed(tokens):
+            reset(token)
+
+    detail = recorder.get_run(run_id, include_sensitive=True)
+    assert detail is not None
+    assert detail["metadata"]["custom"] == "value"
+    assert detail["metadata"]["execution_source"] == "telegram"
+    assert detail["metadata"]["principal_id"] == "telegram:1:kai"
+    assert detail["metadata"]["permission_profile_id"] == "telegram:1:restricted"
+    assert detail["metadata"]["interactive"] is False
+    assert detail["events"][-1]["metadata"]["policy"] == "restricted"
+    assert detail["events"][-1]["metadata"]["principal_id"] == "telegram:1:kai"

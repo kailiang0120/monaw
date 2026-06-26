@@ -31,7 +31,20 @@ from app.agent.approval_broker import (
     _TICKETS_FILE,
     _APPROVAL_LOG,
 )
-from app.agent.run_context import reset_current_conversation_id, set_current_conversation_id
+from app.agent.run_context import (
+    reset_current_conversation_id,
+    reset_current_control_session_id,
+    reset_current_execution_source,
+    reset_current_interactive,
+    reset_current_permission_profile_id,
+    reset_current_principal_id,
+    set_current_conversation_id,
+    set_current_control_session_id,
+    set_current_execution_source,
+    set_current_interactive,
+    set_current_permission_profile_id,
+    set_current_principal_id,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +101,28 @@ class TestTicketCreation:
             reset_current_conversation_id(token)
 
         assert t.conversation_id == "conv-context"
+
+    def test_create_ticket_inherits_execution_principal_context(self):
+        tokens = [
+            (reset_current_conversation_id, set_current_conversation_id("conv-source")),
+            (reset_current_control_session_id, set_current_control_session_id("session-1")),
+            (reset_current_execution_source, set_current_execution_source("telegram")),
+            (reset_current_principal_id, set_current_principal_id("telegram:chat:user")),
+            (reset_current_permission_profile_id, set_current_permission_profile_id("telegram:restricted")),
+            (reset_current_interactive, set_current_interactive(False)),
+        ]
+        try:
+            ticket = create_ticket(tool_name="ctx_tool")
+        finally:
+            for reset, token in reversed(tokens):
+                reset(token)
+
+        assert ticket.conversation_id == "conv-source"
+        assert ticket.control_session_id == "session-1"
+        assert ticket.execution_source == "telegram"
+        assert ticket.principal_id == "telegram:chat:user"
+        assert ticket.permission_profile_id == "telegram:restricted"
+        assert ticket.interactive is False
 
 
 class TestTicketRetrieval:

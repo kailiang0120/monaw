@@ -44,7 +44,7 @@ DEFAULT_SKILLS = {
     "computer-use": True,
     "filesystem": True,
     "memory": True,
-    "skill-creator": True,
+    "skill-creator": False,
     "background-check": False,
     "browser-use": True,
 }
@@ -175,6 +175,8 @@ class MCPServerConfig(BaseModel):
     call_timeout_ms: int = 30000
     reconnect_on_unhealthy: bool = True
     allow_list: list[str] = Field(default_factory=list)
+    trusted_tools: list[str] = Field(default_factory=list)
+    tool_risk_overrides: dict[str, Literal["low", "medium", "high"]] = Field(default_factory=dict)
     description: str = ""
 
 
@@ -291,7 +293,7 @@ class SandboxWslSettings(BaseModel):
 
 class SandboxSettings(BaseModel):
     enabled: bool = True
-    mode: Literal["off", "disabled", "auto", "enforce", "docker", "local_restricted", "wsl"] = "auto"
+    mode: Literal["off", "disabled", "auto", "enforce", "host", "docker", "local_restricted", "wsl"] = "auto"
     default_profile: Literal["standard", "untrusted", "project_write", "host_required"] = "standard"
     require_strong_for_untrusted: bool = True
     default_write_strategy: Literal["discard", "copy_out", "direct_rw"] = "copy_out"
@@ -379,7 +381,7 @@ def _legacy_tools_to_skills(payload: dict[str, Any]) -> dict[str, bool]:
         "computer-use": windows_tools or windows_controller,
         "filesystem": windows_controller,
         "memory": True,
-        "skill-creator": True,
+        "skill-creator": False,
         "background-check": False,
         "browser-use": True,
     }

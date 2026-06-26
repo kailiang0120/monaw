@@ -295,6 +295,11 @@ def test_telegram_agent_bridge_reuses_chat_session():
         assert first.conversation_id == second.conversation_id
         assert [call["conversation_id"] for call in calls] == [first.conversation_id, first.conversation_id]
         assert [call["message"] for call in calls] == ["Hello", "Continue"]
+        assert calls[0]["execution_source"] == "telegram"
+        assert calls[0]["control_session_id"] == "telegram"
+        assert calls[0]["principal_id"] == "telegram:12345:unknown"
+        assert calls[0]["permission_profile_id"] == "telegram:12345:restricted"
+        assert calls[0]["interactive"] is False
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -1122,5 +1127,36 @@ def test_telegram_handler_reports_delivery_failure(monkeypatch):
                 "text": "The agent finished, but Telegram delivery failed: telegram send failed",
             },
         ) in calls
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+
+def test_telegram_agent_bridge_rate_limits_per_user():
+    tmp_dir = _workspace_tmp_dir("telegram-rate-limit")
+    try:
+        calls = []
+
+        async def fake_runner(**kwargs):
+            calls.append(kwargs)
+            yield {"event": "done", "data": {"summary": "Reply", "status": "complete"}}
+
+        bridge = TelegramAgentBridge(
+            session_store=TelegramSessionStore(tmp_dir / "sessions.json"),
+            settings_factory=lambda: object(),
+            runner=fake_runner,
+            initialize_conversation=lambda _conv_id, _title: None,
+        )
+        bridge._user_rate_limit = 1
+        bridge._chat_rate_limit = 10
+        bridge._rate_limit_window_seconds = 60
+
+        first = asyncio.run(bridge.run_chat_message(chat_id=12345, sender_name="kai", text="one"))
+        second = asyncio.run(bridge.run_chat_message(chat_id=12345, sender_name="kai", text="two"))
+
+        assert first.status == "complete"
+        assert second.status == "blocked"
+        assert second.reason_code == "telegram_user_rate_limited"
+        assert len(calls) == 1
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

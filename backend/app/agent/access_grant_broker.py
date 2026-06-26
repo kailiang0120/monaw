@@ -19,14 +19,23 @@ Resume signaling:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 
 from app.agent.database import get_db
-from app.agent.run_context import current_conversation_id
+from app.agent.run_context import (
+    current_control_session_id,
+    current_conversation_id,
+    current_execution_source,
+    current_interactive,
+    current_permission_profile_id,
+    current_principal_id,
+)
 from app.agent.controller_policy import (
     AppEntry,
     add_allowlisted_app,
@@ -43,6 +52,11 @@ from app.agent.settings_store import (
 class AccessGrantTicket(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     conversation_id: str = ""
+    control_session_id: str = ""
+    execution_source: str = "desktop"
+    principal_id: str = ""
+    permission_profile_id: str = ""
+    interactive: bool = True
     target_type: str = ""  # "app" | "path"
     target_identifier: str = ""
     display_name: str = ""
@@ -52,7 +66,26 @@ class AccessGrantTicket(BaseModel):
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    expires_at: str = Field(
+        default_factory=lambda: (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    )
+    payload_hash: str = ""
+    superseded_by: str = ""
     resolved_at: str = ""
+
+    def compute_hash(self) -> str:
+        payload = {
+            "conversation_id": self.conversation_id,
+            "control_session_id": self.control_session_id,
+            "execution_source": self.execution_source,
+            "principal_id": self.principal_id,
+            "permission_profile_id": self.permission_profile_id,
+            "target_type": self.target_type,
+            "target_identifier": self.target_identifier,
+            "action_context": self.action_context,
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 # ── In-memory ticket store ────────────────────────────────────────────────────
@@ -72,6 +105,11 @@ _resume_decisions: dict[str, str] = {}
 def create_grant_ticket(
     *,
     conversation_id: str = "",
+    control_session_id: str = "",
+    execution_source: str = "",
+    principal_id: str = "",
+    permission_profile_id: str = "",
+    interactive: bool | None = None,
     target_type: str = "app",
     target_identifier: str = "",
     display_name: str = "",
@@ -80,12 +118,32 @@ def create_grant_ticket(
     """Create a pending access grant ticket."""
     ticket = AccessGrantTicket(
         conversation_id=conversation_id or current_conversation_id(),
+        control_session_id=control_session_id or current_control_session_id(),
+        execution_source=execution_source or current_execution_source(),
+        principal_id=principal_id or current_principal_id(),
+        permission_profile_id=permission_profile_id or current_permission_profile_id(),
+        interactive=current_interactive() if interactive is None else bool(interactive),
         target_type=target_type,
         target_identifier=target_identifier,
         display_name=display_name or target_identifier,
         action_context=action_context,
     )
+    ticket.payload_hash = ticket.compute_hash()
     with _state_lock:
+        for existing in list(_pending.values()):
+            if (
+                ticket.target_identifier
+                and existing.conversation_id == ticket.conversation_id
+                and existing.control_session_id == ticket.control_session_id
+                and existing.execution_source == ticket.execution_source
+                and existing.principal_id == ticket.principal_id
+                and existing.target_type == ticket.target_type
+                and existing.target_identifier == ticket.target_identifier
+            ):
+                existing.status = "superseded"
+                existing.superseded_by = ticket.id
+                existing.resolved_at = datetime.now(timezone.utc).isoformat()
+                _pending.pop(existing.id, None)
         _pending[ticket.id] = ticket
         _all[ticket.id] = ticket
     return ticket
@@ -102,20 +160,66 @@ def get_grant_ticket(ticket_id: str) -> AccessGrantTicket | None:
     return _all.get(ticket_id)
 
 
+def grant_validation_error(
+    ticket: AccessGrantTicket,
+    *,
+    expected_session_id: str = "",
+    expected_conversation_id: str = "",
+    expected_execution_source: str = "",
+    require_granted: bool = False,
+) -> str:
+    expected_status = "granted" if require_granted else "pending"
+    if ticket.status != expected_status:
+        return f"ticket is {ticket.status}"
+    try:
+        if datetime.fromisoformat(ticket.expires_at) <= datetime.now(timezone.utc):
+            return "ticket is expired"
+    except ValueError:
+        return "ticket expiry is invalid"
+    if expected_session_id and ticket.control_session_id != expected_session_id:
+        return "ticket belongs to another control session"
+    if expected_conversation_id and ticket.conversation_id != expected_conversation_id:
+        return "ticket belongs to another conversation"
+    if expected_execution_source and ticket.execution_source != expected_execution_source:
+        return "ticket belongs to another execution source"
+    if ticket.compute_hash() != ticket.payload_hash:
+        return "ticket payload hash mismatch"
+    return ""
+
+
+def _session_grant_identifier(identifier: str) -> str:
+    return "|".join((
+        current_control_session_id(),
+        current_execution_source(),
+        current_principal_id(),
+        current_permission_profile_id(),
+        current_conversation_id(),
+        identifier,
+    ))
+
+
 def resolve_grant(
-    ticket_id: str, decision: str
+    ticket_id: str,
+    decision: str,
+    *,
+    expected_session_id: str = "",
 ) -> AccessGrantTicket | None:
     """Resolve an access grant ticket with the user's decision.
 
     decision: "once" | "session" | "always" | "deny"
     """
     with _state_lock:
-        ticket = _pending.pop(ticket_id, None)
-    if ticket is None:
-        return None
+        ticket = _pending.get(ticket_id)
+        if ticket is None or grant_validation_error(ticket, expected_session_id=expected_session_id):
+            return None
+        _pending.pop(ticket_id, None)
 
     ticket.resolved_at = datetime.now(timezone.utc).isoformat()
     ticket.decision = decision
+
+    if not ticket.interactive and decision in {"session", "always"}:
+        ticket.status = "denied"
+        return ticket
 
     if decision == "deny":
         ticket.status = "denied"
@@ -127,11 +231,11 @@ def resolve_grant(
         _persist_permanent_grant(ticket)
     elif decision == "session":
         get_db().add_session_grant(
-            ticket.target_type, ticket.target_identifier, "session"
+            ticket.target_type, _session_grant_identifier(ticket.target_identifier), "session"
         )
     elif decision == "once":
         get_db().add_session_grant(
-            ticket.target_type, ticket.target_identifier, "once"
+            ticket.target_type, _session_grant_identifier(ticket.target_identifier), "once"
         )
 
     return ticket
@@ -139,9 +243,10 @@ def resolve_grant(
 
 def check_session_grant(target_type: str, identifier: str) -> bool:
     """Check if a session grant exists for this target."""
-    grant = get_db().check_session_grant(target_type, identifier)
+    scoped_identifier = _session_grant_identifier(identifier)
+    grant = get_db().check_session_grant(target_type, scoped_identifier)
     if grant == "once":
-        get_db().consume_once_grant(target_type, identifier)
+        get_db().consume_once_grant(target_type, scoped_identifier)
         return True
     return grant is not None
 

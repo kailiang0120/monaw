@@ -17,9 +17,15 @@ from app.agent.access_grant_broker import (
     create_grant_ticket,
     get_resume_decision,
     register_pending_resume,
+    resolve_grant,
     signal_resume,
 )
-from app.agent.run_context import reset_current_conversation_id, set_current_conversation_id
+from app.agent.run_context import (
+    reset_current_conversation_id,
+    reset_current_interactive,
+    set_current_conversation_id,
+    set_current_interactive,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +70,20 @@ def test_create_grant_ticket_inherits_current_conversation_context():
         reset_current_conversation_id(token)
 
     assert ticket.conversation_id == "conv-grant"
+
+
+def test_non_interactive_grant_ticket_cannot_create_persistent_grant():
+    token = set_current_interactive(False)
+    try:
+        ticket = create_grant_ticket(target_type="app", target_identifier="notepad")
+    finally:
+        reset_current_interactive(token)
+
+    resolved = resolve_grant(ticket.id, "always")
+
+    assert resolved is not None
+    assert resolved.status == "denied"
+    assert resolved.decision == "always"
 
 
 def test_register_pending_resume_handles_decision_signaled_before_waiter():

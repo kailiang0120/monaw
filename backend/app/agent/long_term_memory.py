@@ -532,6 +532,10 @@ class LongTermMemory:
             "source": str(meta.get("source") or ""),
             "source_conversation_id": str(meta.get("source_conversation_id") or ""),
             "source_message_id": meta.get("source_message_id"),
+            "source_principal_id": str(meta.get("source_principal_id") or ""),
+            "source_permission_profile_id": str(meta.get("source_permission_profile_id") or ""),
+            "source_execution_source": str(meta.get("source_execution_source") or ""),
+            "sensitivity": str(meta.get("sensitivity") or "normal"),
             "created_at": str(meta.get("created_at") or now),
             "updated_at": str(meta.get("updated_at") or now),
             "last_used_at": str(meta.get("last_used_at") or ""),
@@ -552,6 +556,10 @@ class LongTermMemory:
             "source": record.get("source", ""),
             "source_conversation_id": record.get("source_conversation_id", ""),
             "source_message_id": record.get("source_message_id"),
+            "source_principal_id": record.get("source_principal_id", ""),
+            "source_permission_profile_id": record.get("source_permission_profile_id", ""),
+            "source_execution_source": record.get("source_execution_source", ""),
+            "sensitivity": record.get("sensitivity", "normal"),
             "created_at": record["created_at"],
             "updated_at": record["updated_at"],
             "last_used_at": record.get("last_used_at", ""),
@@ -836,6 +844,9 @@ class LongTermMemory:
         source: str = "",
         source_conversation_id: str = "",
         source_message_id: int | None = None,
+        source_principal_id: str = "",
+        source_permission_profile_id: str = "",
+        source_execution_source: str = "",
         memory_id: str | None = None,
     ) -> dict[str, Any] | None:
         text = str(content or "").strip()
@@ -864,6 +875,10 @@ class LongTermMemory:
                     "source": source or existing.get("source", ""),
                     "source_conversation_id": source_conversation_id or existing.get("source_conversation_id", ""),
                     "source_message_id": source_message_id if source_message_id is not None else existing.get("source_message_id"),
+                    "source_principal_id": source_principal_id or existing.get("source_principal_id", ""),
+                    "source_permission_profile_id": source_permission_profile_id or existing.get("source_permission_profile_id", ""),
+                    "source_execution_source": source_execution_source or existing.get("source_execution_source", ""),
+                    "sensitivity": "sensitive" if self._contains_sensitive(text) else existing.get("sensitivity", "normal"),
                     "updated_at": now,
                     "collection": "long-term",
                 }
@@ -896,6 +911,10 @@ class LongTermMemory:
                             "source": source or section.meta.get("source", ""),
                             "source_conversation_id": source_conversation_id or section.meta.get("source_conversation_id", ""),
                             "source_message_id": source_message_id if source_message_id is not None else section.meta.get("source_message_id"),
+                            "source_principal_id": source_principal_id or section.meta.get("source_principal_id", ""),
+                            "source_permission_profile_id": source_permission_profile_id or section.meta.get("source_permission_profile_id", ""),
+                            "source_execution_source": source_execution_source or section.meta.get("source_execution_source", ""),
+                            "sensitivity": "sensitive" if self._contains_sensitive(section.body) else section.meta.get("sensitivity", "normal"),
                         }
                     )
                     sections[index] = section
@@ -917,6 +936,10 @@ class LongTermMemory:
                 "source": source,
                 "source_conversation_id": source_conversation_id,
                 "source_message_id": source_message_id,
+                "source_principal_id": source_principal_id,
+                "source_permission_profile_id": source_permission_profile_id,
+                "source_execution_source": source_execution_source,
+                "sensitivity": "sensitive" if self._contains_sensitive(str(decision.get("new_body") or text)) else "normal",
                 "created_at": now,
                 "updated_at": now,
                 "last_used_at": "",
@@ -1267,6 +1290,7 @@ class LongTermMemory:
 
     def _prompt_content(self, content: str) -> str:
         text = re.sub(r"^[-*]\s+", "", " ".join(str(content or "").split()))
+        text = re.sub(r"(?i)\b(ignore|override|forget)\b[^.?!]*(previous|system|developer|policy|instruction)[^.?!]*[.?!]?", "", text).strip()
         replacements = [
             (re.compile(r"^The user prefers\b", re.I), "You prefer"),
             (re.compile(r"^The user likes\b", re.I), "You like"),

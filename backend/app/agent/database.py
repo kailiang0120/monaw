@@ -122,6 +122,9 @@ CREATE TABLE IF NOT EXISTS scheduled_task_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
     conversation_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    lease_owner TEXT DEFAULT '',
+    lease_expires_at TEXT DEFAULT '',
     started_at TEXT NOT NULL,
     finished_at TEXT DEFAULT '',
     status TEXT NOT NULL DEFAULT 'running',
@@ -130,6 +133,9 @@ CREATE TABLE IF NOT EXISTS scheduled_task_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
 ON scheduled_task_runs(task_id, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_runs_idempotency
+ON scheduled_task_runs(task_id, idempotency_key)
+WHERE idempotency_key <> '';
 
 CREATE TABLE IF NOT EXISTS conversation_compactions (
     conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
@@ -267,6 +273,9 @@ class Database:
                 notify_telegram INTEGER NOT NULL DEFAULT 0,
                 telegram_chat_id TEXT DEFAULT '',
                 reuse_conversation INTEGER NOT NULL DEFAULT 0,
+                owner_principal_id TEXT DEFAULT '',
+                permission_profile_id TEXT DEFAULT 'scheduled-restricted',
+                permission_profile_snapshot TEXT DEFAULT '',
                 last_run_at TEXT DEFAULT '',
                 last_run_status TEXT DEFAULT '',
                 last_run_conversation_id TEXT DEFAULT '',
@@ -282,6 +291,9 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
                 conversation_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL DEFAULT '',
+                lease_owner TEXT DEFAULT '',
+                lease_expires_at TEXT DEFAULT '',
                 started_at TEXT NOT NULL,
                 finished_at TEXT DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'running',
@@ -290,6 +302,9 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
             ON scheduled_task_runs(task_id, id DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_runs_idempotency
+            ON scheduled_task_runs(task_id, idempotency_key)
+            WHERE idempotency_key <> '';
             """
         )
         existing = {
@@ -300,6 +315,29 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE scheduled_tasks ADD COLUMN reuse_conversation INTEGER NOT NULL DEFAULT 0"
             )
+        if "owner_principal_id" not in existing:
+            self.conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN owner_principal_id TEXT DEFAULT ''")
+        if "permission_profile_id" not in existing:
+            self.conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN permission_profile_id TEXT DEFAULT 'scheduled-restricted'")
+        if "permission_profile_snapshot" not in existing:
+            self.conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN permission_profile_snapshot TEXT DEFAULT ''")
+        run_existing = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(scheduled_task_runs)").fetchall()
+        }
+        if "idempotency_key" not in run_existing:
+            self.conn.execute("ALTER TABLE scheduled_task_runs ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''")
+        if "lease_owner" not in run_existing:
+            self.conn.execute("ALTER TABLE scheduled_task_runs ADD COLUMN lease_owner TEXT DEFAULT ''")
+        if "lease_expires_at" not in run_existing:
+            self.conn.execute("ALTER TABLE scheduled_task_runs ADD COLUMN lease_expires_at TEXT DEFAULT ''")
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_runs_idempotency
+            ON scheduled_task_runs(task_id, idempotency_key)
+            WHERE idempotency_key <> ''
+            """
+        )
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -390,6 +428,9 @@ class Database:
         "notify_telegram",
         "telegram_chat_id",
         "reuse_conversation",
+        "owner_principal_id",
+        "permission_profile_id",
+        "permission_profile_snapshot",
         "last_run_at",
         "last_run_status",
         "last_run_conversation_id",
@@ -414,6 +455,9 @@ class Database:
             "notify_telegram": 0,
             "telegram_chat_id": "",
             "reuse_conversation": 0,
+            "owner_principal_id": "",
+            "permission_profile_id": "scheduled-restricted",
+            "permission_profile_snapshot": "",
             "last_run_at": "",
             "last_run_status": "",
             "last_run_conversation_id": "",
@@ -519,14 +563,28 @@ class Database:
         conversation_id: str,
         started_at: str,
         status: str = "running",
+        idempotency_key: str = "",
+        lease_owner: str = "",
+        lease_expires_at: str = "",
     ) -> int:
         with self._lock:
             cur = self.conn.execute(
                 """
-                INSERT INTO scheduled_task_runs (task_id, conversation_id, started_at, status)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO scheduled_task_runs (
+                    task_id, conversation_id, idempotency_key, lease_owner,
+                    lease_expires_at, started_at, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, conversation_id, started_at, status),
+                (
+                    task_id,
+                    conversation_id,
+                    idempotency_key,
+                    lease_owner,
+                    lease_expires_at,
+                    started_at,
+                    status,
+                ),
             )
             self.conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
@@ -539,6 +597,8 @@ class Database:
         status: str = "",
         final_text: str = "",
         error: str = "",
+        lease_owner: str = "",
+        lease_expires_at: str = "",
     ) -> None:
         fields = {
             key: value
@@ -547,6 +607,8 @@ class Database:
                 "status": status,
                 "final_text": final_text,
                 "error": error,
+                "lease_owner": lease_owner,
+                "lease_expires_at": lease_expires_at,
             }.items()
             if value != ""
         }
@@ -581,6 +643,25 @@ class Database:
             """
         )
         return {str(row["task_id"]) for row in rows}
+
+    def recover_expired_scheduled_task_runs(self, now_iso: str) -> int:
+        with self._lock:
+            cur = self.conn.execute(
+                """
+                UPDATE scheduled_task_runs
+                SET status = 'error',
+                    finished_at = ?,
+                    error = 'scheduler lease expired',
+                    lease_owner = '',
+                    lease_expires_at = ''
+                WHERE status = 'running'
+                  AND lease_expires_at <> ''
+                  AND lease_expires_at <= ?
+                """,
+                (now_iso, now_iso),
+            )
+            self.conn.commit()
+            return int(cur.rowcount)
 
     # Message CRUD
 
