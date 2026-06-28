@@ -25,6 +25,7 @@ import mascotCurious from '../assets/mascots/curious.png'
 import mascotStart from '../assets/mascots/start.png'
 import mascotThinking from '../assets/mascots/thinking.gif'
 import { PlanProgress } from './PlanProgress'
+import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
 import { fetchMessageToolCalls } from '../lib/api/conversations'
 import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
@@ -35,6 +36,22 @@ import type { ActivityItem, ApprovalNotice, Message, ToolCall } from '../hooks/u
 
 const MIN_IMAGE_PREVIEW_DIMENSION_PX = 16
 const MAX_VISIBLE_THINKING_CHARS = 500
+const FORMATTED_RESPONSE_CACHE_LIMIT = 300
+const formattedResponseCache = new Map<string, string>()
+
+function cachedFormatAgentResponse(message: Message): string {
+  const revision = message.contentRevision ?? message.content.length
+  const key = `${message.id}:${revision}`
+  const cached = formattedResponseCache.get(key)
+  if (cached !== undefined) return cached
+  const formatted = formatAgentResponse(message.content)
+  formattedResponseCache.set(key, formatted)
+  if (formattedResponseCache.size > FORMATTED_RESPONSE_CACHE_LIMIT) {
+    const firstKey = formattedResponseCache.keys().next().value
+    if (firstKey) formattedResponseCache.delete(firstKey)
+  }
+  return formatted
+}
 
 function isDisplayableThinking(thinking?: string): thinking is string {
   const trimmed = thinking?.trim()
@@ -142,8 +159,8 @@ export const MessageBubble = memo(function MessageBubble({
   const status = streamingStatus(message)
   const hasBody = message.content.trim().length > 0
   const formattedContent = useMemo(
-    () => (hasBody ? formatAgentResponse(message.content) : ''),
-    [hasBody, message.content],
+    () => (hasBody ? cachedFormatAgentResponse(message) : ''),
+    [hasBody, message],
   )
   const showToolCalls = message.toolCalls && message.toolCalls.length > 0
   const showThinking = !message.streaming && isDisplayableThinking(message.thinking)
@@ -320,11 +337,7 @@ function ResponseTimer({
   const [now, setNow] = useState(() => Date.now())
   const isLive = startedAtMs !== undefined
 
-  useEffect(() => {
-    if (!isLive) return
-    const timer = window.setInterval(() => setNow(Date.now()), 250)
-    return () => window.clearInterval(timer)
-  }, [isLive])
+  useVisibleInterval(() => setNow(Date.now()), isLive ? 250 : null)
 
   const label = isLive
     ? `Elapsed time ${formatResponseDuration(Math.max(0, now - startedAtMs))}`
@@ -452,10 +465,7 @@ function LiveWorkPanel({
 
 function InlineElapsed({ startedAtMs }: { startedAtMs: number }) {
   const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 250)
-    return () => window.clearInterval(timer)
-  }, [])
+  useVisibleInterval(() => setNow(Date.now()), 250)
   const duration = formatResponseDuration(Math.max(0, now - startedAtMs))
   return (
     <span

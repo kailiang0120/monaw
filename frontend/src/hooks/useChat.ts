@@ -74,6 +74,7 @@ export interface Message {
   runStatus?: 'streaming' | 'complete' | 'paused' | 'error'
   responseStartedAtMs?: number
   responseDurationMs?: number
+  contentRevision?: number
 }
 
 interface StreamDonePayload {
@@ -280,7 +281,13 @@ export function useChat(conversationId: string | null) {
         if (!content) return
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === assistantId ? { ...m, content: m.content + content } : m
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content: m.content + content,
+                  contentRevision: (m.contentRevision ?? 0) + 1,
+                }
+              : m
           )
         )
       }

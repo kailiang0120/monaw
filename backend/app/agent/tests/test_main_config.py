@@ -1,9 +1,12 @@
 import asyncio
 
+import pytest
+
 from app.main import _split_csv_setting
 from app.skills.browser_use import manager as browser_manager_module
 from app import main as main_module
 from app.agent import scheduler as scheduler_module
+from app import startup_security
 
 
 def test_split_csv_setting_drops_empty_cors_entries():
@@ -53,3 +56,23 @@ def test_lifespan_does_not_prewarm_browser(monkeypatch):
     assert runtime_calls == ["dirs"]
     assert browser_calls == []
     assert scheduler_events == ["start", "stop"]
+
+
+def test_startup_security_requires_control_plane_secret(monkeypatch):
+    monkeypatch.delenv("MONAW_CONTROL_SECRET", raising=False)
+
+    with pytest.raises(RuntimeError, match="control-plane secret"):
+        startup_security.validate_control_plane_secret()
+
+
+def test_startup_security_rejects_symlink_runtime_directory(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this platform")
+
+    with pytest.raises(RuntimeError, match="symlink"):
+        startup_security.validate_runtime_directory(linked)

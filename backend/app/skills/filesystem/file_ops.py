@@ -13,6 +13,7 @@ from app.agent.access_grant_broker import create_grant_ticket
 from app.agent.approval_broker import create_ticket
 from app.agent.controller_policy import ActionType, canonical, resolve_permission
 from app.agent.execution_resume import register_executor
+from app.agent.response_attachments import ATTACHMENT_HANDLE_PREFIX, resolve_attachment_handle_path
 
 _MAX_READ_BYTES = 1024 * 1024
 _DEFAULT_READ_BYTES = 65536
@@ -149,17 +150,18 @@ def _gate_path(
     action_description: str,
     payload_args: dict[str, Any],
 ) -> str | None:
-    decision = resolve_permission(action, target_path=path)
+    target_path = _policy_target_path(path)
+    decision = resolve_permission(action, target_path=target_path)
     if decision.blocked:
         return _blocked_result(decision)
     if decision.requires_access_grant:
-        return _pending_access_grant_result(decision, path=path, action_context=action_description)
+        return _pending_access_grant_result(decision, path=target_path, action_context=action_description)
     if decision.requires_confirmation:
         return _pending_approval_result(
             decision,
             tool_name=tool_name,
             action_type=action.value,
-            path=path,
+            path=target_path,
             action_description=action_description,
             payload_args=payload_args,
         )
@@ -167,7 +169,15 @@ def _gate_path(
 
 
 def _resolve_path(path: str) -> Path:
+    attachment_path = resolve_attachment_handle_path(path)
+    if attachment_path is not None:
+        return attachment_path
     return Path(canonical(path))
+
+
+def _policy_target_path(path: str) -> str:
+    attachment_path = resolve_attachment_handle_path(path)
+    return str(attachment_path) if attachment_path is not None else path
 
 
 def _same_resolved_path(left: Path, right: Path) -> bool:
@@ -192,6 +202,10 @@ def _has_path_traversal(path: str) -> bool:
 
 
 def _validate_path_shape(path: str, *, operation: str) -> str | None:
+    if str(path or "").strip().startswith(ATTACHMENT_HANDLE_PREFIX):
+        if resolve_attachment_handle_path(path) is None:
+            return _error("attachment_not_found", f"{operation} attachment handle is not available in this context.")
+        return None
     if _has_path_traversal(path):
         return _error("path_traversal_rejected", f"{operation} path contains parent traversal segments.")
     return None
@@ -493,6 +507,9 @@ def file_search(
         return _json({"status": "error", "error": "path is required"})
     if not query:
         return _json({"status": "error", "error": "query is required"})
+    shape_error = _validate_path_shape(path, operation="filesystem")
+    if shape_error:
+        return shape_error
     pending = _gate_path(
         ActionType.READ,
         path=path,

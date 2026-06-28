@@ -565,6 +565,8 @@ _ELEMENT_METADATA_SCRIPT = """
     type: el.getAttribute('type') || '',
     id: el.getAttribute('id') || '',
     name: el.getAttribute('name') || '',
+    href: el instanceof HTMLAnchorElement ? (el.href || el.getAttribute('href') || '') : '',
+    download: el.getAttribute('download') || '',
     aria_label: el.getAttribute('aria-label') || '',
     placeholder: el.getAttribute('placeholder') || '',
     text: normalize(el.innerText || el.textContent || ''),

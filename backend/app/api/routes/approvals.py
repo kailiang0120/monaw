@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.agent.approval_broker import (
     approve_ticket,
@@ -9,9 +9,12 @@ from app.agent.approval_broker import (
     signal_resume as signal_approval_resume,
     ticket_validation_error,
 )
+from app.agent.ui_events import publish_ui_event
 from app.schemas import ApprovalDecisionIn, ApprovalTicketOut
 
 router = APIRouter()
+PENDING_APPROVAL_LIMIT_MAX = 100
+APPROVAL_HISTORY_LIMIT_MAX = 200
 
 def _require_ticket_context(ticket_id: str, request: Request):
     ticket = get_ticket(ticket_id)
@@ -28,9 +31,13 @@ def _require_ticket_context(ticket_id: str, request: Request):
 
 
 @router.get("/approvals/pending", response_model=list[ApprovalTicketOut])
-async def list_pending_approvals(conversation_id: str = ""):
+async def list_pending_approvals(
+    conversation_id: str = "",
+    limit: int = Query(50, ge=1, le=PENDING_APPROVAL_LIMIT_MAX),
+    offset: int = Query(0, ge=0, le=10_000),
+):
     tickets = get_pending_tickets(conversation_id)
-    return [_ticket_to_out(t) for t in tickets]
+    return [_ticket_to_out(t) for t in tickets[offset:offset + limit]]
 
 
 @router.post("/approvals/{ticket_id}/approve", response_model=ApprovalTicketOut)
@@ -41,6 +48,10 @@ async def approve(ticket_id: str, request: Request, body: ApprovalDecisionIn | N
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found or not pending")
     signal_approval_resume(ticket_id, "approved")
+    publish_ui_event(
+        "approval_ticket.changed",
+        {"ticket_id": ticket.id, "conversation_id": ticket.conversation_id, "status": ticket.status.value},
+    )
     return _ticket_to_out(ticket)
 
 
@@ -52,12 +63,21 @@ async def reject(ticket_id: str, request: Request, body: ApprovalDecisionIn | No
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found or not pending")
     signal_approval_resume(ticket_id, "rejected")
+    publish_ui_event(
+        "approval_ticket.changed",
+        {"ticket_id": ticket.id, "conversation_id": ticket.conversation_id, "status": ticket.status.value},
+    )
     return _ticket_to_out(ticket)
 
 
 @router.get("/approvals/history", response_model=list[ApprovalTicketOut])
-async def approval_history(conversation_id: str = "", limit: int = 50):
-    tickets = get_approval_history(conversation_id, limit)
+async def approval_history(
+    conversation_id: str = "",
+    limit: int = Query(50, ge=1, le=APPROVAL_HISTORY_LIMIT_MAX),
+    offset: int = Query(0, ge=0, le=10_000),
+):
+    tickets = get_approval_history(conversation_id, limit + offset)
+    tickets = tickets[offset:offset + limit]
     return [_ticket_to_out(t) for t in tickets]
 
 

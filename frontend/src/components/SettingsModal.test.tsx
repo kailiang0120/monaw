@@ -243,6 +243,7 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
       user_identity: '',
       communication_style: '',
     },
+    settings_version: 'settings-v1',
     available_skills: [
       {
         slug: 'browser_use',
@@ -515,6 +516,7 @@ describe('SettingsModal', () => {
 
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        expected_settings_version: 'settings-v1',
         llm: expect.objectContaining({
           provider: 'gemini',
           model_name: 'gemini-3-flash-preview',

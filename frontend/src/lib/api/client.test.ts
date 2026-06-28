@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { apiFetch, resetApiSessionForTests } from './client'
+import { ApiError, apiFetch, decodeApiError, resetApiSessionForTests } from './client'
 
 describe('authenticated API client', () => {
   afterEach(() => {
@@ -41,5 +41,39 @@ describe('authenticated API client', () => {
     expect(getControlSession).toHaveBeenCalledTimes(2)
     expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('Authorization'))
       .toBe('Bearer refreshed')
+  })
+
+  it('decodes structured API error envelopes', async () => {
+    const response = new Response(
+      JSON.stringify({
+        code: 'validation_error',
+        message: 'Request validation failed',
+        request_id: 'req-123',
+        details: { errors: [{ loc: ['body', 'mode'], type: 'string_pattern_mismatch' }] },
+      }),
+      { status: 422 },
+    )
+
+    const error = await decodeApiError(response, 'Fallback')
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.message).toBe('Request validation failed')
+    expect(error.status).toBe(422)
+    expect(error.code).toBe('validation_error')
+    expect(error.requestId).toBe('req-123')
+    expect(error.details.errors).toEqual([{ loc: ['body', 'mode'], type: 'string_pattern_mismatch' }])
+  })
+
+  it('falls back to legacy detail errors', async () => {
+    const response = new Response(JSON.stringify({ detail: 'Ticket not found' }), {
+      status: 404,
+      headers: { 'x-request-id': 'req-legacy' },
+    })
+
+    const error = await decodeApiError(response, 'Fallback')
+
+    expect(error.message).toBe('Ticket not found')
+    expect(error.code).toBe('request_failed')
+    expect(error.requestId).toBe('req-legacy')
   })
 })

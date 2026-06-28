@@ -1,11 +1,14 @@
 import base64
 import binascii
 import re
-import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
-from app.agent.response_attachments import register_attachment_path
+from app.agent.response_attachments import (
+    new_attachment_id,
+    public_attachment_payload,
+    register_attachment_path,
+)
 from app.agent.runtime_paths import runtime_path
 from app.schemas import AttachmentUploadRequest, AttachmentUploadResponse
 
@@ -21,8 +24,8 @@ def _safe_filename(filename: str) -> str:
 
 
 @router.post("/uploads", response_model=AttachmentUploadResponse)
-async def upload_attachment(body: AttachmentUploadRequest):
-    upload_id = str(uuid.uuid4())
+async def upload_attachment(body: AttachmentUploadRequest, request: Request):
+    upload_id = new_attachment_id()
     encoded = body.data_base64
     if "," in encoded and encoded.lstrip().lower().startswith("data:"):
         encoded = encoded.split(",", 1)[1]
@@ -39,12 +42,17 @@ async def upload_attachment(body: AttachmentUploadRequest):
     conv_dir = body.conversation_id or "pending"
     target_path = runtime_path("uploads", conv_dir, upload_id, safe_name)
     target_path.write_bytes(data)
-    register_attachment_path(upload_id, target_path)
-
-    return AttachmentUploadResponse(
-        id=upload_id,
-        name=safe_name,
-        path=str(target_path),
+    control_session_id = request.state.control_session.session_id
+    record = register_attachment_path(
+        upload_id,
+        target_path,
+        control_session_id=control_session_id,
+        principal_id=control_session_id,
+        conversation_id=body.conversation_id or "pending",
         mime_type=body.mime_type or "",
-        size=len(data),
     )
+    if record is None:
+        raise HTTPException(status_code=500, detail="Unable to register uploaded file")
+
+    payload = public_attachment_payload(record)
+    return AttachmentUploadResponse(**payload)

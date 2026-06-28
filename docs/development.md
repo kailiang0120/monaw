@@ -63,6 +63,10 @@ Do not expose the backend through port forwarding, a reverse proxy, a tunnel, or
 a non-loopback bind. Electron rejects non-loopback backend hosts unless
 `MONAW_ALLOW_UNSAFE_BACKEND_HOST=1` is deliberately set.
 
+Operational security, incident response, backup, restore, retention, and
+complete-data-deletion guidance lives in [operations.md](operations.md). The
+generated route table lives in [api.md](api.md) and is checked by tests.
+
 ## Credential Storage
 
 Provider API keys and the Telegram bot token are encrypted in Electron main
@@ -90,6 +94,8 @@ Frontend npm commands must run from `frontend`, not the repo root.
 - [Telegram](telegram.md)
 - [Permissions](permissions.md)
 - [Sandboxing](sandboxing.md)
+- [Operations](operations.md)
+- [API route reference](api.md)
 
 ## Runtime Layout
 

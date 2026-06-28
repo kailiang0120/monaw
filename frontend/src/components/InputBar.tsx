@@ -41,6 +41,7 @@ interface Props {
   isStreaming: boolean
   conversationId: string | null
   contextRefreshKey: number
+  usageRefreshKey?: number
   disabled?: boolean
   disabledReason?: string
   approvalMode: ApprovalMode
@@ -54,6 +55,7 @@ export function InputBar({
   isStreaming,
   conversationId,
   contextRefreshKey,
+  usageRefreshKey = 0,
   disabled,
   disabledReason,
   approvalMode,
@@ -116,26 +118,32 @@ export function InputBar({
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
     if (!conversationId) {
       setContextUsage(null)
       return
     }
+    if (isStreaming) {
+      return () => {
+        cancelled = true
+        controller.abort()
+      }
+    }
     setContextUsage(null)
     const loadUsage = async () => {
       try {
-        const usage = await fetchContextUsage(conversationId)
+        const usage = await fetchContextUsage(conversationId, controller.signal)
         if (!cancelled) setContextUsage(usage)
       } catch {
         if (!cancelled) setContextUsage(null)
       }
     }
-    loadUsage()
-    const interval = window.setInterval(loadUsage, 10_000)
+    void loadUsage()
     return () => {
       cancelled = true
-      window.clearInterval(interval)
+      controller.abort()
     }
-  }, [conversationId, contextRefreshKey, isStreaming])
+  }, [conversationId, contextRefreshKey, isStreaming, usageRefreshKey])
 
   const handleSend = async () => {
     const trimmed = value.trim()

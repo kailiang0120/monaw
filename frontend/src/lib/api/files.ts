@@ -1,13 +1,16 @@
 import { apiFetch, BASE } from './client'
 import type { UploadedAttachment } from './types'
 
-function fileUrl(attachment: Pick<UploadedAttachment, 'id'>, preview = false): string {
+function fileUrl(attachment: Pick<UploadedAttachment, 'id' | 'conversation_id'>, preview = false): string {
   const suffix = preview ? '/preview' : ''
-  return `${BASE}/api/files/${encodeURIComponent(attachment.id)}${suffix}`
+  const query = attachment.conversation_id
+    ? `?conversation_id=${encodeURIComponent(attachment.conversation_id)}`
+    : ''
+  return `${BASE}/api/files/${encodeURIComponent(attachment.id)}${suffix}${query}`
 }
 
 export async function fetchAttachmentObjectUrl(
-  attachment: Pick<UploadedAttachment, 'id'>,
+  attachment: Pick<UploadedAttachment, 'id' | 'conversation_id'>,
   preview = false,
 ): Promise<string> {
   const response = await apiFetch(fileUrl(attachment, preview))

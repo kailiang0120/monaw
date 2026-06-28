@@ -81,6 +81,45 @@ function Wait-ForEndpoint {
   throw "$Name did not become ready within $TimeoutSeconds seconds."
 }
 
+function Test-LoopbackHost {
+  param([Parameter(Mandatory = $true)] [string] $HostName)
+
+  $normalized = $HostName.Trim().ToLowerInvariant()
+  return @('127.0.0.1', 'localhost', '::1') -contains $normalized
+}
+
+function Assert-SafeBackendHost {
+  param([Parameter(Mandatory = $true)] [string] $HostName)
+
+  if (Test-LoopbackHost -HostName $HostName) {
+    return
+  }
+  if ($env:MONAW_ALLOW_UNSAFE_BACKEND_HOST -eq '1') {
+    Write-Warning 'MONAW_ALLOW_UNSAFE_BACKEND_HOST=1 is set; non-loopback backend host is allowed for this launch.'
+    return
+  }
+  throw 'Refusing to start with a non-loopback backend host. Use 127.0.0.1, localhost, or ::1.'
+}
+
+function Assert-RuntimeDirectory {
+  param([Parameter(Mandatory = $true)] [string] $Path)
+
+  New-Item -ItemType Directory -Force -Path $Path | Out-Null
+  $item = Get-Item -LiteralPath $Path -Force
+  if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Runtime directory must not be a symlink or junction.'
+  }
+  $probe = Join-Path $Path ('.startup-check-{0}.tmp' -f ([guid]::NewGuid().ToString('N')))
+  try {
+    Set-Content -LiteralPath $probe -Value 'ok' -Encoding utf8NoBOM
+    if ((Get-Content -Raw -LiteralPath $probe) -notmatch '^ok') {
+      throw 'Runtime directory write verification failed.'
+    }
+  } finally {
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Start-NpmScriptHidden {
   param(
     [Parameter(Mandatory = $true)] [string] $ScriptName,
@@ -136,6 +175,9 @@ $runtimeConfig = if (Test-Path $runtimeConfigPath) {
 $backendHost = Get-JsonValueOrDefault -Object $runtimeConfig -Property 'backendHost' -Default '127.0.0.1'
 $backendPort = Get-JsonValueOrDefault -Object $runtimeConfig -Property 'backendPort' -Default 8420
 $vitePort = Get-VitePort
+
+Assert-SafeBackendHost -HostName ([string]$backendHost)
+Assert-RuntimeDirectory -Path $runtimeDir
 
 $viteUrl = "http://localhost:$vitePort"
 $backendHealthUrl = "http://${backendHost}:$backendPort/health"

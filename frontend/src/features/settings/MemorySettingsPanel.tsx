@@ -66,10 +66,11 @@ const EMPTY_STATS = {
 
 interface Props {
   draft: AgentSettings
+  refreshKey?: number
   updateDraft: (updater: (current: AgentSettings) => AgentSettings) => void
 }
 
-export function MemorySettingsPanel({ draft, updateDraft }: Props) {
+export function MemorySettingsPanel({ draft, refreshKey = 0, updateDraft }: Props) {
   const [query, setQuery] = useState('')
   const [activeTab, setActiveTab] = useState<MemoryCategory>('preference')
   const [statusFilter, setStatusFilter] = useState<'' | MemoryStatus>('active')
@@ -175,21 +176,19 @@ export function MemorySettingsPanel({ draft, updateDraft }: Props) {
   }, [activeTab, listParams])
 
   useEffect(() => {
-    loadMemoryData({ clearOnError: true })
+    void loadMemoryData({ clearOnError: true })
     const refresh = () => loadMemoryData({ silent: true })
-    const intervalId = window.setInterval(refresh, 10000)
     const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') refresh()
+      if (document.visibilityState === 'visible') void refresh()
     }
     window.addEventListener('focus', refresh)
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
       requestSeq.current += 1
-      window.clearInterval(intervalId)
       window.removeEventListener('focus', refresh)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
-  }, [loadMemoryData])
+  }, [loadMemoryData, refreshKey])
 
   const sections = useMemo(() => {
     if (statusFilter === 'active' && !query && !reviewFilter && memoryFile) {

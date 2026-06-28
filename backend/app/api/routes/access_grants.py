@@ -1,18 +1,25 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.agent.access_grant_broker import (
     get_pending_grants,
     resolve_grant,
     signal_resume as signal_grant_resume,
 )
+from app.agent.ui_events import publish_ui_event
 from app.schemas import AccessGrantDecisionIn, AccessGrantTicketOut
 
 router = APIRouter()
+PENDING_ACCESS_GRANT_LIMIT_MAX = 100
 
 
 @router.get("/access-grants/pending", response_model=list[AccessGrantTicketOut])
-async def list_pending_access_grants(conversation_id: str = ""):
+async def list_pending_access_grants(
+    conversation_id: str = "",
+    limit: int = Query(50, ge=1, le=PENDING_ACCESS_GRANT_LIMIT_MAX),
+    offset: int = Query(0, ge=0, le=10_000),
+):
     tickets = get_pending_grants(conversation_id)
+    tickets = tickets[offset:offset + limit]
     return [
         AccessGrantTicketOut(
             id=t.id,
@@ -44,6 +51,10 @@ async def resolve_access_grant(ticket_id: str, body: AccessGrantDecisionIn, requ
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found or not pending")
     signal_grant_resume(ticket_id, body.decision)
+    publish_ui_event(
+        "access_grant.changed",
+        {"ticket_id": ticket.id, "conversation_id": ticket.conversation_id, "status": ticket.status},
+    )
     return AccessGrantTicketOut(
         id=ticket.id,
         conversation_id=ticket.conversation_id,

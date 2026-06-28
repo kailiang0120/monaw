@@ -5,6 +5,15 @@ import pytest
 
 from app.agent.settings_store import AgentSettings, PathRule, save_agent_settings
 from app.agent.tool_registry import ToolRegistry
+from app.agent.run_context import (
+    reset_current_control_session_id,
+    reset_current_conversation_id,
+    reset_current_principal_id,
+    set_current_control_session_id,
+    set_current_conversation_id,
+    set_current_principal_id,
+)
+from app.agent.response_attachments import register_attachment_path
 from app.skills.filesystem import file_ops
 from app.skills.filesystem import tools as filesystem_tools
 
@@ -59,6 +68,32 @@ def test_filesystem_read_write_list_and_search_are_policy_gated(policy_env):
     assert patch_result["replacements"] == 1
     assert hash_result["algorithm"] == "sha256"
     assert tree_result["entries"][0]["relative_path"] == "notes.txt"
+
+
+def test_filesystem_read_accepts_scoped_attachment_handle(policy_env):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    target = policy_env.root / "upload.txt"
+    target.write_text("attached payload", encoding="utf-8")
+    register_attachment_path(
+        "upload-1",
+        target,
+        control_session_id="session-a",
+        principal_id="session-a",
+        conversation_id="conv-a",
+    )
+    session_token = set_current_control_session_id("session-a")
+    principal_token = set_current_principal_id("session-a")
+    conversation_token = set_current_conversation_id("conv-a")
+    try:
+        result = json.loads(file_ops.file_read("attachment://upload-1"))
+    finally:
+        reset_current_conversation_id(conversation_token)
+        reset_current_principal_id(principal_token)
+        reset_current_control_session_id(session_token)
+
+    assert result["status"] == "ok"
+    assert result["content"] == "attached payload"
+    assert result["path"] == str(target.resolve(strict=False))
 
 
 def test_filesystem_mutation_helpers_are_policy_gated(policy_env):

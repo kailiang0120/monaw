@@ -403,17 +403,20 @@ Relevant code:
 
 ## Phase 5: High-Risk Capability Hardening
 
-Status: partially implemented and locally verified on June 25-26, 2026. `skill-creator`
-is disabled by default, mutating skill-creator operations are approval-gated,
-generated skills are staged and activated disabled without same-turn runtime
-loading, and reflected MCP tools now require approval by default unless
-explicitly trusted by server configuration. MCP approvals include a reflected
-schema hash and argument budgets. Additional June 26 hardening covers filesystem
-path shape checks, recursive/symlink/write budgets, browser non-interactive
-domain policy, DNS/host checks, and external-protocol rejection, computer-use batch/focus/clipboard
-limits, memory provenance and injection-resistant prompt rendering, and restricted
-scheduled-task permission snapshots. A full shared capability-gate service and
-some deeper browser redirect/download approval work remain tracked below.
+Status: implemented and locally verified on June 27, 2026. `skill-creator` is disabled by
+default, mutating skill-creator operations are approval-gated, generated skills
+are staged and activated disabled without same-turn runtime loading, and
+reflected MCP tools require approval by default unless explicitly trusted by
+server configuration. MCP approvals include a reflected schema hash and argument
+budgets. Filesystem path shape checks, recursive/symlink/write budgets, browser
+non-interactive domain policy, DNS/host checks, external-protocol rejection,
+computer-use batch/focus/clipboard limits, memory provenance and
+injection-resistant prompt rendering, and restricted scheduled-task permission
+snapshots are implemented and covered by regression tests. Managed browser
+startup now disables automatic downloads, and browser clicks/types that target
+download links or file upload/file chooser controls return explicit approval
+tickets with deterministic resume executors. Clearing managed browser downloads
+is also approval-gated.
 
 ### 5.1 Skill Creator
 
@@ -533,22 +536,19 @@ Relevant code:
 
 ## Phase 6: Source-Aware Execution Policy
 
-Status: partially implemented and locally verified on June 25-26, 2026. Agent
-runs now carry a structured execution context with source, principal,
-conversation, permission-profile id, and interactivity. Desktop/API runs use
-the authenticated control session, scheduled runs persist and reuse restricted
-permission snapshot identity, Telegram runs use chat/sender-derived principals
-with per-chat/per-user rate limits, and replay uses a dedicated non-interactive
-replay source. Approval/access-grant tickets record the execution principal,
-session grants are scoped by principal/profile/source, non-interactive tickets
-cannot create session or permanent grants, and observability run/event metadata
-now records execution source, principal, profile, and interactivity. Follow-up
-hardening added typed job run states, bounded stream overflow accounting,
-browser redirect SSRF validation, bounded memory retrieval plus permanent
-memory deletion, and scheduler run leases/idempotency/restart recovery with
-global/per-task concurrency limits. Remaining work includes a central
-execution-gate service, provider-adapter separation, and renderer/token storage
-hardening.
+Status: implemented and re-audited on June 27, 2026. Agent runs carry a
+structured execution context with source, principal, conversation,
+permission-profile id, and interactivity. Desktop/API runs use the authenticated
+control session, scheduled runs persist and reuse restricted permission snapshot
+identity, Telegram runs use chat/sender-derived principals with per-chat/per-user
+rate limits, and replay uses a dedicated non-interactive replay source.
+Approval/access-grant tickets record the execution principal, session grants are
+scoped by principal/profile/source, non-interactive tickets cannot create
+session or permanent grants, and observability run/event metadata records
+execution source, principal, profile, and interactivity. The central
+execution-gate service is now extracted; provider-adapter separation and
+renderer/token storage hardening remain tracked in later architecture/Electron
+phases rather than Phase 6.
 
 ### Finding
 
@@ -610,6 +610,16 @@ and sandbox request must receive this context.
 
 ## Phase 7: Scheduler Reliability and Idempotency
 
+Status: implemented and locally verified on June 27, 2026. Scheduled runs now
+persist durable lifecycle states including queued, running, succeeded, failed,
+cancelled, abandoned, and dead-lettered. Run rows carry leases and deterministic
+idempotency keys, expired leases recover to abandoned on service startup,
+queued runs are persisted before waiting behind prior work, due-time claiming is
+atomic, global/per-task concurrency is enforced, terminal runs clear lease
+metadata, retained streamed output is capped with truncation markers, repeated
+failures disable tasks into a dead-letter state, and scheduler API health/status
+surfaces running state without prompt or path contents.
+
 ### Finding
 
 The scheduler polls SQLite, tracks active work in memory, and cancels in-flight
@@ -656,6 +666,16 @@ Relevant code:
 - Restart does not silently lose queued work.
 
 ## Phase 8: Attachment and Local File Access
+
+Status: implemented and locally verified on June 27, 2026. Attachment IDs are
+random opaque handles, registry entries are scoped by authenticated
+session/principal/conversation with expiry and size cleanup, upload/chat/history
+responses no longer expose absolute paths, chat and Telegram prompts use
+`attachment://` handles, filesystem reads can resolve scoped attachment handles,
+file/preview endpoints reauthorize against the caller context and current path
+policy, registry entries reject directories, symlinks, non-regular files, and
+oversized files, downloads use safe filenames and size caps, and previews render
+through a bounded isolated worker with safe decode failures.
 
 ### Finding
 
@@ -787,6 +807,35 @@ API / Electron / Telegram / Scheduler
   through narrow interfaces.
 - No new module should repeat permission or approval policy logic.
 
+Status: execution-gate service slice implemented and locally verified on
+June 27, 2026. Approval/access-grant pending-output parsing, wait/timeout,
+denial handling, approved-ticket replay, and granted access re-execution now
+live in `backend/app/agent/execution_gate.py`, with `TurnLoop` delegating to
+that service through compatibility wrappers. Direct regression coverage was
+added in `test_execution_gate.py`. A follow-up June 27 slice added an explicit
+LLM provider adapter boundary in `backend/app/agent/llm_provider_adapters.py`,
+so `LLMClient.chat_with_tools` dispatches through a provider port instead of
+branching directly. A later June 27 slice moved provider request construction
+for Gemini, OpenAI Responses, and OpenAI-compatible chat into
+`backend/app/agent/llm_provider_requests.py`, and `TurnLoop` now accepts a typed
+`ObservabilityPort` from `backend/app/agent/observability/ports.py` instead of
+hard-coupling its constructor to the concrete recorder. A June 28 slice moved
+provider response parsing and usage extraction into
+`backend/app/agent/llm_provider_responses.py`, leaving `LLMClient` with
+compatibility wrappers over the provider response port. Another June 28 slice
+extracted run-stream event publishing and heartbeat flush bookkeeping into
+`backend/app/agent/run_events.py`, with `TurnLoop` delegating queue writes
+through a typed publisher. The final June 28 slice added a provider-free
+`AgentRunStateMachine`, moved database bootstrap and forward-upgrade logic to
+`backend/app/agent/db_bootstrap.py`, split memory markdown primitives and the
+section storage repository into `memory_documents.py` and
+`memory_repository.py`, moved browser URL policy plus tool registration into
+`browser_use/url_policy.py` and `browser_use/registration.py`, and split
+observability redaction/storage helpers into dedicated modules. Boundary
+regression coverage in `test_architecture_boundaries.py` and
+`test_run_state_machine.py` verifies these ports without live providers or
+runtime databases. Phase 9 is now implemented and locally verified.
+
 ## Phase 10: API Contracts and Error Handling
 
 ### Finding
@@ -828,6 +877,27 @@ Relevant code:
 - Concurrent settings edits detect stale versions.
 - Frontend surfaces mutation failures instead of silently keeping stale state.
 - Pagination limits cannot be bypassed.
+
+Status: first API-contract slice implemented and locally verified on
+June 27, 2026. API exceptions and request-size rejections now return a stable
+`{code, message, request_id, details}` envelope, controller-policy mutation uses
+a strict typed request model that rejects unknown fields, and the frontend API
+client can decode structured envelopes while retaining legacy `{detail: ...}`
+fallbacks. A follow-up June 27 slice added bounded pagination/payload limits to
+conversation lists, message history/tool-call expansion, pending approval/grant
+lists, and approval history, with validation-envelope coverage for bypass
+attempts. A later June 27 slice made settings mutation strict, added
+`settings_version` to settings responses, added
+`expected_settings_version` optimistic-concurrency checks with a stable
+`settings_version_conflict` response, and wired the settings frontend to submit
+the loaded version. A June 28 slice added explicit response models for the
+remaining JSON control-plane endpoints, including diagnostics, observability,
+chat jobs, sandbox status, settings helpers, and delete acknowledgements, plus
+a route-contract regression that keeps JSON endpoints typed while excluding
+SSE/file streams and 204 responses. Another June 28 slice added frontend API
+interfaces for chat-job and OK responses and an OpenAPI parity regression that
+checks key frontend API interfaces cover backend response-schema fields.
+Phase 10 is now implemented and locally verified.
 
 ## Phase 11: Frontend and Electron Performance
 
@@ -885,6 +955,38 @@ Relevant code:
 - Production Electron tests confirm navigation and IPC restrictions.
 - Bundle size and startup time do not regress beyond agreed budgets.
 
+### Implementation status
+
+Implemented on June 28. Added the authenticated `/api/events` SSE channel backed
+by `backend/app/agent/ui_events.py`, with invalidation events for conversation,
+scheduled-task, approval, access-grant, usage, memory, observability, settings,
+and backend-readiness changes. The frontend now opens one authenticated event
+stream through `frontend/src/lib/api/serverEvents.ts`, invalidates local state
+from that stream, and keeps only a low-frequency recovery poll while the event
+channel is disconnected and the window is visible. Approval, context-usage, and
+memory refresh intervals were removed.
+
+The frontend now compares scheduled tasks by stable identity/revision fields
+instead of `JSON.stringify`, caches formatted assistant content by message ID
+and content revision, preserves the existing bounded typewriter stream flush,
+virtualizes observability run/error lists in addition to the existing chat
+virtualization, and aborts stale conversation, context-usage, settings, and
+observability requests on conversation switches, refresh replacement, and
+settings close. Live elapsed timers now use a shared visibility-aware interval
+helper so they pause while the window is hidden. Settings, memory,
+observability, and scheduling surfaces are lazy-loaded.
+
+Electron was hardened in the same slice: the renderer sandbox is enabled,
+preload exposes a frozen argument-validating API, every IPC handler validates
+the sender and argument shape, navigation/new-window/redirect paths are
+restricted through the explicit URL validation helper, and production CSP was
+narrowed with object/base/frame/form hard-deny directives.
+
+Verification: `npm run typecheck`, `npm test`, `npm run build:renderer`,
+`python -m pytest backend/app/agent/tests -q`, and focused Electron/security
+tests pass locally. The backend suite reports the existing pytest config
+warnings for unknown timeout options.
+
 ## Phase 12: Observability, Privacy, and Retention
 
 ### Required changes
@@ -917,6 +1019,38 @@ Relevant code:
 - Storage growth is bounded and visible.
 - Export and deletion behavior are covered by integration tests.
 
+Status: implemented and locally verified on June 28, 2026. Observability fields
+are classified by sensitivity in `backend/app/agent/privacy.py`, and the
+recorder now defaults to metadata-only capture unless the expiring support-mode
+setting is active or tests explicitly opt into detailed capture. Detailed
+observability prompts, tool inputs, tool outputs, and final outputs are redacted
+and encrypted at rest with a local Fernet key before being persisted to SQLite
+or JSONL. Debug bundles are exported as encrypted `.json.enc` files, include
+field classifications, enforce size limits, and reject symlinked export
+directories or path escapes.
+
+Runtime retention is centralized in `backend/app/agent/data_lifecycle.py` and
+applied at backend startup. It enforces age/size cleanup for observability
+runs, debug bundles, backend logs, approval and access-grant history, attachment
+registry entries, browser/MCP diagnostics, and scheduled-task output. The
+observability summary exposes storage usage, retention settings, queue/drop
+metrics, database/model/tool latency metrics, and redaction-failure counts.
+
+A user-visible deletion path was added at `POST /api/privacy/delete-data` and
+the Observability settings panel now exposes a confirmed Delete Data action. The
+deletion coordinator clears observability rows and artifacts, backend logs,
+debug bundles, approval tickets/logs, transient access grants, attachment
+registry/files, memory files, browser/MCP diagnostics, and retained
+scheduled-task output, then emits UI invalidation events.
+
+Verification: `python -m py_compile` for the changed backend modules,
+`python -m pytest backend/app/agent/tests/test_observability_recorder.py
+backend/app/agent/tests/test_data_lifecycle.py ... -q` focused checks,
+`python -m pytest backend/app/agent/tests -q` (`596 passed, 4 skipped`),
+`npm run typecheck`, `npm test -- ObservabilityPanel.test.tsx`, `npm run
+build:renderer`, and `git diff --check` pass locally. Pytest still reports the
+existing unknown-timeout-option warnings.
+
 ## Phase 13: Scripts, Deployment, and Documentation
 
 ### Required changes
@@ -946,34 +1080,60 @@ Relevant code:
 - Packaged and development launchers use the same security model.
 - Documentation examples pass automated smoke tests where practical.
 
+Status: implemented and locally verified on June 28, 2026. Startup now fails
+closed when `MONAW_CONTROL_SECRET` is missing or too short, and validates that
+the runtime directory exists, is writable, and is not a symlink. Electron keeps
+the packaged and development backend launch path on loopback, passes a generated
+control-plane secret only through the backend process environment, disables
+development-token auth for Electron launches, and rejects non-loopback backend
+hosts unless `MONAW_ALLOW_UNSAFE_BACKEND_HOST=1` is deliberately set. The
+Windows launcher now independently rejects non-loopback runtime config and
+verifies the runtime directory before starting Vite/Electron.
+
+Operational documentation was added in `docs/operations.md` covering local
+control-plane exposure warnings, startup requirements, source-specific Telegram
+and scheduled-task restrictions, OS-backed credential storage and migration,
+incident response, credential/token revocation, approval/grant cleanup, backup,
+restore, retention, and complete data deletion. `README.md`, development,
+Telegram, and scheduling docs link to the operations guidance. The generated
+endpoint reference in `docs/api.md` is produced by
+`scripts/generate-api-docs.py` and checked in tests against live FastAPI route
+definitions.
+
+Verification: `python -m py_compile backend/app/startup_security.py
+backend/app/main.py scripts/generate-api-docs.py`, focused startup/docs tests,
+`python -m pytest backend/app/agent/tests -q` (`599 passed, 5 skipped`), `npm
+run typecheck`, `npm test`, and `npm run build:renderer` pass locally. Pytest
+still reports the existing unknown-timeout-option warnings.
+
 ## Module-by-Module Completion Checklist
 
 ### System entrypoints and configuration
 
-- [ ] Loopback-only default binding
-- [ ] Authenticated API startup
-- [ ] Exact CORS allowlist
-- [ ] Request-size and rate limits
-- [ ] Secure startup-script secret handling
-- [ ] Accurate deployment documentation
+- [x] Loopback-only default binding
+- [x] Authenticated API startup
+- [x] Exact CORS allowlist
+- [x] Request-size and rate limits
+- [x] Secure startup-script secret handling
+- [x] Accurate deployment documentation
 
 ### Backend API
 
-- [ ] Authentication and scope dependency on every privileged route
-- [ ] Strict request and response schemas
-- [ ] Standard error envelope
-- [ ] Pagination and payload limits
-- [ ] Session-bound files, approvals, and grants
+- [x] Authentication and scope dependency on every privileged route
+- [x] Strict request and response schemas
+- [x] Standard error envelope
+- [x] Pagination and payload limits
+- [x] Session-bound files, approvals, and grants
 - [x] Redacted diagnostics and observability
 
 ### Agent runtime
 
 - [x] Typed run state machine
 - [x] Source and principal in run context
-- [ ] Central execution-gate service
+- [x] Central execution-gate service
 - [x] Bounded streaming queues
 - [x] Explicit cancellation and timeout behavior
-- [ ] Provider adapters separated from orchestration
+- [x] Provider adapters separated from orchestration
 
 ### Security and control subsystems
 
@@ -982,7 +1142,7 @@ Relevant code:
 - [x] Access-grant expiry and ownership
 - [x] Central recursive redaction
 - [x] Audit records include source, principal, policy, and backend
-- [ ] Prompt injection cannot modify policy state
+- [x] Prompt injection cannot modify policy state
 
 ### Exec skill
 
@@ -1002,7 +1162,7 @@ Relevant code:
 
 - [x] Deny-by-default domain policy for non-interactive sources
 - [x] DNS and redirect SSRF checks
-- [ ] Download, upload, and file-chooser approvals; external protocols rejected
+- [x] Download, upload, and file-chooser approvals; external protocols rejected
 - [x] DOM, screenshot, and response budgets
 
 ### Computer-use skill
@@ -1041,7 +1201,7 @@ Relevant code:
 - [x] Per-user and per-chat rate limits
 - [x] Restricted default capability profile
 - [x] Local confirmation for persistent grants
-- [ ] Token stored outside renderer-accessible storage
+- [x] Token stored outside renderer-accessible storage
 
 ### Skill creator
 
@@ -1053,28 +1213,28 @@ Relevant code:
 
 ### Electron
 
-- [ ] OS-backed credential storage
-- [ ] Narrow sender-validated IPC
-- [ ] Renderer sandbox enabled where supported
-- [ ] Navigation and external URL restrictions
-- [ ] Production CSP verification
+- [x] OS-backed credential storage
+- [x] Narrow sender-validated IPC
+- [x] Renderer sandbox enabled where supported
+- [x] Navigation and external URL restrictions
+- [x] Production CSP verification
 
 ### Frontend
 
-- [ ] Authenticated centralized API client
-- [ ] Event-driven invalidation
-- [ ] Stable entity revisions
-- [ ] Stream update batching
-- [ ] Long-list virtualization
-- [ ] Consistent visible error handling
+- [x] Authenticated centralized API client
+- [x] Event-driven invalidation
+- [x] Stable entity revisions
+- [x] Stream update batching
+- [x] Long-list virtualization
+- [x] Consistent visible error handling
 
 ### Persistence and operations
 
-- [ ] Transactional migration tests
-- [ ] Foreign keys and query indexes
-- [ ] WAL and busy-timeout policy
-- [ ] Retention jobs
-- [ ] Backup, restore, and integrity checks
+- [x] Transactional migration tests
+- [x] Foreign keys and query indexes
+- [x] WAL and busy-timeout policy
+- [x] Retention jobs
+- [x] Backup, restore, and integrity checks
 
 ## Recommended Pull Request Sequence
 

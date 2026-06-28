@@ -12,20 +12,7 @@ from collections import defaultdict
 from typing import Any, AsyncIterator, Callable
 from urllib.parse import urlparse
 
-from app.agent.access_grant_broker import (
-    cleanup_resume as cleanup_grant_resume,
-    get_resume_decision as get_grant_resume_decision,
-    get_grant_ticket,
-    grant_validation_error,
-    register_pending_resume as register_grant_resume,
-)
-from app.agent.approval_broker import (
-    cleanup_resume as cleanup_approval_resume,
-    get_resume_decision as get_approval_resume_decision,
-    get_ticket as get_approval_ticket,
-    register_pending_resume as register_approval_resume,
-)
-from app.agent.execution_resume import resume_approved_ticket
+from app.agent.execution_gate import ExecutionGateService
 from app.agent.iteration_budget import IterationBudget
 from app.agent.llm_client import LLMClient, VisionDescriber, build_tool_result_message
 from app.agent.memory_manager import MemoryManager
@@ -37,14 +24,14 @@ from app.agent.observability.recorder import (
     set_current_run_id,
     usage_from_any,
 )
+from app.agent.observability.ports import ObservabilityPort
 from app.agent.response_attachments import collect_response_attachments
+from app.agent.run_events import RunEventPublisher
 from app.agent.run_context import (
-    current_control_session_id,
-    current_conversation_id,
-    current_execution_source,
     reset_current_conversation_id,
     set_current_conversation_id,
 )
+from app.agent.run_state_machine import AgentRunStateMachine
 from app.agent.state import ExecutionPlan, PlanStep
 from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.harness.tool_policy import ToolPolicy, tool_call_signature
@@ -706,8 +693,7 @@ def _compact_tool_observation(tool_name: str, tool_output: str) -> str:
 
 
 async def _heartbeat_pump(
-    queue: asyncio.Queue,
-    last_flush: list[float],
+    publisher: RunEventPublisher,
     stop_event: asyncio.Event,
 ) -> None:
     """Push a heartbeat event whenever no real event has been flushed for HEARTBEAT_INTERVAL_S."""
@@ -721,9 +707,8 @@ async def _heartbeat_pump(
             pass
         if stop_event.is_set():
             break
-        if loop.time() - last_flush[0] >= HEARTBEAT_INTERVAL_S:
-            await queue.put({"event": "heartbeat", "data": {"t": int(time.time() * 1000), "phase": "idle"}})
-            last_flush[0] = loop.time()
+        if loop.time() - publisher.last_flush[0] >= HEARTBEAT_INTERVAL_S:
+            await publisher.heartbeat(phase="idle")
 
 
 class TurnLoop:
@@ -739,6 +724,7 @@ class TurnLoop:
         max_turn_seconds: float = 1800.0,
         max_llm_call_seconds: float = 300.0,
         vision_describer: VisionDescriber | None = None,
+        observability: ObservabilityPort | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.registry = registry
@@ -751,7 +737,8 @@ class TurnLoop:
         self.max_llm_call_seconds = max_llm_call_seconds
         self.executor = ToolExecutor()
         self.policy = ToolPolicy()
-        self.observability = get_observability_recorder()
+        self.execution_gate = ExecutionGateService()
+        self.observability: ObservabilityPort = observability or get_observability_recorder()
 
     def shutdown(self) -> None:
         self.executor.shutdown()
@@ -903,61 +890,18 @@ class TurnLoop:
         *,
         budget: IterationBudget | None = None,
     ) -> tuple[str, list[dict]]:
-        pending_event = self._check_pending_status(tool_output)
-        if pending_event is None:
-            return tool_output, []
-
-        dispatched = self.registry.dispatch(tool_name, arguments)
-        if dispatched is None:
-            return tool_output, [pending_event]
-
-        resolved_output = tool_output
-        emitted_events: list[dict] = [pending_event]
-        async for resolution_event in self._await_ticket_resolution(
-            budget or self._new_turn_budget(),
-            pending_event["data"]["ticket_id"],
-            pending_event["event"],
-            dispatched["tool"],
-            dispatched["arguments"],
-        ):
-            if "_result" in resolution_event:
-                resolved_output = resolution_event["_result"]
-            else:
-                emitted_events.append(resolution_event)
-        return resolved_output, emitted_events
+        return await self.execution_gate.handle_pending_tool_output(
+            tool_output=tool_output,
+            tool_name=tool_name,
+            arguments=arguments,
+            registry=self.registry,
+            budget=budget or self._new_turn_budget(),
+            execute_tool=self._execute_tool,
+        )
 
     @staticmethod
     def _check_pending_status(tool_output: str) -> dict | None:
-        try:
-            data = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
-        except (json.JSONDecodeError, TypeError):
-            return None
-
-        if not isinstance(data, dict):
-            return None
-
-        status = data.get("status")
-        if status == "pending_approval":
-            return {
-                "event": "approval_required",
-                "data": {
-                    "ticket_id": data.get("ticket_id", ""),
-                    "action": data.get("action", ""),
-                    "reason": data.get("reason", ""),
-                },
-            }
-        if status == "pending_access_grant":
-            return {
-                "event": "access_grant_required",
-                "data": {
-                    "ticket_id": data.get("ticket_id", ""),
-                    "target_type": data.get("target_type", ""),
-                    "target_identifier": data.get("target_identifier", ""),
-                    "display_name": data.get("display_name", ""),
-                    "action_context": data.get("action_context", ""),
-                },
-            }
-        return None
+        return ExecutionGateService.check_pending_status(tool_output)
 
     async def _await_ticket_resolution(
         self,
@@ -968,116 +912,34 @@ class TurnLoop:
         arguments: dict,
         timeout: float = 600.0,
     ):
-        if event_kind == "access_grant_required":
-            event = register_grant_resume(ticket_id)
-            get_decision = lambda: get_grant_resume_decision(ticket_id)
-            cleanup = lambda: cleanup_grant_resume(ticket_id)
-        else:
-            event = register_approval_resume(ticket_id)
-            get_decision = lambda: get_approval_resume_decision(ticket_id)
-            cleanup = lambda: cleanup_approval_resume(ticket_id)
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-
-        try:
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    yield {
-                        "_result": json.dumps(
-                            {
-                                "status": "error",
-                                "error": "Permission request timed out after 10 minutes.",
-                            }
-                        )
-                    }
-                    return
-
-                try:
-                    await asyncio.wait_for(asyncio.shield(event.wait()), timeout=min(15.0, remaining))
-                    break
-                except asyncio.TimeoutError:
-                    yield {"event": "ping", "data": {}}
-
-            decision = get_decision()
-            if decision in (None, "deny", "rejected"):
-                yield {
-                    "_result": json.dumps(
-                        {
-                            "status": "denied",
-                            "reason": "User denied access. Cannot proceed with this action.",
-                        }
-                    )
-                }
-                return
-
-            try:
-                if event_kind == "approval_required":
-                    # One-time approval: re-running the tool normally would hit the gate
-                    # again and create a fresh pending ticket. Replay via the registered
-                    # resume executor so the gate is bypassed for this exact payload.
-                    ticket = get_approval_ticket(ticket_id)
-                    if ticket is None:
-                        resumed_output = json.dumps(
-                            {"status": "error", "error": f"Approval ticket {ticket_id} not found after approval."}
-                        )
-                    else:
-                        updated_ticket = await asyncio.to_thread(resume_approved_ticket, ticket)
-                        resumed_output = updated_ticket.execution_result or json.dumps(
-                            {"status": "ok", "ticket_id": ticket_id}
-                        )
-                else:
-                    grant_ticket = get_grant_ticket(ticket_id)
-                    validation_error = (
-                        "ticket not found"
-                        if grant_ticket is None
-                        else grant_validation_error(
-                            grant_ticket,
-                            expected_session_id=current_control_session_id(),
-                            expected_conversation_id=current_conversation_id(),
-                            expected_execution_source=current_execution_source(),
-                            require_granted=True,
-                        )
-                    )
-                    if validation_error:
-                        resumed_output = json.dumps(
-                            {"status": "error", "error": f"Access grant invalidated: {validation_error}"}
-                        )
-                    else:
-                        # The exact-context grant has mutated policy, so re-run the original tool.
-                        resumed_arguments = dict(arguments)
-                        resumed_output = await self._execute_tool(budget, tool_dict, resumed_arguments)
-            except Exception as exc:
-                resumed_output = json.dumps({"status": "error", "error": str(exc)})
-
-            yield {
-                "event": "tool_resumed",
-                "data": {"tool": tool_dict.get("name", ""), "output": resumed_output},
-            }
-            yield {"_result": resumed_output}
-        finally:
-            cleanup()
+        async for event in self.execution_gate.await_ticket_resolution(
+            budget=budget,
+            ticket_id=ticket_id,
+            event_kind=event_kind,
+            tool_dict=tool_dict,
+            arguments=arguments,
+            execute_tool=self._execute_tool,
+            timeout=timeout,
+        ):
+            yield event
 
     async def _react_worker(
         self,
         message: str,
         conversation_id: str,
         system_prompt: str | Callable[[], str],
-        queue: asyncio.Queue,
-        last_flush: list[float],
+        publisher: RunEventPublisher,
         attachments: list[dict] | None = None,
     ) -> None:
         """Run the react loop, pushing all events into the queue. Caller is responsible for the None sentinel."""
-        loop = asyncio.get_running_loop()
         context_token = set_current_conversation_id(conversation_id)
         obs_run_id = ""
         obs_context_token = None
         turn_started_at = time.perf_counter()
+        run_state = AgentRunStateMachine()
 
         def _put(event: dict) -> None:
-            queue.put_nowait(event)
-            last_flush[0] = loop.time()
+            publisher.publish_nowait(event)
 
         final_text = ""
         final_attachment_paths: list[str] = []
@@ -1197,6 +1059,7 @@ class TurnLoop:
             nonlocal turn_persisted
             if turn_persisted:
                 return
+            run_state.finalizing()
             response_duration_ms = _response_duration_ms()
             persist_turn = getattr(self.memory, "persist_turn", None)
             if callable(persist_turn):
@@ -1337,6 +1200,7 @@ class TurnLoop:
 
                 llm_call_started_at = time.perf_counter()
                 try:
+                    run_state.model_call()
                     visible_tools = self.registry.get_all_tools(visible_only=True)
                     model_tools = _tools_with_final_answer(
                         visible_tools,
@@ -2080,6 +1944,7 @@ class TurnLoop:
                             },
                         })
                         try:
+                            run_state.tool_execution()
                             tool_result = await self._execute_tool_result(
                                 budget,
                                 tool_dict,
@@ -2107,6 +1972,7 @@ class TurnLoop:
 
                         pending_event = self._check_pending_status(tool_output)
                         if pending_event:
+                            run_state.waiting_for(str(pending_event.get("event") or ""))
                             _put(pending_event)
                             ticket_id = pending_event["data"]["ticket_id"]
                             resolved_output: str | None = None
@@ -2525,6 +2391,12 @@ class TurnLoop:
                 done_data["incomplete"] = True
                 if incomplete_reason_code:
                     done_data["reason_code"] = incomplete_reason_code
+                if stop_requested:
+                    run_state.cancel(incomplete_reason_code or "cancelled")
+                else:
+                    run_state.fail(incomplete_reason_code or "incomplete")
+            else:
+                run_state.complete()
             _put({
                 "event": "done",
                 "data": done_data,
@@ -2545,6 +2417,7 @@ class TurnLoop:
                 except Exception:
                     logger.exception("schedule_long_term_learning failed")
         except asyncio.CancelledError:
+            run_state.cancel("cancelled")
             partial_text = _assistant_message_on_cancel()
             try:
                 await _persist_turn_once(partial_text, status="paused")
@@ -2575,6 +2448,7 @@ class TurnLoop:
                 )
             raise
         except Exception as exc:
+            run_state.fail("internal_error")
             logger.exception("react_worker error: %s", exc)
             _obs_error(
                 str(exc),
@@ -2625,10 +2499,11 @@ class TurnLoop:
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
             last_flush: list[float] = [loop.time()]
+            publisher = RunEventPublisher(queue, last_flush, loop=loop)
             stop_event = asyncio.Event()
 
             pump_task = asyncio.create_task(
-                _heartbeat_pump(queue, last_flush, stop_event)
+                _heartbeat_pump(publisher, stop_event)
             )
 
             async def _run_worker_with_timeout():
@@ -2638,8 +2513,7 @@ class TurnLoop:
                             message,
                             conversation_id,
                             system_prompt,
-                            queue,
-                            last_flush,
+                            publisher,
                             attachments,
                         ),
                         timeout=self.max_turn_seconds,
@@ -2657,11 +2531,11 @@ class TurnLoop:
                         failure_reason="turn_timeout",
                         final_output="Timed out.",
                     )
-                    queue.put_nowait({
+                    publisher.publish_nowait({
                         "event": "error",
                         "data": {"code": "turn_timeout", "message": f"Turn exceeded {self.max_turn_seconds}s limit."},
                     })
-                    queue.put_nowait({
+                    publisher.publish_nowait({
                         "event": "done",
                         "data": {"conversation_id": conversation_id, "summary": "Timed out."},
                     })

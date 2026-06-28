@@ -11,11 +11,11 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from app.agent.migrations import apply_migrations
+from app.agent.db_bootstrap import initialize_database
 from app.agent.runtime_paths import RUNTIME_DIR
 
 logger = logging.getLogger(__name__)
@@ -23,131 +23,6 @@ logger = logging.getLogger(__name__)
 _RUNTIME_DIR = RUNTIME_DIR
 _DB_PATH = _RUNTIME_DIR / "agent.db"
 _JSON_CONVERSATIONS_DIR = _RUNTIME_DIR / "conversations"
-
-_SCHEMA_VERSION = 10
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY
-);
-
-CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL DEFAULT 'Untitled',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    summary TEXT DEFAULT '',
-    task_goal TEXT DEFAULT '',
-    context_tokens_estimate INTEGER DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    thinking TEXT DEFAULT '',
-    status TEXT DEFAULT 'complete',
-    response_duration_ms INTEGER,
-    attachments_json TEXT DEFAULT '',
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id);
-
-CREATE TABLE IF NOT EXISTS tool_calls (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    conversation_id TEXT NOT NULL,
-    tool_name TEXT NOT NULL,
-    input TEXT DEFAULT '',
-    output TEXT DEFAULT '',
-    status TEXT DEFAULT 'pending',
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_msg ON tool_calls(message_id);
-
-CREATE TABLE IF NOT EXISTS tool_outcomes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    tool_name TEXT NOT NULL,
-    result TEXT DEFAULT '',
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS plan_steps (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    step_id TEXT NOT NULL,
-    description TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS session_grants (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    target_type TEXT NOT NULL,
-    identifier TEXT NOT NULL,
-    grant_type TEXT NOT NULL,
-    use_count INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL,
-    UNIQUE(target_type, identifier)
-);
-
-CREATE TABLE IF NOT EXISTS scheduled_tasks (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    schedule_kind TEXT NOT NULL,
-    cron_expr TEXT DEFAULT '',
-    interval_seconds INTEGER DEFAULT 0,
-    run_at TEXT DEFAULT '',
-    timezone TEXT NOT NULL DEFAULT 'UTC',
-    enabled INTEGER NOT NULL DEFAULT 1,
-    overlap_policy TEXT NOT NULL DEFAULT 'skip',
-    notify_telegram INTEGER NOT NULL DEFAULT 0,
-    telegram_chat_id TEXT DEFAULT '',
-    reuse_conversation INTEGER NOT NULL DEFAULT 0,
-    last_run_at TEXT DEFAULT '',
-    last_run_status TEXT DEFAULT '',
-    last_run_conversation_id TEXT DEFAULT '',
-    next_run_at TEXT DEFAULT '',
-    consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_enabled_next
-ON scheduled_tasks(enabled, next_run_at);
-
-CREATE TABLE IF NOT EXISTS scheduled_task_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
-    conversation_id TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL DEFAULT '',
-    lease_owner TEXT DEFAULT '',
-    lease_expires_at TEXT DEFAULT '',
-    started_at TEXT NOT NULL,
-    finished_at TEXT DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'running',
-    final_text TEXT DEFAULT '',
-    error TEXT DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
-ON scheduled_task_runs(task_id, id DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_runs_idempotency
-ON scheduled_task_runs(task_id, idempotency_key)
-WHERE idempotency_key <> '';
-
-CREATE TABLE IF NOT EXISTS conversation_compactions (
-    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
-    summary TEXT NOT NULL DEFAULT '',
-    source_message_id INTEGER NOT NULL DEFAULT 0,
-    message_count INTEGER NOT NULL DEFAULT 0,
-    tokens_before INTEGER NOT NULL DEFAULT 0,
-    tokens_after INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-"""
 
 
 class Database:
@@ -173,171 +48,8 @@ class Database:
     def init_db(self) -> None:
         """Create tables if they don't exist, apply migrations."""
         with self._lock:
-            self.conn.executescript(_SCHEMA_SQL)
-            cur = self.conn.execute(
-                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
-            )
-            row = cur.fetchone()
-            current_version = int(row["version"]) if row is not None else 0
-            self._migrate(current_version)
-            apply_migrations(self.conn)
-            self._ensure_message_columns()
-            self._ensure_archive_message_columns()
-            if current_version < _SCHEMA_VERSION:
-                self.conn.execute(
-                    "INSERT INTO schema_version (version) VALUES (?)",
-                    (_SCHEMA_VERSION,),
-                )
-            self.conn.execute("PRAGMA optimize")
+            initialize_database(self.conn)
             self.conn.commit()
-
-    def _migrate(self, current_version: int) -> None:
-        # The conversations table existed before these resumability fields were added.
-        # Ensure upgrades add them for existing runtime databases.
-        if current_version < 2:
-            self._ensure_conversation_columns()
-        if current_version < 3:
-            self._ensure_message_columns()
-        self._ensure_scheduled_task_tables()
-
-    def _ensure_conversation_columns(self) -> None:
-        column_defs = {
-            "summary": "TEXT DEFAULT ''",
-            "task_goal": "TEXT DEFAULT ''",
-            "context_tokens_estimate": "INTEGER DEFAULT 0",
-        }
-        existing = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(conversations)").fetchall()
-        }
-        for column, definition in column_defs.items():
-            if column not in existing:
-                self.conn.execute(
-                    f"ALTER TABLE conversations ADD COLUMN {column} {definition}"
-                )
-
-    def _ensure_message_columns(self) -> None:
-        column_defs = {
-            "thinking": "TEXT DEFAULT ''",
-            "status": "TEXT DEFAULT 'complete'",
-            "response_duration_ms": "INTEGER",
-            "attachments_json": "TEXT DEFAULT ''",
-        }
-        existing = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
-        for column, definition in column_defs.items():
-            if column not in existing:
-                self.conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {definition}")
-        self.conn.execute(
-            """
-            UPDATE messages
-            SET status = 'paused'
-            WHERE role = 'assistant'
-              AND status = 'complete'
-              AND (
-                content LIKE 'Paused:%'
-                OR content LIKE 'Paused before executing more tools%'
-                OR content LIKE 'Stopped: repeated browser action%'
-              )
-            """
-        )
-
-    def _ensure_archive_message_columns(self) -> None:
-        existing = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(messages_archive)").fetchall()
-        }
-        if not existing:
-            return
-        if "response_duration_ms" not in existing:
-            self.conn.execute("ALTER TABLE messages_archive ADD COLUMN response_duration_ms INTEGER")
-        if "attachments_json" not in existing:
-            self.conn.execute("ALTER TABLE messages_archive ADD COLUMN attachments_json TEXT DEFAULT ''")
-
-    def _ensure_scheduled_task_tables(self) -> None:
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS scheduled_tasks (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                prompt TEXT NOT NULL,
-                schedule_kind TEXT NOT NULL,
-                cron_expr TEXT DEFAULT '',
-                interval_seconds INTEGER DEFAULT 0,
-                run_at TEXT DEFAULT '',
-                timezone TEXT NOT NULL DEFAULT 'UTC',
-                enabled INTEGER NOT NULL DEFAULT 1,
-                overlap_policy TEXT NOT NULL DEFAULT 'skip',
-                notify_telegram INTEGER NOT NULL DEFAULT 0,
-                telegram_chat_id TEXT DEFAULT '',
-                reuse_conversation INTEGER NOT NULL DEFAULT 0,
-                owner_principal_id TEXT DEFAULT '',
-                permission_profile_id TEXT DEFAULT 'scheduled-restricted',
-                permission_profile_snapshot TEXT DEFAULT '',
-                last_run_at TEXT DEFAULT '',
-                last_run_status TEXT DEFAULT '',
-                last_run_conversation_id TEXT DEFAULT '',
-                next_run_at TEXT DEFAULT '',
-                consecutive_failures INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_enabled_next
-            ON scheduled_tasks(enabled, next_run_at);
-
-            CREATE TABLE IF NOT EXISTS scheduled_task_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
-                conversation_id TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL DEFAULT '',
-                lease_owner TEXT DEFAULT '',
-                lease_expires_at TEXT DEFAULT '',
-                started_at TEXT NOT NULL,
-                finished_at TEXT DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'running',
-                final_text TEXT DEFAULT '',
-                error TEXT DEFAULT ''
-            );
-            CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
-            ON scheduled_task_runs(task_id, id DESC);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_runs_idempotency
-            ON scheduled_task_runs(task_id, idempotency_key)
-            WHERE idempotency_key <> '';
-            """
-        )
-        existing = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(scheduled_tasks)").fetchall()
-        }
-        if "reuse_conversation" not in existing:
-            self.conn.execute(
-                "ALTER TABLE scheduled_tasks ADD COLUMN reuse_conversation INTEGER NOT NULL DEFAULT 0"
-            )
-        if "owner_principal_id" not in existing:
-            self.conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN owner_principal_id TEXT DEFAULT ''")
-        if "permission_profile_id" not in existing:
-            self.conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN permission_profile_id TEXT DEFAULT 'scheduled-restricted'")
-        if "permission_profile_snapshot" not in existing:
-            self.conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN permission_profile_snapshot TEXT DEFAULT ''")
-        run_existing = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(scheduled_task_runs)").fetchall()
-        }
-        if "idempotency_key" not in run_existing:
-            self.conn.execute("ALTER TABLE scheduled_task_runs ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''")
-        if "lease_owner" not in run_existing:
-            self.conn.execute("ALTER TABLE scheduled_task_runs ADD COLUMN lease_owner TEXT DEFAULT ''")
-        if "lease_expires_at" not in run_existing:
-            self.conn.execute("ALTER TABLE scheduled_task_runs ADD COLUMN lease_expires_at TEXT DEFAULT ''")
-        self.conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_runs_idempotency
-            ON scheduled_task_runs(task_id, idempotency_key)
-            WHERE idempotency_key <> ''
-            """
-        )
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -599,6 +311,7 @@ class Database:
         error: str = "",
         lease_owner: str = "",
         lease_expires_at: str = "",
+        clear_lease: bool = False,
     ) -> None:
         fields = {
             key: value
@@ -612,6 +325,9 @@ class Database:
             }.items()
             if value != ""
         }
+        if clear_lease:
+            fields["lease_owner"] = ""
+            fields["lease_expires_at"] = ""
         if not fields:
             return
         sets = ", ".join(f"{key} = ?" for key in fields)
@@ -639,7 +355,7 @@ class Database:
             """
             SELECT DISTINCT task_id
             FROM scheduled_task_runs
-            WHERE status = 'running'
+            WHERE status IN ('queued', 'running')
             """
         )
         return {str(row["task_id"]) for row in rows}
@@ -649,7 +365,7 @@ class Database:
             cur = self.conn.execute(
                 """
                 UPDATE scheduled_task_runs
-                SET status = 'error',
+                SET status = 'abandoned',
                     finished_at = ?,
                     error = 'scheduler lease expired',
                     lease_owner = '',
@@ -662,6 +378,53 @@ class Database:
             )
             self.conn.commit()
             return int(cur.rowcount)
+
+    def enforce_scheduled_task_run_retention(
+        self,
+        *,
+        max_age_days: int = 30,
+        max_output_chars: int = 20_000,
+    ) -> dict[str, int]:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days))).isoformat()
+        max_chars = max(0, int(max_output_chars))
+        with self._lock:
+            deleted = self.conn.execute(
+                """
+                DELETE FROM scheduled_task_runs
+                WHERE finished_at <> ''
+                  AND finished_at < ?
+                """,
+                (cutoff,),
+            ).rowcount
+            truncated = self.conn.execute(
+                """
+                UPDATE scheduled_task_runs
+                SET final_text = substr(final_text, 1, ?),
+                    error = substr(error, 1, ?)
+                WHERE length(final_text) > ? OR length(error) > ?
+                """,
+                (max_chars, max_chars, max_chars, max_chars),
+            ).rowcount
+            self.conn.commit()
+        return {
+            "scheduled_task_runs_deleted": int(deleted),
+            "scheduled_task_outputs_truncated": int(truncated),
+        }
+
+    def clear_scheduled_task_outputs(self) -> dict[str, int]:
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(*) FROM scheduled_task_runs
+                WHERE final_text <> '' OR error <> ''
+                """
+            ).fetchone()
+            updated = int(row[0] if row else 0)
+            self.conn.execute(
+                "UPDATE scheduled_task_runs SET final_text = '', error = ''"
+            )
+            self.conn.commit()
+        return {"scheduled_task_outputs_cleared": updated}
 
     # Message CRUD
 

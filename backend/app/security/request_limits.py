@@ -5,6 +5,8 @@ import uuid
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.api.errors import error_code_for_status
+
 
 def _limit_for_path(path: str) -> int:
     if path == "/api/uploads":
@@ -62,7 +64,7 @@ class RequestSizeLimitMiddleware:
         async def replay_receive() -> Message:
             if buffered:
                 return buffered.pop(0)
-            return {"type": "http.disconnect"}
+            return await receive()
 
         await self.app(scope, replay_receive, send)
 
@@ -83,7 +85,14 @@ class RequestSizeLimitMiddleware:
         detail: str,
         request_id: str,
     ) -> None:
-        body = json.dumps({"detail": detail, "request_id": request_id}).encode("utf-8")
+        body = json.dumps(
+            {
+                "code": error_code_for_status(status),
+                "message": detail,
+                "request_id": request_id,
+                "details": {},
+            }
+        ).encode("utf-8")
         await send(
             {
                 "type": "http.response.start",

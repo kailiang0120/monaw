@@ -5,6 +5,16 @@ from fastapi import APIRouter, HTTPException, Request
 from app.agent.observability.recorder import get_observability_recorder
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
 from app.config import settings
+from app.schemas import (
+    ObservabilityBackendLogOut,
+    ObservabilityDebugBundleOut,
+    ObservabilityErrorOut,
+    ObservabilityReplayResultOut,
+    ObservabilityRunDetailOut,
+    ObservabilityRunOut,
+    ObservabilitySummaryOut,
+    ObservabilitySupportModeOut,
+)
 from app.security.support_mode import (
     disable_support_mode,
     enable_support_mode,
@@ -14,12 +24,12 @@ from app.security.support_mode import (
 router = APIRouter()
 
 
-@router.get("/observability/summary")
+@router.get("/observability/summary", response_model=ObservabilitySummaryOut)
 async def observability_summary():
     return get_observability_recorder().summary()
 
 
-@router.get("/observability/runs")
+@router.get("/observability/runs", response_model=list[ObservabilityRunOut])
 async def observability_runs(
     status: str = "",
     source: str = "",
@@ -36,7 +46,7 @@ async def observability_runs(
     )
 
 
-@router.get("/observability/runs/{run_id}")
+@router.get("/observability/runs/{run_id}", response_model=ObservabilityRunDetailOut)
 async def observability_run_detail(run_id: str):
     payload = get_observability_recorder().get_run(run_id)
     if payload is None:
@@ -44,7 +54,7 @@ async def observability_run_detail(run_id: str):
     return payload
 
 
-@router.get("/observability/errors")
+@router.get("/observability/errors", response_model=list[ObservabilityErrorOut])
 async def observability_errors(level: str = "", q: str = "", limit: int = 100):
     return get_observability_recorder().list_errors(level=level, q=q, limit=limit)
 
@@ -63,12 +73,12 @@ def _require_support_mode(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Support mode is required for detailed diagnostics")
 
 
-@router.get("/observability/support-mode")
+@router.get("/observability/support-mode", response_model=ObservabilitySupportModeOut)
 async def observability_support_mode_status(request: Request):
     return _support_mode_payload(request)
 
 
-@router.post("/observability/support-mode")
+@router.post("/observability/support-mode", response_model=ObservabilitySupportModeOut)
 async def observability_enable_support_mode(request: Request, duration_seconds: int = 300):
     status = enable_support_mode(request.state.control_session.session_id, duration_seconds)
     return {
@@ -78,7 +88,7 @@ async def observability_enable_support_mode(request: Request, duration_seconds: 
     }
 
 
-@router.delete("/observability/support-mode")
+@router.delete("/observability/support-mode", response_model=ObservabilitySupportModeOut)
 async def observability_disable_support_mode(request: Request):
     status = disable_support_mode(request.state.control_session.session_id)
     return {
@@ -88,13 +98,13 @@ async def observability_disable_support_mode(request: Request):
     }
 
 
-@router.get("/observability/logs/backend")
+@router.get("/observability/logs/backend", response_model=ObservabilityBackendLogOut)
 async def observability_backend_log(request: Request, tail: int = 400):
     _require_support_mode(request)
     return get_observability_recorder().read_backend_log_tail(tail=tail)
 
 
-@router.post("/observability/runs/{run_id}/replay")
+@router.post("/observability/runs/{run_id}/replay", response_model=ObservabilityReplayResultOut)
 async def replay_observability_run(run_id: str):
     recorder = get_observability_recorder()
     source_run = recorder.get_run(run_id, include_sensitive=True)
@@ -172,7 +182,7 @@ async def replay_observability_run(run_id: str):
     }
 
 
-@router.post("/observability/runs/{run_id}/export-debug-bundle")
+@router.post("/observability/runs/{run_id}/export-debug-bundle", response_model=ObservabilityDebugBundleOut)
 async def export_observability_debug_bundle(run_id: str, request: Request):
     _require_support_mode(request)
     try:

@@ -382,6 +382,7 @@ export function normalizeDraft(
 
   return {
     ...settings,
+    settings_version: settings.settings_version || '',
     telegram_allowed_user_ids: (settings.telegram_allowed_user_ids ?? '').trim(),
     telegram_allowed_chat_ids: (settings.telegram_allowed_chat_ids ?? '').trim(),
     identity: {

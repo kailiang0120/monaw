@@ -10,7 +10,7 @@ from app.agent.settings_store import build_runtime_namespace, load_agent_setting
 from app.agent.skill_loader import available_skill_payload
 from app.config import settings
 from app.agent.observability.recorder import redact
-from app.schemas import BrowserUseDiagnosticsOut
+from app.schemas import BrowserUseDiagnosticsOut, DiagnosticsSummaryPayload, MCPServerDiagnosticsOut
 from app.skills.browser_use.manager import (
     ensure_browser_use_runtime_dirs,
     get_browser_use_diagnostics,
@@ -66,7 +66,7 @@ def _safe_browser_diagnostics(diagnostics: dict) -> dict:
     return safe
 
 
-@router.get("/diagnostics/summary")
+@router.get("/diagnostics/summary", response_model=DiagnosticsSummaryPayload)
 async def get_diagnostics_summary(request: Request):
     runtime_settings = load_agent_settings(settings)
     runtime_namespace = build_runtime_namespace(settings, runtime_settings)
@@ -120,7 +120,7 @@ async def get_diagnostics_summary(request: Request):
     }
 
 
-@router.get("/diagnostics/mcp")
+@router.get("/diagnostics/mcp", response_model=list[MCPServerDiagnosticsOut])
 async def get_mcp_diagnostics():
     runtime_settings = load_agent_settings(settings)
     feature_enabled = bool(runtime_settings.mcp.enabled)
@@ -214,7 +214,7 @@ async def get_mcp_diagnostics():
     return payload
 
 
-@router.post("/diagnostics/mcp/{name}/reconnect")
+@router.post("/diagnostics/mcp/{name}/reconnect", response_model=MCPServerDiagnosticsOut)
 async def reconnect_mcp(name: str):
     runtime_settings = load_agent_settings(settings)
     if not runtime_settings.mcp.enabled:
@@ -222,7 +222,7 @@ async def reconnect_mcp(name: str):
     status = reconnect_mcp_server(name)
     if status is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    return status
+    return _safe_mcp_entry(status)
 
 
 @router.get("/diagnostics/browser-use", response_model=BrowserUseDiagnosticsOut)

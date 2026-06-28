@@ -10,9 +10,10 @@ import type { ApprovalTicket } from '../lib/api/types'
 interface Props {
   conversationId: string | null
   isStreaming: boolean
+  refreshKey?: number
 }
 
-export function ApprovalToast({ conversationId, isStreaming }: Props) {
+export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: Props) {
   const [toast, setToast] = useState<ApprovalTicket | null>(null)
   const [seenIds, setSeenIds] = useState<Set<string>>(new Set())
   const [acting, setActing] = useState(false)
@@ -48,10 +49,8 @@ export function ApprovalToast({ conversationId, isStreaming }: Props) {
       setToast(null)
       return
     }
-    poll()
-    const iv = setInterval(poll, 2500)
-    return () => clearInterval(iv)
-  }, [isStreaming, poll])
+    void poll()
+  }, [isStreaming, poll, refreshKey])
 
   const handleApprove = async () => {
     if (!toast) return

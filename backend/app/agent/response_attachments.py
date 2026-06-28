@@ -1,23 +1,32 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import mimetypes
 import os
 import re
 import secrets
+import stat
 from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from pathlib import Path
+import time
 from typing import Any
 
+from app.agent.run_context import (
+    current_control_session_id,
+    current_conversation_id,
+    current_principal_id,
+)
 from app.agent.runtime_paths import RUNTIME_DIR
 
 MAX_RESPONSE_ATTACHMENTS = 12
+MAX_ATTACHMENT_REGISTRY_ITEMS = 1000
+ATTACHMENT_EXPIRY_SECONDS = 7 * 24 * 60 * 60
+MAX_ATTACHMENT_DOWNLOAD_BYTES = 100 * 1024 * 1024
+ATTACHMENT_HANDLE_PREFIX = "attachment://"
 MIN_SCREENSHOT_PREVIEW_DIMENSION_PX = 16
 MAX_GENERATED_SCREENSHOT_DIMENSION_PX = 100_000
 MAX_GENERATED_SCREENSHOT_PIXELS = 120_000_000
-_ATTACHMENT_ID_SALT = secrets.token_bytes(16)
-_ATTACHMENT_REGISTRY: dict[str, Path] = {}
 _ATTACHMENT_REGISTRY_LOADED = False
 _ATTACHMENT_REGISTRY_PATH = RUNTIME_DIR / "attachment_registry.json"
 _GENERATED_SCREENSHOT_NAME_RE = re.compile(
@@ -69,11 +78,131 @@ _RETURNABLE_EXTENSIONS = {
 }
 
 
-def _stable_id(path: Path) -> str:
-    digest = hashlib.sha256()
-    digest.update(_ATTACHMENT_ID_SALT)
-    digest.update(str(path).encode("utf-8"))
-    return digest.hexdigest()[:24]
+@dataclass(slots=True)
+class AttachmentRecord:
+    id: str
+    path: str
+    name: str
+    mime_type: str = "application/octet-stream"
+    size: int = 0
+    width: int | None = None
+    height: int | None = None
+    control_session_id: str = ""
+    principal_id: str = ""
+    conversation_id: str = ""
+    created_at: float = 0.0
+    expires_at: float = 0.0
+
+
+_ATTACHMENT_REGISTRY: dict[str, AttachmentRecord] = {}
+
+
+def new_attachment_id() -> str:
+    return secrets.token_urlsafe(18)
+
+
+def attachment_handle(attachment_id: str) -> str:
+    return f"{ATTACHMENT_HANDLE_PREFIX}{attachment_id}"
+
+
+def _attachment_id_from_handle(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith(ATTACHMENT_HANDLE_PREFIX):
+        return text[len(ATTACHMENT_HANDLE_PREFIX):].strip()
+    return text
+
+
+def public_attachment_payload(record: AttachmentRecord) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": record.id,
+        "name": record.name,
+        "path": attachment_handle(record.id),
+        "mime_type": record.mime_type,
+        "size": record.size,
+        "conversation_id": record.conversation_id,
+        "expires_at": int(record.expires_at),
+    }
+    if record.width is not None:
+        payload["width"] = record.width
+    if record.height is not None:
+        payload["height"] = record.height
+    return payload
+
+
+def _record_from_path(
+    attachment_id: str,
+    target: Path,
+    *,
+    control_session_id: str = "",
+    principal_id: str = "",
+    conversation_id: str = "",
+    mime_type: str = "",
+    width: int | None = None,
+    height: int | None = None,
+    expires_in: int = ATTACHMENT_EXPIRY_SECONDS,
+) -> AttachmentRecord:
+    resolved_mime = mime_type or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    try:
+        size = target.stat().st_size
+    except OSError:
+        size = 0
+    now = time.time()
+    return AttachmentRecord(
+        id=str(attachment_id),
+        path=str(target),
+        name=target.name,
+        mime_type=resolved_mime,
+        size=size,
+        width=width,
+        height=height,
+        control_session_id=control_session_id,
+        principal_id=principal_id or control_session_id,
+        conversation_id=conversation_id,
+        created_at=now,
+        expires_at=now + max(60, int(expires_in)),
+    )
+
+
+def _is_regular_file(path: Path) -> bool:
+    try:
+        file_stat = path.stat()
+    except OSError:
+        return False
+    return stat.S_ISREG(file_stat.st_mode) and path.is_file()
+
+
+def _is_read_allowed_by_policy(path: Path) -> bool:
+    try:
+        from app.agent.controller_policy import ActionType, resolve_permission
+
+        decision = resolve_permission(ActionType.READ, target_path=str(path))
+    except Exception:
+        return False
+    return not decision.blocked and not decision.requires_access_grant
+
+
+def _valid_attachment_target(
+    raw_path: str | Path,
+    *,
+    enforce_policy: bool = False,
+) -> Path | None:
+    try:
+        source = Path(raw_path).expanduser()
+        if source.is_symlink():
+            return None
+        target = source.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+    if target.is_symlink() or not _is_regular_file(target):
+        return None
+    try:
+        if target.stat().st_size > MAX_ATTACHMENT_DOWNLOAD_BYTES:
+            return None
+    except OSError:
+        return None
+    if enforce_policy and not _is_read_allowed_by_policy(target):
+        return None
+    return target
 
 
 def _load_attachment_registry() -> None:
@@ -87,22 +216,69 @@ def _load_attachment_registry() -> None:
         return
     if not isinstance(payload, dict):
         return
-    for attachment_id, raw_path in payload.items():
-        try:
-            target = Path(str(raw_path)).expanduser().resolve(strict=False)
-        except (OSError, RuntimeError):
+    items: Iterable[Any]
+    if payload.get("version") == 2 and isinstance(payload.get("items"), list):
+        items = payload["items"]
+    else:
+        items = [
+            {"id": attachment_id, "path": raw_path}
+            for attachment_id, raw_path in payload.items()
+        ]
+    for item in items:
+        if not isinstance(item, dict):
             continue
-        if target.is_file():
-            _ATTACHMENT_REGISTRY[str(attachment_id)] = target
+        attachment_id = str(item.get("id") or "")
+        raw_path = item.get("path")
+        if not attachment_id:
+            continue
+        target = _valid_attachment_target(raw_path)
+        if target is None:
+            continue
+        expires_at = float(item.get("expires_at") or 0)
+        if expires_at and expires_at <= time.time():
+            continue
+        record = _record_from_path(
+            attachment_id,
+            target,
+            control_session_id=str(item.get("control_session_id") or ""),
+            principal_id=str(item.get("principal_id") or ""),
+            conversation_id=str(item.get("conversation_id") or ""),
+            mime_type=str(item.get("mime_type") or ""),
+            width=item.get("width") if isinstance(item.get("width"), int) else None,
+            height=item.get("height") if isinstance(item.get("height"), int) else None,
+        )
+        record.created_at = float(item.get("created_at") or record.created_at)
+        record.expires_at = expires_at or record.expires_at
+        _ATTACHMENT_REGISTRY[str(attachment_id)] = record
+
+
+def _cleanup_attachment_registry() -> None:
+    now = time.time()
+    expired = [
+        attachment_id
+        for attachment_id, record in _ATTACHMENT_REGISTRY.items()
+        if record.expires_at <= now or _valid_attachment_target(record.path) is None
+    ]
+    for attachment_id in expired:
+        _ATTACHMENT_REGISTRY.pop(attachment_id, None)
+    if len(_ATTACHMENT_REGISTRY) <= MAX_ATTACHMENT_REGISTRY_ITEMS:
+        return
+    ordered = sorted(_ATTACHMENT_REGISTRY.values(), key=lambda record: record.created_at)
+    for record in ordered[: len(_ATTACHMENT_REGISTRY) - MAX_ATTACHMENT_REGISTRY_ITEMS]:
+        _ATTACHMENT_REGISTRY.pop(record.id, None)
 
 
 def _persist_attachment_registry() -> None:
     try:
+        _cleanup_attachment_registry()
         _ATTACHMENT_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            attachment_id: str(path)
-            for attachment_id, path in sorted(_ATTACHMENT_REGISTRY.items())
-            if path.is_file()
+            "version": 2,
+            "items": [
+                asdict(record)
+                for record in sorted(_ATTACHMENT_REGISTRY.values(), key=lambda item: item.created_at)
+                if _valid_attachment_target(record.path) is not None
+            ],
         }
         tmp_path = _ATTACHMENT_REGISTRY_PATH.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -111,23 +287,216 @@ def _persist_attachment_registry() -> None:
         return
 
 
-def register_attachment_path(attachment_id: str, path: str | Path) -> None:
+def attachment_registry_stats() -> dict[str, int]:
     _load_attachment_registry()
+    _cleanup_attachment_registry()
+    return {
+        "attachment_registry_items": len(_ATTACHMENT_REGISTRY),
+        "attachment_registry_max_items": MAX_ATTACHMENT_REGISTRY_ITEMS,
+        "attachment_registry_expiry_seconds": ATTACHMENT_EXPIRY_SECONDS,
+    }
+
+
+def clear_attachment_registry(*, delete_registered_files: bool = False) -> dict[str, int]:
+    """Clear response attachment registry and optionally registered runtime files."""
+    _load_attachment_registry()
+    counts = {
+        "attachment_registry_items": len(_ATTACHMENT_REGISTRY),
+        "attachment_files_deleted": 0,
+    }
+    if delete_registered_files:
+        runtime_root = RUNTIME_DIR.resolve(strict=False)
+        for record in list(_ATTACHMENT_REGISTRY.values()):
+            try:
+                path = Path(record.path)
+                if path.is_symlink():
+                    continue
+                resolved = path.resolve(strict=False)
+                if resolved.is_file() and resolved.is_relative_to(runtime_root):
+                    resolved.unlink()
+                    counts["attachment_files_deleted"] += 1
+            except OSError:
+                continue
+    _ATTACHMENT_REGISTRY.clear()
     try:
-        target = Path(path).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError):
-        return
-    if target.is_file():
-        _ATTACHMENT_REGISTRY[str(attachment_id)] = target
-        _persist_attachment_registry()
+        _ATTACHMENT_REGISTRY_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return counts
 
 
-def resolve_attachment_path(attachment_id: str) -> Path | None:
+def register_attachment_path(
+    attachment_id: str,
+    path: str | Path,
+    *,
+    control_session_id: str = "",
+    principal_id: str = "",
+    conversation_id: str = "",
+    mime_type: str = "",
+    width: int | None = None,
+    height: int | None = None,
+    expires_in: int = ATTACHMENT_EXPIRY_SECONDS,
+    enforce_policy: bool = False,
+) -> AttachmentRecord | None:
     _load_attachment_registry()
-    path = _ATTACHMENT_REGISTRY.get(str(attachment_id))
-    if path is None or not path.is_file():
+    target = _valid_attachment_target(path, enforce_policy=enforce_policy)
+    if target is None:
         return None
-    return path
+    record = _record_from_path(
+        attachment_id,
+        target,
+        control_session_id=control_session_id,
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+        mime_type=mime_type,
+        width=width,
+        height=height,
+        expires_in=expires_in,
+    )
+    _ATTACHMENT_REGISTRY[str(attachment_id)] = record
+    _persist_attachment_registry()
+    return record
+
+
+def _record_matches_scope(
+    record: AttachmentRecord,
+    *,
+    control_session_id: str = "",
+    principal_id: str = "",
+    conversation_id: str = "",
+    allow_internal: bool = False,
+) -> bool:
+    if allow_internal:
+        return True
+    if record.control_session_id and record.control_session_id != control_session_id:
+        return False
+    if record.principal_id and principal_id and record.principal_id != principal_id:
+        return False
+    if record.principal_id and not principal_id and record.control_session_id != control_session_id:
+        return False
+    if record.conversation_id and record.conversation_id not in {conversation_id, "pending"}:
+        return False
+    return True
+
+
+def resolve_attachment_record(
+    attachment_id: str,
+    *,
+    control_session_id: str = "",
+    principal_id: str = "",
+    conversation_id: str = "",
+    allow_internal: bool = False,
+) -> AttachmentRecord | None:
+    _load_attachment_registry()
+    _cleanup_attachment_registry()
+    record = _ATTACHMENT_REGISTRY.get(_attachment_id_from_handle(attachment_id))
+    if record is None:
+        return None
+    path = _valid_attachment_target(record.path)
+    if path is None:
+        _ATTACHMENT_REGISTRY.pop(record.id, None)
+        _persist_attachment_registry()
+        return None
+    if not _record_matches_scope(
+        record,
+        control_session_id=control_session_id,
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+        allow_internal=allow_internal,
+    ):
+        return None
+    return record
+
+
+def revalidate_attachment_path(path: str | Path) -> Path | None:
+    target = _valid_attachment_target(path, enforce_policy=True)
+    if target is None:
+        return None
+    return target
+
+
+def resolve_attachment_path(
+    attachment_id: str,
+    *,
+    control_session_id: str = "",
+    principal_id: str = "",
+    conversation_id: str = "",
+    allow_internal: bool = False,
+) -> Path | None:
+    record = resolve_attachment_record(
+        attachment_id,
+        control_session_id=control_session_id,
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+        allow_internal=allow_internal,
+    )
+    return Path(record.path) if record is not None else None
+
+
+def bind_attachment_to_conversation(
+    attachment_id: str,
+    *,
+    control_session_id: str,
+    principal_id: str,
+    conversation_id: str,
+) -> AttachmentRecord | None:
+    record = resolve_attachment_record(
+        attachment_id,
+        control_session_id=control_session_id,
+        principal_id=principal_id,
+        conversation_id="pending",
+    )
+    if record is None:
+        return None
+    if record.conversation_id in {"", "pending"} and conversation_id:
+        record.conversation_id = conversation_id
+        _persist_attachment_registry()
+    return record
+
+
+def resolve_attachment_handle_path(value: str) -> Path | None:
+    text = str(value or "").strip()
+    if not text.startswith(ATTACHMENT_HANDLE_PREFIX):
+        return None
+    return resolve_attachment_path(
+        text,
+        control_session_id=current_control_session_id(),
+        principal_id=current_principal_id(),
+        conversation_id=current_conversation_id(),
+    )
+
+
+def runtime_attachment_from_ref(
+    attachment: Any,
+    *,
+    control_session_id: str,
+    principal_id: str,
+    conversation_id: str,
+) -> dict[str, Any] | None:
+    attachment_id = str(getattr(attachment, "id", "") or "").strip()
+    if not attachment_id and isinstance(attachment, dict):
+        attachment_id = str(attachment.get("id") or "").strip()
+    if not attachment_id:
+        return None
+    record = bind_attachment_to_conversation(
+        attachment_id,
+        control_session_id=control_session_id,
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+    )
+    if record is None:
+        record = resolve_attachment_record(
+            attachment_id,
+            control_session_id=control_session_id,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+        )
+    if record is None:
+        return None
+    payload = public_attachment_payload(record)
+    payload["path"] = record.path
+    payload["handle"] = attachment_handle(record.id)
+    return payload
 
 
 def _strip_path_text(value: str) -> str:
@@ -144,7 +513,13 @@ def _resolved_candidate_path(raw_path: str) -> Path | None:
         return None
 
 
-def _attachment_from_resolved_path(path: Path) -> dict[str, Any] | None:
+def _attachment_from_resolved_path(
+    path: Path,
+    *,
+    control_session_id: str | None = None,
+    principal_id: str | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     if path.suffix.lower() not in _RETURNABLE_EXTENSIONS:
@@ -154,22 +529,19 @@ def _attachment_from_resolved_path(path: Path) -> dict[str, Any] | None:
     if _is_invalid_generated_screenshot(path, image_dimensions):
         _delete_file(path)
         return None
-    try:
-        size = path.stat().st_size
-    except OSError:
-        size = 0
-    attachment_id = _stable_id(path)
-    register_attachment_path(attachment_id, path)
-    attachment = {
-        "id": attachment_id,
-        "name": path.name,
-        "path": str(path),
-        "mime_type": mime_type,
-        "size": size,
-    }
-    if image_dimensions is not None:
-        attachment["width"], attachment["height"] = image_dimensions
-    return attachment
+    attachment_id = new_attachment_id()
+    record = register_attachment_path(
+        attachment_id,
+        path,
+        control_session_id=current_control_session_id() if control_session_id is None else control_session_id,
+        principal_id=current_principal_id() if principal_id is None else principal_id,
+        conversation_id=current_conversation_id() if conversation_id is None else conversation_id,
+        mime_type=mime_type,
+        width=image_dimensions[0] if image_dimensions is not None else None,
+        height=image_dimensions[1] if image_dimensions is not None else None,
+        enforce_policy=True,
+    )
+    return public_attachment_payload(record) if record is not None else None
 
 
 def _attachment_from_path(raw_path: str) -> dict[str, Any] | None:
@@ -299,6 +671,9 @@ def collect_response_attachments(
     tool_outputs: Iterable[str] | None = None,
     limit: int = MAX_RESPONSE_ATTACHMENTS,
     include_generated_tool_screenshots: bool = False,
+    control_session_id: str | None = None,
+    principal_id: str | None = None,
+    conversation_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Collect user-visible deliverables without exposing progress screenshots.
 
@@ -322,11 +697,16 @@ def collect_response_attachments(
             and _is_generated_screenshot_attachment_path(path)
         ):
             return
-        attachment = _attachment_from_resolved_path(path)
-        if attachment is None:
-            return
-        key = os.path.normcase(os.path.normpath(attachment["path"]))
+        key = os.path.normcase(os.path.normpath(str(path)))
         if key in seen:
+            return
+        attachment = _attachment_from_resolved_path(
+            path,
+            control_session_id=control_session_id,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+        )
+        if attachment is None:
             return
         seen.add(key)
         attachments.append(attachment)

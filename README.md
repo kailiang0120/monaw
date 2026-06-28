@@ -235,11 +235,14 @@ Permissions, approvals, access grants, and sandbox settings are configured in Se
 The backend API is a privileged local control plane. The desktop application
 authenticates every `/api` request with a short-lived session and binds the
 backend to loopback by default. Do not expose the backend through port
-forwarding, reverse proxies, tunnels, or permissive firewall rules.
+forwarding, reverse proxies, tunnels, permissive firewall rules, or non-loopback
+binds. See [docs/operations.md](docs/operations.md).
 
 Provider keys and the Telegram bot token are encrypted through Electron's
 OS-backed `safeStorage`. Saved credential values are write-only from the
 renderer: the UI can see whether a value exists, but cannot read it back.
+
+The generated endpoint reference is [docs/api.md](docs/api.md).
 
 ## Troubleshooting
 

@@ -1,7 +1,7 @@
 import re
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agent.identity import DEFAULT_AGENT_NAME
 from app.agent.llm_constants import DEFAULT_VISION_FALLBACK_MODEL
@@ -29,11 +29,13 @@ class ChatRequest(BaseModel):
 class AttachmentRef(BaseModel):
     id: str
     name: str
-    path: str
+    path: str = ""
     mime_type: str = ""
     size: int = Field(0, ge=0)
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
+    conversation_id: str = ""
+    expires_at: int | None = None
 
 
 class AttachmentUploadRequest(BaseModel):
@@ -102,6 +104,26 @@ class ContextUsagePayload(BaseModel):
     estimator: str = ""
     breakdown: list[ContextUsageBreakdownItemPayload] = Field(default_factory=list)
     notes: str = ""
+
+
+class OkResponse(BaseModel):
+    ok: bool = True
+
+
+class ChatJobCreateResponse(BaseModel):
+    job_id: str
+    conversation_id: str
+
+
+class ChatJobOut(BaseModel):
+    job_id: str
+    conversation_id: str
+    status: str
+    started_at: float
+    workflow_engine: str = ""
+    active_graph_node: str = ""
+    checkpoint_status: str = ""
+    last_resume_reason: str = ""
 
 
 VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
@@ -293,7 +315,7 @@ class SandboxWslSettingsPayload(BaseModel):
 
 class SandboxSettingsPayload(BaseModel):
     enabled: bool = True
-    mode: str = Field("auto", pattern="^(off|auto|docker|local_restricted|wsl)$")
+    mode: str = Field("auto", pattern="^(off|disabled|auto|enforce|host|docker|local_restricted|wsl)$")
     default_profile: str = Field("standard", pattern="^(standard|untrusted|project_write|host_required)$")
     require_strong_for_untrusted: bool = True
     default_write_strategy: str = Field("copy_out", pattern="^(discard|copy_out|direct_rw)$")
@@ -335,13 +357,54 @@ class AgentSettingsPayload(BaseModel):
     permissions: PermissionSettingsPayload
     sandbox: SandboxSettingsPayload
     identity: IdentitySettingsPayload
+    settings_version: str = ""
     available_skills: list[SkillDescriptorPayload] = Field(default_factory=list)
     api_keys: ApiKeyStatusPayload | None = None
     telegram_allowed_user_ids: str = ""
     telegram_allowed_chat_ids: str = ""
 
 
+class ModelProviderOptionPayload(BaseModel):
+    id: str
+    label: str
+    models: list[str] = Field(default_factory=list)
+
+
+class ModelOptionsPayload(BaseModel):
+    providers: list[ModelProviderOptionPayload] = Field(default_factory=list)
+    vision_fallback_models: list[str] = Field(default_factory=list)
+
+
+class WorkspaceInstructionsPayload(BaseModel):
+    path: str
+    content: str
+
+
+class SpeechToTextStatusPayload(BaseModel):
+    provider: str
+    label: str
+    engine: str
+    cloud_provider: str = "gemini"
+    cloud_model: str = ""
+    cloud_configured: bool = False
+    model_id: str
+    model_label: str
+    model_size: str
+    downloaded: bool
+    download_dir: str
+    dependency_available: bool
+    loaded: bool
+
+
+class ControllerPolicyMarkdownPayload(BaseModel):
+    policy_markdown: str
+    allowlist_markdown: str
+
+
 class SettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_settings_version: Optional[str] = Field(None, min_length=1, max_length=128)
     llm: Optional[LLMSettingsPayload] = None
     speech_to_text: Optional[SpeechToTextSettingsPayload] = None
     mcp: Optional[MCPSettingsPayload] = None
@@ -391,6 +454,123 @@ class ControllerPolicyOut(BaseModel):
     allow_delete: bool
     dangerous_actions_require_confirm: bool
     allowlisted_apps: list[AppEntryOut]
+
+
+class ControllerPolicyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Optional[str] = Field(None, pattern="^(default|full_access|custom|user_config)$")
+    permitted_roots: Optional[list[str]] = None
+    blocked_roots: Optional[list[str]] = None
+    allow_delete: Optional[bool] = None
+    dangerous_actions_require_confirm: Optional[bool] = None
+
+
+class RuntimeFileStatusPayload(BaseModel):
+    path: str = ""
+    exists: bool
+    size_bytes: int = 0
+
+
+class DiagnosticsBackendPayload(BaseModel):
+    name: str
+    version: str
+    port: int
+    runtime_dir: str = ""
+    database: RuntimeFileStatusPayload
+
+
+class DiagnosticsSchedulerPayload(BaseModel):
+    running: bool = False
+    stopping: bool = False
+    inflight_tasks: int = 0
+    startup_error: str = ""
+
+
+class DiagnosticsTelegramPayload(BaseModel):
+    configured: bool = False
+    running: bool = False
+    startup_error: str = ""
+
+
+class DiagnosticsMcpSummaryPayload(BaseModel):
+    enabled: bool
+    configured_servers: int
+    runtime_servers: int
+    connected_servers: int
+    unhealthy_servers: int
+
+
+class DiagnosticsBrowserSummaryPayload(BaseModel):
+    available: bool
+    session_active: bool
+    preferred_mode: str
+    current_mode: str
+    last_error: str
+
+
+class SandboxBackendCapabilityPayload(BaseModel):
+    backend: str
+    enabled: bool
+    available: bool
+    security_label: str
+    network_enforcement: str
+    version: str = ""
+    reason: str = ""
+
+
+class SandboxStatusPayload(BaseModel):
+    enabled: bool
+    mode: str
+    default_profile: str
+    default_network: str
+    default_write_strategy: str
+    require_strong_for_untrusted: bool
+    backends: dict[str, SandboxBackendCapabilityPayload]
+
+
+class DiagnosticsSummaryPayload(BaseModel):
+    backend: DiagnosticsBackendPayload
+    scheduler: DiagnosticsSchedulerPayload
+    telegram: DiagnosticsTelegramPayload
+    mcp: DiagnosticsMcpSummaryPayload
+    browser: DiagnosticsBrowserSummaryPayload
+    sandbox: SandboxStatusPayload
+
+
+class MCPServerDiagnosticsOut(BaseModel):
+    name: str
+    enabled: bool = False
+    transport: str = "stdio"
+    connected: bool = False
+    state: str = ""
+    tool_count: int = 0
+    last_error: str | None = None
+    unhealthy_reason: str | None = None
+    description: str = ""
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    cwd: str = ""
+    url: str = ""
+    resolved_executable: str = ""
+    startup_phase: str = ""
+    pid: int | None = None
+    started_at: str | None = None
+    connected_at: str | None = None
+    disconnected_at: str | None = None
+    stderr_tail: str = ""
+    last_call_started_at: str | None = None
+    last_call_duration_ms: int | float | None = None
+    failed_call_count: int = 0
+    remote_tool_names: list[str] = Field(default_factory=list)
+    reflected_tool_names: list[str] = Field(default_factory=list)
+    login_capable: bool = False
+    skill_enabled: bool = False
+    skill_available: bool = False
+    skill_unavailable_reason: str = ""
+    feature_enabled: bool = False
+    feature_available: bool = False
+    feature_unavailable_reason: str = ""
 
 
 # ── Approval ticket schemas ───────────────────────────────────────────────────
@@ -578,6 +758,192 @@ class BrowserUseDiagnosticsOut(BaseModel):
     available_system_profiles: list[BrowserUseProfileOut] = Field(default_factory=list)
     current_page: BrowserUsePageOut | None = None
     tab_count: int = 0
+
+
+class ObservabilityUsageOut(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    image_tokens: int = 0
+    total_tokens: int = 0
+    source: str = ""
+
+
+class ObservabilityTrendPointOut(BaseModel):
+    day: str
+    runs: int = 0
+    tokens: int = 0
+    average_duration_ms: float = 0
+
+
+class ObservabilityReasonCountOut(BaseModel):
+    reason: str
+    count: int
+
+
+class ObservabilityToolCountOut(BaseModel):
+    tool_name: str
+    count: int
+
+
+class ObservabilityModelUsageOut(BaseModel):
+    model: str
+    provider: str
+    runs: int = 0
+    tokens: int = 0
+
+
+class ObservabilitySummaryOut(BaseModel):
+    total_runs: int = 0
+    successful_runs: int = 0
+    success_rate: float = 0
+    failed_runs: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0
+    average_duration_ms: float = 0
+    tool_error_count: int = 0
+    storage_path: str = ""
+    token_usage_over_time: list[ObservabilityTrendPointOut] = Field(default_factory=list)
+    duration_trend: list[ObservabilityTrendPointOut] = Field(default_factory=list)
+    top_error_reasons: list[ObservabilityReasonCountOut] = Field(default_factory=list)
+    top_failing_tools: list[ObservabilityToolCountOut] = Field(default_factory=list)
+    model_usage: list[ObservabilityModelUsageOut] = Field(default_factory=list)
+    storage_metrics: dict[str, Any] = Field(default_factory=dict)
+    runtime_metrics: dict[str, Any] = Field(default_factory=dict)
+    field_classification: dict[str, Any] = Field(default_factory=dict)
+
+
+class ObservabilityRunOut(BaseModel):
+    run_id: str
+    conversation_id: str = ""
+    message_id: str = ""
+    source: str = ""
+    model: str = ""
+    provider: str = ""
+    status: str = ""
+    failure_reason: str = ""
+    failure_pattern: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    duration_ms: int = 0
+    user_message: str = ""
+    final_output: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    image_tokens: int = 0
+    total_tokens: int = 0
+    usage_source: str = ""
+    estimated_cost_usd: float = 0
+    cost_source: str = ""
+    tool_count: int = 0
+    tool_error_count: int = 0
+    event_count: int = 0
+    metadata_json: str = ""
+
+
+class ObservabilityEventOut(BaseModel):
+    event_id: str
+    run_id: str
+    conversation_id: str = ""
+    message_id: str = ""
+    event_type: str = ""
+    level: str = ""
+    status: str = ""
+    source: str = ""
+    model: str = ""
+    provider: str = ""
+    tool_name: str = ""
+    error_code: str = ""
+    error_message: str = ""
+    duration_ms: int | float = 0
+    input: Any = None
+    output: Any = None
+    tokens: ObservabilityUsageOut | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+
+
+class ObservabilityErrorOut(BaseModel):
+    error_id: str
+    run_id: str = ""
+    conversation_id: str = ""
+    message_id: str = ""
+    level: str = ""
+    logger_name: str = ""
+    module: str = ""
+    error_type: str = ""
+    message: str = ""
+    traceback: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+
+
+class ObservabilityReplayOut(BaseModel):
+    replay_id: str
+    source_run_id: str
+    replay_run_id: str = ""
+    conversation_id: str = ""
+    status_change: str = ""
+    duration_delta_ms: int = 0
+    token_delta: int = 0
+    tool_sequence_diff: str = ""
+    failure_reason_diff: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+
+
+class ObservabilityRunDetailOut(ObservabilityRunOut):
+    events: list[ObservabilityEventOut] = Field(default_factory=list)
+    errors: list[ObservabilityErrorOut] = Field(default_factory=list)
+    replays: list[ObservabilityReplayOut] = Field(default_factory=list)
+    tool_sequence: list[str] = Field(default_factory=list)
+
+
+class ObservabilitySupportModeOut(BaseModel):
+    enabled: bool
+    expires_at_epoch: float
+    remaining_seconds: int
+
+
+class ObservabilityBackendLogOut(BaseModel):
+    path: str
+    exists: bool
+    size_bytes: int = 0
+    lines: list[str] = Field(default_factory=list)
+    truncated: bool = False
+    error: str = ""
+
+
+class ObservabilityReplayResultOut(BaseModel):
+    source_run_id: str
+    replay_run_id: str
+    conversation_id: str
+    status: str
+    summary: str
+    errors: list[str] = Field(default_factory=list)
+    comparison: ObservabilityReplayOut
+
+
+class ObservabilityDebugBundleOut(BaseModel):
+    filename: str
+    run_id: str
+    size_bytes: int = 0
+    encrypted: bool = False
+
+
+class DataDeletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: bool = False
+
+
+class DataDeletionResult(BaseModel):
+    ok: bool = True
+    deleted: dict[str, int] = Field(default_factory=dict)
+    deleted_at: str = ""
 
 
 # ── Long-term memory schemas ────────────────────────────────────────────────

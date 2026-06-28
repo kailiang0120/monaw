@@ -22,6 +22,58 @@ export const BASE = resolveApiBase()
 
 export const JSON_HEADERS = { 'Content-Type': 'application/json' } as const
 
+export type ApiErrorEnvelope = {
+  code: string
+  message: string
+  request_id: string
+  details: Record<string, unknown>
+}
+
+export class ApiError extends Error {
+  status: number
+  code: string
+  requestId: string
+  details: Record<string, unknown>
+
+  constructor(response: Response, envelope: ApiErrorEnvelope, fallbackMessage: string) {
+    super(envelope.message || fallbackMessage)
+    this.name = 'ApiError'
+    this.status = response.status
+    this.code = envelope.code || 'request_failed'
+    this.requestId = envelope.request_id || response.headers.get('x-request-id') || ''
+    this.details = envelope.details || {}
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function legacyMessage(payload: Record<string, unknown>, fallbackMessage: string): string {
+  const detail = payload.detail
+  if (typeof detail === 'string' && detail) return detail
+  if (isRecord(detail) && typeof detail.message === 'string' && detail.message) {
+    return detail.message
+  }
+  return fallbackMessage
+}
+
+export async function decodeApiError(response: Response, fallbackMessage = 'Request failed'): Promise<ApiError> {
+  const payload = await response.json().catch(() => null)
+  const record = isRecord(payload) ? payload : {}
+  const envelope: ApiErrorEnvelope = {
+    code: typeof record.code === 'string' && record.code ? record.code : 'request_failed',
+    message: typeof record.message === 'string' && record.message ? record.message : legacyMessage(record, fallbackMessage),
+    request_id: typeof record.request_id === 'string' ? record.request_id : response.headers.get('x-request-id') || '',
+    details: isRecord(record.details) ? record.details : {},
+  }
+  return new ApiError(response, envelope, fallbackMessage)
+}
+
+export async function throwApiError(response: Response, fallbackMessage = 'Request failed'): Promise<never> {
+  throw await decodeApiError(response, fallbackMessage)
+}
+
 type ControlSession = {
   token: string
   expiresAt: number

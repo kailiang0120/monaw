@@ -21,6 +21,9 @@ from app.agent.llm_constants import (
     DEFAULT_VISION_FALLBACK_MAX_OUTPUT_TOKENS,
     DEFAULT_VISION_FALLBACK_MODEL,
 )
+from app.agent import llm_provider_requests as provider_requests
+from app.agent import llm_provider_responses as provider_responses
+from app.agent.llm_provider_adapters import create_llm_provider_adapter
 from app.agent.observability.recorder import UsageStats
 
 logger = logging.getLogger(__name__)
@@ -608,193 +611,55 @@ def _normalise_messages_for_openai_responses(
 
 
 def _extract_gemini_model_parts(response) -> list:
-    try:
-        candidates = response.candidates or []
-        if not candidates:
-            return []
-        content = candidates[0].content
-        return list(content.parts or [])
-    except Exception:
-        return []
+    return provider_responses.extract_gemini_model_parts(response)
 
 
 def _split_gemini_text_parts(response) -> tuple[str, str]:
-    answer_parts: list[str] = []
-    thought_parts: list[str] = []
-    for part in _extract_gemini_model_parts(response):
-        text = str(getattr(part, "text", "") or "")
-        if not text:
-            continue
-        if bool(getattr(part, "thought", False)):
-            thought_parts.append(text)
-        else:
-            answer_parts.append(text)
-    return "".join(answer_parts), "".join(thought_parts)
+    return provider_responses.split_gemini_text_parts(response)
 
 
 def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+    return provider_responses.obj_get(obj, key, default)
 
 
 def _obj_to_dict(obj: Any) -> dict:
-    def convert(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {k: convert(v) for k, v in value.items() if v is not None}
-        if isinstance(value, list):
-            return [convert(v) for v in value]
-        if isinstance(value, tuple):
-            return [convert(v) for v in value]
-        model_dump = getattr(value, "model_dump", None)
-        if callable(model_dump):
-            return convert(model_dump(exclude_none=True))
-        if hasattr(value, "__dict__"):
-            return {
-                k: convert(v)
-                for k, v in vars(value).items()
-                if not k.startswith("_") and v is not None
-            }
-        return value
-
-    if isinstance(obj, dict):
-        return convert(obj)
-    model_dump = getattr(obj, "model_dump", None)
-    if callable(model_dump):
-        return convert(model_dump(exclude_none=True))
-    if hasattr(obj, "__dict__"):
-        return convert(obj)
-    return {}
+    return provider_responses.obj_to_dict(obj)
 
 
 def _usage_int(obj: Any, key: str) -> int:
-    try:
-        value = _obj_get(obj, key, 0)
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
+    return provider_responses.usage_int(obj, key)
 
 
 def _usage_nested_int(obj: Any, *path: str) -> int:
-    current = obj
-    for key in path:
-        current = _obj_get(current, key, None)
-        if current is None:
-            return 0
-    try:
-        return max(0, int(current or 0))
-    except (TypeError, ValueError):
-        return 0
+    return provider_responses.usage_nested_int(obj, *path)
 
 
 def _usage_from_openai(usage: Any) -> UsageStats:
-    if not usage:
-        return UsageStats()
-    input_tokens = _usage_int(usage, "input_tokens") or _usage_int(usage, "prompt_tokens")
-    output_tokens = _usage_int(usage, "output_tokens") or _usage_int(usage, "completion_tokens")
-    total_tokens = _usage_int(usage, "total_tokens")
-    cached_tokens = (
-        _usage_nested_int(usage, "input_tokens_details", "cached_tokens")
-        or _usage_nested_int(usage, "prompt_tokens_details", "cached_tokens")
-        or _usage_int(usage, "prompt_cache_hit_tokens")
-    )
-    reasoning_tokens = (
-        _usage_nested_int(usage, "output_tokens_details", "reasoning_tokens")
-        or _usage_nested_int(usage, "completion_tokens_details", "reasoning_tokens")
-    )
-    return UsageStats(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        reasoning_tokens=reasoning_tokens,
-        cached_tokens=cached_tokens,
-        total_tokens=total_tokens or input_tokens + output_tokens + reasoning_tokens,
-        source="provider",
-    ).normalized()
+    return provider_responses.usage_from_openai(usage)
 
 
 def _usage_from_gemini_metadata(metadata: Any) -> UsageStats:
-    if not metadata:
-        return UsageStats()
-    input_tokens = _usage_int(metadata, "prompt_token_count")
-    output_tokens = _usage_int(metadata, "candidates_token_count")
-    reasoning_tokens = _usage_int(metadata, "thoughts_token_count")
-    cached_tokens = _usage_int(metadata, "cached_content_token_count")
-    total_tokens = _usage_int(metadata, "total_token_count")
-    image_tokens = _usage_int(metadata, "image_token_count")
-    return UsageStats(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        reasoning_tokens=reasoning_tokens,
-        cached_tokens=cached_tokens,
-        image_tokens=image_tokens,
-        total_tokens=total_tokens or input_tokens + output_tokens + reasoning_tokens + image_tokens,
-        source="provider",
-    ).normalized()
+    return provider_responses.usage_from_gemini_metadata(metadata)
 
 
 def _usage_from_gemini_response(response: Any) -> UsageStats:
-    return _usage_from_gemini_metadata(
-        _obj_get(response, "usage_metadata", None) or _obj_get(response, "usageMetadata", None)
-    )
+    return provider_responses.usage_from_gemini_response(response)
 
 
 def _openai_response_output_items(response: Any) -> list[Any]:
-    output = _obj_get(response, "output", [])
-    return list(output or []) if isinstance(output, (list, tuple)) else []
+    return provider_responses.openai_response_output_items(response)
 
 
 def _openai_response_text_and_reasoning(response: Any) -> tuple[str, str]:
-    text_parts: list[str] = []
-    reasoning_parts: list[str] = []
-
-    for item in _openai_response_output_items(response):
-        item_type = _obj_get(item, "type", "")
-        if item_type == "message":
-            for part in list(_obj_get(item, "content", []) or []):
-                part_type = _obj_get(part, "type", "")
-                if part_type in {"output_text", "text"}:
-                    text_parts.append(str(_obj_get(part, "text", "") or ""))
-        elif item_type == "reasoning":
-            for summary in list(_obj_get(item, "summary", []) or []):
-                reasoning_parts.append(str(_obj_get(summary, "text", "") or ""))
-            for content in list(_obj_get(item, "content", []) or []):
-                reasoning_parts.append(str(_obj_get(content, "text", "") or ""))
-
-    if not text_parts:
-        output_text = str(_obj_get(response, "output_text", "") or "")
-        if output_text:
-            text_parts.append(output_text)
-
-    return "".join(text_parts), "".join(reasoning_parts)
+    return provider_responses.openai_response_text_and_reasoning(response)
 
 
 def _extract_openai_response_tool_calls(response: Any) -> list[ToolCallRequest]:
-    tool_calls: list[ToolCallRequest] = []
-    for item in _openai_response_output_items(response):
-        if _obj_get(item, "type", "") != "function_call":
-            continue
-        arguments_buf = str(_obj_get(item, "arguments", "") or "")
-        try:
-            arguments = json.loads(arguments_buf) if arguments_buf else {}
-        except json.JSONDecodeError:
-            arguments = {"_raw": arguments_buf}
-        tool_calls.append(
-            ToolCallRequest(
-                call_id=str(_obj_get(item, "call_id", "") or _obj_get(item, "id", "") or ""),
-                tool_name=str(_obj_get(item, "name", "") or ""),
-                arguments=arguments,
-            )
-        )
-    return tool_calls
+    return provider_responses.extract_openai_response_tool_calls(response, ToolCallRequest)
 
 
 def _openai_response_provider_messages(response: Any) -> list[dict]:
-    messages: list[dict] = []
-    for item in _openai_response_output_items(response):
-        item_type = _obj_get(item, "type", "")
-        if item_type in {"function_call", "reasoning"}:
-            messages.append(_obj_to_dict(item))
-    return messages
+    return provider_responses.openai_response_provider_messages(response)
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +702,7 @@ class LLMClient:
             )
         else:
             raise ValueError(f"Unsupported provider: {provider!r}. Use 'openai', 'deepseek', or 'gemini'.")
+        self.provider_adapter = create_llm_provider_adapter(self.provider, self)
 
     @staticmethod
     def build_tool_result_message(result: ToolCallResult) -> dict:
@@ -861,14 +727,15 @@ class LLMClient:
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse:
-        if self.provider == "gemini":
-            return await _with_retry(
-                lambda: self._gemini_chat(messages, tools, system_prompt, stream_callback, tool_choice)
+        return await _with_retry(
+            lambda: self.provider_adapter.chat_with_tools(
+                messages,
+                tools,
+                system_prompt,
+                stream_callback,
+                tool_choice,
             )
-        else:
-            return await _with_retry(
-                lambda: self._openai_chat(messages, tools, system_prompt, stream_callback, tool_choice)
-            )
+        )
 
     async def chat(
         self,
@@ -896,28 +763,15 @@ class LLMClient:
         stream_callback: Callable[[str], Awaitable[None]] | None,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse:
-        from google.genai import types
-
-        gemini_messages = _normalise_messages_for_gemini(
-            messages,
-            system_prompt,
+        gemini_messages, config = provider_requests.gemini_request_payload(
+            model_name=self.model_name,
+            messages=messages,
+            tools=tools,
+            system_prompt=system_prompt,
+            reasoning_effort=self.reasoning_effort,
             include_images=self._supports_vision,
+            tool_choice=tool_choice,
         )
-
-        config_kwargs: dict = {}
-        if system_prompt:
-            config_kwargs["system_instruction"] = system_prompt
-        thinking_config = _gemini_thinking_config(self.model_name, self.reasoning_effort, types)
-        if thinking_config is not None:
-            config_kwargs["thinking_config"] = thinking_config
-        if tools:
-            config_kwargs["tools"] = [_tools_to_gemini(tools)]
-            if tool_choice in {"required", "any"}:
-                config_kwargs["tool_config"] = types.ToolConfig(
-                    function_calling_config=types.FunctionCallingConfig(mode="ANY")
-                )
-
-        config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
         if stream_callback is not None:
             return await self._gemini_stream(gemini_messages, config, stream_callback)
@@ -1043,21 +897,16 @@ class LLMClient:
                 tool_choice,
             )
 
-        oai_messages = _normalise_messages_for_openai(
-            messages,
-            system_prompt,
+        kwargs = provider_requests.openai_compatible_chat_kwargs(
+            provider=self.provider,
+            model_name=self.model_name,
+            messages=messages,
+            tools=tools,
+            system_prompt=system_prompt,
+            reasoning_effort=self.reasoning_effort,
             include_images=self._supports_vision,
+            tool_choice=tool_choice,
         )
-        kwargs: dict = {"model": self.model_name, "messages": oai_messages}
-        if self.provider == "deepseek":
-            kwargs["reasoning_effort"] = _deepseek_reasoning_effort(self.reasoning_effort)
-            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-        if tools:
-            kwargs["tools"] = _tools_to_openai(tools)
-            if tool_choice:
-                kwargs["tool_choice"] = tool_choice
-            elif self.provider != "deepseek":
-                kwargs["tool_choice"] = "auto"
 
         if stream_callback is not None:
             return await self._openai_stream(kwargs, stream_callback)
@@ -1072,26 +921,15 @@ class LLMClient:
         stream_callback: Callable[[str], Awaitable[None]] | None,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse:
-        input_items = _normalise_messages_for_openai_responses(
-            messages,
+        kwargs = provider_requests.openai_responses_kwargs(
+            model_name=self.model_name,
+            messages=messages,
+            tools=tools,
+            system_prompt=system_prompt,
+            reasoning_effort=self.reasoning_effort,
             include_images=self._supports_vision,
+            tool_choice=tool_choice,
         )
-        kwargs: dict = {
-            "model": self.model_name,
-            "input": input_items,
-        }
-        if system_prompt:
-            kwargs["instructions"] = system_prompt
-        if _openai_model_supports_reasoning_config(self.model_name):
-            effort = _openai_reasoning_effort(self.reasoning_effort)
-            reasoning: dict[str, str] = {"effort": effort}
-            if effort != "none":
-                reasoning["summary"] = "auto"
-            kwargs["reasoning"] = reasoning
-        if tools:
-            kwargs["tools"] = _tools_to_openai_responses(tools)
-            if tool_choice:
-                kwargs["tool_choice"] = tool_choice
 
         if stream_callback is not None:
             return await self._openai_responses_stream(kwargs, stream_callback)
@@ -1314,42 +1152,11 @@ class LLMClient:
 
 def _extract_gemini_tool_calls(response) -> list[ToolCallRequest]:
     """Extract function calls from a google-genai GenerateContentResponse."""
-    if response is None:
-        return []
-    try:
-        fcs = response.function_calls  # list[FunctionCall] or None
-    except Exception:
-        return []
-    if not fcs:
-        return []
-
-    result = []
-    for i, fc in enumerate(fcs):
-        try:
-            name = fc.name or ""
-            args = dict(fc.args) if fc.args else {}
-            call_id = fc.id or f"gemini-call-{i}"
-            result.append(ToolCallRequest(call_id=call_id, tool_name=name, arguments=args))
-        except Exception as exc:
-            logger.warning("Failed to parse Gemini function_call: %s", exc)
-    return result
+    return provider_responses.extract_gemini_tool_calls(response, ToolCallRequest)
 
 
 def _extract_openai_tool_calls(raw_tool_calls) -> list[ToolCallRequest]:
-    result: list[ToolCallRequest] = []
-    for tc in raw_tool_calls or []:
-        try:
-            args_str = tc.function.arguments or "{}"
-            try:
-                args = json.loads(args_str)
-            except json.JSONDecodeError:
-                args = {"_raw": args_str}
-            result.append(
-                ToolCallRequest(call_id=tc.id, tool_name=tc.function.name, arguments=args)
-            )
-        except Exception as exc:
-            logger.warning("Failed to parse OpenAI tool call: %s", exc)
-    return result
+    return provider_responses.extract_openai_tool_calls(raw_tool_calls, ToolCallRequest)
 
 
 def _openai_finish_reason(raw: str | None) -> str:

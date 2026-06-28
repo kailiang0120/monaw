@@ -1,7 +1,9 @@
 import json
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.agent.database import get_db
 from app.agent.context_usage import (
@@ -16,8 +18,15 @@ from app.agent.memory_manager import (
     list_conversation_metadata,
     peek_memory_manager,
 )
-from app.agent.response_attachments import collect_response_attachments
+from app.agent.response_attachments import (
+    ATTACHMENT_HANDLE_PREFIX,
+    collect_response_attachments,
+    new_attachment_id,
+    public_attachment_payload,
+    register_attachment_path,
+)
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
+from app.agent.ui_events import publish_ui_event
 from app.config import settings
 from app.schemas import (
     ConversationCreate,
@@ -26,6 +35,7 @@ from app.schemas import (
     ContextUsagePayload,
     MessageOut,
     MessagesResponse,
+    OkResponse,
     ToolCallOut,
 )
 
@@ -36,6 +46,10 @@ HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX = "\n\n[history preview truncated]"
 TOOL_CALL_MODE_NONE = "none"
 TOOL_CALL_MODE_SUMMARY = "summary"
 TOOL_CALL_MODE_FULL = "full"
+CONVERSATION_LIST_LIMIT_MAX = 200
+MESSAGE_LIMIT_MAX = 200
+MESSAGE_TOOL_CALL_LIMIT_MAX = 200
+MESSAGE_TOOL_PAYLOAD_LIMIT_MAX = 20_000
 
 
 def get_runtime(runtime_settings):
@@ -56,7 +70,12 @@ def build_skill_prompt_sections(skills, visible_tool_names: set[str]) -> dict[st
     return skill_build_prompt_sections(skills, visible_tool_names)
 
 
-def _stored_response_attachments(raw_value: object) -> list[dict] | None:
+def _stored_response_attachments(
+    raw_value: object,
+    *,
+    control_session_id: str = "",
+    conversation_id: str = "",
+) -> list[dict] | None:
     if not isinstance(raw_value, str) or not raw_value.strip():
         return None
     try:
@@ -65,7 +84,37 @@ def _stored_response_attachments(raw_value: object) -> list[dict] | None:
         return None
     if not isinstance(payload, list):
         return None
-    return [item for item in payload if isinstance(item, dict)]
+    attachments: list[dict] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        item_path = str(item.get("path") or "").strip()
+        if item_id and item_path.startswith(ATTACHMENT_HANDLE_PREFIX):
+            sanitized = dict(item)
+            sanitized["path"] = f"{ATTACHMENT_HANDLE_PREFIX}{item_id}"
+            sanitized.setdefault("conversation_id", conversation_id)
+            attachments.append(sanitized)
+            continue
+        try:
+            path = Path(item_path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if not path.is_file():
+            continue
+        record = register_attachment_path(
+            new_attachment_id(),
+            path,
+            control_session_id=control_session_id,
+            principal_id=control_session_id,
+            conversation_id=conversation_id,
+            mime_type=str(item.get("mime_type") or ""),
+            width=item.get("width") if isinstance(item.get("width"), int) else None,
+            height=item.get("height") if isinstance(item.get("height"), int) else None,
+        )
+        if record is not None:
+            attachments.append(public_attachment_payload(record))
+    return attachments
 
 
 def _history_tool_payload(value: object, limit: int) -> str:
@@ -175,14 +224,20 @@ def _completion_protocol_text() -> str:
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
-async def list_conversations():
-    return list_conversation_metadata()
+async def list_conversations(
+    limit: int = Query(100, ge=1, le=CONVERSATION_LIST_LIMIT_MAX),
+    offset: int = Query(0, ge=0, le=10_000),
+):
+    conversations = list_conversation_metadata()
+    return conversations[offset:offset + limit]
 
 
 @router.post("/conversations", response_model=ConversationOut)
 async def create_conversation(body: ConversationCreate):
     conv_id = str(uuid.uuid4())
-    return create_conversation_file(conv_id, body.title)
+    conversation = create_conversation_file(conv_id, body.title)
+    publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "created"})
+    return conversation
 
 
 @router.get("/conversations/{conv_id}/context-usage", response_model=ContextUsagePayload)
@@ -247,24 +302,27 @@ async def rename_conversation(conv_id: str, body: ConversationRename):
         raise HTTPException(status_code=404, detail="Conversation not found")
     db.update_conversation(conv_id, title=body.title.strip())
     conv = db.get_conversation(conv_id)
+    publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "renamed"})
     return conv
 
 
-@router.delete("/conversations/{conv_id}")
+@router.delete("/conversations/{conv_id}", response_model=OkResponse)
 async def delete_conversation(conv_id: str):
     memory_manager = peek_memory_manager()
     found = memory_manager.delete(conv_id) if memory_manager is not None else delete_conversation_file(conv_id)
     if not found:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "deleted"})
     return {"ok": True}
 
 
 @router.get("/conversations/{conv_id}/messages", response_model=MessagesResponse)
 async def get_conversation_messages(
+    request: Request,
     conv_id: str,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=MESSAGE_LIMIT_MAX),
     before_id: int | None = Query(None),
-    tool_payload_limit: int | None = Query(None, ge=0, le=20000),
+    tool_payload_limit: int | None = Query(None, ge=0, le=MESSAGE_TOOL_PAYLOAD_LIMIT_MAX),
     include_tool_calls: bool = Query(True),
     tool_call_mode: str | None = Query(
         None,
@@ -305,7 +363,12 @@ async def get_conversation_messages(
             tool_calls = _summary_tool_calls(db, message_id=message_id, limit=preview_tool_payload_limit)
         else:
             tool_calls = []
-        stored_attachments = _stored_response_attachments(msg.get("attachments_json"))
+        control_session_id = request.state.control_session.session_id
+        stored_attachments = _stored_response_attachments(
+            msg.get("attachments_json"),
+            control_session_id=control_session_id,
+            conversation_id=conv_id,
+        )
         attachments = stored_attachments
         if attachments is None:
             if full_tool_call_rows is None:
@@ -315,9 +378,17 @@ async def get_conversation_messages(
                 collect_response_attachments(
                     content=msg["content"],
                     tool_calls=attachment_tool_calls,
+                    control_session_id=control_session_id,
+                    principal_id=control_session_id,
+                    conversation_id=conv_id,
                 )
                 if attachment_tool_calls
-                else collect_response_attachments(content=msg["content"])
+                else collect_response_attachments(
+                    content=msg["content"],
+                    control_session_id=control_session_id,
+                    principal_id=control_session_id,
+                    conversation_id=conv_id,
+                )
             )
         result.append(
             MessageOut(
@@ -340,9 +411,18 @@ async def get_conversation_messages(
 @router.get("/messages/{message_id}/tool-calls", response_model=list[ToolCallOut])
 async def get_message_tool_calls(
     message_id: int,
+    limit: int = Query(100, ge=1, le=MESSAGE_TOOL_CALL_LIMIT_MAX),
+    offset: int = Query(0, ge=0, le=10_000),
+    tool_payload_limit: int | None = Query(
+        None,
+        ge=0,
+        le=MESSAGE_TOOL_PAYLOAD_LIMIT_MAX,
+    ),
 ):
     db = get_db()
     message = db.fetchone("SELECT id FROM messages WHERE id = ?", (message_id,))
     if message is None:
         raise HTTPException(status_code=404, detail="Message not found")
-    return _full_tool_calls(db.get_tool_calls_for_message(int(message["id"])), limit=None)
+    rows = db.get_tool_calls_for_message(int(message["id"]))
+    rows = rows[offset:offset + limit]
+    return _full_tool_calls(rows, limit=tool_payload_limit)

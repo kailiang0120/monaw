@@ -10,9 +10,11 @@ from app.agent.observability.recorder import (
     reset_current_run_id,
     set_current_run_id,
 )
+from app.agent.observability.ports import ObservabilityPort
 
 __all__ = [
     "ObservabilityRecorder",
+    "ObservabilityPort",
     "UsageStats",
     "current_run_id",
     "get_observability_recorder",

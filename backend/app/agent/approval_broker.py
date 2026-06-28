@@ -26,6 +26,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.agent.runtime_paths import RUNTIME_DIR
+from app.agent.ui_events import publish_ui_event
 from app.agent.run_context import (
     current_control_session_id,
     current_conversation_id,
@@ -263,6 +264,10 @@ def create_ticket(
         _pending_index[ticket.id] = ticket
         _append_ticket(ticket)
     _log_approval_md("CREATED", ticket)
+    publish_ui_event(
+        "approval_ticket.created",
+        {"ticket_id": ticket.id, "conversation_id": ticket.conversation_id, "status": ticket.status.value},
+    )
     return ticket
 
 
@@ -378,3 +383,74 @@ def get_history(
 def reload_from_disk() -> None:
     """Force reload from JSONL (for recovery/testing)."""
     _load_tickets_from_disk()
+
+
+def clear_all_tickets() -> dict[str, int]:
+    """Clear approval tickets, resume state, and persisted approval history."""
+    with _state_lock:
+        counts = {
+            "approval_tickets": len(_all_tickets),
+            "pending_approval_tickets": len(_pending_index),
+            "approval_resume_events": len(_resume_events),
+        }
+        _pending_index.clear()
+        _all_tickets.clear()
+        _resume_events.clear()
+        _resume_decisions.clear()
+        for path in (_TICKETS_FILE, _APPROVAL_LOG):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    publish_ui_event("approval_ticket.deleted", {"all": True})
+    return counts
+
+
+def enforce_retention(max_age_days: int = 30, max_items: int = 1000) -> dict[str, int]:
+    """Bound resolved approval history by age and count while keeping pending tickets."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days)))
+
+    def _ticket_time(ticket: ApprovalTicket) -> datetime:
+        for value in (ticket.resolved_at, ticket.created_at):
+            try:
+                parsed = datetime.fromisoformat(value)
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        return datetime.now(timezone.utc)
+
+    with _state_lock:
+        original_count = len(_all_tickets)
+        retained = {
+            ticket_id: ticket
+            for ticket_id, ticket in _all_tickets.items()
+            if ticket.status == TicketStatus.PENDING or _ticket_time(ticket) >= cutoff
+        }
+        resolved = [
+            ticket
+            for ticket in retained.values()
+            if ticket.status != TicketStatus.PENDING
+        ]
+        overflow = max(0, len(resolved) - max(0, int(max_items)))
+        if overflow:
+            drop_ids = {
+                ticket.id
+                for ticket in sorted(resolved, key=_ticket_time)[:overflow]
+            }
+            retained = {
+                ticket_id: ticket
+                for ticket_id, ticket in retained.items()
+                if ticket_id not in drop_ids
+            }
+        _all_tickets.clear()
+        _all_tickets.update(retained)
+        _pending_index.clear()
+        _pending_index.update({
+            ticket_id: ticket
+            for ticket_id, ticket in _all_tickets.items()
+            if ticket.status == TicketStatus.PENDING
+        })
+        removed = original_count - len(_all_tickets)
+        if removed:
+            _rewrite_tickets()
+    return {"approval_tickets_removed": max(0, removed)}

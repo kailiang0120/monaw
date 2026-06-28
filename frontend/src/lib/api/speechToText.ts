@@ -1,4 +1,4 @@
-import { apiFetch, BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS, decodeApiError } from './client'
 import type { SpeechToTextTranscription } from './types'
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -30,14 +30,16 @@ export async function transcribeSpeech(blob: Blob): Promise<SpeechToTextTranscri
     }),
   })
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: 'Speech-to-text failed' }))
+    const error = await decodeApiError(res, 'Speech-to-text failed')
     console.error('[speech-to-text] upload failed', {
       status: res.status,
-      detail: error.detail,
+      code: error.code,
+      requestId: error.requestId,
+      message: error.message,
       size: blob.size,
       type: blob.type || 'unknown',
     })
-    throw new Error(error.detail || 'Speech-to-text failed')
+    throw error
   }
   const result = await res.json()
   console.info('[speech-to-text] upload complete', {

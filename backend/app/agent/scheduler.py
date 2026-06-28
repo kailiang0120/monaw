@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.agent.database import get_db
+from app.agent.ui_events import publish_ui_event
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,10 @@ SettingsFactory = Callable[[], Any]
 _SCHEDULER_LEASE_SECONDS = 15 * 60
 _DEFAULT_MAX_GLOBAL_CONCURRENCY = 4
 _DEFAULT_MAX_PER_TASK_CONCURRENCY = 1
+_DEFAULT_SHUTDOWN_GRACE_SECONDS = 2.0
+_MAX_SCHEDULED_OUTPUT_CHARS = 20_000
+_MAX_CONSECUTIVE_FAILURES = 5
+_TRUNCATED_OUTPUT_SUFFIX = "\n\n[scheduled output truncated]"
 
 _SERVICE: "ScheduledTaskService | None" = None
 
@@ -83,12 +88,14 @@ class ScheduledTaskService:
         tick_interval: float = 30.0,
         max_global_concurrency: int = _DEFAULT_MAX_GLOBAL_CONCURRENCY,
         max_per_task_concurrency: int = _DEFAULT_MAX_PER_TASK_CONCURRENCY,
+        shutdown_grace_seconds: float = _DEFAULT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
         self.settings_factory = settings_factory
         self.runner = runner
         self._tick_interval = float(tick_interval)
         self._max_global_concurrency = max(1, int(max_global_concurrency))
         self._max_per_task_concurrency = max(1, int(max_per_task_concurrency))
+        self._shutdown_grace_seconds = max(0.0, float(shutdown_grace_seconds))
         self._lease_owner = f"scheduler:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._inflight: dict[str, list[asyncio.Task]] = {}
@@ -113,11 +120,14 @@ class ScheduledTaskService:
                 pass
             self._task = None
 
-        inflight = [task for tasks in self._inflight.values() for task in tasks]
-        for task in inflight:
+        inflight = [task for tasks in self._inflight.values() for task in tasks if not task.done()]
+        pending = set(inflight)
+        if pending and self._shutdown_grace_seconds > 0:
+            _, pending = await asyncio.wait(pending, timeout=self._shutdown_grace_seconds)
+        for task in pending:
             task.cancel()
-        if inflight:
-            await asyncio.gather(*inflight, return_exceptions=True)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         self._inflight.clear()
         if get_scheduled_task_service() is self:
             set_scheduled_task_service(None)
@@ -187,7 +197,7 @@ class ScheduledTaskService:
                         if not running.done():
                             running.cancel()
                 elif policy == "queue":
-                    run = self._prepare_run(row, manual=False)
+                    run = self._prepare_run(row, manual=False, initial_status="queued")
                     task = asyncio.create_task(
                         self._run_after_previous(task_id, previous, row, run),
                         name=f"scheduled-task-queued-{task_id}",
@@ -249,7 +259,7 @@ class ScheduledTaskService:
                     row,
                     run_id=int(run["run_id"]),
                     conversation_id=str(run["conversation_id"]),
-                    status="skipped",
+                    status="cancelled",
                     final_text="",
                     error="cancelled",
                 )
@@ -258,6 +268,14 @@ class ScheduledTaskService:
         except Exception:
             logger.debug("scheduled-tasks: queued run ignored previous failure", exc_info=True)
         if self._stop.is_set():
+            await self._finish_run(
+                row,
+                run_id=int(run["run_id"]),
+                conversation_id=str(run["conversation_id"]),
+                status="cancelled",
+                final_text="",
+                error="scheduler stopped before queued run started",
+            )
             return
         latest = get_db().get_scheduled_task(task_id) or row
         await self._run_prepared_task(latest, run)
@@ -280,7 +298,7 @@ class ScheduledTaskService:
             fields["enabled"] = 0
         get_db().update_scheduled_task(str(row["id"]), **fields)
 
-    def _prepare_run(self, row: dict[str, Any], *, manual: bool) -> dict[str, Any]:
+    def _prepare_run(self, row: dict[str, Any], *, manual: bool, initial_status: str = "running") -> dict[str, Any]:
         task_id = str(row["id"])
         started_at = _iso_utc(_utc_now())
         title = str(row.get("title") or "Scheduled task").strip() or "Scheduled task"
@@ -301,6 +319,7 @@ class ScheduledTaskService:
             idempotency_key=f"{task_id}:{idempotency_source}",
             lease_owner=self._lease_owner,
             lease_expires_at=self._lease_expires_at(),
+            status=initial_status,
         )
         return {
             "run_id": run_id,
@@ -314,11 +333,19 @@ class ScheduledTaskService:
         run_id = int(run["run_id"])
         conversation_id = str(run["conversation_id"])
         final_text_parts: list[str] = []
+        final_text_chars = 0
+        final_text_truncated = False
         done_summary = ""
         error_text = ""
-        status = "ok"
+        status = "succeeded"
 
         try:
+            get_db().update_scheduled_task_run(
+                run_id,
+                status="running",
+                lease_owner=self._lease_owner,
+                lease_expires_at=self._lease_expires_at(),
+            )
             settings = self.settings_factory()
             async for event in self.runner(
                 message=str(row.get("prompt") or ""),
@@ -338,25 +365,35 @@ class ScheduledTaskService:
                 event_name = str(event.get("event") or "")
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}
                 if event_name == "token":
-                    final_text_parts.append(str(data.get("content") or ""))
+                    token = str(data.get("content") or "")
+                    if token and final_text_chars < _MAX_SCHEDULED_OUTPUT_CHARS:
+                        remaining = _MAX_SCHEDULED_OUTPUT_CHARS - final_text_chars
+                        final_text_parts.append(token[:remaining])
+                        final_text_chars += min(len(token), remaining)
+                        final_text_truncated = final_text_truncated or len(token) > remaining
+                    elif token:
+                        final_text_truncated = True
                 elif event_name == "done":
                     done_summary = str(data.get("summary") or "").strip()
                     if data.get("status") == "error" or data.get("incomplete"):
-                        status = "error"
+                        status = "failed"
                         error_text = str(data.get("reason_code") or "scheduled task ended incomplete")
                 elif event_name == "error":
-                    status = "error"
+                    status = "failed"
                     error_text = str(data.get("message") or data.get("code") or "scheduled task error")
         except asyncio.CancelledError:
-            status = "skipped"
+            status = "cancelled"
             error_text = "cancelled"
             raise
         except Exception as exc:
             logger.exception("scheduled-tasks: task %s failed", task_id)
-            status = "error"
+            status = "failed"
             error_text = str(exc)
         finally:
             final_text = done_summary or "".join(final_text_parts).strip()
+            if final_text_truncated and not final_text.endswith(_TRUNCATED_OUTPUT_SUFFIX):
+                final_text = f"{final_text[:_MAX_SCHEDULED_OUTPUT_CHARS].rstrip()}{_TRUNCATED_OUTPUT_SUFFIX}"
+            final_text = final_text[: _MAX_SCHEDULED_OUTPUT_CHARS + len(_TRUNCATED_OUTPUT_SUFFIX)]
             await self._finish_run(
                 row,
                 run_id=run_id,
@@ -378,28 +415,36 @@ class ScheduledTaskService:
     ) -> None:
         now = _utc_now()
         now_iso = _iso_utc(now)
-        get_db().update_scheduled_task_run(
-            run_id,
-            finished_at=now_iso,
-            status=status,
-            final_text=final_text,
-            error=error,
-        )
-
         next_run = self.compute_next_run(row, after=now)
         failures = int(row.get("consecutive_failures") or 0)
-        if status == "ok":
+        if status == "succeeded":
             failures = 0
-        elif status == "error":
+        elif status == "failed":
             failures += 1
 
         enabled = int(row.get("enabled") or 0)
-        last_status = status
-        if failures >= 5:
+        stored_status = status
+        last_status = {
+            "succeeded": "ok",
+            "failed": "error",
+            "cancelled": "cancelled",
+            "skipped": "skipped",
+        }.get(status, status)
+        if failures >= _MAX_CONSECUTIVE_FAILURES:
             enabled = 0
-            last_status = "disabled_after_failures"
+            stored_status = "dead_letter"
+            last_status = "dead_letter"
         elif next_run is None and str(row.get("schedule_kind")) == "once":
             enabled = 0
+
+        get_db().update_scheduled_task_run(
+            run_id,
+            finished_at=now_iso,
+            status=stored_status,
+            final_text=final_text,
+            error=error,
+            clear_lease=True,
+        )
 
         get_db().update_scheduled_task(
             str(row["id"]),
@@ -410,9 +455,19 @@ class ScheduledTaskService:
             consecutive_failures=failures,
             enabled=enabled,
         )
+        publish_ui_event(
+            "scheduled_tasks.changed",
+            {"task_id": str(row["id"]), "action": "run_finished", "status": last_status},
+        )
+        publish_ui_event(
+            "conversation.changed",
+            {"conversation_id": conversation_id, "action": "scheduled_run_finished"},
+        )
+        publish_ui_event("usage.changed", {"conversation_id": conversation_id})
+        publish_ui_event("observability.changed", {"conversation_id": conversation_id})
 
         if (
-            status != "skipped"
+            status not in {"skipped", "cancelled"}
             and int(row.get("notify_telegram") or 0)
             and str(row.get("telegram_chat_id") or "").strip()
         ):

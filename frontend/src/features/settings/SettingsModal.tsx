@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -24,8 +24,6 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
-import { MemorySettingsPanel } from './MemorySettingsPanel'
-import { ObservabilityPanel } from './ObservabilityPanel'
 import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel'
 import {
   DEFAULT_CONNECTION_PORTAL,
@@ -89,6 +87,9 @@ import {
 
 interface Props {
   onClose: () => void
+  diagnosticsRefreshKey?: number
+  memoryRefreshKey?: number
+  observabilityRefreshKey?: number
 }
 
 type SettingsTab = 'model' | 'apiKeys' | 'identity' | 'memory' | 'skills' | 'browser' | 'mcp' | 'observability' | 'permissions' | 'sandbox'
@@ -117,7 +118,19 @@ const SETTINGS_TABS: Array<{
   { id: 'sandbox', label: 'Sandbox', description: 'Exec isolation', icon: Container },
 ]
 
-export function SettingsModal({ onClose }: Props) {
+const MemorySettingsPanel = lazy(() =>
+  import('./MemorySettingsPanel').then((module) => ({ default: module.MemorySettingsPanel })),
+)
+const ObservabilityPanel = lazy(() =>
+  import('./ObservabilityPanel').then((module) => ({ default: module.ObservabilityPanel })),
+)
+
+export function SettingsModal({
+  onClose,
+  diagnosticsRefreshKey = 0,
+  memoryRefreshKey = 0,
+  observabilityRefreshKey = 0,
+}: Props) {
   const [draft, setDraft] = useState<AgentSettings | null>(null)
   const [modelOptions, setModelOptions] = useState<ModelOptionsCatalog>(FALLBACK_MODEL_OPTIONS)
   const [activeTab, setActiveTab] = useState<SettingsTab>('model')
@@ -164,48 +177,53 @@ export function SettingsModal({ onClose }: Props) {
     setMcpDiagnostics(next)
   }
 
-  const loadMcpDiagnostics = async () => {
+  const loadMcpDiagnostics = async (signal?: AbortSignal) => {
     try {
-      storeMcpDiagnostics(await fetchMCPDiagnostics())
+      storeMcpDiagnostics(await fetchMCPDiagnostics(signal))
     } catch {
+      if (signal?.aborted) return
       setMcpDiagnostics({})
     }
   }
 
-  const loadBrowserDiagnostics = async () => {
+  const loadBrowserDiagnostics = async (signal?: AbortSignal) => {
     try {
-      setBrowserDiagnostics(await fetchBrowserUseDiagnostics())
+      setBrowserDiagnostics(await fetchBrowserUseDiagnostics(signal))
     } catch {
+      if (signal?.aborted) return
       setBrowserDiagnostics(null)
     }
   }
 
-  const loadSandboxStatus = async () => {
+  const loadSandboxStatus = async (signal?: AbortSignal) => {
     try {
-      setSandboxStatus(await fetchSandboxStatus())
+      setSandboxStatus(await fetchSandboxStatus(signal))
     } catch {
+      if (signal?.aborted) return
       setSandboxStatus(null)
     }
   }
 
-  const loadSpeechToTextStatus = async () => {
+  const loadSpeechToTextStatus = async (signal?: AbortSignal) => {
     try {
-      setSpeechToTextStatus(await fetchSpeechToTextStatus())
+      setSpeechToTextStatus(await fetchSpeechToTextStatus(signal))
       setSpeechToTextError('')
     } catch (error) {
+      if (signal?.aborted) return
       setSpeechToTextStatus(null)
       setSpeechToTextError(error instanceof Error ? error.message : 'Speech-to-text status could not be loaded.')
     }
   }
 
-  const loadWorkspaceInstructions = async () => {
+  const loadWorkspaceInstructions = async (signal?: AbortSignal) => {
     try {
-      const instructions = await fetchWorkspaceInstructions()
+      const instructions = await fetchWorkspaceInstructions(signal)
       setCustomInstructions(instructions.content)
       setCustomInstructionsSavedContent(instructions.content)
       setCustomInstructionsPath(instructions.path)
       setCustomInstructionsError('')
     } catch (error) {
+      if (signal?.aborted) return
       setCustomInstructions('')
       setCustomInstructionsSavedContent('')
       setCustomInstructionsPath('')
@@ -215,9 +233,11 @@ export function SettingsModal({ onClose }: Props) {
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
+    const signal = controller.signal
 
     const load = async () => {
-      const modelOptionsPromise = fetchModelOptions().catch(() => FALLBACK_MODEL_OPTIONS)
+      const modelOptionsPromise = fetchModelOptions(signal).catch(() => FALLBACK_MODEL_OPTIONS)
       modelOptionsPromise.then((loadedModelOptions) => {
         if (cancelled) return
         setModelOptions(loadedModelOptions)
@@ -226,7 +246,7 @@ export function SettingsModal({ onClose }: Props) {
 
       let settings: AgentSettings | null = null
       try {
-        settings = normalizeDraft(await fetchSettings())
+        settings = normalizeDraft(await fetchSettings(signal))
         if (!cancelled) {
           setLoadError('')
           setDraft(settings)
@@ -234,6 +254,7 @@ export function SettingsModal({ onClose }: Props) {
           setTelegramAllowedChatIds(settings.telegram_allowed_chat_ids)
         }
       } catch (error) {
+        if (signal.aborted) return
         console.error('[settings] Failed to load settings', error)
         if (!cancelled) {
           setLoadError(error instanceof Error ? error.message : 'Settings could not be loaded.')
@@ -242,11 +263,11 @@ export function SettingsModal({ onClose }: Props) {
       }
 
       void Promise.all([
-        loadMcpDiagnostics(),
-        loadBrowserDiagnostics(),
-        loadSandboxStatus(),
-        loadSpeechToTextStatus(),
-        loadWorkspaceInstructions(),
+        loadMcpDiagnostics(signal),
+        loadBrowserDiagnostics(signal),
+        loadSandboxStatus(signal),
+        loadSpeechToTextStatus(signal),
+        loadWorkspaceInstructions(signal),
       ])
 
       if (window.electronAPI) {
@@ -275,8 +296,21 @@ export function SettingsModal({ onClose }: Props) {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [])
+
+  useEffect(() => {
+    if (!diagnosticsRefreshKey) return
+    const controller = new AbortController()
+    void Promise.all([
+      loadMcpDiagnostics(controller.signal),
+      loadBrowserDiagnostics(controller.signal),
+      loadSandboxStatus(controller.signal),
+    ])
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diagnosticsRefreshKey])
 
   const updateDraft = (updater: (current: AgentSettings) => AgentSettings) => {
     setDraft((current) => (current ? updater(current) : current))
@@ -496,6 +530,7 @@ export function SettingsModal({ onClose }: Props) {
       }
 
       const savedSettings = await updateSettings({
+        ...(draft.settings_version ? { expected_settings_version: draft.settings_version } : {}),
         llm: draft.llm,
         speech_to_text: draft.speech_to_text,
         mcp: draft.mcp,
@@ -1295,7 +1330,13 @@ export function SettingsModal({ onClose }: Props) {
                 title="Memory"
                 description="Review durable user preferences, behavior, workflow context, and memory retrieval settings."
               >
-                <MemorySettingsPanel draft={draft} updateDraft={updateDraft} />
+                <Suspense fallback={null}>
+                  <MemorySettingsPanel
+                    draft={draft}
+                    updateDraft={updateDraft}
+                    refreshKey={memoryRefreshKey}
+                  />
+                </Suspense>
               </SettingsPanel>
             )}
 
@@ -1669,7 +1710,9 @@ export function SettingsModal({ onClose }: Props) {
                 title="Observability"
                 description="Inspect structured traces, token usage, local errors, and replay diagnosis."
               >
-                <ObservabilityPanel />
+                <Suspense fallback={null}>
+                  <ObservabilityPanel refreshKey={observabilityRefreshKey} />
+                </Suspense>
               </SettingsPanel>
             )}
 

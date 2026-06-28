@@ -12,6 +12,8 @@ const {
   normalizeBackendHost,
 } = require('./control-auth')
 const { SECRET_FIELDS, createCredentialVault } = require('./credential-vault')
+const CREDENTIAL_IDS = new Set(Object.keys(SECRET_FIELDS))
+const MAX_IPC_STRING_LENGTH = 20_000
 
 const BACKEND_HOST = normalizeBackendHost(
   runtimeConfig.backendHost,
@@ -244,6 +246,10 @@ function buildContentSecurityPolicy() {
       `img-src 'self' data: blob: ${backendHttp}`,
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'none'",
     ].join('; ')
   }
 
@@ -252,8 +258,12 @@ function buildContentSecurityPolicy() {
     "script-src 'self'",
     `connect-src 'self' ${backendHttp}`,
     `img-src 'self' data: blob: ${backendHttp}`,
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'none'",
   ].join('; ')
 }
 
@@ -326,6 +336,33 @@ function assertTrustedIpcSender(event) {
   }
 }
 
+function assertIpcString(value, name, maxLength = MAX_IPC_STRING_LENGTH) {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw new Error(`IPC request rejected: invalid ${name}`)
+  }
+  return value
+}
+
+function assertOptionalIpcString(value, name, maxLength = MAX_IPC_STRING_LENGTH) {
+  if (value === undefined || value === null || value === '') return ''
+  return assertIpcString(value, name, maxLength)
+}
+
+function assertCredentialId(id) {
+  const value = assertIpcString(id, 'credential id', 80)
+  if (!CREDENTIAL_IDS.has(value)) {
+    throw new Error('IPC request rejected: unsupported credential id')
+  }
+  return value
+}
+
+function assertTheme(value) {
+  if (value !== 'light' && value !== 'dark') {
+    throw new Error('IPC request rejected: invalid theme')
+  }
+  return value
+}
+
 function isExternalOpenableUrl(value) {
   try {
     const url = new URL(value)
@@ -341,6 +378,15 @@ function openExternalUrl(value) {
     console.warn('[main] Failed to open external URL', value, err.message)
   })
   return true
+}
+
+function handleUntrustedNavigation(event, url) {
+  if (isTrustedRendererUrl(url)) return
+  if (openExternalUrl(url)) {
+    event.preventDefault()
+    return
+  }
+  event.preventDefault()
 }
 
 function installMediaPermissionHandler() {
@@ -390,7 +436,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       devTools: isDev && process.env.MONAW_DEVTOOLS === '1',
     },
   })
@@ -410,14 +456,9 @@ function createWindow() {
     return { action: 'deny' }
   })
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (isTrustedRendererUrl(url)) return
-    if (openExternalUrl(url)) {
-      event.preventDefault()
-      return
-    }
-    event.preventDefault()
-  })
+  mainWindow.webContents.on('will-navigate', handleUntrustedNavigation)
+  mainWindow.webContents.on('will-frame-navigate', handleUntrustedNavigation)
+  mainWindow.webContents.on('will-redirect', handleUntrustedNavigation)
 
   mainWindow.on('closed', () => { mainWindow = null })
 }
@@ -545,17 +586,20 @@ ipcMain.handle('credentials:status', async (event) => {
 
 ipcMain.handle('credentials:set', async (event, id, value) => {
   assertTrustedIpcSender(event)
+  const credentialId = assertCredentialId(id)
+  const credentialValue = assertIpcString(value, 'credential value')
   const vault = await getCredentialVault()
-  vault.setCredential(id, value)
-  await updateBackendSettings({ [SECRET_FIELDS[id].backendField]: value })
+  vault.setCredential(credentialId, credentialValue)
+  await updateBackendSettings({ [SECRET_FIELDS[credentialId].backendField]: credentialValue })
   return vault.status()
 })
 
 ipcMain.handle('credentials:delete', async (event, id) => {
   assertTrustedIpcSender(event)
+  const credentialId = assertCredentialId(id)
   const vault = await getCredentialVault()
-  vault.deleteCredential(id)
-  await updateBackendSettings({ [SECRET_FIELDS[id].backendField]: '' })
+  vault.deleteCredential(credentialId)
+  await updateBackendSettings({ [SECRET_FIELDS[credentialId].backendField]: '' })
   return vault.status()
 })
 
@@ -566,14 +610,15 @@ ipcMain.handle('credentials:apply', async (event) => {
 
 ipcMain.handle('theme:set', async (event, theme) => {
   assertTrustedIpcSender(event)
-  applyNativeTheme(theme)
+  applyNativeTheme(assertTheme(theme))
 })
 
 ipcMain.handle('dialog:select-directory', async (event, defaultPath) => {
   assertTrustedIpcSender(event)
+  const safeDefaultPath = assertOptionalIpcString(defaultPath, 'default path', 4096)
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Choose output folder',
-    defaultPath: defaultPath || undefined,
+    defaultPath: safeDefaultPath || undefined,
     properties: ['openDirectory', 'createDirectory'],
   })
   if (result.canceled || !result.filePaths.length) return ''

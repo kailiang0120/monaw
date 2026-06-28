@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -678,6 +679,13 @@ def save_agent_settings(settings_data: AgentSettings, *, settings_path: Path | N
     return settings_data
 
 
+def settings_version(settings_data: AgentSettings) -> str:
+    """Stable optimistic-concurrency token for the persisted settings payload."""
+
+    raw = settings_data.model_dump_json().encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def merge_agent_settings(current: AgentSettings, patch: dict[str, Any]) -> AgentSettings:
     merged = current.model_dump()
 
@@ -774,6 +782,7 @@ def api_settings_payload(base_settings, agent_settings: AgentSettings) -> dict[s
     runtime_settings = build_runtime_namespace(base_settings, agent_settings)
     return {
         **agent_settings.model_dump(),
+        "settings_version": settings_version(agent_settings),
         "available_skills": available_skill_payload(runtime_settings),
         "api_keys": {
             "has_openai_key": bool(base_settings.openai_api_key),

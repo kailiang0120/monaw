@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.agent.llm_client import (
     LLMClient,
+    LLMResponse,
     VisionDescriber,
     build_tool_result_message,
     build_vision_describer,
@@ -20,6 +21,8 @@ from app.agent.llm_client import (
     _openai_reasoning_effort,
     _tools_to_gemini,
 )
+from app.agent.llm_provider_adapters import GeminiProviderAdapter, OpenAICompatibleProviderAdapter
+from app.agent import llm_provider_requests
 from app.agent.harness.tool_protocol import ToolCallResult
 from app.skills.memory.tools import register_tools as register_memory_tools
 
@@ -130,6 +133,60 @@ def test_deepseek_uses_openai_client_with_base_url(monkeypatch):
         "base_url": "https://api.deepseek.com",
     }
     assert client.reasoning_effort == "high"
+
+
+def test_llm_client_public_chat_routes_through_provider_adapter(monkeypatch):
+    class FakeAsyncOpenAI:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeAdapter:
+        def __init__(self):
+            self.calls = []
+
+        async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None, tool_choice=None):
+            self.calls.append((messages, tools, system_prompt, stream_callback, tool_choice))
+            return LLMResponse(content="adapter response")
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+    client = LLMClient(provider="openai", model_name="gpt-test", api_key="openai-key")
+    adapter = FakeAdapter()
+    client.provider_adapter = adapter
+
+    response = asyncio.run(
+        client.chat_with_tools(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+            system_prompt="sys",
+            tool_choice="required",
+        )
+    )
+
+    assert response.content == "adapter response"
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0][2] == "sys"
+    assert adapter.calls[0][4] == "required"
+
+
+def test_llm_client_selects_provider_adapter(monkeypatch):
+    class FakeAsyncOpenAI:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeGeminiClient:
+        def __init__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr("google.genai.Client", FakeGeminiClient)
+
+    openai_client = LLMClient(provider="openai", model_name="gpt-test", api_key="openai-key")
+    deepseek_client = LLMClient(provider="deepseek", model_name="deepseek-test", api_key="deepseek-key")
+    gemini_client = LLMClient(provider="gemini", model_name="gemini-test", api_key="google-key")
+
+    assert isinstance(openai_client.provider_adapter, OpenAICompatibleProviderAdapter)
+    assert isinstance(deepseek_client.provider_adapter, OpenAICompatibleProviderAdapter)
+    assert isinstance(gemini_client.provider_adapter, GeminiProviderAdapter)
 
 
 def test_deepseek_reasoning_effort_maps_to_provider_contract():
@@ -517,6 +574,34 @@ def test_openai_responses_payload_can_require_tool_choice(monkeypatch):
     assert response.finish_reason == "tool_calls"
     assert response.tool_calls[0].tool_name == "final_answer"
     assert response.tool_calls[0].arguments == {"answer": "done"}
+
+
+def test_llm_client_uses_provider_request_builder_for_openai_responses(monkeypatch):
+    captured_builder = {}
+    captured_request = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured_request.update(kwargs)
+            return SimpleNamespace(status="completed", output=[])
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **_kwargs):
+            self.responses = FakeResponses()
+
+    def fake_kwargs(**kwargs):
+        captured_builder.update(kwargs)
+        return {"model": kwargs["model_name"], "input": [{"role": "user", "content": "built"}]}
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(llm_provider_requests, "openai_responses_kwargs", fake_kwargs)
+
+    client = LLMClient(provider="openai", model_name="gpt-test", api_key="openai-key")
+    asyncio.run(client._openai_chat([{"role": "user", "content": "hello"}], [], "sys", None))
+
+    assert captured_builder["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured_builder["system_prompt"] == "sys"
+    assert captured_request["input"] == [{"role": "user", "content": "built"}]
 
 
 def test_openai_responses_payload_requests_reasoning_summary(monkeypatch):

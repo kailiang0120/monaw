@@ -4,10 +4,8 @@ import asyncio
 import base64
 import html
 import inspect
-import ipaddress
 import json
 import re
-import socket
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -16,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
+from app.agent.approval_broker import create_ticket
 from app.agent.run_context import current_interactive
 from app.agent.response_attachments import (
     MAX_GENERATED_SCREENSHOT_DIMENSION_PX,
@@ -24,7 +23,15 @@ from app.agent.response_attachments import (
     get_image_dimensions,
 )
 
-from .manager import _clear_chrome_session_restore_state, configure_browser_use_manager
+from .manager import _clear_chrome_session_restore_state
+from .url_policy import (
+    allowed_domains as _allowed_domains,
+    assert_fetch_host_public as _assert_fetch_host_public,
+    browser_url_policy as _browser_url_policy_impl,
+    fetch_domain_allowed as _fetch_domain_allowed,
+    normalize_fetch_url as _normalize_fetch_url,
+    validate_fetch_final_url as _validate_fetch_final_url,
+)
 
 from .dom_scripts import (
     _ELEMENT_METADATA_SCRIPT,
@@ -49,6 +56,180 @@ def _decode_json_string(raw: Any) -> Any:
         return json.loads(raw) if raw else {}
     except json.JSONDecodeError:
         return raw
+
+
+def _browser_url_policy(manager: Any, raw_url: str, *, action: str) -> tuple[str, dict[str, Any] | None]:
+    return _browser_url_policy_impl(
+        manager,
+        raw_url,
+        action=action,
+        interactive=current_interactive(),
+    )
+
+
+_DOWNLOAD_HINT_EXTENSIONS = {
+    ".7z",
+    ".csv",
+    ".dmg",
+    ".doc",
+    ".docx",
+    ".exe",
+    ".gz",
+    ".iso",
+    ".msi",
+    ".pdf",
+    ".pkg",
+    ".rar",
+    ".tar",
+    ".tgz",
+    ".xls",
+    ".xlsx",
+    ".zip",
+}
+
+
+def _pending_browser_approval(
+    *,
+    tool_name: str,
+    action_type: str,
+    action_description: str,
+    reason: str,
+    reason_code: str,
+    payload_args: dict[str, Any],
+    target_url: str = "",
+) -> str:
+    if not current_interactive():
+        return _json_output(
+            {
+                "status": "blocked",
+                "reason": "Browser file transfer actions require an interactive approval.",
+                "reason_code": "browser_file_transfer_approval_unavailable",
+                "policy_source": "browser_policy",
+            }
+        )
+    input_str = json.dumps(payload_args, ensure_ascii=False, sort_keys=True)
+    ticket = create_ticket(
+        action_type=action_type,
+        tool_name=tool_name,
+        target_path=target_url,
+        risk_level="high",
+        reason=reason,
+        action_description=action_description,
+        payload={"input_str": input_str, "args": payload_args},
+    )
+    return _json_output(
+        {
+            "status": "pending_approval",
+            "ticket_id": ticket.id,
+            "action": action_description,
+            "reason": reason,
+            "reason_code": reason_code,
+            "policy_source": "browser_policy",
+            "target_url": target_url,
+        }
+    )
+
+
+def _looks_like_download_target(meta: dict[str, Any] | None) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    tag = str(meta.get("tag") or "").lower()
+    role = str(meta.get("role") or "").lower()
+    href = str(meta.get("href") or "").strip()
+    download_attr = str(meta.get("download") or "").strip()
+    blob = " ".join(
+        str(meta.get(key) or "")
+        for key in ("text", "aria_label", "name", "id", "download", "href")
+    ).lower()
+    if download_attr:
+        return True
+    if tag == "a" or role == "link":
+        path = urlparse(href).path.lower()
+        if any(path.endswith(ext) for ext in _DOWNLOAD_HINT_EXTENSIONS):
+            return True
+        if "download" in blob or "export" in blob:
+            return True
+    return False
+
+
+def _looks_like_file_input(meta: dict[str, Any] | None) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    return str(meta.get("tag") or "").lower() == "input" and str(meta.get("type") or "").lower() == "file"
+
+
+async def _point_element_metadata(page, x: int, y: int) -> dict[str, Any] | None:
+    try:
+        result = await page.evaluate(
+            """
+            (x, y) => {
+              const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+              const el = document.elementFromPoint(x, y);
+              if (!el) return null;
+              const rect = el.getBoundingClientRect();
+              return JSON.stringify({
+                ref: el.getAttribute('data-agent-ref') || '',
+                tag: (el.tagName || '').toLowerCase(),
+                role: el.getAttribute('role') || '',
+                type: el.getAttribute('type') || '',
+                id: el.getAttribute('id') || '',
+                name: el.getAttribute('name') || '',
+                href: el instanceof HTMLAnchorElement ? (el.href || el.getAttribute('href') || '') : '',
+                download: el.getAttribute('download') || '',
+                aria_label: el.getAttribute('aria-label') || '',
+                text: normalize(el.innerText || el.textContent || ''),
+                x: Math.round(rect.x),
+                y: Math.round(rect.y),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+              });
+            }
+            """,
+            int(x),
+            int(y),
+        )
+    except Exception:
+        return None
+    decoded = _decode_json_string(result)
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _browser_click_payload(
+    *,
+    ref: str,
+    selector: str,
+    text: str,
+    exact_text: bool,
+    x: int | None,
+    y: int | None,
+    button: str,
+    clicks: int,
+    tab_target_id: str,
+    tab_index: int,
+    wait_for_selector: str,
+    wait_for_text: str,
+    wait_for_url_contains: str,
+    expect_new_tab: bool,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "ref": ref,
+        "selector": selector,
+        "text": text,
+        "exact_text": exact_text,
+        "x": x,
+        "y": y,
+        "button": button,
+        "clicks": clicks,
+        "tab_target_id": tab_target_id,
+        "tab_index": tab_index,
+        "wait_for_selector": wait_for_selector,
+        "wait_for_text": wait_for_text,
+        "wait_for_url_contains": wait_for_url_contains,
+        "expect_new_tab": expect_new_tab,
+        "timeout_seconds": timeout_seconds,
+    }
+
 
 
 _FAST_TEXT_INSERT_SCRIPT = r"""
@@ -541,163 +722,6 @@ def _truncate_fetch_content(value: str, max_chars: int) -> tuple[str, bool]:
     if len(value) <= limit:
         return value, False
     return value[:limit], True
-
-
-def _ip_is_blocked_target(ip: ipaddress._BaseAddress) -> bool:
-    """Reject addresses that point at the host itself or internal networks
-    (loopback, link-local incl. cloud-metadata 169.254.169.254, private,
-    reserved, multicast, unspecified)."""
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
-
-
-def _assert_fetch_host_public(host: str) -> None:
-    """Block SSRF: refuse hosts that are, or resolve to, non-public addresses."""
-    cleaned = (host or "").strip().lower().strip("[]")
-    if not cleaned:
-        raise ValueError("URL must include a host.")
-    # IP literal: check directly without a DNS lookup.
-    try:
-        if _ip_is_blocked_target(ipaddress.ip_address(cleaned)):
-            raise ValueError("URL host resolves to a non-public address.")
-        return
-    except ValueError as exc:
-        if "non-public" in str(exc):
-            raise
-    # Hostname: resolve and reject if ANY resolved address is non-public.
-    try:
-        infos = socket.getaddrinfo(cleaned, None, proto=socket.IPPROTO_TCP)
-    except OSError as exc:
-        raise ValueError(f"Could not resolve URL host: {cleaned}") from exc
-    for info in infos:
-        sockaddr = info[4]
-        try:
-            if _ip_is_blocked_target(ipaddress.ip_address(sockaddr[0])):
-                raise ValueError("URL host resolves to a non-public address.")
-        except ValueError as exc:
-            if "non-public" in str(exc):
-                raise
-
-
-def _normalize_fetch_url(raw_url: str) -> str:
-    value = str(raw_url or "").strip()
-    if not value:
-        raise ValueError("URL is required.")
-    parsed = urlparse(value)
-    if not parsed.scheme:
-        value = f"https://{value}"
-        parsed = urlparse(value)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("URL must be an http or https URL.")
-    return value
-
-
-def _fetch_domain_allowed(url: str, allowed_domains: list[str]) -> bool:
-    if not allowed_domains:
-        return True
-    host = (urlparse(url).hostname or "").lower()
-    if not host:
-        return False
-    for raw_domain in allowed_domains:
-        parsed = urlparse(raw_domain if "://" in raw_domain else f"https://{raw_domain}")
-        allowed = (parsed.hostname or raw_domain).lower().lstrip(".")
-        if host == allowed or host.endswith(f".{allowed}"):
-            return True
-    return False
-
-
-def _validate_fetch_final_url(
-    requested_url: str,
-    final_url: str,
-    allowed_domains: list[str],
-) -> dict[str, Any] | None:
-    try:
-        normalized_final = _normalize_fetch_url(final_url or requested_url)
-    except ValueError as exc:
-        return {
-            "status": "error",
-            "reason_code": "invalid_final_url",
-            "url": requested_url,
-            "final_url": str(final_url or ""),
-            "error": str(exc),
-        }
-    if not _fetch_domain_allowed(normalized_final, allowed_domains):
-        return {
-            "status": "error",
-            "reason_code": "redirect_domain_not_allowed",
-            "url": requested_url,
-            "final_url": normalized_final,
-            "allowed_domains": allowed_domains,
-            "error": "Redirect target host is not in Settings -> Browser allowed domains.",
-        }
-    try:
-        _assert_fetch_host_public(urlparse(normalized_final).hostname or "")
-    except ValueError as exc:
-        return {
-            "status": "error",
-            "reason_code": "blocked_redirect_host",
-            "url": requested_url,
-            "final_url": normalized_final,
-            "error": str(exc),
-        }
-    return None
-
-
-def _allowed_domains(manager: Any) -> list[str]:
-    return [
-        str(item).strip().lower()
-        for item in (getattr(manager, "config", {}) or {}).get("allowed_domains", [])
-        if str(item).strip()
-    ]
-
-
-def _browser_url_policy(manager: Any, raw_url: str, *, action: str) -> tuple[str, dict[str, Any] | None]:
-    try:
-        normalized_url = _normalize_fetch_url(raw_url)
-    except ValueError as exc:
-        return "", {
-            "status": "error",
-            "reason_code": "invalid_url",
-            "url": str(raw_url or ""),
-            "error": str(exc),
-        }
-    allowed_domains = _allowed_domains(manager)
-    if not _fetch_domain_allowed(normalized_url, allowed_domains):
-        return normalized_url, {
-            "status": "error",
-            "reason_code": "domain_not_allowed",
-            "url": normalized_url,
-            "allowed_domains": allowed_domains,
-            "error": "URL host is not in Settings -> Browser allowed domains.",
-        }
-    if not current_interactive() and not allowed_domains:
-        return normalized_url, {
-            "status": "blocked",
-            "reason_code": "non_interactive_domain_policy_required",
-            "url": normalized_url,
-            "action": action,
-            "error": "Non-interactive browser network actions require an explicit allowed domain policy.",
-        }
-    if not current_interactive():
-        try:
-            _assert_fetch_host_public(urlparse(normalized_url).hostname or "")
-        except ValueError as exc:
-            return normalized_url, {
-                "status": "error",
-                "reason_code": "blocked_host",
-                "url": normalized_url,
-                "error": str(exc),
-            }
-    return normalized_url, None
 
 
 def _first_fetch_attr(obj: Any, names: tuple[str, ...], default: Any = "") -> Any:
@@ -1662,6 +1686,7 @@ async def browser_click(
     wait_for_url_contains: str = "",
     expect_new_tab: bool = False,
     timeout_seconds: float = 10,
+    _bypass_gate: bool = False,
 ) -> str:
     page = await _current_page(
         manager,
@@ -1674,6 +1699,59 @@ async def browser_click(
     target_after: dict[str, Any] | None = None
 
     if x is not None and y is not None:
+        if not _bypass_gate:
+            point_meta = await _point_element_metadata(page, int(x), int(y))
+            if _looks_like_file_input(point_meta):
+                return _pending_browser_approval(
+                    tool_name="browser_click",
+                    action_type="browser_file_upload",
+                    action_description="Open a browser file chooser",
+                    reason="Clicking this browser target may open a local file chooser for upload.",
+                    reason_code="browser_file_chooser_approval_required",
+                    payload_args=_browser_click_payload(
+                        ref=ref,
+                        selector=selector,
+                        text=text,
+                        exact_text=exact_text,
+                        x=x,
+                        y=y,
+                        button=button,
+                        clicks=clicks,
+                        tab_target_id=tab_target_id,
+                        tab_index=tab_index,
+                        wait_for_selector=wait_for_selector,
+                        wait_for_text=wait_for_text,
+                        wait_for_url_contains=wait_for_url_contains,
+                        expect_new_tab=expect_new_tab,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                )
+            if _looks_like_download_target(point_meta):
+                return _pending_browser_approval(
+                    tool_name="browser_click",
+                    action_type="browser_download",
+                    action_description="Click a browser download target",
+                    reason="Clicking this browser target may download a file.",
+                    reason_code="browser_download_approval_required",
+                    payload_args=_browser_click_payload(
+                        ref=ref,
+                        selector=selector,
+                        text=text,
+                        exact_text=exact_text,
+                        x=x,
+                        y=y,
+                        button=button,
+                        clicks=clicks,
+                        tab_target_id=tab_target_id,
+                        tab_index=tab_index,
+                        wait_for_selector=wait_for_selector,
+                        wait_for_text=wait_for_text,
+                        wait_for_url_contains=wait_for_url_contains,
+                        expect_new_tab=expect_new_tab,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    target_url=str((point_meta or {}).get("href") or ""),
+                )
         mouse = await _page_mouse(page)
         await mouse.click(int(x), int(y), button=button, click_count=max(1, clicks))
         clicked.update({"x": int(x), "y": int(y), "button": button, "clicks": max(1, clicks)})
@@ -1687,6 +1765,58 @@ async def browser_click(
             exact_text=exact_text,
         )
         element_meta = await _element_metadata(page, resolved_selector)
+        if not _bypass_gate:
+            if _looks_like_file_input(element_meta):
+                return _pending_browser_approval(
+                    tool_name="browser_click",
+                    action_type="browser_file_upload",
+                    action_description="Open a browser file chooser",
+                    reason="Clicking this browser target may open a local file chooser for upload.",
+                    reason_code="browser_file_chooser_approval_required",
+                    payload_args=_browser_click_payload(
+                        ref=ref,
+                        selector=selector,
+                        text=text,
+                        exact_text=exact_text,
+                        x=x,
+                        y=y,
+                        button=button,
+                        clicks=clicks,
+                        tab_target_id=tab_target_id,
+                        tab_index=tab_index,
+                        wait_for_selector=wait_for_selector,
+                        wait_for_text=wait_for_text,
+                        wait_for_url_contains=wait_for_url_contains,
+                        expect_new_tab=expect_new_tab,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                )
+            if _looks_like_download_target(element_meta):
+                return _pending_browser_approval(
+                    tool_name="browser_click",
+                    action_type="browser_download",
+                    action_description="Click a browser download target",
+                    reason="Clicking this browser target may download a file.",
+                    reason_code="browser_download_approval_required",
+                    payload_args=_browser_click_payload(
+                        ref=ref,
+                        selector=selector,
+                        text=text,
+                        exact_text=exact_text,
+                        x=x,
+                        y=y,
+                        button=button,
+                        clicks=clicks,
+                        tab_target_id=tab_target_id,
+                        tab_index=tab_index,
+                        wait_for_selector=wait_for_selector,
+                        wait_for_text=wait_for_text,
+                        wait_for_url_contains=wait_for_url_contains,
+                        expect_new_tab=expect_new_tab,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    target_url=str((element_meta or {}).get("href") or ""),
+                )
         await element.click(button=button, click_count=max(1, clicks))
         clicked.update(
             {
@@ -1746,6 +1876,7 @@ async def browser_type(
     verify_value: bool = True,
     wait_for_text: str = "",
     timeout_seconds: float = 10,
+    _bypass_gate: bool = False,
 ) -> str:
     page = await _current_page(
         manager,
@@ -1770,6 +1901,28 @@ async def browser_type(
             prefer_editable=True,
         )
     target_before = await _element_metadata(page, resolved_selector)
+    if not _bypass_gate and _looks_like_file_input(target_before):
+        return _pending_browser_approval(
+            tool_name="browser_type",
+            action_type="browser_file_upload",
+            action_description="Interact with a browser file upload field",
+            reason="Typing into this browser target may interact with a local file upload field.",
+            reason_code="browser_file_chooser_approval_required",
+            payload_args={
+                "text": text,
+                "ref": ref,
+                "selector": selector,
+                "target_text": target_text,
+                "exact_text": exact_text,
+                "submit": submit,
+                "clear": clear,
+                "tab_target_id": tab_target_id,
+                "tab_index": tab_index,
+                "verify_value": verify_value,
+                "wait_for_text": wait_for_text,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
     input_method = await _fast_insert_text(page, element, resolved_selector, text, clear)
     if submit:
         await page.press("Enter")
@@ -2190,6 +2343,8 @@ async def browser_fill_form(
             )
         )
         results.append(result)
+        if result.get("status") == "pending_approval":
+            return _json_output(result)
         if result.get("status") != "ok":
             return _json_output({"status": "error", "filled": results, "error": "A form field failed verification."})
     if submit_ref or submit_selector:
@@ -2204,15 +2359,27 @@ async def browser_fill_form(
                 tab_index=tab_index,
             )
         )
+        if submit_result.get("status") == "pending_approval":
+            return _json_output(submit_result)
         return _json_output({"status": submit_result.get("status", "ok"), "filled": results, "submit": submit_result})
     return _json_output({"status": "ok", "filled": results})
 
 
-async def browser_downloads(manager, action: str = "list") -> str:
+async def browser_downloads(manager, action: str = "list", *, _bypass_gate: bool = False) -> str:
     downloads_dir = Path(manager.config["downloads_dir"])
     downloads_dir.mkdir(parents=True, exist_ok=True)
     normalized = action.strip().lower()
     if normalized == "clear":
+        if not _bypass_gate:
+            return _pending_browser_approval(
+                tool_name="browser_downloads",
+                action_type="browser_downloads_clear",
+                action_description="Clear managed browser downloads",
+                reason="Clearing browser downloads removes files from the managed downloads directory.",
+                reason_code="browser_downloads_clear_approval_required",
+                payload_args={"action": normalized},
+                target_url=str(downloads_dir),
+            )
         removed = 0
         for item in downloads_dir.iterdir():
             if item.is_file():
@@ -2443,668 +2610,6 @@ async def browser_evaluate(
 
 
 def register_tools(registry, settings) -> None:
-    manager = configure_browser_use_manager(settings)
+    from .registration import register_browser_tools
 
-    registry.extend(
-        [
-            {
-                "name": "browser_session",
-                "description": "Inspect, reset, stop, or switch the built-in browser-use session between managed and system Chrome modes.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["status", "doctor", "list_profiles", "stop", "reset", "use_managed", "use_system"],
-                            "default": "status",
-                        },
-                        "mode": {
-                            "type": "string",
-                            "enum": ["auto", "managed", "system"],
-                            "default": "auto",
-                        },
-                        "profile_directory": {"type": "string", "default": ""},
-                    },
-                    "required": [],
-                },
-                "callable": lambda action="status", mode="auto", profile_directory="": browser_session(
-                    manager,
-                    action=action,
-                    mode=mode,
-                    profile_directory=profile_directory,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_open",
-                "description": "Ensure a browser session exists, reusing an already-open matching tab before navigating the current tab unless reuse_existing is false.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "default": ""},
-                        "mode": {"type": "string", "enum": ["auto", "managed", "system"], "default": "auto"},
-                        "profile_directory": {"type": "string", "default": ""},
-                        "new_tab": {"type": "boolean", "default": False},
-                        "reuse_existing": {"type": "boolean", "default": True},
-                        "wait_until": {"type": "string", "enum": ["domcontentloaded", "networkidle", "load"], "default": "domcontentloaded"},
-                    },
-                    "required": [],
-                },
-                "callable": lambda url="", mode="auto", profile_directory="", new_tab=False, reuse_existing=True, wait_until="domcontentloaded": browser_open(
-                    manager,
-                    url=url,
-                    mode=mode,
-                    profile_directory=profile_directory,
-                    new_tab=new_tab,
-                    reuse_existing=reuse_existing,
-                    wait_until=wait_until,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_navigate",
-                "description": "Navigate the current browser tab to a new URL.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string"},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                        "wait_until": {"type": "string", "enum": ["domcontentloaded", "networkidle", "load"], "default": "domcontentloaded"},
-                    },
-                    "required": ["url"],
-                },
-                "callable": lambda url, tab_target_id="", tab_index=-1, wait_until="domcontentloaded": browser_navigate(
-                    manager,
-                    url=url,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                    wait_until=wait_until,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_back",
-                "description": "Go back in the current browser tab.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-                "callable": lambda: browser_back(manager),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_forward",
-                "description": "Go forward in the current browser tab.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-                "callable": lambda: browser_forward(manager),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_reload",
-                "description": "Reload the current browser tab.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-                "callable": lambda: browser_reload(manager),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_tabs",
-                "description": "List, create, switch, or close browser tabs in the current browser-use session.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["list", "new", "switch", "close"], "default": "list"},
-                        "url": {"type": "string", "default": ""},
-                        "target_id": {"type": "string", "default": ""},
-                        "index": {"type": "integer", "default": -1},
-                        "tab_index": {"type": "integer", "default": -1},
-                        "mode": {"type": "string", "enum": ["auto", "managed", "system"], "default": "auto"},
-                    },
-                    "required": [],
-                },
-                "callable": lambda action="list", url="", target_id="", index=-1, tab_index=-1, mode="auto": browser_tabs(
-                    manager,
-                    action=action,
-                    url=url,
-                    target_id=target_id,
-                    index=index,
-                    tab_index=tab_index,
-                    mode=mode,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_snapshot",
-                "description": "Capture the current browser tab state and assign stable refs to visible interactive elements.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "include_screenshot": {"type": "boolean", "default": False},
-                        "limit": {"type": "integer", "default": 40},
-                        "mode": {"type": "string", "enum": ["auto", "managed", "system"], "default": "auto"},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                        "engine": {"type": "string", "enum": ["auto", "enhanced", "legacy"], "default": "auto"},
-                        "include_tree": {"type": "boolean", "default": False},
-                        "include_scroll_info": {"type": "boolean", "default": True},
-                        "include_hidden_hints": {"type": "boolean", "default": True},
-                    },
-                    "required": [],
-                },
-                "callable": lambda include_screenshot=False, limit=40, mode="auto", tab_target_id="", tab_index=-1, engine="auto", include_tree=False, include_scroll_info=True, include_hidden_hints=True: browser_snapshot(
-                    manager,
-                    include_screenshot=include_screenshot,
-                    limit=limit,
-                    mode=mode,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                    engine=engine,
-                    include_tree=include_tree,
-                    include_scroll_info=include_scroll_info,
-                    include_hidden_hints=include_hidden_hints,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_click",
-                "description": "Click a browser element by ref, selector, visible text, or absolute page coordinates.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "ref": {"type": "string", "default": ""},
-                        "selector": {"type": "string", "default": ""},
-                        "text": {"type": "string", "default": ""},
-                        "exact_text": {"type": "boolean", "default": False},
-                        "x": {"type": "integer"},
-                        "y": {"type": "integer"},
-                        "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
-                        "clicks": {"type": "integer", "default": 1},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                        "wait_for_selector": {"type": "string", "default": ""},
-                        "wait_for_text": {"type": "string", "default": ""},
-                        "wait_for_url_contains": {"type": "string", "default": ""},
-                        "expect_new_tab": {"type": "boolean", "default": False},
-                        "timeout_seconds": {"type": "number", "default": 10},
-                    },
-                    "required": [],
-                },
-                "callable": lambda ref="", selector="", text="", exact_text=False, x=None, y=None, button="left", clicks=1, tab_target_id="", tab_index=-1, wait_for_selector="", wait_for_text="", wait_for_url_contains="", expect_new_tab=False, timeout_seconds=10: browser_click(
-                    manager,
-                    ref=ref,
-                    selector=selector,
-                    text=text,
-                    exact_text=exact_text,
-                    x=x,
-                    y=y,
-                    button=button,
-                    clicks=clicks,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                    wait_for_selector=wait_for_selector,
-                    wait_for_text=wait_for_text,
-                    wait_for_url_contains=wait_for_url_contains,
-                    expect_new_tab=expect_new_tab,
-                    timeout_seconds=timeout_seconds,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_type",
-                "description": "Fast-fill a browser input or editable element by stable ref, selector, or target_text. Uses direct DOM value insertion for long text and returns target metadata for verification.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "ref": {"type": "string", "default": ""},
-                        "selector": {"type": "string", "default": ""},
-                        "target_text": {"type": "string", "default": ""},
-                        "exact_text": {"type": "boolean", "default": False},
-                        "submit": {"type": "boolean", "default": False},
-                        "clear": {"type": "boolean", "default": True},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                        "verify_value": {"type": "boolean", "default": True},
-                        "wait_for_text": {"type": "string", "default": ""},
-                        "timeout_seconds": {"type": "number", "default": 10},
-                    },
-                    "required": ["text"],
-                },
-                "callable": lambda text, ref="", selector="", target_text="", exact_text=False, submit=False, clear=True, tab_target_id="", tab_index=-1, verify_value=True, wait_for_text="", timeout_seconds=10: browser_type(
-                    manager,
-                    text=text,
-                    ref=ref,
-                    selector=selector,
-                    target_text=target_text,
-                    exact_text=exact_text,
-                    submit=submit,
-                    clear=clear,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                    verify_value=verify_value,
-                    wait_for_text=wait_for_text,
-                    timeout_seconds=timeout_seconds,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_press",
-                "description": "Send a key press to the active browser tab.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "key": {"type": "string"},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": ["key"],
-                },
-                "callable": lambda key, tab_target_id="", tab_index=-1: browser_press(
-                    manager,
-                    key=key,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_select_option",
-                "description": "Select one or more option values in a browser select element.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "values": {"type": "array", "items": {"type": "string"}},
-                        "ref": {"type": "string", "default": ""},
-                        "selector": {"type": "string", "default": ""},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": ["values"],
-                },
-                "callable": lambda values, ref="", selector="", tab_target_id="", tab_index=-1: browser_select_option(
-                    manager,
-                    values=values,
-                    ref=ref,
-                    selector=selector,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_scroll",
-                "description": "Scroll the active browser tab by pixel deltas.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "delta_x": {"type": "integer", "default": 0},
-                        "delta_y": {"type": "integer", "default": 800},
-                        "x": {"type": "integer", "default": 0},
-                        "y": {"type": "integer", "default": 0},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": [],
-                },
-                "callable": lambda delta_x=0, delta_y=800, x=0, y=0, tab_target_id="", tab_index=-1: browser_scroll(
-                    manager,
-                    delta_x=delta_x,
-                    delta_y=delta_y,
-                    x=x,
-                    y=y,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_wait",
-                "description": "Wait for time to pass or for a browser condition such as selector, visible text, or URL match.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "seconds": {"type": "number", "default": 0},
-                        "selector": {"type": "string", "default": ""},
-                        "text": {"type": "string", "default": ""},
-                        "url_contains": {"type": "string", "default": ""},
-                        "timeout_seconds": {"type": "number", "default": 10},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": [],
-                },
-                "callable": lambda seconds=0, selector="", text="", url_contains="", timeout_seconds=10, tab_target_id="", tab_index=-1: browser_wait(
-                    manager,
-                    seconds=seconds,
-                    selector=selector,
-                    text=text,
-                    url_contains=url_contains,
-                    timeout_seconds=timeout_seconds,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_find",
-                "description": "Find visible browser elements by text, label, or role and return compact refs/metadata.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "default": ""},
-                        "role": {"type": "string", "default": ""},
-                        "label": {"type": "string", "default": ""},
-                        "limit": {"type": "integer", "default": 20},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": [],
-                },
-                "callable": lambda text="", role="", label="", limit=20, tab_target_id="", tab_index=-1: browser_find(
-                    manager,
-                    text=text,
-                    role=role,
-                    label=label,
-                    limit=limit,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-                "metadata": {"observation": True, "mutates_state": False, "risk_level": "low"},
-            },
-            {
-                "name": "browser_get_element",
-                "description": "Inspect one browser_snapshot ref and return cached enhanced DOM metadata plus current element state.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "ref": {"type": "string"},
-                        "fields": {"type": "array", "items": {"type": "string"}, "default": []},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": ["ref"],
-                },
-                "callable": lambda ref, fields=None, tab_target_id="", tab_index=-1: browser_get_element(
-                    manager,
-                    ref=ref,
-                    fields=fields,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-                "metadata": {"observation": True, "mutates_state": False, "risk_level": "low"},
-            },
-            {
-                "name": "browser_fetch",
-                "description": (
-                    "Read-only fetch and extract a URL with Scrapling. Use for known URLs before opening a browser; "
-                    "supports HTTP, dynamic rendered, and explicit stealth modes."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["auto", "http", "dynamic", "stealth"], "default": "auto"},
-                        "selector": {"type": "string", "default": ""},
-                        "output": {"type": "string", "enum": ["text", "markdown", "html", "links", "metadata"], "default": "text"},
-                        "max_chars": {"type": "integer", "default": 20000},
-                        "wait_selector": {"type": "string", "default": ""},
-                        "network_idle": {"type": "boolean", "default": False},
-                        "timeout_ms": {"type": "integer", "default": 30000},
-                    },
-                    "required": ["url"],
-                },
-                "callable": lambda url, mode="auto", selector="", output="text", max_chars=20000, wait_selector="", network_idle=False, timeout_ms=30000: browser_fetch(
-                    manager,
-                    url=url,
-                    mode=mode,
-                    selector=selector,
-                    output=output,
-                    max_chars=max_chars,
-                    wait_selector=wait_selector,
-                    network_idle=network_idle,
-                    timeout_ms=timeout_ms,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-                "metadata": {
-                    "observation": True,
-                    "mutates_state": False,
-                    "risk_level": "low",
-                    "parallel_safe": True,
-                    "resource_locks": [],
-                    "repeat_safe": True,
-                },
-            },
-            {
-                "name": "browser_extract_text",
-                "description": "Extract visible text from the page or a CSS selector.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "selector": {"type": "string", "default": ""},
-                        "max_chars": {"type": "integer", "default": 20000},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": [],
-                },
-                "callable": lambda selector="", max_chars=20000, tab_target_id="", tab_index=-1: browser_extract_text(
-                    manager,
-                    selector=selector,
-                    max_chars=max_chars,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-                "metadata": {"observation": True, "mutates_state": False, "risk_level": "low"},
-            },
-            {
-                "name": "browser_fill_form",
-                "description": "Fill multiple browser fields by refs/selectors and optionally click a submit control.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "fields": {"type": "array", "items": {"type": "object"}},
-                        "submit_ref": {"type": "string", "default": ""},
-                        "submit_selector": {"type": "string", "default": ""},
-                        "wait_for_text": {"type": "string", "default": ""},
-                        "timeout_seconds": {"type": "number", "default": 10},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": ["fields"],
-                },
-                "callable": lambda fields, submit_ref="", submit_selector="", wait_for_text="", timeout_seconds=10, tab_target_id="", tab_index=-1: browser_fill_form(
-                    manager,
-                    fields=fields,
-                    submit_ref=submit_ref,
-                    submit_selector=submit_selector,
-                    wait_for_text=wait_for_text,
-                    timeout_seconds=timeout_seconds,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_downloads",
-                "description": "List or clear files in the managed browser downloads directory.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"action": {"type": "string", "enum": ["list", "clear"], "default": "list"}},
-                    "required": [],
-                },
-                "callable": lambda action="list": browser_downloads(manager, action=action),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_console",
-                "description": "Read collected browser console diagnostics when available.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-                "callable": lambda: browser_console(manager),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_network_summary",
-                "description": "Summarize recent browser resource timing entries for the active tab.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "default": 50},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": [],
-                },
-                "callable": lambda limit=50, tab_target_id="", tab_index=-1: browser_network_summary(
-                    manager,
-                    limit=limit,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_screenshot",
-                "description": "Capture a screenshot of the current browser tab or a specific element ref/selector.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "ref": {"type": "string", "default": ""},
-                        "selector": {"type": "string", "default": ""},
-                        "format": {"type": "string", "enum": ["png", "jpeg", "webp"], "default": "png"},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": [],
-                },
-                "callable": lambda ref="", selector="", format="png", tab_target_id="", tab_index=-1: browser_screenshot(
-                    manager,
-                    ref=ref,
-                    selector=selector,
-                    format=format,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_full_page_screenshot",
-                "description": (
-                    "Capture a full-page browser screenshot. Optionally navigates to a URL first, "
-                    "applies stealth-oriented init/runtime scripts, removes common fixed banners and popups, "
-                    "and reports third-party archive/proxy fallbacks when the page remains blocked."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "default": ""},
-                        "format": {"type": "string", "enum": ["png", "jpeg", "webp"], "default": "png"},
-                        "mode": {"type": "string", "enum": ["auto", "managed", "system"], "default": "auto"},
-                        "profile_directory": {"type": "string", "default": ""},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                        "stealth": {"type": "boolean", "default": True},
-                        "declutter": {"type": "boolean", "default": True},
-                        "remove_fixed": {"type": "boolean", "default": True},
-                        "click_close": {"type": "boolean", "default": True},
-                        "fallback_proxy": {
-                            "type": "string",
-                            "enum": ["none", "suggest", "archive_is", "smry_ai"],
-                            "default": "suggest",
-                            "description": (
-                                "Use 'suggest' to return fallback URLs. Use archive_is or smry_ai only when "
-                                "sending the current URL to that third-party proxy is acceptable."
-                            ),
-                        },
-                    },
-                    "required": [],
-                },
-                "callable": lambda url="", format="png", mode="auto", profile_directory="", tab_target_id="", tab_index=-1, stealth=True, declutter=True, remove_fixed=True, click_close=True, fallback_proxy="suggest": browser_full_page_screenshot(
-                    manager,
-                    url=url,
-                    format=format,
-                    mode=mode,
-                    profile_directory=profile_directory,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                    stealth=stealth,
-                    declutter=declutter,
-                    remove_fixed=remove_fixed,
-                    click_close=click_close,
-                    fallback_proxy=fallback_proxy,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-            {
-                "name": "browser_evaluate",
-                "description": "Run JavaScript in the active browser tab. The script must be an arrow function like `(args) => ...`.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "script": {"type": "string"},
-                        "args": {"type": "array", "items": {}},
-                        "tab_target_id": {"type": "string", "default": ""},
-                        "tab_index": {"type": "integer", "default": -1},
-                    },
-                    "required": ["script"],
-                },
-                "callable": lambda script, args=None, tab_target_id="", tab_index=-1: browser_evaluate(
-                    manager,
-                    script=script,
-                    args=args,
-                    tab_target_id=tab_target_id,
-                    tab_index=tab_index,
-                ),
-                "domain": "browser",
-                "execution_mode": "async",
-                "affinity_group": "browser-use",
-            },
-        ]
-    )
+    register_browser_tools(registry, settings)

@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, Field
 
 from app.agent.database import get_db
+from app.agent.ui_events import publish_ui_event
 from app.agent.run_context import (
     current_control_session_id,
     current_conversation_id,
@@ -146,6 +147,17 @@ def create_grant_ticket(
                 _pending.pop(existing.id, None)
         _pending[ticket.id] = ticket
         _all[ticket.id] = ticket
+    publish_ui_event(
+        "access_grant.created",
+        {
+            "ticket_id": ticket.id,
+            "conversation_id": ticket.conversation_id,
+            "target_type": ticket.target_type,
+            "target_identifier": ticket.target_identifier,
+            "display_name": ticket.display_name,
+            "action_context": ticket.action_context,
+        },
+    )
     return ticket
 
 
@@ -254,6 +266,70 @@ def check_session_grant(target_type: str, identifier: str) -> bool:
 def clear_session_grants() -> None:
     """Clear all session grants (called on app restart)."""
     get_db().clear_session_grants()
+
+
+def clear_all_grants() -> dict[str, int]:
+    """Clear transient access-grant tickets, resume state, and DB session grants."""
+    with _state_lock:
+        counts = {
+            "access_grant_tickets": len(_all),
+            "pending_access_grants": len(_pending),
+            "access_grant_resume_events": len(_resume_events),
+        }
+        _pending.clear()
+        _all.clear()
+        _resume_events.clear()
+        _resume_decisions.clear()
+    get_db().clear_session_grants()
+    publish_ui_event("access_grant.deleted", {"all": True})
+    return counts
+
+
+def enforce_retention(max_age_days: int = 30, max_items: int = 1000) -> dict[str, int]:
+    """Bound resolved in-memory grant history by age and count."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days)))
+
+    def _ticket_time(ticket: AccessGrantTicket) -> datetime:
+        for value in (ticket.resolved_at, ticket.created_at):
+            try:
+                parsed = datetime.fromisoformat(value)
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        return datetime.now(timezone.utc)
+
+    with _state_lock:
+        original_count = len(_all)
+        retained = {
+            ticket_id: ticket
+            for ticket_id, ticket in _all.items()
+            if ticket.status == "pending" or _ticket_time(ticket) >= cutoff
+        }
+        resolved = [
+            ticket
+            for ticket in retained.values()
+            if ticket.status != "pending"
+        ]
+        overflow = max(0, len(resolved) - max(0, int(max_items)))
+        if overflow:
+            drop_ids = {
+                ticket.id
+                for ticket in sorted(resolved, key=_ticket_time)[:overflow]
+            }
+            retained = {
+                ticket_id: ticket
+                for ticket_id, ticket in retained.items()
+                if ticket_id not in drop_ids
+            }
+        _all.clear()
+        _all.update(retained)
+        _pending.clear()
+        _pending.update({
+            ticket_id: ticket
+            for ticket_id, ticket in _all.items()
+            if ticket.status == "pending"
+        })
+    return {"access_grants_removed": max(0, original_count - len(_all))}
 
 
 def register_pending_resume(ticket_id: str) -> asyncio.Event:

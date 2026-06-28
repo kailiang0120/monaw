@@ -854,7 +854,23 @@ def test_prepare_telegram_message_input_downloads_photo_and_document(monkeypatch
                 return TelegramFile({"photo-large": b"jpg", "doc-1": b"pdf"}[file_id])
 
         monkeypatch.setattr(telegram_bridge, "runtime_path", lambda *parts: tmp_dir.joinpath(*parts))
-        monkeypatch.setattr(telegram_bridge, "register_attachment_path", lambda _id, _path: None)
+        def fake_register(attachment_id, path, **kwargs):
+            return SimpleNamespace(
+                id=attachment_id,
+                path=str(path),
+                name=Path(path).name,
+                mime_type=kwargs.get("mime_type") or "application/octet-stream",
+                size=Path(path).stat().st_size,
+                width=kwargs.get("width"),
+                height=kwargs.get("height"),
+                control_session_id=kwargs.get("control_session_id", ""),
+                principal_id=kwargs.get("principal_id", ""),
+                conversation_id=kwargs.get("conversation_id", ""),
+                created_at=0.0,
+                expires_at=9999999999.0,
+            )
+
+        monkeypatch.setattr(telegram_bridge, "register_attachment_path", fake_register)
 
         message = SimpleNamespace(
             text="",
@@ -881,6 +897,8 @@ def test_prepare_telegram_message_input_downloads_photo_and_document(monkeypatch
 
         assert prepared.text.startswith("Please inspect these")
         assert "Uploaded file(s):" in prepared.text
+        assert "attachment://" in prepared.text
+        assert str(tmp_dir) not in prepared.text
         assert [attachment["mime_type"] for attachment in prepared.attachments] == [
             "image/jpeg",
             "application/pdf",

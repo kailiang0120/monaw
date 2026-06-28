@@ -3,11 +3,12 @@ import type { AccessGrantDecision, AccessGrantTicket } from './types'
 
 export async function fetchPendingAccessGrants(
   conversationId?: string,
+  limit = 50,
+  offset = 0,
 ): Promise<AccessGrantTicket[]> {
-  const qs = conversationId
-    ? `?conversation_id=${encodeURIComponent(conversationId)}`
-    : ''
-  const res = await apiFetch(`${BASE}/api/access-grants/pending${qs}`)
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (conversationId) params.set('conversation_id', conversationId)
+  const res = await apiFetch(`${BASE}/api/access-grants/pending?${params}`)
   if (!res.ok) throw new Error('Failed to fetch pending access grants')
   return res.json()
 }

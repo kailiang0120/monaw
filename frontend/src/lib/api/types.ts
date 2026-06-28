@@ -4,6 +4,26 @@ export interface Conversation {
   created_at: string
 }
 
+export interface OkResponse {
+  ok: boolean
+}
+
+export interface ChatJobCreateResponse {
+  job_id: string
+  conversation_id: string
+}
+
+export interface ChatJob {
+  job_id: string
+  conversation_id: string
+  status: string
+  started_at: string
+  workflow_engine: string
+  active_graph_node: string
+  checkpoint_status: string
+  last_resume_reason: string
+}
+
 export type ScheduleKind = 'cron' | 'interval' | 'once'
 export type ScheduledTaskOverlapPolicy = 'skip' | 'queue' | 'cancel_previous'
 
@@ -100,6 +120,8 @@ export interface UploadedAttachment {
   size: number
   width?: number
   height?: number
+  conversation_id?: string
+  expires_at?: number | null
 }
 
 export interface SavedMessage {
@@ -352,6 +374,9 @@ export interface ObservabilitySummary {
   top_error_reasons: Array<{ reason: string; count: number }>
   top_failing_tools: Array<{ tool_name: string; count: number }>
   model_usage: Array<{ model: string; provider: string; runs: number; tokens: number }>
+  storage_metrics: Record<string, unknown>
+  runtime_metrics: Record<string, unknown>
+  field_classification: Record<string, unknown>
 }
 
 export interface ObservabilityRun {
@@ -465,6 +490,13 @@ export interface ObservabilityDebugBundle {
   filename: string
   run_id: string
   size_bytes: number
+  encrypted: boolean
+}
+
+export interface DataDeletionResult {
+  ok: boolean
+  deleted: Record<string, number>
+  deleted_at: string
 }
 
 export type MemoryCategory = 'preference' | 'behavior' | 'fact' | 'workflow' | 'project' | 'reflection'
@@ -726,6 +758,7 @@ export interface AgentSettings {
     user_identity: string
     communication_style: string
   }
+  settings_version: string
   available_skills: SkillDescriptor[]
   api_keys: {
     has_openai_key: boolean
@@ -774,6 +807,7 @@ export interface WorkspaceInstructions {
 }
 
 export interface SettingsUpdatePayload {
+  expected_settings_version?: string
   llm?: AgentSettings['llm']
   speech_to_text?: AgentSettings['speech_to_text']
   mcp?: AgentSettings['mcp']
