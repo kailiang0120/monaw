@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import BadRequest
 
+from app.agent import response_attachments as attachments_module
 from app.agent.llm_constants import DEEPSEEK_CHAT_MODELS, OPENAI_CHAT_MODELS
 from app.agent.response_attachments import collect_response_attachments, resolve_attachment_path
 from app.agent.speech_to_text import (
@@ -232,7 +233,8 @@ def test_simplify_telegram_text_removes_markdown_formatting():
     assert "](" not in text
 
 
-def test_telegram_agent_bridge_returns_simplified_reply_but_keeps_attachment_detection():
+def test_telegram_agent_bridge_returns_simplified_reply_but_keeps_attachment_detection(monkeypatch):
+    monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
     tmp_dir = _workspace_tmp_dir("telegram-plain-reply")
     try:
         output_path = tmp_dir / "report.md"
@@ -260,7 +262,8 @@ def test_telegram_agent_bridge_returns_simplified_reply_but_keeps_attachment_det
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def test_telegram_agent_bridge_reuses_chat_session():
+def test_telegram_agent_bridge_reuses_chat_session(monkeypatch):
+    monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
     tmp_dir = _workspace_tmp_dir("telegram-agent-bridge")
     try:
         calls = []
@@ -770,7 +773,8 @@ def test_telegram_permission_callback_resumes_access_grant(monkeypatch):
     assert any(call[0] == "edit" and "Granted session for ticket grant-1" in call[1] for call in calls)
 
 
-def test_collect_response_attachments_from_tool_output():
+def test_collect_response_attachments_from_tool_output(monkeypatch):
+    monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
     tmp_dir = _workspace_tmp_dir("telegram-attachments")
     try:
         image_path = tmp_dir / "result image.png"

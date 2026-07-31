@@ -1180,9 +1180,3 @@ register_executor("file_append", _resume_file_append)
 register_executor("create_file", _resume_create_file)
 register_executor("file_patch", _resume_file_patch)
 
-
-
-
-
-
-

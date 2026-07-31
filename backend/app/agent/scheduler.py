@@ -537,4 +537,3 @@ class ScheduledTaskService:
             return run_at.astimezone(timezone.utc)
 
         return None
-

@@ -24,12 +24,19 @@ $process = Start-Process `
     -PassThru `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath
+# Cache the native process handle so Windows PowerShell 5.1 preserves ExitCode
+# when Start-Process is combined with manual timeout handling.
+$null = $process.Handle
 
 try {
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         throw "Backend '$Group' tests exceeded the ${TimeoutSeconds}s suite timeout."
     }
+    # Complete redirected-stream processing before reading output or ExitCode.
+    $process.WaitForExit()
+    $process.Refresh()
+    $exitCode = $process.ExitCode
 
     if (Test-Path $stdoutPath) {
         Get-Content $stdoutPath
@@ -37,8 +44,8 @@ try {
     if (Test-Path $stderrPath) {
         Get-Content $stderrPath
     }
-    if ($process.ExitCode -ne 0) {
-        exit $process.ExitCode
+    if ($exitCode -ne 0) {
+        exit $exitCode
     }
 }
 finally {
