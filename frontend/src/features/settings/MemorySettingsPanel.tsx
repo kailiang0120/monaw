@@ -770,7 +770,7 @@ function sectionPreview(value: string) {
 function ToggleChip({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
   return (
     <label className="inline-flex h-7 cursor-pointer items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 text-[11px] text-neutral-300 transition-colors hover:text-neutral-100">
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-3 w-3 accent-[#8bcf4f]" />
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-3 w-3" />
       <span>{label}</span>
     </label>
   )

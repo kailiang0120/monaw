@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronUp } from 'lucide-react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Check, ChevronDown } from 'lucide-react'
 
 export interface DropdownOption<T extends string> {
   value: T
@@ -18,6 +19,9 @@ interface Props<T extends string> {
   className?: string
 }
 
+const MENU_MARGIN = 4
+const MIN_MENU_SPACE = 180
+
 export function Dropdown<T extends string>({
   value,
   options,
@@ -30,74 +34,128 @@ export function Dropdown<T extends string>({
   className = '',
 }: Props<T>) {
   const [open, setOpen] = useState(false)
-  const wrapperRef = useRef<HTMLDivElement>(null)
+  const [menuStyle, setMenuStyle] = useState<{ top: number; left: number; minWidth: number } | null>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const active = options.find((option) => option.value === value)
+
+  /**
+   * Portal into the theme root rather than <body>, so the menu still inherits
+   * the theme's CSS variables. Neither element establishes a containing block,
+   * so `position: fixed` resolves against the viewport either way.
+   */
+  const portalContainer = (): HTMLElement => {
+    const themeRoot = triggerRef.current?.closest('.theme-dark, .theme-light')
+    return (themeRoot as HTMLElement | null) ?? document.body
+  }
+
+  /**
+   * The menu renders in a portal with fixed positioning. Anchoring it to the
+   * trigger inside the DOM would let any ancestor with `overflow: hidden` (a
+   * settings card, the modal shell) clip it.
+   */
+  useLayoutEffect(() => {
+    if (!open) return
+    const trigger = triggerRef.current
+    if (!trigger) return
+
+    const place = () => {
+      const rect = trigger.getBoundingClientRect()
+      const spaceBelow = window.innerHeight - rect.bottom
+      const menuHeight = menuRef.current?.offsetHeight ?? 0
+      const dropUp = spaceBelow < Math.min(MIN_MENU_SPACE, menuHeight + MENU_MARGIN)
+      const top = dropUp
+        ? Math.max(MENU_MARGIN, rect.top - menuHeight - MENU_MARGIN)
+        : rect.bottom + MENU_MARGIN
+      const left = align === 'right'
+        ? Math.max(MENU_MARGIN, rect.right - (menuRef.current?.offsetWidth ?? rect.width))
+        : rect.left
+      setMenuStyle({ top, left, minWidth: rect.width })
+    }
+
+    place()
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+  }, [open, align, options.length])
 
   useEffect(() => {
     if (!open) return
     const handlePointerDown = (event: MouseEvent) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+      const target = event.target as Node
+      if (triggerRef.current?.contains(target)) return
+      if (menuRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
         setOpen(false)
       }
     }
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
     window.addEventListener('mousedown', handlePointerDown)
-    window.addEventListener('keydown', handleKey)
+    window.addEventListener('keydown', handleKey, true)
     return () => {
       window.removeEventListener('mousedown', handlePointerDown)
-      window.removeEventListener('keydown', handleKey)
+      window.removeEventListener('keydown', handleKey, true)
     }
   }, [open])
 
-  const sizeClass = size === 'sm' ? 'h-7 px-2.5 text-[11px]' : 'h-9 px-3 text-xs'
+  const menu = open && (
+    <div
+      ref={menuRef}
+      role="listbox"
+      aria-label={ariaLabel}
+      className="st-menu"
+      style={{
+        position: 'fixed',
+        top: menuStyle?.top ?? -9999,
+        left: menuStyle?.left ?? -9999,
+        minWidth: menuStyle?.minWidth,
+        visibility: menuStyle ? 'visible' : 'hidden',
+      }}
+    >
+      {options.map((option) => {
+        const selected = option.value === value
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="option"
+            aria-selected={selected}
+            onClick={() => {
+              onChange(option.value)
+              setOpen(false)
+            }}
+            className="st-menu-item"
+          >
+            <span className="truncate">{option.label}</span>
+            {selected && <Check size={12} className="shrink-0" />}
+          </button>
+        )
+      })}
+    </div>
+  )
 
   return (
-    <div ref={wrapperRef} className={`relative ${className}`}>
+    <div className={`relative ${className}`}>
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
         aria-label={ariaLabel}
+        aria-haspopup="listbox"
         aria-expanded={open}
-        className={`inline-flex w-full items-center justify-between gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] font-medium text-neutral-300 outline-none transition-colors hover:text-neutral-100 focus:border-accent/60 disabled:cursor-not-allowed disabled:opacity-50 ${sizeClass}`}
+        className={`st-select ${size === 'sm' ? 'st-select-sm' : ''}`}
       >
         <span className="truncate">{active?.label ?? placeholder ?? 'Select'}</span>
-        <ChevronUp
-          size={12}
-          className={`shrink-0 transition-transform ${open ? '' : 'rotate-180'}`}
-        />
+        <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
-      {open && (
-        <div
-          className={`absolute z-30 mt-1 min-w-full overflow-hidden rounded-lg border border-white/[0.1] bg-[#171615] py-1 text-[11px] shadow-2xl shadow-black/40 ${
-            align === 'right' ? 'right-0' : 'left-0'
-          }`}
-        >
-          {options.map((option) => {
-            const selected = option.value === value
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => {
-                  onChange(option.value)
-                  setOpen(false)
-                }}
-                className={`flex w-full items-center justify-between gap-2 whitespace-nowrap px-3 py-2 text-left transition-colors ${
-                  selected
-                    ? 'bg-accent/20 text-neutral-100'
-                    : 'text-neutral-400 hover:bg-white/[0.05] hover:text-neutral-100'
-                }`}
-              >
-                <span>{option.label}</span>
-                {selected && <Check size={12} className="text-accent-light" />}
-              </button>
-            )
-          })}
-        </div>
-      )}
+      {menu ? createPortal(menu, portalContainer()) : null}
     </div>
   )
 }

@@ -467,6 +467,12 @@ export interface ObservabilityRunDetail extends ObservabilityRun {
   tool_sequence: string[]
 }
 
+export interface ObservabilitySupportMode {
+  enabled: boolean
+  expires_at_epoch: number
+  remaining_seconds: number
+}
+
 export interface ObservabilityBackendLog {
   path: string
   exists: boolean

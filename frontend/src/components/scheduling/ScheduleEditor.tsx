@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { ChevronDown } from 'lucide-react'
 import type { ScheduleKind } from '../../lib/api/types'
 import { CronHelper } from './CronHelper'
 import { DateTimePicker } from './DateTimePicker'
@@ -19,13 +21,22 @@ interface Props {
 const UNITS = ['minutes', 'hours', 'days'] as const
 type Unit = (typeof UNITS)[number]
 
-// ─── cron field definitions ───────────────────────────────────────────────────
+/**
+ * "Cron" means nothing to most people, so the modes are named after what they
+ * do. The cron expression itself is still available, one disclosure down.
+ */
+const KINDS: Array<{ kind: ScheduleKind; label: string; hint: string }> = [
+  { kind: 'cron', label: 'At set times', hint: 'Weekdays at 8am, the 1st of every month, and so on.' },
+  { kind: 'interval', label: 'Every so often', hint: 'A fixed gap between runs, starting from when you save.' },
+  { kind: 'once', label: 'Once', hint: 'A single run at a date and time you choose.' },
+]
+
 const CRON_FIELDS = [
-  { label: 'Minute',  placeholder: '0',   hint: '0 – 59'       },
-  { label: 'Hour',    placeholder: '8',   hint: '0 – 23'       },
-  { label: 'Day',     placeholder: '*',   hint: '1 – 31'       },
-  { label: 'Month',   placeholder: '*',   hint: '1 – 12'       },
-  { label: 'Weekday', placeholder: '1-5', hint: '0=Sun  6=Sat' },
+  { label: 'Minute', placeholder: '0', hint: '0–59' },
+  { label: 'Hour', placeholder: '8', hint: '0–23' },
+  { label: 'Day', placeholder: '*', hint: '1–31' },
+  { label: 'Month', placeholder: '*', hint: '1–12' },
+  { label: 'Weekday', placeholder: '1-5', hint: '0=Sun, 6=Sat' },
 ] as const
 
 /** Split a cron string into exactly 5 parts, filling with '*' if needed. */
@@ -47,8 +58,10 @@ export function ScheduleEditor({
   onRunAtChange,
   onTimezoneChange,
 }: Props) {
+  const [rawCronOpen, setRawCronOpen] = useState(false)
   const interval = secondsToInterval(intervalSeconds)
   const cronParts = splitCron(cronExpr)
+  const activeKind = KINDS.find((item) => item.kind === scheduleKind)
 
   const adjustValue = (delta: number) => {
     const next = Math.max(1, interval.value + delta)
@@ -57,7 +70,6 @@ export function ScheduleEditor({
 
   const updateCronField = (index: number, raw: string) => {
     const parts = splitCron(cronExpr)
-    // Allow empty while editing; use '*' as placeholder only when empty on blur
     parts[index] = raw
     onCronExprChange(parts.join(' '))
   }
@@ -70,108 +82,100 @@ export function ScheduleEditor({
 
   return (
     <div className="space-y-3">
-      {/* ── Kind selector ────────────────────────────────── */}
-      <div className="grid grid-cols-3 gap-1 rounded-lg border border-white/[0.08] bg-black/10 p-1">
-        {(
-          [
-            ['cron', 'Cron'],
-            ['interval', 'Every'],
-            ['once', 'Once'],
-          ] as const
-        ).map(([kind, label]) => (
+      <div className="st-segment w-full">
+        {KINDS.map(({ kind, label }) => (
           <button
             key={kind}
             type="button"
             onClick={() => onScheduleKindChange(kind)}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              scheduleKind === kind
-                ? 'bg-accent text-white shadow-sm'
-                : 'text-neutral-500 hover:bg-white/[0.04] hover:text-neutral-200'
-            }`}
+            aria-pressed={scheduleKind === kind}
+            className="st-segment-item flex-1"
           >
             {label}
           </button>
         ))}
       </div>
+      {activeKind && <p className="st-desc">{activeKind.hint}</p>}
 
-      {/* ── Cron — 5 labeled fields ───────────────────────── */}
       {scheduleKind === 'cron' && (
-        <div className="space-y-3">
-          {/* 5-column grid */}
-          <div className="grid grid-cols-5 gap-2">
-            {CRON_FIELDS.map(({ label, placeholder, hint }, i) => (
-              <div key={label} className="space-y-1">
-                {/* Field label */}
-                <p className="text-center text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-                  {label}
-                </p>
-                {/* Input */}
-                <input
-                  value={cronParts[i]}
-                  onChange={(e) => updateCronField(i, e.target.value)}
-                  onBlur={() => finalizeCronField(i)}
-                  className="control w-full rounded-lg px-1.5 py-1.5 text-center font-mono text-sm"
-                  placeholder={placeholder}
-                  spellCheck={false}
-                  autoComplete="off"
-                />
-                {/* Range hint */}
-                <p className="text-center text-[9px] leading-tight text-neutral-600">{hint}</p>
+        <CronHelper cronExpr={cronExpr} timezone={timezone} onChange={onCronExprChange}>
+          <div>
+            <button
+              type="button"
+              onClick={() => setRawCronOpen((value) => !value)}
+              className="st-btn st-btn-ghost -ml-2"
+            >
+              <ChevronDown size={12} className={`transition-transform ${rawCronOpen ? 'rotate-180' : ''}`} />
+              {rawCronOpen ? 'Hide custom expression' : 'Write a custom expression'}
+            </button>
+            {rawCronOpen && (
+              <div className="mt-2 grid grid-cols-5 gap-2">
+                {CRON_FIELDS.map(({ label, placeholder, hint }, index) => (
+                  <div key={label} className="space-y-1">
+                    <p className="st-hint text-center">{label}</p>
+                    <input
+                      value={cronParts[index]}
+                      aria-label={`Cron ${label.toLowerCase()}`}
+                      onChange={(event) => updateCronField(index, event.target.value)}
+                      onBlur={() => finalizeCronField(index)}
+                      className="st-input text-center font-mono"
+                      placeholder={placeholder}
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                    <p className="st-hint text-center text-[0.625rem]">{hint}</p>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
-
-          <CronHelper cronExpr={cronExpr} timezone={timezone} onChange={onCronExprChange} />
-        </div>
+        </CronHelper>
       )}
 
-      {/* ── Interval ─────────────────────────────────────── */}
       {scheduleKind === 'interval' && (
-        <div className="flex items-center gap-2">
-          {/* Number stepper */}
-          <div className="flex items-center overflow-hidden rounded-lg border border-white/[0.1] bg-white/[0.035]">
+        <div className="flex flex-wrap items-center gap-2">
+          <div
+            className="flex items-center overflow-hidden rounded-lg"
+            style={{ border: '1px solid var(--st-border-strong)', background: 'var(--st-surface-sunken)' }}
+          >
             <button
               type="button"
               onClick={() => adjustValue(-1)}
-              aria-label="Decrease"
-              className="flex h-9 w-8 items-center justify-center text-base text-neutral-500 transition-colors hover:bg-white/[0.06] hover:text-neutral-100"
+              aria-label="Decrease interval"
+              className="st-btn st-btn-ghost h-9 w-9 rounded-none"
             >
               −
             </button>
             <input
               type="number"
               min={1}
+              aria-label="Interval value"
               value={interval.value}
-              onChange={(e) => {
-                const v = Math.max(1, +e.target.value || 1)
-                onIntervalSecondsChange(intervalToSeconds(v, interval.unit))
+              onChange={(event) => {
+                const next = Math.max(1, Number(event.target.value) || 1)
+                onIntervalSecondsChange(intervalToSeconds(next, interval.unit))
               }}
-              className="w-14 bg-transparent py-1.5 text-center text-sm text-neutral-200 outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+              className="w-14 border-0 bg-transparent py-1.5 text-center text-sm outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+              style={{ color: 'var(--st-text)' }}
             />
             <button
               type="button"
               onClick={() => adjustValue(1)}
-              aria-label="Increase"
-              className="flex h-9 w-8 items-center justify-center text-base text-neutral-500 transition-colors hover:bg-white/[0.06] hover:text-neutral-100"
+              aria-label="Increase interval"
+              className="st-btn st-btn-ghost h-9 w-9 rounded-none"
             >
               +
             </button>
           </div>
 
-          {/* Unit pill selector */}
-          <div className="flex flex-1 gap-1 rounded-lg border border-white/[0.08] bg-black/10 p-1">
+          <div className="st-segment flex-1">
             {UNITS.map((unit) => (
               <button
                 key={unit}
                 type="button"
-                onClick={() =>
-                  onIntervalSecondsChange(intervalToSeconds(interval.value, unit))
-                }
-                className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
-                  interval.unit === unit
-                    ? 'bg-accent text-white shadow-sm'
-                    : 'text-neutral-500 hover:bg-white/[0.04] hover:text-neutral-200'
-                }`}
+                onClick={() => onIntervalSecondsChange(intervalToSeconds(interval.value, unit))}
+                aria-pressed={interval.unit === unit}
+                className="st-segment-item flex-1 capitalize"
               >
                 {unit}
               </button>
@@ -180,20 +184,18 @@ export function ScheduleEditor({
         </div>
       )}
 
-      {/* ── Once ─────────────────────────────────────────── */}
-      {scheduleKind === 'once' && (
-        <DateTimePicker value={runAt} onChange={onRunAtChange} />
-      )}
+      {scheduleKind === 'once' && <DateTimePicker value={runAt} onChange={onRunAtChange} />}
 
-      {/* ── Timezone (cron + once only) ───────────────────── */}
       {scheduleKind !== 'interval' && (
-        <TimezoneSelect value={timezone} onChange={onTimezoneChange} />
+        <div>
+          <p className="st-hint mb-1.5">Times are interpreted in this timezone</p>
+          <TimezoneSelect value={timezone} onChange={onTimezoneChange} />
+        </div>
       )}
     </div>
   )
 }
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
 function secondsToInterval(seconds: number): { value: number; unit: Unit } {
   const n = Math.max(60, Number(seconds) || 3600)
   if (n % 86400 === 0) return { value: n / 86400, unit: 'days' }

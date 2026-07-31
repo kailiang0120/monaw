@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -16,6 +16,7 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Search,
   Server,
   Shield,
   Trash2,
@@ -33,6 +34,35 @@ import {
   type ConnectionSecretValues,
 } from './connectionPortals/connectionPortalConfig'
 import { Dropdown } from '../../components/Dropdown'
+import {
+  Badge,
+  ChoiceCard,
+  FlagToggle,
+  Note,
+  NumberRow,
+  PageHeader,
+  ReadOnlyValue,
+  SettingRow,
+  SettingsCard,
+  StackedRow,
+  Switch,
+  SwitchRow,
+} from '../../components/ui/Panel'
+import {
+  BROWSER_COPY,
+  CONFIRMATION_COPY,
+  FOOTER_COPY,
+  IDENTITY_COPY,
+  MCP_COPY,
+  MODEL_COPY,
+  OVERRIDE_COPY,
+  PAGE_COPY,
+  PERMISSION_MODE_COPY,
+  RISK_COPY,
+  SANDBOX_COPY,
+  SKILLS_COPY,
+  type SettingsPageId,
+} from './settingsCopy'
 import {
   fetchBrowserUseDiagnostics,
   fetchMCPDiagnostics,
@@ -63,7 +93,6 @@ import type {
 } from '../../lib/api/types'
 import {
   MCP_SERVER_TEMPLATES,
-  PERMISSION_MODE_HELP,
   PERMISSION_PROFILES,
   SKILL_GROUP_COPY,
   SKILL_GUIDANCE,
@@ -92,7 +121,7 @@ interface Props {
   observabilityRefreshKey?: number
 }
 
-type SettingsTab = 'model' | 'apiKeys' | 'identity' | 'memory' | 'skills' | 'browser' | 'mcp' | 'observability' | 'permissions' | 'sandbox'
+type SettingsTab = SettingsPageId
 
 const PERMISSION_MODE_LABEL: Record<AgentSettings['permissions']['mode'], string> = {
   default: 'Default',
@@ -100,23 +129,32 @@ const PERMISSION_MODE_LABEL: Record<AgentSettings['permissions']['mode'], string
   custom: 'Custom',
 }
 
-const SETTINGS_TABS: Array<{
-  id: SettingsTab
-  label: string
-  description: string
-  icon: LucideIcon
-}> = [
-  { id: 'model', label: 'Model', description: 'Provider and runtime', icon: Bot },
-  { id: 'apiKeys', label: 'Connections', description: 'Portals and tokens', icon: KeyRound },
-  { id: 'identity', label: 'Identity', description: 'Names and tone', icon: UserRound },
-  { id: 'memory', label: 'Memory', description: 'User behavior', icon: Brain },
-  { id: 'skills', label: 'Skills', description: 'Agent capabilities', icon: Wrench },
-  { id: 'browser', label: 'Browser', description: 'Browser-use runtime', icon: Globe2 },
-  { id: 'mcp', label: 'MCP', description: 'External tool servers', icon: Server },
-  { id: 'observability', label: 'Observability', description: 'Traces and logs', icon: Activity },
-  { id: 'permissions', label: 'Permissions', description: 'Approvals and overrides', icon: Shield },
-  { id: 'sandbox', label: 'Sandbox', description: 'Exec isolation', icon: Container },
+const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
+  identity: UserRound,
+  apiKeys: KeyRound,
+  model: Bot,
+  memory: Brain,
+  skills: Wrench,
+  browser: Globe2,
+  mcp: Server,
+  permissions: Shield,
+  sandbox: Container,
+  observability: Activity,
+}
+
+/**
+ * Ten flat tabs is a list; grouped, it is a map. The grouping follows what a
+ * user is trying to do — set the agent up, give it abilities, fence it in.
+ */
+const NAV_GROUPS: Array<{ id: string; label: string; items: SettingsTab[] }> = [
+  { id: 'general', label: 'General', items: ['identity', 'apiKeys'] },
+  { id: 'intelligence', label: 'Intelligence', items: ['model', 'memory'] },
+  { id: 'capabilities', label: 'Capabilities', items: ['skills', 'browser', 'mcp'] },
+  { id: 'safety', label: 'Safety', items: ['permissions', 'sandbox'] },
+  { id: 'inspect', label: 'Inspect', items: ['observability'] },
 ]
+
+const ALL_TABS: SettingsTab[] = NAV_GROUPS.flatMap((group) => group.items)
 
 const MemorySettingsPanel = lazy(() =>
   import('./MemorySettingsPanel').then((module) => ({ default: module.MemorySettingsPanel })),
@@ -124,6 +162,27 @@ const MemorySettingsPanel = lazy(() =>
 const ObservabilityPanel = lazy(() =>
   import('./ObservabilityPanel').then((module) => ({ default: module.ObservabilityPanel })),
 )
+
+/** The slice of settings that Save actually sends, used to detect edits. */
+function draftSignature(
+  draft: AgentSettings,
+  telegramUserIds: string,
+  telegramChatIds: string,
+): string {
+  return JSON.stringify({
+    llm: draft.llm,
+    speech_to_text: draft.speech_to_text,
+    mcp: draft.mcp,
+    browser: draft.browser,
+    memory: draft.memory,
+    tools: draft.tools,
+    permissions: draft.permissions,
+    sandbox: draft.sandbox,
+    identity: draft.identity,
+    telegramUserIds: telegramUserIds.trim(),
+    telegramChatIds: telegramChatIds.trim(),
+  })
+}
 
 export function SettingsModal({
   onClose,
@@ -134,6 +193,7 @@ export function SettingsModal({
   const [draft, setDraft] = useState<AgentSettings | null>(null)
   const [modelOptions, setModelOptions] = useState<ModelOptionsCatalog>(FALLBACK_MODEL_OPTIONS)
   const [activeTab, setActiveTab] = useState<SettingsTab>('model')
+  const [navQuery, setNavQuery] = useState('')
   const [openaiKey, setOpenaiKey] = useState('')
   const [deepseekKey, setDeepseekKey] = useState('')
   const [tavilyKey, setTavilyKey] = useState('')
@@ -168,6 +228,11 @@ export function SettingsModal({
   const [blockedRootInput, setBlockedRootInput] = useState('')
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null)
   const [diagOpen, setDiagOpen] = useState(false)
+  const [browserAdvancedOpen, setBrowserAdvancedOpen] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [baselineSignature, setBaselineSignature] = useState('')
+
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   const storeMcpDiagnostics = (items: MCPServerDiagnostics[]) => {
     const next: Record<string, MCPServerDiagnostics> = {}
@@ -252,6 +317,11 @@ export function SettingsModal({
           setDraft(settings)
           setTelegramAllowedUserIds(settings.telegram_allowed_user_ids)
           setTelegramAllowedChatIds(settings.telegram_allowed_chat_ids)
+          setBaselineSignature(draftSignature(
+            settings,
+            settings.telegram_allowed_user_ids,
+            settings.telegram_allowed_chat_ids,
+          ))
         }
       } catch (error) {
         if (signal.aborted) return
@@ -311,6 +381,11 @@ export function SettingsModal({
     return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [diagnosticsRefreshKey])
+
+  // Switching pages should start you at the top, not halfway down the last one.
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0
+  }, [activeTab])
 
   const updateDraft = (updater: (current: AgentSettings) => AgentSettings) => {
     setDraft((current) => (current ? updater(current) : current))
@@ -513,6 +588,7 @@ export function SettingsModal({
     if (!draft) return
     if (duplicateMcpServerNames(draft.mcp.servers).length > 0) return
     setSaving(true)
+    setConfirmDiscard(false)
     try {
       const browserSecretPayload: {
         openai_api_key?: string
@@ -560,6 +636,11 @@ export function SettingsModal({
       } : normalizedSavedSettings)
       setTelegramAllowedUserIds(normalizedSavedSettings.telegram_allowed_user_ids)
       setTelegramAllowedChatIds(normalizedSavedSettings.telegram_allowed_chat_ids)
+      setBaselineSignature(draftSignature(
+        normalizedSavedSettings,
+        normalizedSavedSettings.telegram_allowed_user_ids,
+        normalizedSavedSettings.telegram_allowed_chat_ids,
+      ))
       setDirtySecrets(new Set())
       await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
       setSaved(true)
@@ -628,29 +709,53 @@ export function SettingsModal({
     })
   }
 
-  const draftStats = useMemo(() => {
-    if (!draft) return null
-    const enabledSkills = Object.values(draft.tools.skills).filter(Boolean).length
-    const connectedMcp = Object.values(mcpDiagnostics).filter((item) => item.connected).length
-    return {
-      enabledSkills,
-      serverCount: draft.mcp.servers.length,
-      connectedMcp,
-      permissionMode: PERMISSION_MODE_LABEL[draft.permissions.mode],
+  const isDirty = useMemo(() => {
+    if (!draft) return false
+    if (dirtySecrets.size > 0) return true
+    if (!baselineSignature) return false
+    return draftSignature(draft, telegramAllowedUserIds, telegramAllowedChatIds) !== baselineSignature
+  }, [draft, dirtySecrets, baselineSignature, telegramAllowedUserIds, telegramAllowedChatIds])
+
+  const requestClose = () => {
+    if (isDirty) {
+      setConfirmDiscard(true)
+      return
     }
-  }, [draft, mcpDiagnostics])
+    onClose()
+  }
+
+  // Escape closes, but never silently throws away edits.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      requestClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDirty])
+
+  const visibleTabs = useMemo(() => {
+    const query = navQuery.trim().toLowerCase()
+    if (!query) return null
+    return ALL_TABS.filter((tab) => {
+      const copy = PAGE_COPY[tab]
+      return `${copy.label} ${copy.blurb} ${copy.keywords}`.toLowerCase().includes(query)
+    })
+  }, [navQuery])
 
   if (!draft) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-        <div className="panel max-w-md rounded-2xl px-4 py-3 text-sm text-neutral-300">
+      <div className="st-overlay fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="settings-shell max-w-md rounded-2xl px-5 py-4">
           {loadError ? (
             <div>
-              <p className="font-medium text-red-200">Settings failed to load.</p>
-              <p className="mt-1 text-xs text-neutral-400">{loadError}</p>
+              <p className="st-label" style={{ color: 'var(--st-danger)' }}>Settings failed to load.</p>
+              <p className="st-desc mt-1">{loadError}</p>
             </div>
           ) : (
-            'Loading settings...'
+            <p className="st-desc">Loading settings…</p>
           )}
         </div>
       </div>
@@ -693,513 +798,496 @@ export function SettingsModal({
   const customInstructionsDirty = customInstructions !== customInstructionsSavedContent
   const speechToTextIsCloud = draft.speech_to_text.engine === 'cloud'
   const speechToTextReady = speechToTextIsCloud ? Boolean(speechToTextStatus?.cloud_configured) : Boolean(speechToTextStatus?.downloaded)
-  const speechToTextHeaderStatus = speechToTextIsCloud
-    ? (speechToTextReady ? 'cloud ready' : 'key needed')
-    : (speechToTextReady ? 'ready' : 'download needed')
-  const speechToTextHeaderClass = speechToTextReady
-    ? 'bg-emerald-400/10 text-emerald-200'
-    : 'bg-amber-400/10 text-amber-200'
   const speechToTextPanelStatus = speechToTextIsCloud
     ? (speechToTextStatus?.cloud_configured ? 'Uses your saved Google API key.' : 'Save a Google API key in Connections.')
     : deletingSpeechToText
-      ? 'Deleting local speech model...'
+      ? 'Deleting local speech model…'
       : offloadingSpeechToText
-        ? 'Offloading speech model...'
+        ? 'Offloading speech model…'
         : speechToTextStatus?.loaded
           ? 'Model is loaded in memory.'
           : speechToTextStatus?.downloaded
             ? 'Local transcription is ready.'
             : downloadingSpeechToText
-              ? 'Downloading Whisper base...'
+              ? 'Downloading Whisper base…'
               : 'Download once before voice input.'
 
   const getSkillHealth = (skill: AgentSettings['available_skills'][number]) => {
     if (!skill.available) return `Unavailable: ${formatUnavailableReason(skill.unavailable_reason)}`
     if (skill.name === 'browser-use') {
-      if (!browserSkillEnabled) return draft.tools.skills['browser-use'] ? 'Unavailable' : 'Disabled'
-      if (!browserDiagnostics) return 'Waiting for diagnostics'
+      if (!browserSkillEnabled) return draft.tools.skills['browser-use'] ? 'Unavailable' : 'Off'
+      if (!browserDiagnostics) return 'Checking'
       if (browserDiagnostics.session_active && browserDiagnostics.current_mode) {
         return browserDiagnostics.current_mode === 'managed' ? 'Managed active' : 'System active'
       }
       if (browserDiagnostics.last_error) return 'Degraded'
       return 'Ready'
     }
-    return skill.recommended ? 'Default on' : 'Optional'
+    return skill.recommended ? 'On by default' : 'Optional'
   }
 
-  const skillHealthClass = (skill: AgentSettings['available_skills'][number]) => {
+  const skillHealthTone = (skill: AgentSettings['available_skills'][number]) => {
     const health = getSkillHealth(skill)
-    if (health.startsWith('Unavailable') || health === 'Degraded') {
-      return 'border-amber-400/25 bg-amber-400/10 text-amber-300'
-    }
-    if (
-      health === 'Connected' ||
-      health === 'Ready' ||
-      health === 'Default on' ||
-      health === 'Managed active' ||
-      health === 'System active'
-    ) {
-      return 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300'
-    }
-    return 'border-white/[0.08] bg-white/[0.03] text-neutral-400'
+    if (health.startsWith('Unavailable') || health === 'Degraded') return 'warn' as const
+    if (['Ready', 'On by default', 'Managed active', 'System active'].includes(health)) return 'ok' as const
+    return 'neutral' as const
   }
+
+  const footerMessage = duplicateMcpNames.length > 0
+    ? { icon: AlertCircle, tone: 'danger' as const, text: FOOTER_COPY.duplicateMcp }
+    : saved
+      ? { icon: CheckCircle2, tone: 'ok' as const, text: FOOTER_COPY.saved }
+      : isDirty
+        ? { icon: AlertCircle, tone: 'warn' as const, text: FOOTER_COPY.dirty }
+        : { icon: CheckCircle2, tone: 'neutral' as const, text: FOOTER_COPY.clean }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
-      onClick={(e) => e.target === e.currentTarget && onClose()}
+      className="st-overlay fixed inset-0 z-50 flex items-center justify-center p-4"
+      onClick={(e) => e.target === e.currentTarget && requestClose()}
     >
-      <div className="panel flex h-[min(92vh,920px)] w-full max-w-6xl overflow-hidden rounded-2xl">
-        <aside className="settings-sidebar hidden h-full w-48 shrink-0 flex-col border-r border-white/[0.07] bg-[#141312] p-3 md:flex">
-          <div className="mb-4 flex items-center justify-between gap-2">
-            <div>
-              <p className="section-label">Agent controls</p>
-              <h2 className="mt-0.5 text-base font-semibold tracking-tight text-neutral-100">Settings</h2>
-            </div>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        className="settings-shell flex h-[min(92vh,940px)] w-full max-w-6xl overflow-hidden rounded-2xl"
+      >
+        {/* ------------------------------------------------------ navigation */}
+        <aside className="st-nav hidden h-full w-56 shrink-0 flex-col p-3 md:flex">
+          <div className="mb-3 flex items-center justify-between gap-2 px-1">
+            <h2 className="st-title">Settings</h2>
             <button
               type="button"
-              onClick={onClose}
-              className="ghost-button h-7 w-7 rounded-lg"
+              onClick={requestClose}
+              className="st-btn st-btn-ghost st-btn-icon"
               aria-label="Close settings"
             >
-              <X size={14} />
+              <X size={15} />
             </button>
           </div>
 
-          <div className="settings-sidebar-scroll min-h-0 flex-1 overflow-y-auto">
-            <nav className="space-y-0.5">
-              {SETTINGS_TABS.map((tab) => {
-                const Icon = tab.icon
-                const active = activeTab === tab.id
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setActiveTab(tab.id)}
-                    className={`flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left text-xs transition-colors ${
-                      active
-                        ? 'border-accent/25 bg-accent/10 font-medium text-neutral-100'
-                        : 'border-transparent font-medium text-neutral-500 hover:border-white/[0.08] hover:bg-white/[0.035] hover:text-neutral-200'
-                    }`}
-                  >
-                    <Icon size={14} className={active ? 'shrink-0 text-accent-light' : 'shrink-0 text-neutral-600'} />
-                    <span className="truncate">{tab.label}</span>
-                  </button>
-                )
-              })}
-            </nav>
-
-            {draftStats && (
-              <div className="mt-4 rounded-lg border border-white/[0.07] bg-white/[0.025] p-2.5">
-                <p className="section-label mb-2">Snapshot</p>
-                <div className="space-y-1.5 text-[11px] text-neutral-400">
-                  <SettingStat label="Skills on" value={draftStats.enabledSkills} />
-                  <SettingStat label="MCP" value={draftStats.serverCount} />
-                  <SettingStat label="Connected" value={draftStats.connectedMcp} />
-                  <SettingStat label="Mode" value={draftStats.permissionMode} />
-                </div>
-              </div>
-            )}
+          <div className="relative mb-3">
+            <Search
+              size={13}
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2"
+              style={{ color: 'var(--st-text-faint)' }}
+            />
+            <input
+              value={navQuery}
+              onChange={(e) => setNavQuery(e.target.value)}
+              placeholder="Search settings"
+              aria-label="Search settings"
+              className="st-input st-search"
+            />
           </div>
+
+          <nav className="st-scroll-hidden min-h-0 flex-1 overflow-y-auto">
+            {visibleTabs ? (
+              visibleTabs.length === 0 ? (
+                <p className="st-hint px-1 py-2">No settings match “{navQuery}”.</p>
+              ) : (
+                <div className="space-y-0.5">
+                  {visibleTabs.map((tab) => (
+                    <NavItem
+                      key={tab}
+                      tab={tab}
+                      active={activeTab === tab}
+                      onSelect={() => setActiveTab(tab)}
+                    />
+                  ))}
+                </div>
+              )
+            ) : (
+              NAV_GROUPS.map((group) => (
+                <div key={group.id} className="mb-3">
+                  <p className="st-group-label mb-1.5 px-1">{group.label}</p>
+                  <div className="space-y-0.5">
+                    {group.items.map((tab) => (
+                      <NavItem
+                        key={tab}
+                        tab={tab}
+                        active={activeTab === tab}
+                        onSelect={() => setActiveTab(tab)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))
+            )}
+          </nav>
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex items-center justify-between gap-3 border-b border-white/[0.07] px-5 py-4 md:hidden">
-            <div>
-              <p className="section-label">Agent controls</p>
-              <h2 className="mt-1 text-base font-semibold text-neutral-100">Settings</h2>
-            </div>
+          {/* ------------------------------------------------ compact header */}
+          <header className="st-divider-b flex items-center justify-between gap-3 px-5 py-3 md:hidden">
+            <h2 className="st-title">Settings</h2>
             <button
               type="button"
-              onClick={onClose}
-              className="ghost-button h-8 w-8 rounded-lg"
+              onClick={requestClose}
+              className="st-btn st-btn-ghost st-btn-icon"
               aria-label="Close settings"
             >
               <X size={15} />
             </button>
           </header>
 
-          <div className="border-b border-white/[0.07] px-4 py-3 md:hidden">
-            <select
+          <div className="st-divider-b px-4 py-3 md:hidden">
+            <Dropdown<SettingsTab>
+              ariaLabel="Settings section"
               value={activeTab}
-              onChange={(e) => setActiveTab(e.target.value as SettingsTab)}
-              className="control w-full rounded-xl px-3 py-2 text-sm"
-            >
-              {SETTINGS_TABS.map((tab) => (
-                <option key={tab.id} value={tab.id}>{tab.label}</option>
-              ))}
-            </select>
+              onChange={setActiveTab}
+              options={ALL_TABS.map((tab) => ({ value: tab, label: PAGE_COPY[tab].label }))}
+            />
           </div>
 
-          <div className="settings-scroll-area min-h-0 flex-1 overflow-y-auto px-5 pb-0 pt-5">
-            {activeTab === 'model' && (
-              <SettingsPanel
-                icon={Bot}
-                title="Model"
-                description="Configure provider, model selection, reasoning effort, and long-running turn limits."
-              >
-                <div className="space-y-4">
-                    <div className="rounded-lg border border-accent/20 bg-accent/10 px-3 py-2 text-xs text-neutral-400">
-                      Choose OpenAI, DeepSeek, or Google. DeepSeek uses the OpenAI-compatible endpoint at https://api.deepseek.com.
-                    </div>
-
-                    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                      <div className="space-y-3">
-                        <Field label="Provider">
-                          <Dropdown<AgentSettings['llm']['provider']>
-                            value={draft.llm.provider}
-                            options={providerOptions(modelOptions).map((p) => ({
-                              value: p.id,
-                              label: providerLabel(p.id, modelOptions),
-                            }))}
-                            onChange={(provider) => {
-                              const modelName = modelsForProvider(provider, modelOptions)[0]
-                              const reasoningOptions = reasoningEffortsForProvider(provider, modelName)
-                              updateDraft((current) => ({
-                                ...current,
-                                llm: {
-                                  ...current.llm,
-                                  provider,
-                                  model_name: modelName,
-                                  reasoning_effort: reasoningOptions.includes(current.llm.reasoning_effort)
-                                    ? current.llm.reasoning_effort
-                                    : reasoningOptions[0],
-                                },
-                              }))
-                            }}
-                          />
-                        </Field>
-                        <Field label="Model">
-                          <Dropdown<string>
-                            value={draft.llm.model_name}
-                            options={modelsForProvider(draft.llm.provider, modelOptions).map((m) => ({ value: m, label: m }))}
-                            onChange={(model_name) => updateDraft((current) => {
-                              const reasoningOptions = reasoningEffortsForProvider(current.llm.provider, model_name)
-                              return {
-                                ...current,
-                                llm: {
-                                  ...current.llm,
-                                  model_name,
-                                  reasoning_effort: reasoningOptions.includes(current.llm.reasoning_effort)
-                                    ? current.llm.reasoning_effort
-                                    : reasoningOptions[0],
-                                },
-                              }
-                            })}
-                          />
-                        </Field>
-                        <Field label="Reasoning effort">
-                          <Dropdown<AgentSettings['llm']['reasoning_effort']>
-                            value={draft.llm.reasoning_effort}
-                            options={reasoningEffortsForProvider(draft.llm.provider, draft.llm.model_name).map((e) => ({
-                              value: e,
-                              label: formatReasoningEffort(e),
-                            }))}
-                            onChange={(reasoning_effort) => updateDraft((current) => ({
-                              ...current,
-                              llm: { ...current.llm, reasoning_effort },
-                            }))}
-                          />
-                        </Field>
-                        <div className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
-                          <div className="space-y-3">
-                            <ToggleRow
-                              label="Vision fallback"
-                              checked={draft.llm.vision_fallback_enabled}
-                              onChange={(vision_fallback_enabled) => updateDraft((current) => ({
-                                ...current,
-                                llm: { ...current.llm, vision_fallback_enabled },
-                              }))}
-                            />
-                            <Field label="Vision model">
-                              <Dropdown<string>
-                                value={draft.llm.vision_fallback_model}
-                                options={visionFallbackModels(modelOptions).map((m) => ({ value: m, label: m }))}
-                                disabled={!draft.llm.vision_fallback_enabled}
-                                onChange={(vision_fallback_model) => updateDraft((current) => ({
-                                  ...current,
-                                  llm: { ...current.llm, vision_fallback_model },
-                                }))}
-                              />
-                            </Field>
-                          </div>
-                          <p className="mt-2 text-xs leading-relaxed text-neutral-500">
-                            Used when the active model cannot read screenshots. Requires a saved Google API key.
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="space-y-4">
-                        <div className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
-                          {/* Header */}
-                          <div className="mb-3 flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <Mic size={14} className="text-accent-light" />
-                              <p className="text-xs font-semibold text-neutral-200">Speech to Text</p>
-                            </div>
-                            <span className={`status-pill border-white/[0.08] ${speechToTextHeaderClass}`}>
-                              {speechToTextHeaderStatus}
-                            </span>
-                          </div>
-                          {/* Engine selector — inline */}
-                          <div className="mb-3 flex items-center justify-between gap-3">
-                            <span className="text-xs text-neutral-500">Engine</span>
-                            <Dropdown<AgentSettings['speech_to_text']['engine']>
-                              size="sm"
-                              className="w-28"
-                              value={draft.speech_to_text.engine}
-                              options={[
-                                { value: 'local', label: 'Local' },
-                                { value: 'cloud', label: 'Cloud' },
-                              ]}
-                              onChange={(engine) => updateDraft((current) => ({
-                                ...current,
-                                speech_to_text: { ...current.speech_to_text, engine },
-                              }))}
-                            />
-                          </div>
-                          {/* Single compact row: model info + status badge + actions */}
-                          <div className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-white/[0.025] px-3 py-2">
-                            <div className="min-w-0">
-                              <p className="truncate text-[11px] font-medium text-neutral-200">
-                                {speechToTextIsCloud
-                                  ? draft.speech_to_text.cloud_model
-                                  : (speechToTextStatus ? `${speechToTextStatus.model_label} (${speechToTextStatus.model_size})` : 'Whisper base (~142 MB)')}
-                              </p>
-                              <p className="mt-0.5 text-[10px] text-neutral-500">{speechToTextPanelStatus}</p>
-                            </div>
-                            <div className="flex shrink-0 items-center gap-1.5">
-                              {speechToTextStatus?.loaded && (
-                                <span className="status-pill border-white/[0.08] bg-emerald-400/10 text-[10px] text-emerald-200">loaded</span>
-                              )}
-                              <button
-                                type="button"
-                                onClick={handleDownloadSpeechToText}
-                                disabled={speechToTextIsCloud || downloadingSpeechToText || speechToTextStatus?.downloaded}
-                                aria-label="Download local speech model"
-                                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-accent/20 bg-accent/10 text-accent-light outline-none transition-colors hover:border-accent/35 hover:bg-accent/15 focus:ring-2 focus:ring-accent/20 disabled:cursor-not-allowed disabled:border-white/[0.08] disabled:bg-white/[0.03] disabled:text-neutral-500"
-                                title={speechToTextStatus?.downloaded ? 'Already downloaded' : 'Download local model'}
-                              >
-                                {downloadingSpeechToText ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={handleOffloadSpeechToText}
-                                disabled={speechToTextIsCloud || offloadingSpeechToText || !speechToTextStatus?.loaded}
-                                aria-label="Offload local speech model"
-                                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-neutral-300 outline-none transition-colors hover:border-white/[0.16] hover:bg-white/[0.06] focus:ring-2 focus:ring-accent/20 disabled:cursor-not-allowed disabled:text-neutral-600 disabled:opacity-60"
-                                title="Offload local model from memory"
-                              >
-                                {offloadingSpeechToText ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={handleDeleteSpeechToText}
-                                disabled={speechToTextIsCloud || deletingSpeechToText || !speechToTextStatus?.downloaded}
-                                aria-label="Delete local speech model"
-                                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-red-400/20 bg-red-500/10 text-red-200 outline-none transition-colors hover:border-red-400/35 hover:bg-red-500/15 focus:ring-2 focus:ring-red-400/20 disabled:cursor-not-allowed disabled:border-white/[0.08] disabled:bg-white/[0.03] disabled:text-neutral-600 disabled:opacity-60"
-                                title="Delete local model file"
-                              >
-                                {deletingSpeechToText ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                              </button>
-                            </div>
-                          </div>
-                          {speechToTextError && (
-                            <p className="mt-2 text-xs leading-relaxed text-red-300">{speechToTextError}</p>
-                          )}
-                        </div>
-
-                        <div className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
-                          <div className="mb-3 flex items-center justify-between gap-3">
-                            <p className="text-xs font-semibold text-neutral-200">Runtime limits</p>
-                            <span className="status-pill border-white/[0.08] bg-white/[0.03] text-neutral-400">per turn</span>
-                          </div>
-                          <div className="divide-y divide-white/[0.05] rounded-lg border border-white/[0.06] overflow-hidden">
-                            <label className="flex cursor-text items-center justify-between gap-4 bg-white/[0.025] px-3 py-2 transition-colors focus-within:bg-white/[0.04]">
-                              <span className="text-xs text-neutral-500">Tools</span>
-                              <div className="flex items-baseline gap-1.5">
-                                <input
-                                  type="number"
-                                  aria-label="Tool iteration limit"
-                                  min={1}
-                                  max={500}
-                                  value={draft.llm.max_iterations_per_turn}
-                                  onChange={(e) => updateLlmNumber('max_iterations_per_turn', e.target.value, 1, 500)}
-                                  className="runtime-limit-input w-14 bg-transparent text-right text-sm font-semibold text-neutral-100 outline-none"
-                                />
-                                <span className="text-[10px] text-neutral-500">calls</span>
-                              </div>
-                            </label>
-                            <label className="flex cursor-text items-center justify-between gap-4 bg-white/[0.025] px-3 py-2 transition-colors focus-within:bg-white/[0.04]">
-                              <span className="text-xs text-neutral-500">Turn</span>
-                              <div className="flex items-baseline gap-1.5">
-                                <input
-                                  type="number"
-                                  aria-label="Turn timeout seconds"
-                                  min={30}
-                                  max={14400}
-                                  value={draft.llm.max_turn_seconds}
-                                  onChange={(e) => updateLlmNumber('max_turn_seconds', e.target.value, 30, 14400)}
-                                  className="runtime-limit-input w-14 bg-transparent text-right text-sm font-semibold text-neutral-100 outline-none"
-                                />
-                                <span className="text-[10px] text-neutral-500">sec</span>
-                              </div>
-                            </label>
-                            <label className="flex cursor-text items-center justify-between gap-4 bg-white/[0.025] px-3 py-2 transition-colors focus-within:bg-white/[0.04]">
-                              <span className="text-xs text-neutral-500">LLM call</span>
-                              <div className="flex items-baseline gap-1.5">
-                                <input
-                                  type="number"
-                                  aria-label="LLM call timeout seconds"
-                                  min={30}
-                                  max={1800}
-                                  value={draft.llm.max_llm_call_seconds}
-                                  onChange={(e) => updateLlmNumber('max_llm_call_seconds', e.target.value, 30, 1800)}
-                                  className="runtime-limit-input w-14 bg-transparent text-right text-sm font-semibold text-neutral-100 outline-none"
-                                />
-                                <span className="text-[10px] text-neutral-500">sec</span>
-                              </div>
-                            </label>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                </div>
-              </SettingsPanel>
-            )}
-
-            {activeTab === 'apiKeys' && (
-              <SettingsPanel
-                icon={KeyRound}
-                title="Connections"
-                description="Choose a connection portal and configure the required tokens for that integration."
-              >
-                <ConnectionPortalPanel
-                  selectedPortal={activeConnectionPortal}
-                  values={connectionSecretValues}
-                  statuses={connectionSecretStatuses}
-                  showSecrets={showKey}
-                  onPortalChange={setActiveConnectionPortal}
-                  onSecretChange={updateConnectionSecret}
-                  onToggleSecrets={() => setShowKey((value) => !value)}
-                />
-                {activeConnectionPortal === 'telegram' && (
-                  <div className="mt-4 rounded-xl border border-white/[0.07] bg-black/10 p-4">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <p className="text-xs font-semibold text-neutral-200">Telegram allowlist</p>
-                      <span className={`status-pill border-white/[0.08] ${telegramAllowlistConfigured ? 'bg-emerald-400/10 text-emerald-200' : 'bg-amber-400/10 text-amber-200'}`}>
-                        {telegramAllowlistConfigured ? 'configured' : 'required'}
-                      </span>
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <Field label="Allowed user IDs">
-                        <input
-                          value={telegramAllowedUserIds}
-                          onChange={(e) => {
-                            setTelegramAllowedUserIds(e.target.value)
-                          }}
-                          placeholder="123456789, 987654321"
-                          className="control w-full rounded-xl px-3 py-2 text-sm"
-                        />
-                      </Field>
-                      <Field label="Allowed chat IDs">
-                        <input
-                          value={telegramAllowedChatIds}
-                          onChange={(e) => {
-                            setTelegramAllowedChatIds(e.target.value)
-                          }}
-                          placeholder="-1001234567890"
-                          className="control w-full rounded-xl px-3 py-2 text-sm"
-                        />
-                      </Field>
-                    </div>
-                    <p className="mt-3 text-xs leading-relaxed text-neutral-500">
-                      User ID is your Telegram account's numeric from.id. Group access uses the chat.id, often a negative -100... value.
-                    </p>
-                  </div>
-                )}
-              </SettingsPanel>
-            )}
-
-            {activeTab === 'identity' && (
-              <SettingsPanel
-                icon={UserRound}
-                title="Identity"
-                description="Configure how the agent presents itself, how it addresses you, and the communication style it should use."
-              >
-                <div className="grid gap-4 lg:grid-cols-[1fr_0.85fr]">
+          {/* ---------------------------------------------------- page body */}
+          <div ref={scrollRef} className="st-scroll min-h-0 flex-1 overflow-y-auto px-6 py-6">
+            <div className="mx-auto w-full max-w-[46rem]">
+              {activeTab === 'model' && (
+                <>
+                  <PageHeader title={PAGE_COPY.model.label} description={PAGE_COPY.model.blurb} />
                   <div className="space-y-4">
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <Field label="Agent nickname">
+                    <SettingsCard
+                      title="Which model to use"
+                      footnote="DeepSeek is reached through its OpenAI-compatible endpoint at https://api.deepseek.com."
+                    >
+                      <SettingRow label="Provider" description={MODEL_COPY.provider}>
+                        <Dropdown<AgentSettings['llm']['provider']>
+                          ariaLabel="Provider"
+                          value={draft.llm.provider}
+                          options={providerOptions(modelOptions).map((p) => ({
+                            value: p.id,
+                            label: providerLabel(p.id, modelOptions),
+                          }))}
+                          onChange={(provider) => {
+                            const modelName = modelsForProvider(provider, modelOptions)[0]
+                            const reasoningOptions = reasoningEffortsForProvider(provider, modelName)
+                            updateDraft((current) => ({
+                              ...current,
+                              llm: {
+                                ...current.llm,
+                                provider,
+                                model_name: modelName,
+                                reasoning_effort: reasoningOptions.includes(current.llm.reasoning_effort)
+                                  ? current.llm.reasoning_effort
+                                  : reasoningOptions[0],
+                              },
+                            }))
+                          }}
+                        />
+                      </SettingRow>
+                      <SettingRow label="Model" description={MODEL_COPY.model}>
+                        <Dropdown<string>
+                          ariaLabel="Model"
+                          value={draft.llm.model_name}
+                          options={modelsForProvider(draft.llm.provider, modelOptions).map((m) => ({ value: m, label: m }))}
+                          onChange={(model_name) => updateDraft((current) => {
+                            const reasoningOptions = reasoningEffortsForProvider(current.llm.provider, model_name)
+                            return {
+                              ...current,
+                              llm: {
+                                ...current.llm,
+                                model_name,
+                                reasoning_effort: reasoningOptions.includes(current.llm.reasoning_effort)
+                                  ? current.llm.reasoning_effort
+                                  : reasoningOptions[0],
+                              },
+                            }
+                          })}
+                        />
+                      </SettingRow>
+                      <SettingRow label="Reasoning effort" description={MODEL_COPY.reasoningEffort}>
+                        <Dropdown<AgentSettings['llm']['reasoning_effort']>
+                          ariaLabel="Reasoning effort"
+                          value={draft.llm.reasoning_effort}
+                          options={reasoningEffortsForProvider(draft.llm.provider, draft.llm.model_name).map((e) => ({
+                            value: e,
+                            label: formatReasoningEffort(e),
+                          }))}
+                          onChange={(reasoning_effort) => updateDraft((current) => ({
+                            ...current,
+                            llm: { ...current.llm, reasoning_effort },
+                          }))}
+                        />
+                      </SettingRow>
+                    </SettingsCard>
+
+                    <SettingsCard title="Reading images and screenshots">
+                      <SwitchRow
+                        label="Vision fallback"
+                        description={MODEL_COPY.visionFallback}
+                        checked={draft.llm.vision_fallback_enabled}
+                        onChange={(vision_fallback_enabled) => updateDraft((current) => ({
+                          ...current,
+                          llm: { ...current.llm, vision_fallback_enabled },
+                        }))}
+                      />
+                      <SettingRow label="Vision model" description={MODEL_COPY.visionModel}>
+                        <Dropdown<string>
+                          ariaLabel="Vision model"
+                          value={draft.llm.vision_fallback_model}
+                          options={visionFallbackModels(modelOptions).map((m) => ({ value: m, label: m }))}
+                          disabled={!draft.llm.vision_fallback_enabled}
+                          onChange={(vision_fallback_model) => updateDraft((current) => ({
+                            ...current,
+                            llm: { ...current.llm, vision_fallback_model },
+                          }))}
+                        />
+                      </SettingRow>
+                      {draft.llm.vision_fallback_enabled && !draft.api_keys.has_google_key && (
+                        <div className="px-4 pb-4">
+                          <Note tone="warn" icon={AlertCircle}>{MODEL_COPY.visionRequiresKey}</Note>
+                        </div>
+                      )}
+                    </SettingsCard>
+
+                    <SettingsCard
+                      title="Voice input"
+                      description={MODEL_COPY.speechLocalIntro}
+                      action={
+                        <Badge tone={speechToTextReady ? 'ok' : 'warn'}>
+                          {speechToTextIsCloud
+                            ? (speechToTextReady ? 'Cloud ready' : 'Key needed')
+                            : (speechToTextReady ? 'Ready' : 'Download needed')}
+                        </Badge>
+                      }
+                    >
+                      <SettingRow label="Transcription engine" description={MODEL_COPY.speechEngine}>
+                        <Dropdown<AgentSettings['speech_to_text']['engine']>
+                          ariaLabel="Transcription engine"
+                          value={draft.speech_to_text.engine}
+                          options={[
+                            { value: 'local', label: 'Local (offline)' },
+                            { value: 'cloud', label: 'Cloud (Google)' },
+                          ]}
+                          onChange={(engine) => updateDraft((current) => ({
+                            ...current,
+                            speech_to_text: { ...current.speech_to_text, engine },
+                          }))}
+                        />
+                      </SettingRow>
+                      <div className="st-row">
+                        <div className="min-w-0">
+                          <p className="st-label flex items-center gap-2">
+                            <Mic size={13} style={{ color: 'var(--st-accent-text)' }} />
+                            {speechToTextIsCloud
+                              ? draft.speech_to_text.cloud_model
+                              : (speechToTextStatus ? `${speechToTextStatus.model_label} (${speechToTextStatus.model_size})` : 'Whisper base (~142 MB)')}
+                          </p>
+                          <p className="st-desc mt-1">{speechToTextPanelStatus}</p>
+                        </div>
+                        <div className="st-row-control-auto flex items-center gap-1.5">
+                          {speechToTextStatus?.loaded && <Badge tone="ok">In memory</Badge>}
+                          <button
+                            type="button"
+                            onClick={handleDownloadSpeechToText}
+                            disabled={speechToTextIsCloud || downloadingSpeechToText || speechToTextStatus?.downloaded}
+                            aria-label="Download local speech model"
+                            title={speechToTextStatus?.downloaded ? 'Already downloaded' : 'Download the model (about 142 MB)'}
+                            className="st-btn st-btn-secondary st-btn-icon"
+                          >
+                            {downloadingSpeechToText ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleOffloadSpeechToText}
+                            disabled={speechToTextIsCloud || offloadingSpeechToText || !speechToTextStatus?.loaded}
+                            aria-label="Offload local speech model"
+                            title="Free the memory it is using, keeping the download"
+                            className="st-btn st-btn-secondary st-btn-icon"
+                          >
+                            {offloadingSpeechToText ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleDeleteSpeechToText}
+                            disabled={speechToTextIsCloud || deletingSpeechToText || !speechToTextStatus?.downloaded}
+                            aria-label="Delete local speech model"
+                            title="Delete the downloaded model from disk"
+                            className="st-btn st-btn-danger st-btn-icon"
+                          >
+                            {deletingSpeechToText ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                          </button>
+                        </div>
+                      </div>
+                      {speechToTextError && (
+                        <div className="px-4 pb-4">
+                          <Note tone="danger">{speechToTextError}</Note>
+                        </div>
+                      )}
+                    </SettingsCard>
+
+                    <SettingsCard title="Limits for a single request" description={MODEL_COPY.runtimeLimits}>
+                      <NumberRow
+                        label="Maximum tool calls"
+                        description={MODEL_COPY.maxIterations}
+                        ariaLabel="Tool iteration limit"
+                        unit="calls"
+                        min={1}
+                        max={500}
+                        value={draft.llm.max_iterations_per_turn}
+                        onChange={(value) => updateLlmNumber('max_iterations_per_turn', value, 1, 500)}
+                      />
+                      <NumberRow
+                        label="Time budget per message"
+                        description={MODEL_COPY.maxTurnSeconds}
+                        ariaLabel="Turn timeout seconds"
+                        unit="seconds"
+                        min={30}
+                        max={14400}
+                        value={draft.llm.max_turn_seconds}
+                        onChange={(value) => updateLlmNumber('max_turn_seconds', value, 30, 14400)}
+                      />
+                      <NumberRow
+                        label="Timeout per model reply"
+                        description={MODEL_COPY.maxLlmCallSeconds}
+                        ariaLabel="LLM call timeout seconds"
+                        unit="seconds"
+                        min={30}
+                        max={1800}
+                        value={draft.llm.max_llm_call_seconds}
+                        onChange={(value) => updateLlmNumber('max_llm_call_seconds', value, 30, 1800)}
+                      />
+                    </SettingsCard>
+                  </div>
+                </>
+              )}
+
+              {activeTab === 'apiKeys' && (
+                <>
+                  <PageHeader title={PAGE_COPY.apiKeys.label} description={PAGE_COPY.apiKeys.blurb} />
+                  <div className="space-y-4">
+                    <SettingsCard>
+                      <div className="p-4">
+                        <ConnectionPortalPanel
+                          selectedPortal={activeConnectionPortal}
+                          values={connectionSecretValues}
+                          statuses={connectionSecretStatuses}
+                          showSecrets={showKey}
+                          onPortalChange={setActiveConnectionPortal}
+                          onSecretChange={updateConnectionSecret}
+                          onToggleSecrets={() => setShowKey((value) => !value)}
+                        />
+                      </div>
+                    </SettingsCard>
+
+                    {activeConnectionPortal === 'telegram' && (
+                      <SettingsCard
+                        title="Who may talk to the agent on Telegram"
+                        description="Only the accounts and groups listed here can send the agent messages. Leave both empty and nobody gets through."
+                        action={
+                          <Badge tone={telegramAllowlistConfigured ? 'ok' : 'warn'}>
+                            {telegramAllowlistConfigured ? 'Configured' : 'Required'}
+                          </Badge>
+                        }
+                      >
+                        <StackedRow
+                          label="Allowed user IDs"
+                          description="Your Telegram account's numeric ID. Separate several with commas."
+                        >
+                          <input
+                            value={telegramAllowedUserIds}
+                            aria-label="Allowed user IDs"
+                            onChange={(e) => setTelegramAllowedUserIds(e.target.value)}
+                            placeholder="123456789, 987654321"
+                            className="st-input"
+                          />
+                        </StackedRow>
+                        <StackedRow
+                          label="Allowed chat IDs"
+                          description="Group chat IDs, usually a negative number starting with -100."
+                        >
+                          <input
+                            value={telegramAllowedChatIds}
+                            aria-label="Allowed chat IDs"
+                            onChange={(e) => setTelegramAllowedChatIds(e.target.value)}
+                            placeholder="-1001234567890"
+                            className="st-input"
+                          />
+                        </StackedRow>
+                      </SettingsCard>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {activeTab === 'identity' && (
+                <>
+                  <PageHeader title={PAGE_COPY.identity.label} description={PAGE_COPY.identity.blurb} />
+                  <div className="space-y-4">
+                    <SettingsCard title="Names">
+                      <SettingRow label="Agent nickname" description={IDENTITY_COPY.agentName}>
                         <input
                           value={draft.identity.agent_name}
+                          aria-label="Agent nickname"
                           maxLength={80}
                           onChange={(e) => updateDraft((current) => ({
                             ...current,
                             identity: { ...current.identity, agent_name: e.target.value },
                           }))}
                           placeholder={DEFAULT_AGENT_NAME}
-                          className="control w-full rounded-xl px-3 py-2 text-sm"
+                          className="st-input"
                         />
-                      </Field>
-
-                      <Field label="Call me">
+                      </SettingRow>
+                      <SettingRow label="Call me" description={IDENTITY_COPY.userName}>
                         <input
                           value={draft.identity.user_name}
+                          aria-label="Call me"
                           maxLength={80}
                           onChange={(e) => updateDraft((current) => ({
                             ...current,
                             identity: { ...current.identity, user_name: e.target.value },
                           }))}
                           placeholder="Your preferred name"
-                          className="control w-full rounded-xl px-3 py-2 text-sm"
+                          className="st-input"
                         />
-                      </Field>
-                    </div>
+                      </SettingRow>
+                    </SettingsCard>
 
-                    <Field label="User identity">
-                      <textarea
-                        value={draft.identity.user_identity}
-                        maxLength={1000}
-                        rows={5}
-                        onChange={(e) => updateDraft((current) => ({
-                          ...current,
-                          identity: { ...current.identity, user_identity: e.target.value },
-                        }))}
-                        placeholder="Role, work context, preferences, or background the agent should remember."
-                        className="control w-full resize-none rounded-xl px-3 py-2 text-sm leading-relaxed"
-                      />
-                    </Field>
+                    <SettingsCard title="How the agent should treat you">
+                      <StackedRow label="User identity" description={IDENTITY_COPY.userIdentity}>
+                        <textarea
+                          value={draft.identity.user_identity}
+                          aria-label="User identity"
+                          maxLength={1000}
+                          rows={4}
+                          onChange={(e) => updateDraft((current) => ({
+                            ...current,
+                            identity: { ...current.identity, user_identity: e.target.value },
+                          }))}
+                          placeholder="Auditor at a mid-size firm. Windows only. Prefers Excel over CSV."
+                          className="st-input resize-none leading-relaxed"
+                        />
+                      </StackedRow>
+                      <StackedRow label="Communication style" description={IDENTITY_COPY.communicationStyle}>
+                        <textarea
+                          value={draft.identity.communication_style}
+                          aria-label="Communication style"
+                          maxLength={1000}
+                          rows={4}
+                          onChange={(e) => updateDraft((current) => ({
+                            ...current,
+                            identity: { ...current.identity, communication_style: e.target.value },
+                          }))}
+                          placeholder="Short answers. Lead with the conclusion. No filler."
+                          className="st-input resize-none leading-relaxed"
+                        />
+                      </StackedRow>
+                    </SettingsCard>
 
-                    <Field label="Communication style">
-                      <textarea
-                        value={draft.identity.communication_style}
-                        maxLength={1000}
-                        rows={5}
-                        onChange={(e) => updateDraft((current) => ({
-                          ...current,
-                          identity: { ...current.identity, communication_style: e.target.value },
-                        }))}
-                        placeholder="Tone, language, level of detail, formatting, and how direct the agent should be."
-                        className="control w-full resize-none rounded-xl px-3 py-2 text-sm leading-relaxed"
-                      />
-                    </Field>
-
-                    <div className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
-                      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold text-neutral-200">Custom instructions</p>
-                          <p className="mt-1 break-all text-[10px] text-neutral-600">{customInstructionsPath || 'AGENTS.md'}</p>
-                        </div>
+                    <SettingsCard
+                      title="Custom instructions"
+                      description={IDENTITY_COPY.customInstructions}
+                      action={
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
                             onClick={handleResetCustomInstructions}
                             disabled={resettingCustomInstructions || savingCustomInstructions}
                             aria-label="Restore default custom instructions"
-                            className="ghost-button rounded-lg px-2.5 py-1.5 text-xs"
+                            className="st-btn st-btn-ghost"
                           >
-                            {resettingCustomInstructions ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                            {resettingCustomInstructions ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
                             Restore default
                           </button>
                           <button
@@ -1207,473 +1295,486 @@ export function SettingsModal({
                             onClick={handleSaveCustomInstructions}
                             disabled={!customInstructionsDirty || savingCustomInstructions || resettingCustomInstructions}
                             aria-label="Apply custom instructions"
-                            className="primary-button rounded-lg px-2.5 py-1.5 text-xs disabled:opacity-50"
+                            className="st-btn st-btn-primary"
                           >
-                            {savingCustomInstructions ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                            {savingCustomInstructions ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
                             {customInstructionsDirty ? 'Apply' : 'Applied'}
                           </button>
                         </div>
+                      }
+                      footnote={
+                        <>
+                          <span className="block">{IDENTITY_COPY.customInstructionsLimit}</span>
+                          <span className="mt-1 block break-all">Stored at {customInstructionsPath || 'AGENTS.md'}</span>
+                        </>
+                      }
+                    >
+                      <div className="p-4">
+                        <textarea
+                          aria-label="Custom instructions"
+                          value={customInstructions}
+                          maxLength={20000}
+                          rows={10}
+                          onChange={(e) => setCustomInstructions(e.target.value)}
+                          placeholder="# AGENTS.md"
+                          className="st-input resize-y font-mono text-xs leading-relaxed"
+                        />
+                        {customInstructionsError && (
+                          <div className="mt-3">
+                            <Note tone="danger">{customInstructionsError}</Note>
+                          </div>
+                        )}
                       </div>
-                      <textarea
-                        aria-label="Custom instructions"
-                        value={customInstructions}
-                        maxLength={20000}
-                        rows={8}
-                        onChange={(e) => setCustomInstructions(e.target.value)}
-                        placeholder="# AGENTS.md"
-                        className="control w-full resize-y rounded-xl px-3 py-2 font-mono text-xs leading-relaxed"
-                      />
-                      <p className="mt-2 text-[10px] leading-relaxed text-neutral-600">
-                        Loaded from .monaw workspace instructions. These guide agent behavior without overriding system rules, identity, or permission checks.
-                      </p>
-                      {customInstructionsError && (
-                        <p className="mt-2 text-xs leading-relaxed text-red-300">{customInstructionsError}</p>
-                      )}
-                    </div>
-                  </div>
+                    </SettingsCard>
 
-                  <div className="panel-muted rounded-xl p-4">
-                    <p className="section-label">Runtime profile</p>
-                    <div className="mt-4 space-y-3 text-xs">
-                      <PathStat label="Agent" value={resolveAgentName(draft.identity.agent_name)} />
-                      <PathStat label="User" value={draft.identity.user_name.trim() || '-'} />
-                      <PathStat label="User context" value={draft.identity.user_identity.trim() || '-'} />
-                      <PathStat label="Style" value={draft.identity.communication_style.trim() || '-'} />
-                      <PathStat label="Instructions" value={customInstructionsPath || '-'} />
-                    </div>
-                    <div className="mt-4">
-                      <Notice>
-                        Identity settings adjust the Monaw nickname, user context, and tone. Tool rules, permission checks, and safety constraints still take priority.
-                      </Notice>
-                    </div>
-                  </div>
-                </div>
-              </SettingsPanel>
-            )}
-
-            {activeTab === 'skills' && (
-              <SettingsPanel
-                icon={Wrench}
-                title="Skills"
-                description="Enable capabilities for the agent runtime. Click a skill to see details."
-              >
-                <div className="grid items-start gap-4 lg:grid-cols-2">
-                  {(['recommended', 'optional'] as const).map((tier) => (
-                    <div key={tier} className="panel-muted rounded-xl p-3">
-                      <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-xs font-semibold text-neutral-200">{SKILL_GROUP_COPY[tier].title}</p>
-                        <span className="status-pill border-white/[0.08] bg-white/[0.03] text-neutral-400">
-                          {skillGroups[tier].length}
-                        </span>
+                    <SettingsCard title="What the agent will use">
+                      <div className="grid gap-3 p-4 sm:grid-cols-2">
+                        <ReadOnlyValue label="Agent name" value={resolveAgentName(draft.identity.agent_name)} />
+                        <ReadOnlyValue label="Your name" value={draft.identity.user_name.trim()} />
+                        <ReadOnlyValue label="Instructions file" value={customInstructionsPath} />
+                        <ReadOnlyValue
+                          label="Style"
+                          value={draft.identity.communication_style.trim() || 'Default'}
+                        />
                       </div>
-                      <div className="space-y-1">
-                        {skillGroups[tier].map((skill) => {
-                          const effectiveEnabled = skill.available && !!draft.tools.skills[skill.name]
-                          const health = getSkillHealth(skill)
-                          const isExpanded = expandedSkill === skill.name
-                          return (
-                            <div key={skill.name} className="overflow-hidden rounded-lg border border-white/[0.07] bg-black/10">
-                              <div className="flex items-center gap-2.5 px-3 py-2 text-xs">
-                                <input
-                                  type="checkbox"
-                                  checked={effectiveEnabled}
-                                  disabled={!skill.available || skill.always}
-                                  onChange={(e) => updateDraft((current) => ({
-                                    ...current,
-                                    tools: {
-                                      ...current.tools,
-                                      skills: { ...current.tools.skills, [skill.name]: e.target.checked },
-                                    },
-                                  }))}
-                                  className="accent-accent h-3.5 w-3.5 shrink-0 cursor-pointer"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => setExpandedSkill(isExpanded ? null : skill.name)}
-                                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                                >
-                                  <span className="truncate font-medium text-neutral-200">{skill.name}</span>
-                                  <span className={`ml-auto shrink-0 status-pill ${skillHealthClass(skill)}`}>{health}</span>
-                                  <ChevronDown
-                                    size={11}
-                                    className={`shrink-0 text-neutral-600 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                    </SettingsCard>
+                  </div>
+                </>
+              )}
+
+              {activeTab === 'skills' && (
+                <>
+                  <PageHeader title={PAGE_COPY.skills.label} description={PAGE_COPY.skills.blurb} />
+                  <div className="space-y-4">
+                    <Note tone="info">{SKILLS_COPY.intro}</Note>
+                    {(['recommended', 'optional'] as const).map((tier) => (
+                      <SettingsCard
+                        key={tier}
+                        title={SKILL_GROUP_COPY[tier].title}
+                        description={SKILL_GROUP_COPY[tier].description}
+                        action={<Badge>{skillGroups[tier].length}</Badge>}
+                      >
+                        {skillGroups[tier].length === 0 ? (
+                          <p className="st-hint p-4">Nothing here.</p>
+                        ) : (
+                          skillGroups[tier].map((skill) => {
+                            const effectiveEnabled = skill.available && !!draft.tools.skills[skill.name]
+                            const isExpanded = expandedSkill === skill.name
+                            return (
+                              <div key={skill.name} className="st-row-stacked">
+                                <div className="flex items-start justify-between gap-4">
+                                  <button
+                                    type="button"
+                                    onClick={() => setExpandedSkill(isExpanded ? null : skill.name)}
+                                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                                  >
+                                    <span className="st-label truncate">{skill.name}</span>
+                                    <Badge tone={skillHealthTone(skill)}>{getSkillHealth(skill)}</Badge>
+                                    <ChevronDown
+                                      size={12}
+                                      className={`shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                                      style={{ color: 'var(--st-text-faint)' }}
+                                    />
+                                  </button>
+                                  <Switch
+                                    label={skill.name}
+                                    checked={effectiveEnabled}
+                                    disabled={!skill.available || skill.always}
+                                    onChange={(checked) => updateDraft((current) => ({
+                                      ...current,
+                                      tools: {
+                                        ...current.tools,
+                                        skills: { ...current.tools.skills, [skill.name]: checked },
+                                      },
+                                    }))}
                                   />
-                                </button>
-                              </div>
-                              {isExpanded && (
-                                <div className="border-t border-white/[0.06] px-3 pb-3 pt-2 text-xs leading-relaxed text-neutral-500">
-                                  <p>{skill.description || 'No description.'}</p>
-                                  {SKILL_GUIDANCE[skill.name] && (
-                                    <p className="mt-1 text-neutral-600">{SKILL_GUIDANCE[skill.name]}</p>
-                                  )}
-                                  {!skill.available && (
-                                    <p className="mt-1 text-amber-300">
-                                      {formatUnavailableReason(skill.unavailable_reason)}
-                                      {skill.load_error ? `: ${skill.load_error}` : ''}
-                                    </p>
-                                  )}
                                 </div>
-                              )}
-                            </div>
-                          )
-                        })}
+                                <p className="st-desc mt-1.5">
+                                  {SKILL_GUIDANCE[skill.name] || skill.description || 'No description available.'}
+                                </p>
+                                {isExpanded && (
+                                  <div className="mt-2 space-y-2">
+                                    {skill.description && <p className="st-hint">{skill.description}</p>}
+                                    {!skill.available && (
+                                      <Note tone="warn">
+                                        {SKILLS_COPY.unavailable}{' '}
+                                        {formatUnavailableReason(skill.unavailable_reason)}
+                                        {skill.load_error ? ` — ${skill.load_error}` : ''}
+                                      </Note>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })
+                        )}
+                      </SettingsCard>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {activeTab === 'memory' && (
+                <>
+                  <PageHeader title={PAGE_COPY.memory.label} description={PAGE_COPY.memory.blurb} />
+                  <Suspense fallback={null}>
+                    <MemorySettingsPanel
+                      draft={draft}
+                      updateDraft={updateDraft}
+                      refreshKey={memoryRefreshKey}
+                    />
+                  </Suspense>
+                </>
+              )}
+
+              {activeTab === 'browser' && (
+                <>
+                  <PageHeader
+                    title={PAGE_COPY.browser.label}
+                    description={PAGE_COPY.browser.blurb}
+                    action={
+                      <button
+                        type="button"
+                        onClick={handleResetBrowserSession}
+                        disabled={resettingBrowserSession || !browserSkillEnabled}
+                        title={BROWSER_COPY.resetSession}
+                        className="st-btn st-btn-secondary"
+                      >
+                        <RotateCcw size={13} />
+                        {resettingBrowserSession ? 'Resetting' : 'Reset session'}
+                      </button>
+                    }
+                  />
+                  <div className="space-y-4">
+                    {browserSkill?.available === false && (
+                      <Note tone="warn" icon={AlertCircle}>
+                        The browser-use package is not installed in the backend Python environment, so browser
+                        automation is unavailable.
+                      </Note>
+                    )}
+
+                    <SettingsCard title="Status">
+                      <div className="grid grid-cols-3">
+                        <StatusCell label="Skill" value={browserSkillEnabled ? 'On' : 'Off'} />
+                        <StatusCell
+                          label="Session"
+                          value={
+                            browserSkill?.available === false
+                              ? 'Unavailable'
+                              : browserDiagnostics?.session_active && browserDiagnostics.current_mode
+                                ? `${browserDiagnostics.current_mode} active`
+                                : browserDiagnostics?.last_error
+                                  ? 'Degraded'
+                                  : browserSkillEnabled ? 'Idle' : 'Off'
+                          }
+                        />
+                        <StatusCell label="Open tabs" value={String(browserDiagnostics?.tab_count ?? 0)} />
                       </div>
-                    </div>
-                  ))}
-                </div>
-              </SettingsPanel>
-            )}
+                    </SettingsCard>
 
-            {activeTab === 'memory' && (
-              <SettingsPanel
-                icon={Brain}
-                title="Memory"
-                description="Review durable user preferences, behavior, workflow context, and memory retrieval settings."
-              >
-                <Suspense fallback={null}>
-                  <MemorySettingsPanel
-                    draft={draft}
-                    updateDraft={updateDraft}
-                    refreshKey={memoryRefreshKey}
-                  />
-                </Suspense>
-              </SettingsPanel>
-            )}
-
-            {activeTab === 'browser' && (
-              <SettingsPanel
-                icon={Globe2}
-                title="Browser"
-                description="Control Browser Use launch mode, Chrome fallback, storage paths, and diagnostics."
-                action={
-                  <button
-                    type="button"
-                    onClick={handleResetBrowserSession}
-                    disabled={resettingBrowserSession || !browserSkillEnabled}
-                    className="ghost-button rounded-xl px-3 py-2 text-xs font-medium disabled:opacity-50"
-                  >
-                    <RotateCcw size={13} />
-                    {resettingBrowserSession ? 'Resetting' : 'Reset Session'}
-                  </button>
-                }
-              >
-                <div className="space-y-3">
-                  <RuntimeSummary
-                    enabled={browserSkillEnabled}
-                    available={browserSkill?.available ?? true}
-                    browserDiagnostics={browserDiagnostics}
-                  />
-
-                  {browserSkill?.available === false && (
-                    <Notice tone="amber">
-                      browser-use package not installed in the backend Python environment.
-                    </Notice>
-                  )}
-
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <Field label="Launch mode">
-                      <Dropdown<AgentSettings['browser']['mode']>
-                        value={draft.browser.mode}
-                        options={[
-                          { value: 'auto', label: 'Auto (managed first)' },
-                          { value: 'managed', label: 'Managed only' },
-                          { value: 'system', label: 'System CDP only' },
-                        ]}
-                        onChange={(mode) => updateDraft((current) => ({
+                    <SettingsCard title="Which browser to drive">
+                      <SettingRow label="Launch mode" description={BROWSER_COPY.mode}>
+                        <Dropdown<AgentSettings['browser']['mode']>
+                          ariaLabel="Launch mode"
+                          value={draft.browser.mode}
+                          options={[
+                            { value: 'auto', label: 'Managed, then yours' },
+                            { value: 'managed', label: 'Managed only' },
+                            { value: 'system', label: 'Your Chrome only' },
+                          ]}
+                          onChange={(mode) => updateDraft((current) => ({
+                            ...current,
+                            browser: { ...current.browser, mode },
+                          }))}
+                        />
+                      </SettingRow>
+                      <SwitchRow
+                        label="Fall back to your Chrome"
+                        description={BROWSER_COPY.systemFallback}
+                        checked={draft.browser.enable_system_fallback}
+                        onChange={(checked) => updateDraft((current) => ({
                           ...current,
-                          browser: { ...current.browser, mode },
+                          browser: { ...current.browser, enable_system_fallback: checked },
                         }))}
                       />
-                    </Field>
-                    <Field label="System connection">
-                      <Dropdown<'auto' | 'attach'>
-                        value={draft.browser.system_connection_strategy === 'launch' ? 'auto' : draft.browser.system_connection_strategy}
-                        options={[
-                          { value: 'auto', label: 'Auto (attach first)' },
-                          { value: 'attach', label: 'Attach only' },
-                        ]}
-                        onChange={(system_connection_strategy) => updateDraft((current) => ({
+                      <SwitchRow
+                        label="Run invisibly"
+                        description={BROWSER_COPY.headless}
+                        checked={draft.browser.headless}
+                        onChange={(checked) => updateDraft((current) => ({
                           ...current,
-                          browser: { ...current.browser, system_connection_strategy },
+                          browser: { ...current.browser, headless: checked },
                         }))}
                       />
-                    </Field>
-                    <Field label="CDP URL">
-                      <input
-                        value={draft.browser.system_cdp_url}
-                        onChange={(e) => updateDraft((current) => ({
+                      <SwitchRow
+                        label="Keep the session open"
+                        description={BROWSER_COPY.keepAlive}
+                        checked={draft.browser.keep_alive}
+                        onChange={(checked) => updateDraft((current) => ({
                           ...current,
-                          browser: { ...current.browser, system_cdp_url: e.target.value },
+                          browser: { ...current.browser, keep_alive: checked },
                         }))}
-                        placeholder="http://127.0.0.1:9222"
-                        className="control h-9 w-full rounded-lg px-3 text-xs"
                       />
-                    </Field>
-                  </div>
+                    </SettingsCard>
 
-                  <div className="grid gap-3 sm:grid-cols-[1fr_1fr]">
-                    <Field label="Chrome profile">
-                      <Dropdown
-                        value={draft.browser.system_profile_directory || ''}
-                        options={[
-                          { value: '', label: 'Auto-detect' },
-                          ...(browserDiagnostics?.available_system_profiles ?? []).map((p) => ({
-                            value: p.directory,
-                            label: `${p.name} (${p.directory})`,
-                          })),
-                        ]}
-                        onChange={(system_profile_directory) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, system_profile_directory },
-                        }))}
-                      />
-                    </Field>
-                    <Field label="Allowed domains">
-                      <input
-                        value={allowedDomainsInput}
-                        onChange={(e) => updateDraft((current) => ({
-                          ...current,
-                          browser: {
-                            ...current.browser,
-                            allowed_domains: e.target.value.split(',').map((item) => item.trim()).filter(Boolean),
-                          },
-                        }))}
-                        placeholder="Comma-separated domains"
-                        className="control h-9 w-full rounded-lg px-3 text-xs"
-                      />
-                    </Field>
-                  </div>
+                    <SettingsCard title="Connecting to your own Chrome">
+                      <SettingRow label="Connection strategy" description={BROWSER_COPY.systemConnection}>
+                        <Dropdown<'auto' | 'attach'>
+                          ariaLabel="Connection strategy"
+                          value={draft.browser.system_connection_strategy === 'launch' ? 'auto' : draft.browser.system_connection_strategy}
+                          options={[
+                            { value: 'auto', label: 'Attach, else launch' },
+                            { value: 'attach', label: 'Attach only' },
+                          ]}
+                          onChange={(system_connection_strategy) => updateDraft((current) => ({
+                            ...current,
+                            browser: { ...current.browser, system_connection_strategy },
+                          }))}
+                        />
+                      </SettingRow>
+                      <SettingRow label="Debugging address" description={BROWSER_COPY.cdpUrl} wide>
+                        <input
+                          value={draft.browser.system_cdp_url}
+                          aria-label="Debugging address"
+                          onChange={(e) => updateDraft((current) => ({
+                            ...current,
+                            browser: { ...current.browser, system_cdp_url: e.target.value },
+                          }))}
+                          placeholder="http://127.0.0.1:9222"
+                          className="st-input font-mono text-xs"
+                        />
+                      </SettingRow>
+                      <SettingRow label="Chrome profile" description={BROWSER_COPY.chromeProfile}>
+                        <Dropdown
+                          ariaLabel="Chrome profile"
+                          value={draft.browser.system_profile_directory || ''}
+                          options={[
+                            { value: '', label: 'Detect automatically' },
+                            ...(browserDiagnostics?.available_system_profiles ?? []).map((p) => ({
+                              value: p.directory,
+                              label: `${p.name} (${p.directory})`,
+                            })),
+                          ]}
+                          onChange={(system_profile_directory) => updateDraft((current) => ({
+                            ...current,
+                            browser: { ...current.browser, system_profile_directory },
+                          }))}
+                        />
+                      </SettingRow>
+                      <SettingRow label="Allowed domains" description={BROWSER_COPY.allowedDomains} wide>
+                        <input
+                          value={allowedDomainsInput}
+                          aria-label="Allowed domains"
+                          onChange={(e) => updateDraft((current) => ({
+                            ...current,
+                            browser: {
+                              ...current.browser,
+                              allowed_domains: e.target.value.split(',').map((item) => item.trim()).filter(Boolean),
+                            },
+                          }))}
+                          placeholder="example.com, docs.example.com"
+                          className="st-input"
+                        />
+                      </SettingRow>
+                    </SettingsCard>
 
-                  <div className="grid gap-1.5 text-xs sm:grid-cols-3">
-                    <ToggleRow
-                      label="Allow system fallback"
-                      checked={draft.browser.enable_system_fallback}
-                      onChange={(checked) => updateDraft((current) => ({
-                        ...current,
-                        browser: { ...current.browser, enable_system_fallback: checked },
-                      }))}
-                    />
-                    <ToggleRow
-                      label="Headless"
-                      checked={draft.browser.headless}
-                      onChange={(checked) => updateDraft((current) => ({
-                        ...current,
-                        browser: { ...current.browser, headless: checked },
-                      }))}
-                    />
-                    <ToggleRow
-                      label="Keep session alive"
-                      checked={draft.browser.keep_alive}
-                      onChange={(checked) => updateDraft((current) => ({
-                        ...current,
-                        browser: { ...current.browser, keep_alive: checked },
-                      }))}
-                    />
-                  </div>
+                    <SettingsCard
+                      title="Where files are saved"
+                      description={BROWSER_COPY.outputWorkspace}
+                      action={window.electronAPI?.selectDirectory ? (
+                        <button type="button" onClick={setOutputRoot} className="st-btn st-btn-secondary">
+                          <Folder size={13} />
+                          Choose folder
+                        </button>
+                      ) : undefined}
+                    >
+                      <StackedRow label="Screenshots">
+                        <OutputFolderInput
+                          label="Screenshots folder"
+                          value={draft.browser.screenshots_dir}
+                          onChange={(screenshots_dir) => updateDraft((current) => ({
+                            ...current,
+                            browser: { ...current.browser, screenshots_dir },
+                          }))}
+                          onBrowse={window.electronAPI?.selectDirectory ? () => chooseBrowserFolder('screenshots_dir') : undefined}
+                        />
+                      </StackedRow>
+                      <StackedRow label="Downloads">
+                        <OutputFolderInput
+                          label="Downloads folder"
+                          value={draft.browser.downloads_dir}
+                          onChange={(downloads_dir) => updateDraft((current) => ({
+                            ...current,
+                            browser: { ...current.browser, downloads_dir },
+                          }))}
+                          onBrowse={window.electronAPI?.selectDirectory ? () => chooseBrowserFolder('downloads_dir') : undefined}
+                        />
+                      </StackedRow>
+                      <div className="st-row-stacked grid gap-3 sm:grid-cols-2">
+                        <ReadOnlyValue label={`Managed profile — ${BROWSER_COPY.managedProfile}`} value={draft.browser.managed_profile_dir} />
+                        <ReadOnlyValue label={`Traces — ${BROWSER_COPY.traces}`} value={draft.browser.traces_dir} />
+                      </div>
+                    </SettingsCard>
 
-                  <div className="panel-muted grid gap-3 rounded-xl p-3 lg:grid-cols-[1fr_1fr_0.7fr_0.7fr]">
-                    <Field label="DOM inspection">
-                      <Dropdown<AgentSettings['browser']['dom_inspection_engine']>
-                        value={draft.browser.dom_inspection_engine}
-                        options={[
-                          { value: 'auto', label: 'Auto' },
-                          { value: 'enhanced', label: 'Enhanced' },
-                          { value: 'legacy', label: 'Legacy' },
-                        ]}
-                        onChange={(dom_inspection_engine) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, dom_inspection_engine },
-                        }))}
-                      />
-                    </Field>
-                    <div className="grid gap-1.5 text-xs sm:grid-cols-2">
-                      <ToggleRow
-                        label="Paint-order filter"
+                    <Disclosure
+                      open={browserAdvancedOpen}
+                      onToggle={() => setBrowserAdvancedOpen((v) => !v)}
+                      title="Advanced page reading"
+                      description={BROWSER_COPY.advanced}
+                    >
+                      <SettingRow label="Page analysis engine" description={BROWSER_COPY.domEngine}>
+                        <Dropdown<AgentSettings['browser']['dom_inspection_engine']>
+                          ariaLabel="Page analysis engine"
+                          value={draft.browser.dom_inspection_engine}
+                          options={[
+                            { value: 'auto', label: 'Automatic' },
+                            { value: 'enhanced', label: 'Enhanced' },
+                            { value: 'legacy', label: 'Legacy' },
+                          ]}
+                          onChange={(dom_inspection_engine) => updateDraft((current) => ({
+                            ...current,
+                            browser: { ...current.browser, dom_inspection_engine },
+                          }))}
+                        />
+                      </SettingRow>
+                      <SwitchRow
+                        label="Skip covered elements"
+                        description={BROWSER_COPY.paintOrder}
                         checked={draft.browser.paint_order_filtering}
                         onChange={(paint_order_filtering) => updateDraft((current) => ({
                           ...current,
                           browser: { ...current.browser, paint_order_filtering },
                         }))}
                       />
-                      <ToggleRow
-                        label="Cross-origin frames"
+                      <SwitchRow
+                        label="Read third-party frames"
+                        description={BROWSER_COPY.crossOrigin}
                         checked={draft.browser.cross_origin_iframes}
                         onChange={(cross_origin_iframes) => updateDraft((current) => ({
                           ...current,
                           browser: { ...current.browser, cross_origin_iframes },
                         }))}
                       />
-                    </div>
-                    <Field label="Max frames">
-                      <input
-                        type="number"
+                      <NumberRow
+                        label="Frames per page"
+                        description={BROWSER_COPY.maxIframes}
+                        ariaLabel="Maximum frames per page"
                         min={0}
                         max={20}
                         value={draft.browser.max_iframes}
-                        onChange={(e) => updateDraft((current) => ({
+                        onChange={(value) => updateDraft((current) => ({
                           ...current,
-                          browser: { ...current.browser, max_iframes: Number(e.target.value) },
+                          browser: { ...current.browser, max_iframes: Number(value) },
                         }))}
-                        className="control h-9 w-full rounded-lg px-3 text-xs"
                       />
-                    </Field>
-                    <Field label="Frame depth">
-                      <input
-                        type="number"
+                      <NumberRow
+                        label="Frame nesting depth"
+                        description={BROWSER_COPY.frameDepth}
+                        ariaLabel="Maximum frame depth"
                         min={0}
                         max={5}
                         value={draft.browser.max_iframe_depth}
-                        onChange={(e) => updateDraft((current) => ({
+                        onChange={(value) => updateDraft((current) => ({
                           ...current,
-                          browser: { ...current.browser, max_iframe_depth: Number(e.target.value) },
+                          browser: { ...current.browser, max_iframe_depth: Number(value) },
                         }))}
-                        className="control h-9 w-full rounded-lg px-3 text-xs"
                       />
-                    </Field>
-                  </div>
+                    </Disclosure>
 
-                  <div className="panel-muted space-y-3 rounded-xl p-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="text-xs font-semibold text-neutral-200">Output workspace</p>
-                        <p className="mt-1 text-xs text-neutral-600">
-                          Screenshots and downloads are saved here. Runtime profiles and traces stay in hidden app storage.
-                        </p>
-                      </div>
-                      {window.electronAPI?.selectDirectory && (
+                    <Disclosure
+                      open={diagOpen}
+                      onToggle={() => setDiagOpen((v) => !v)}
+                      title="Diagnostics"
+                      description="Raw connection details, useful when reporting a problem."
+                    >
+                      <BrowserDiagnosticsCard diagnostics={browserDiagnostics} draft={draft} />
+                    </Disclosure>
+                  </div>
+                </>
+              )}
+
+              {activeTab === 'mcp' && (
+                <>
+                  <PageHeader
+                    title={PAGE_COPY.mcp.label}
+                    description={PAGE_COPY.mcp.blurb}
+                    action={
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Dropdown<MCPServerTemplateKey>
+                          ariaLabel="Server template"
+                          value={mcpTemplate}
+                          options={(Object.entries(MCP_SERVER_TEMPLATES) as Array<[MCPServerTemplateKey, { label: string; build: () => unknown }]>).map(
+                            ([key, template]) => ({ value: key, label: template.label }),
+                          )}
+                          onChange={setMcpTemplate}
+                          size="sm"
+                          className="min-w-44"
+                        />
                         <button
                           type="button"
-                          onClick={setOutputRoot}
-                          className="ghost-button rounded-lg px-2.5 py-1.5 text-xs"
+                          onClick={() => updateDraft((current) => ({
+                            ...current,
+                            mcp: {
+                              ...current.mcp,
+                              servers: [...current.mcp.servers, MCP_SERVER_TEMPLATES[mcpTemplate].build()],
+                            },
+                          }))}
+                          className="st-btn st-btn-primary"
                         >
-                          <Folder size={12} />
-                          Choose root
+                          <Plus size={13} />
+                          Add server
                         </button>
-                      )}
-                    </div>
-                    <div className="grid gap-3 lg:grid-cols-2">
-                      <OutputFolderField
-                        label="Screenshots"
-                        value={draft.browser.screenshots_dir}
-                        onChange={(screenshots_dir) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, screenshots_dir },
-                        }))}
-                        onBrowse={window.electronAPI?.selectDirectory ? () => chooseBrowserFolder('screenshots_dir') : undefined}
-                      />
-                      <OutputFolderField
-                        label="Downloads"
-                        value={draft.browser.downloads_dir}
-                        onChange={(downloads_dir) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, downloads_dir },
-                        }))}
-                        onBrowse={window.electronAPI?.selectDirectory ? () => chooseBrowserFolder('downloads_dir') : undefined}
-                      />
-                    </div>
-                    <div className="grid gap-1.5 lg:grid-cols-2">
-                      <PathStat label="Managed profile" value={draft.browser.managed_profile_dir} />
-                      <PathStat label="Traces" value={draft.browser.traces_dir} />
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border border-white/[0.07] bg-black/10 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => setDiagOpen((v) => !v)}
-                      className="flex w-full items-center justify-between px-3 py-2 text-neutral-400 hover:text-neutral-200"
-                    >
-                      <span className="font-medium">Diagnostics</span>
-                      <ChevronDown size={12} className={`transition-transform ${diagOpen ? 'rotate-180' : ''}`} />
-                    </button>
-                    {diagOpen && (
-                      <div className="border-t border-white/[0.06]">
-                        <BrowserDiagnosticsCard diagnostics={browserDiagnostics} draft={draft} />
                       </div>
+                    }
+                  />
+                  <div className="space-y-4">
+                    <SettingsCard>
+                      <SwitchRow
+                        label="MCP bridge"
+                        description={MCP_COPY.bridge}
+                        checked={mcpFeatureEnabled}
+                        onChange={(checked) => updateDraft((current) => ({
+                          ...current,
+                          mcp: { ...current.mcp, enabled: checked },
+                        }))}
+                      />
+                    </SettingsCard>
+
+                    {!mcpFeatureAvailable && (
+                      <Note tone="warn" icon={AlertCircle}>
+                        The MCP bridge is built in, but the backend Python environment is missing the mcp package
+                        {mcpFeatureUnavailableReason ? ` (${mcpFeatureUnavailableReason})` : ''}.
+                      </Note>
                     )}
-                  </div>
-                </div>
-              </SettingsPanel>
-            )}
+                    {duplicateMcpNames.length > 0 && (
+                      <Note tone="danger" icon={AlertCircle}>
+                        MCP server names must be unique. Duplicated: {duplicateMcpNames.join(', ')}
+                      </Note>
+                    )}
 
-            {activeTab === 'mcp' && (
-              <SettingsPanel
-                icon={Server}
-                title="MCP"
-                description="Add, diagnose, and reconnect external tool servers."
-                action={
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Dropdown<MCPServerTemplateKey>
-                      value={mcpTemplate}
-                      options={(Object.entries(MCP_SERVER_TEMPLATES) as Array<[MCPServerTemplateKey, { label: string; build: () => unknown }]>).map(
-                        ([key, template]) => ({ value: key, label: template.label }),
-                      )}
-                      onChange={setMcpTemplate}
-                      size="sm"
-                      className="min-w-44"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => updateDraft((current) => ({
-                        ...current,
-                        mcp: {
-                          ...current.mcp,
-                          servers: [...current.mcp.servers, MCP_SERVER_TEMPLATES[mcpTemplate].build()],
-                        },
-                      }))}
-                      className="primary-button rounded-xl px-3 py-2 text-xs font-medium"
-                    >
-                      <Plus size={13} />
-                      Add Server
-                    </button>
-                  </div>
-                }
-              >
-                <div className="space-y-4">
-                  <div className="panel-muted flex items-center justify-between gap-3 rounded-xl px-3 py-2.5">
-                    <p className="text-xs font-semibold text-neutral-200">MCP bridge</p>
-                    <ToggleRow
-                      label={mcpFeatureEnabled ? 'Enabled' : 'Disabled'}
-                      checked={mcpFeatureEnabled}
-                      onChange={(checked) => updateDraft((current) => ({
-                        ...current,
-                        mcp: { ...current.mcp, enabled: checked },
-                      }))}
-                    />
-                  </div>
-
-                  {!mcpFeatureAvailable && (
-                    <Notice tone="amber">
-                      The MCP bridge is built in, but the backend Python environment is missing the mcp package{mcpFeatureUnavailableReason ? ` (${mcpFeatureUnavailableReason})` : ''}.
-                    </Notice>
-                  )}
-                  {duplicateMcpNames.length > 0 && (
-                    <Notice tone="red">
-                      MCP server names must be unique: {duplicateMcpNames.join(', ')}
-                    </Notice>
-                  )}
-
-                  {draft.mcp.servers.length === 0 ? (
-                    <div className="panel-muted rounded-xl px-4 py-8 text-center text-sm text-neutral-500">
-                      No MCP servers configured.
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {draft.mcp.servers.map((server, index) => {
+                    {draft.mcp.servers.length === 0 ? (
+                      <SettingsCard>
+                        <div className="p-8 text-center">
+                          <p className="st-label">No MCP servers yet</p>
+                          <p className="st-desc mx-auto mt-1.5">{MCP_COPY.intro}</p>
+                        </div>
+                      </SettingsCard>
+                    ) : (
+                      draft.mcp.servers.map((server, index) => {
                         const diagnostic = server.name ? mcpDiagnostics[server.name] : undefined
                         const statusText = !mcpFeatureEnabled
-                          ? 'MCP feature disabled'
+                          ? 'MCP bridge is off'
                           : diagnostic?.feature_available === false
-                            ? 'MCP backend dependency missing'
+                            ? 'Backend dependency missing'
                           : diagnostic
                             ? diagnostic.connected
-                              ? `Connected - ${diagnostic.tool_count} tools`
-                              : diagnostic.last_error || 'Disconnected'
-                            : 'Waiting for save or reconnect'
+                              ? `Connected — ${diagnostic.tool_count} tools`
+                              : diagnostic.last_error || 'Not connected'
+                            : 'Save or reconnect to check'
 
                         return (
                           <McpServerCard
-                            key={`${server.name || 'mcp-server'}-${index}`}
+                            key={`mcp-server-${index}`}
                             server={server}
                             index={index}
                             diagnostic={diagnostic}
@@ -1693,115 +1794,106 @@ export function SettingsModal({
                             onUpdate={(updater) => updateMcpServer(index, updater)}
                           />
                         )
-                      })}
-                    </div>
-                  )}
+                      })
+                    )}
 
-                  <p className="text-xs leading-relaxed text-neutral-600">
-                    MCP server environment variables and HTTP headers are saved in plaintext in the backend settings file.
-                  </p>
-                </div>
-              </SettingsPanel>
-            )}
-
-            {activeTab === 'observability' && (
-              <SettingsPanel
-                icon={Activity}
-                title="Observability"
-                description="Inspect structured traces, token usage, local errors, and replay diagnosis."
-              >
-                <Suspense fallback={null}>
-                  <ObservabilityPanel refreshKey={observabilityRefreshKey} />
-                </Suspense>
-              </SettingsPanel>
-            )}
-
-            {activeTab === 'permissions' && (
-              <SettingsPanel
-                icon={Shield}
-                title="Permissions"
-                description="Tune approval prompts, high-risk action gates, path overrides, and app overrides."
-              >
-                <div className="space-y-4">
-                  <div className="panel-muted rounded-xl p-3">
-                    <p className="mb-2 text-xs font-semibold text-neutral-200">Approval profile</p>
-                    <div className="grid gap-1.5 sm:grid-cols-3">
-                      {(['default', 'full_access', 'custom'] as const).map((mode) => (
-                        <button
-                          key={mode}
-                          type="button"
-                          onClick={() => updatePermissionMode(mode)}
-                          className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
-                            draft.permissions.mode === mode
-                              ? 'border-accent bg-accent text-white'
-                              : 'border-white/[0.08] bg-white/[0.03] text-neutral-400 hover:text-neutral-100'
-                          }`}
-                        >
-                          {PERMISSION_MODE_LABEL[mode]}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="mt-2 text-[11px] leading-relaxed text-neutral-500">
-                      {PERMISSION_MODE_HELP[draft.permissions.mode]}
-                    </p>
+                    <Note tone="warn">{MCP_COPY.plaintextWarning}</Note>
                   </div>
+                </>
+              )}
 
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    <div className="panel-muted rounded-xl p-3">
-                      <p className="mb-2 text-xs font-semibold text-neutral-200">Confirmation prompts</p>
-                      <div className="space-y-1">
-                        {(Object.entries(displayedPermissions.confirmations) as Array<[keyof AgentSettings['permissions']['confirmations'], boolean]>).map(([key, value]) => (
-                          <ToggleRow
+              {activeTab === 'observability' && (
+                <>
+                  <PageHeader title={PAGE_COPY.observability.label} description={PAGE_COPY.observability.blurb} />
+                  <Suspense fallback={null}>
+                    <ObservabilityPanel refreshKey={observabilityRefreshKey} />
+                  </Suspense>
+                </>
+              )}
+
+              {activeTab === 'permissions' && (
+                <>
+                  <PageHeader title={PAGE_COPY.permissions.label} description={PAGE_COPY.permissions.blurb} />
+                  <div className="space-y-4">
+                    <SettingsCard title="Approval profile" description="Start here. The switches below follow whichever profile you pick.">
+                      <div className="grid gap-2 p-4 sm:grid-cols-3">
+                        {(['default', 'full_access', 'custom'] as const).map((mode) => (
+                          <ChoiceCard
+                            key={mode}
+                            ariaLabel={PERMISSION_MODE_LABEL[mode]}
+                            title={PERMISSION_MODE_COPY[mode].title}
+                            summary={PERMISSION_MODE_COPY[mode].summary}
+                            hint={PERMISSION_MODE_COPY[mode].recommendation}
+                            tone={mode === 'default' ? 'ok' : mode === 'full_access' ? 'warn' : 'neutral'}
+                            selected={draft.permissions.mode === mode}
+                            onSelect={() => updatePermissionMode(mode)}
+                          />
+                        ))}
+                      </div>
+                      {draft.permissions.mode === 'full_access' && (
+                        <div className="px-4 pb-4">
+                          <Note tone="warn" icon={AlertCircle}>
+                            The agent will edit and create files without asking. Deleting still stays off unless you
+                            turn it on below.
+                          </Note>
+                        </div>
+                      )}
+                    </SettingsCard>
+
+                    <SettingsCard
+                      title="Stop and ask me before…"
+                      description="Turning any of these off switches the profile to Custom."
+                    >
+                      {(Object.entries(displayedPermissions.confirmations) as Array<[keyof AgentSettings['permissions']['confirmations'], boolean]>).map(([key, value]) => {
+                        const copy = CONFIRMATION_COPY[key] ?? { label: key, description: '' }
+                        return (
+                          <SwitchRow
                             key={key}
-                            label={`Confirm ${key.replace('_', ' ')}`}
+                            label={copy.label}
+                            description={copy.description}
                             checked={value}
                             onChange={(checked) => updateCustomPermissionDraft((current) => ({
                               ...current,
                               permissions: {
                                 ...current.permissions,
-                                confirmations: {
-                                  ...current.permissions.confirmations,
-                                  [key]: checked,
-                                },
+                                confirmations: { ...current.permissions.confirmations, [key]: checked },
                               },
                             }))}
                           />
-                        ))}
-                      </div>
-                    </div>
+                        )
+                      })}
+                    </SettingsCard>
 
-                    <div className="panel-muted rounded-xl p-3">
-                      <p className="mb-2 text-xs font-semibold text-neutral-200">Risk gates</p>
-                      <div className="space-y-1">
-                        <ToggleRow
-                          label="Allow delete actions"
-                          checked={displayedPermissions.allow_delete}
-                          onChange={(checked) => updateCustomPermissionDraft((current) => ({
-                            ...current,
-                            permissions: { ...current.permissions, allow_delete: checked },
-                          }))}
-                        />
-                        <ToggleRow
-                          label="Dangerous actions require confirm"
-                          checked={displayedPermissions.dangerous_actions_require_confirm}
-                          onChange={(checked) => updateCustomPermissionDraft((current) => ({
-                            ...current,
-                            permissions: { ...current.permissions, dangerous_actions_require_confirm: checked },
-                          }))}
-                        />
-                        <ToggleRow
-                          label="Allow screen fallback"
-                          checked={displayedPermissions.allow_screen_fallback}
-                          onChange={(checked) => updateCustomPermissionDraft((current) => ({
-                            ...current,
-                            permissions: { ...current.permissions, allow_screen_fallback: checked },
-                          }))}
-                        />
-                      </div>
-                    </div>
-                  </div>
+                    <SettingsCard title="High-risk actions">
+                      <SwitchRow
+                        label="Allow delete actions"
+                        description={RISK_COPY.allowDelete.description}
+                        checked={displayedPermissions.allow_delete}
+                        onChange={(checked) => updateCustomPermissionDraft((current) => ({
+                          ...current,
+                          permissions: { ...current.permissions, allow_delete: checked },
+                        }))}
+                      />
+                      <SwitchRow
+                        label="Dangerous actions require confirm"
+                        description={RISK_COPY.dangerous.description}
+                        checked={displayedPermissions.dangerous_actions_require_confirm}
+                        onChange={(checked) => updateCustomPermissionDraft((current) => ({
+                          ...current,
+                          permissions: { ...current.permissions, dangerous_actions_require_confirm: checked },
+                        }))}
+                      />
+                      <SwitchRow
+                        label="Allow screen fallback"
+                        description={RISK_COPY.screenFallback.description}
+                        checked={displayedPermissions.allow_screen_fallback}
+                        onChange={(checked) => updateCustomPermissionDraft((current) => ({
+                          ...current,
+                          permissions: { ...current.permissions, allow_screen_fallback: checked },
+                        }))}
+                      />
+                    </SettingsCard>
 
-                  <div className="grid gap-3 xl:grid-cols-2">
                     <PathOverrides
                       draft={draft}
                       updateDraft={updateCustomPermissionDraft}
@@ -1810,71 +1902,60 @@ export function SettingsModal({
                     />
                     <AppOverrides draft={draft} updateDraft={updateCustomPermissionDraft} />
                   </div>
-                </div>
-              </SettingsPanel>
-            )}
+                </>
+              )}
 
-            {activeTab === 'sandbox' && (
-              <SettingsPanel
-                icon={Container}
-                title="Sandbox"
-                description="Control exec isolation, environment scrubbing, network policy, and backend selection."
-              >
-                <div className="space-y-4">
-                  {/* Policy toggle */}
-                  <div className="panel-muted rounded-xl p-3">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <p className="text-xs font-semibold text-neutral-200">Sandbox policy</p>
-                        <p className="mt-1 text-[11px] leading-relaxed text-neutral-500">
-                          Local direct is compatibility only. Local restricted is advisory. Docker is the strong backend when available.
-                        </p>
-                      </div>
-                      <ToggleRow
-                        label={draft.sandbox.enabled ? 'Enabled' : 'Disabled'}
+              {activeTab === 'sandbox' && (
+                <>
+                  <PageHeader title={PAGE_COPY.sandbox.label} description={PAGE_COPY.sandbox.blurb} />
+                  <div className="space-y-4">
+                    <Note tone="info">{SANDBOX_COPY.intro}</Note>
+
+                    <SettingsCard>
+                      <SwitchRow
+                        label="Sandbox commands"
+                        description={SANDBOX_COPY.enabled}
                         checked={draft.sandbox.enabled}
                         onChange={(checked) => updateDraft((current) => ({
                           ...current,
                           sandbox: { ...current.sandbox, enabled: checked },
                         }))}
                       />
-                    </div>
-                  </div>
+                    </SettingsCard>
 
-                  {/* Execution policy — compact inline rows */}
-                  <div className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
-                    <p className="mb-3 text-xs font-semibold text-neutral-200">Execution policy</p>
-                    <div className="divide-y divide-white/[0.05] overflow-hidden rounded-lg border border-white/[0.06]">
-                      <div className="flex items-center justify-between gap-4 bg-white/[0.025] px-3 py-2">
-                        <span className="text-xs text-neutral-500">Mode</span>
+                    <SettingsCard title="Policy">
+                      <SettingRow
+                        label="Isolation mode"
+                        description={SANDBOX_COPY.modeHelp[draft.sandbox.mode as keyof typeof SANDBOX_COPY.modeHelp] ?? SANDBOX_COPY.mode}
+                      >
                         <Dropdown
-                          size="sm"
-                          className="w-40"
+                          ariaLabel="Isolation mode"
                           value={draft.sandbox.mode}
                           options={[
-                            { value: 'off', label: 'Off (shell disabled)' },
-                            { value: 'auto', label: 'Auto' },
-                            { value: 'enforce', label: 'Enforce strong isolation' },
-                            { value: 'host', label: 'Host (approval required)' },
+                            { value: 'off', label: 'Off — no shell' },
+                            { value: 'auto', label: 'Automatic' },
+                            { value: 'enforce', label: 'Strong isolation only' },
+                            { value: 'host', label: 'Host, with approval' },
                             { value: 'docker', label: 'Docker' },
-                            { value: 'local_restricted', label: 'Host advisory (approval)' },
+                            { value: 'local_restricted', label: 'Host, best effort' },
                           ]}
                           onChange={(mode) => updateDraft((current) => ({
                             ...current,
                             sandbox: { ...current.sandbox, mode },
                           }))}
                         />
-                      </div>
-                      <div className="flex items-center justify-between gap-4 bg-white/[0.025] px-3 py-2">
-                        <span className="text-xs text-neutral-500">Network</span>
+                      </SettingRow>
+                      <SettingRow
+                        label="Network access"
+                        description={SANDBOX_COPY.networkHelp[draft.sandbox.network.default as keyof typeof SANDBOX_COPY.networkHelp] ?? SANDBOX_COPY.network}
+                      >
                         <Dropdown
-                          size="sm"
-                          className="w-40"
+                          ariaLabel="Network access"
                           value={draft.sandbox.network.default}
                           options={[
-                            { value: 'deny', label: 'Deny' },
-                            { value: 'allow_with_approval', label: 'Allow with approval' },
-                            { value: 'allow', label: 'Allow' },
+                            { value: 'deny', label: 'Blocked' },
+                            { value: 'allow_with_approval', label: 'Ask first' },
+                            { value: 'allow', label: 'Allowed' },
                           ]}
                           onChange={(defaultNetwork) => updateDraft((current) => ({
                             ...current,
@@ -1884,173 +1965,163 @@ export function SettingsModal({
                             },
                           }))}
                         />
-                      </div>
-                      <div className="flex items-center justify-between gap-4 bg-white/[0.025] px-3 py-2">
-                        <span className="text-xs text-neutral-500">Write strategy</span>
+                      </SettingRow>
+                      <SettingRow
+                        label="Files created by commands"
+                        description={SANDBOX_COPY.writeStrategyHelp[draft.sandbox.default_write_strategy as keyof typeof SANDBOX_COPY.writeStrategyHelp] ?? SANDBOX_COPY.writeStrategy}
+                      >
                         <Dropdown
-                          size="sm"
-                          className="w-40"
+                          ariaLabel="Files created by commands"
                           value={draft.sandbox.default_write_strategy}
                           options={[
-                            { value: 'discard', label: 'Discard' },
-                            { value: 'copy_out', label: 'Copy out' },
-                            { value: 'direct_rw', label: 'Direct RW' },
+                            { value: 'discard', label: 'Discard them' },
+                            { value: 'copy_out', label: 'Copy them back' },
+                            { value: 'direct_rw', label: 'Write directly' },
                           ]}
                           onChange={(strategy) => updateDraft((current) => ({
                             ...current,
                             sandbox: { ...current.sandbox, default_write_strategy: strategy },
                           }))}
                         />
-                      </div>
-                    </div>
-                  </div>
+                      </SettingRow>
+                    </SettingsCard>
 
-                  {/* Backends + Docker side by side */}
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    <div className="panel-muted rounded-xl p-3">
-                      <p className="mb-2 text-xs font-semibold text-neutral-200">Backends</p>
-                      <div className="space-y-2 text-xs">
-                        {['docker', 'local_restricted', 'host', 'wsl'].map((backend) => {
-                          const status = sandboxStatus?.backends?.[backend]
-                          return (
-                            <div key={backend} className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-black/10 px-3 py-2">
-                              <div>
-                                <p className="font-medium capitalize text-neutral-200">{backend.replace('_', ' ')}</p>
-                                <p className="text-[11px] text-neutral-500">
-                                  {status?.available ? `${status.security_label} isolation` : status?.reason || 'Waiting for status'}
-                                </p>
-                              </div>
-                              <span className={`status-pill border-white/[0.08] ${status?.available ? 'bg-emerald-500/15 text-emerald-200' : 'bg-amber-500/15 text-amber-200'}`}>
-                                {status?.available ? 'available' : 'unavailable'}
-                              </span>
+                    {draft.sandbox.mode === 'enforce' && !sandboxStatus?.backends?.docker?.available && (
+                      <Note tone="warn" icon={AlertCircle}>{SANDBOX_COPY.enforceNeedsDocker}</Note>
+                    )}
+
+                    <SettingsCard title="Available on this computer" description={SANDBOX_COPY.backends}>
+                      {['docker', 'local_restricted', 'host', 'wsl'].map((backend) => {
+                        const status = sandboxStatus?.backends?.[backend]
+                        return (
+                          <div key={backend} className="st-row">
+                            <div className="min-w-0">
+                              <p className="st-label capitalize">{backend.replace('_', ' ')}</p>
+                              <p className="st-desc mt-1">
+                                {status?.available ? `${status.security_label} isolation` : status?.reason || 'Checking…'}
+                              </p>
                             </div>
-                          )
-                        })}
-                      </div>
-                    </div>
+                            <div className="st-row-control-auto">
+                              <Badge tone={status?.available ? 'ok' : 'warn'}>
+                                {status?.available ? 'Available' : 'Not available'}
+                              </Badge>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </SettingsCard>
 
-                    <div className="panel-muted rounded-xl p-3">
-                      <p className="mb-2 text-xs font-semibold text-neutral-200">Docker defaults</p>
-                      <div className="space-y-2">
+                    <SettingsCard title="Docker">
+                      <SwitchRow
+                        label="Use Docker when available"
+                        description="Docker gives the strongest isolation. Turn off only if it conflicts with something else on this machine."
+                        checked={draft.sandbox.docker.enabled}
+                        onChange={(checked) => updateDraft((current) => ({
+                          ...current,
+                          sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, enabled: checked } },
+                        }))}
+                      />
+                      <SettingRow label="Container image" description={SANDBOX_COPY.dockerImage} wide>
                         <input
                           value={draft.sandbox.docker.image}
+                          aria-label="Container image"
                           onChange={(e) => updateDraft((current) => ({
                             ...current,
-                            sandbox: {
-                              ...current.sandbox,
-                              docker: { ...current.sandbox.docker, image: e.target.value },
-                            },
+                            sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, image: e.target.value } },
                           }))}
-                          placeholder="Docker image pinned with @sha256:..."
-                          className="control w-full rounded-xl px-3 py-2 text-sm"
+                          placeholder="python:3.12-slim@sha256:…"
+                          className="st-input font-mono text-xs"
                         />
-                        <ToggleRow
-                          label="Enable Docker backend"
-                          checked={draft.sandbox.docker.enabled}
-                          onChange={(checked) => updateDraft((current) => ({
-                            ...current,
-                            sandbox: {
-                              ...current.sandbox,
-                              docker: { ...current.sandbox.docker, enabled: checked },
-                            },
-                          }))}
-                        />
-                        <ToggleRow
-                          label="Read-only root filesystem"
-                          checked={draft.sandbox.docker.read_only_root}
-                          onChange={(checked) => updateDraft((current) => ({
-                            ...current,
-                            sandbox: {
-                              ...current.sandbox,
-                              docker: { ...current.sandbox.docker, read_only_root: checked },
-                            },
-                          }))}
-                        />
-                      </div>
-                    </div>
-                  </div>
+                      </SettingRow>
+                      <SwitchRow
+                        label="Read-only container"
+                        description={SANDBOX_COPY.dockerReadOnly}
+                        checked={draft.sandbox.docker.read_only_root}
+                        onChange={(checked) => updateDraft((current) => ({
+                          ...current,
+                          sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, read_only_root: checked } },
+                        }))}
+                      />
+                    </SettingsCard>
 
-                  {/* Resources — compact inline rows */}
-                  <div className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
-                    <p className="mb-3 text-xs font-semibold text-neutral-200">Resources</p>
-                    <div className="divide-y divide-white/[0.05] overflow-hidden rounded-lg border border-white/[0.06]">
+                    <SettingsCard title="Resource ceilings" description={SANDBOX_COPY.resources}>
                       {([
-                        { key: 'timeout_seconds' as const, label: 'Timeout', unit: 'sec' },
+                        { key: 'timeout_seconds' as const, label: 'Time limit', unit: 'seconds' },
                         { key: 'memory_mb' as const, label: 'Memory', unit: 'MB' },
-                        { key: 'cpus' as const, label: 'CPUs', unit: null },
-                        { key: 'pids' as const, label: 'PIDs', unit: null },
+                        { key: 'cpus' as const, label: 'CPU cores', unit: 'cores' },
+                        { key: 'pids' as const, label: 'Process limit', unit: '' },
                       ]).map(({ key, label, unit }) => (
-                        <label key={key} className="flex cursor-text items-center justify-between gap-4 bg-white/[0.025] px-3 py-2 transition-colors focus-within:bg-white/[0.04]">
-                          <span className="text-xs text-neutral-500">{label}</span>
-                          <div className="flex items-baseline gap-1.5">
-                            <input
-                              type="number"
-                              value={draft.sandbox.resources[key]}
-                              onChange={(e) => updateDraft((current) => ({
-                                ...current,
-                                sandbox: {
-                                  ...current.sandbox,
-                                  resources: {
-                                    ...current.sandbox.resources,
-                                    [key]: Number(e.target.value),
-                                  },
-                                },
-                              }))}
-                              className="runtime-limit-input w-16 bg-transparent text-right text-sm font-semibold text-neutral-100 outline-none"
-                            />
-                            {unit && <span className="text-[10px] text-neutral-500">{unit}</span>}
-                          </div>
-                        </label>
+                        <NumberRow
+                          key={key}
+                          label={label}
+                          description={SANDBOX_COPY.resourceHelp[key]}
+                          ariaLabel={`Sandbox ${label.toLowerCase()}`}
+                          unit={unit}
+                          value={draft.sandbox.resources[key]}
+                          onChange={(value) => updateDraft((current) => ({
+                            ...current,
+                            sandbox: {
+                              ...current.sandbox,
+                              resources: { ...current.sandbox.resources, [key]: Number(value) },
+                            },
+                          }))}
+                        />
                       ))}
-                    </div>
+                    </SettingsCard>
                   </div>
-
-                  {draft.sandbox.mode === 'enforce' && !sandboxStatus?.backends?.docker?.available && (
-                    <Notice tone="amber">
-                      Enforce mode requires Docker. Commands will block until a strong backend is available.
-                    </Notice>
-                  )}
-                </div>
-              </SettingsPanel>
-            )}
-
-            <div className="h-[5px] shrink-0" aria-hidden="true" />
-          </div>
-
-          <footer className="flex items-center justify-between gap-3 border-t border-white/[0.07] px-5 py-4">
-            <div className="flex items-center gap-2 text-xs text-neutral-500">
-              {duplicateMcpNames.length > 0 ? (
-                <>
-                  <AlertCircle size={14} className="text-red-300" />
-                  Fix duplicate MCP names before saving.
                 </>
-              ) : saved ? (
-                <>
-                  <CheckCircle2 size={14} className="text-emerald-300" />
-                  Settings saved.
-                </>
-              ) : (
-                'Changes apply after Save.'
               )}
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onClose}
-                className="ghost-button rounded-xl px-4 py-2 text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={saving || duplicateMcpNames.length > 0}
-                className="primary-button rounded-xl px-4 py-2 text-sm font-medium"
-              >
-                <Save size={14} />
-                {saved ? 'Saved' : saving ? 'Saving' : 'Save'}
-              </button>
-            </div>
+          </div>
+
+          {/* --------------------------------------------------------- footer */}
+          <footer className="st-divider-t flex items-center justify-between gap-3 px-5 py-3.5">
+            {confirmDiscard ? (
+              <>
+                <p className="st-desc">Close settings and lose your unsaved changes?</p>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => setConfirmDiscard(false)} className="st-btn st-btn-ghost">
+                    Keep editing
+                  </button>
+                  <button type="button" onClick={onClose} className="st-btn st-btn-danger">
+                    Discard changes
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="st-desc flex items-center gap-1.5">
+                  <footerMessage.icon
+                    size={14}
+                    className="shrink-0"
+                    style={{
+                      color: footerMessage.tone === 'ok'
+                        ? 'var(--st-ok)'
+                        : footerMessage.tone === 'warn'
+                          ? 'var(--st-warn)'
+                          : footerMessage.tone === 'danger'
+                            ? 'var(--st-danger)'
+                            : 'var(--st-text-faint)',
+                    }}
+                  />
+                  {footerMessage.text}
+                </p>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={requestClose} className="st-btn st-btn-ghost">
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSave}
+                    disabled={saving || duplicateMcpNames.length > 0}
+                    className="st-btn st-btn-primary"
+                  >
+                    <Save size={13} />
+                    {saved ? 'Saved' : saving ? 'Saving…' : 'Save changes'}
+                  </button>
+                </div>
+              </>
+            )}
           </footer>
         </div>
       </div>
@@ -2058,138 +2129,76 @@ export function SettingsModal({
   )
 }
 
-function SettingsPanel({
-  icon: Icon,
+/* ------------------------------------------------------------ small parts --- */
+
+function NavItem({
+  tab,
+  active,
+  onSelect,
+}: {
+  tab: SettingsTab
+  active: boolean
+  onSelect: () => void
+}) {
+  const Icon = TAB_ICONS[tab]
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-current={active ? 'page' : undefined}
+      className="st-nav-item"
+    >
+      <Icon size={14} className="st-nav-icon" />
+      <span className="truncate">{PAGE_COPY[tab].label}</span>
+    </button>
+  )
+}
+
+function StatusCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="st-status-cell px-4 py-3">
+      <p className="st-hint">{label}</p>
+      <p className="st-label mt-1 capitalize">{value}</p>
+    </div>
+  )
+}
+
+function Disclosure({
+  open,
+  onToggle,
   title,
   description,
-  action,
   children,
 }: {
-  icon: LucideIcon
+  open: boolean
+  onToggle: () => void
   title: string
-  description: string
-  action?: ReactNode
+  description?: string
   children: ReactNode
 }) {
   return (
-    <section className="flex min-h-0 flex-col">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-accent/20 bg-accent/10 text-accent-light">
-            <Icon size={15} />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold tracking-tight text-neutral-100">{title}</h3>
-            <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-neutral-500">{description}</p>
-          </div>
-        </div>
-        {action}
-      </div>
-      {children}
+    <section className="st-card">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-start justify-between gap-4 px-4 py-3.5 text-left"
+      >
+        <span className="min-w-0">
+          <span className="st-label block">{title}</span>
+          {description && <span className="st-desc mt-1 block">{description}</span>}
+        </span>
+        <ChevronDown
+          size={14}
+          className={`mt-0.5 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
+          style={{ color: 'var(--st-text-faint)' }}
+        />
+      </button>
+      {open && <div className="st-divider-t">{children}</div>}
     </section>
   )
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <label className="block space-y-1.5">
-      <span className="section-label">{label}</span>
-      {children}
-    </label>
-  )
-}
-
-function LimitInput({
-  label,
-  inputLabel,
-  unit,
-  min,
-  max,
-  value,
-  onChange,
-}: {
-  label: string
-  inputLabel: string
-  unit: string
-  min: number
-  max: number
-  value: number
-  onChange: (value: string) => void
-}) {
-  return (
-    <label className="rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2 focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/10">
-      <span className="block text-[10px] font-semibold uppercase tracking-[0.16em] text-neutral-500">{label}</span>
-      <span className="mt-1 flex items-baseline gap-2">
-        <input
-          type="number"
-          aria-label={inputLabel}
-          min={min}
-          max={max}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="runtime-limit-input min-w-0 flex-1 bg-transparent text-lg font-semibold text-neutral-100 outline-none"
-        />
-        <span className="shrink-0 text-xs font-medium text-neutral-500">{unit}</span>
-      </span>
-    </label>
-  )
-}
-
-function ToggleRow({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string
-  checked: boolean
-  onChange: (checked: boolean) => void
-}) {
-  return (
-    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-white/[0.07] bg-black/10 px-3 py-2 text-xs text-neutral-300 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04] hover:text-neutral-100">
-      <span>{label}</span>
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="accent-accent h-3.5 w-3.5 cursor-pointer"
-      />
-    </label>
-  )
-}
-
-function SettingStat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <span>{label}</span>
-      <span className="font-medium text-neutral-200">{value}</span>
-    </div>
-  )
-}
-
-function Notice({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'neutral' | 'amber' | 'red' }) {
-  const toneClass = {
-    neutral: 'border-white/[0.08] bg-white/[0.025] text-neutral-500',
-    amber: 'border-amber-400/25 bg-amber-400/10 text-amber-200',
-    red: 'border-red-400/25 bg-red-400/10 text-red-200',
-  }[tone]
-
-  return (
-    <div className={`rounded-xl border px-4 py-3 text-xs leading-relaxed ${toneClass}`}>
-      {children}
-    </div>
-  )
-}
-
-function PathStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg border border-white/[0.07] bg-black/10 px-3 py-2 text-xs">
-      <span className="font-medium text-neutral-400">{label}: </span>
-      <span className="break-all text-neutral-600">{value || '-'}</span>
-    </div>
-  )
-}
-
-function OutputFolderField({
+function OutputFolderInput({
   label,
   value,
   onChange,
@@ -2201,63 +2210,20 @@ function OutputFolderField({
   onBrowse?: () => void
 }) {
   return (
-    <div className="space-y-1.5">
-      <span className="section-label">{label}</span>
-      <div className="flex gap-2">
-        <input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="Folder path"
-          className="control h-9 min-w-0 flex-1 rounded-lg px-3 text-xs"
-        />
-        {onBrowse && (
-          <button
-            type="button"
-            onClick={onBrowse}
-            className="ghost-button h-9 rounded-lg px-2.5 text-xs"
-          >
-            <Folder size={12} />
-            Browse
-          </button>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function RuntimeSummary({
-  enabled,
-  available,
-  browserDiagnostics,
-}: {
-  enabled: boolean
-  available: boolean
-  browserDiagnostics: BrowserUseDiagnostics | null
-}) {
-  const status = !available
-    ? 'Unavailable'
-    : enabled
-      ? browserDiagnostics?.session_active && browserDiagnostics.current_mode
-        ? `${browserDiagnostics.current_mode} active`
-        : browserDiagnostics?.last_error
-          ? 'Degraded'
-          : 'Ready'
-      : 'Disabled'
-
-  return (
-    <div className="panel-muted flex items-center divide-x divide-white/[0.07] rounded-xl text-xs">
-      <div className="px-4 py-2.5">
-        <p className="section-label">Skill</p>
-        <p className="mt-1 font-semibold text-neutral-100">{enabled ? 'Enabled' : 'Disabled'}</p>
-      </div>
-      <div className="px-4 py-2.5">
-        <p className="section-label">Session</p>
-        <p className="mt-1 font-semibold text-neutral-100">{status}</p>
-      </div>
-      <div className="px-4 py-2.5">
-        <p className="section-label">Tabs</p>
-        <p className="mt-1 font-semibold text-neutral-100">{browserDiagnostics?.tab_count ?? 0}</p>
-      </div>
+    <div className="flex gap-2">
+      <input
+        value={value}
+        aria-label={label}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Folder path"
+        className="st-input min-w-0 flex-1 font-mono text-xs"
+      />
+      {onBrowse && (
+        <button type="button" onClick={onBrowse} className="st-btn st-btn-secondary shrink-0">
+          <Folder size={13} />
+          Browse
+        </button>
+      )}
     </div>
   )
 }
@@ -2270,26 +2236,24 @@ function BrowserDiagnosticsCard({
   draft: AgentSettings
 }) {
   return (
-    <div className="grid gap-x-4 gap-y-1 px-3 py-2 text-xs text-neutral-500 sm:grid-cols-2">
-      <p className="col-span-full font-medium text-neutral-300">
+    <div className="space-y-2 p-4">
+      <p className="st-label">
         {diagnostics?.session_active
           ? `Session active — ${diagnostics.current_mode || 'unknown'} mode`
           : 'No active browser session'}
       </p>
-      {diagnostics?.current_mode === 'system' && diagnostics.current_system_connection && (
-        <p className="break-all">Connection: {diagnostics.current_system_connection}</p>
-      )}
-      <p className="break-all">Strategy: {diagnostics?.system_connection_strategy ?? draft.browser.system_connection_strategy}</p>
-      <p className="break-all">CDP URL: {diagnostics?.system_cdp_url || draft.browser.system_cdp_url}</p>
-      {diagnostics?.chrome_executable && (
-        <p className="break-all">Chrome: {diagnostics.chrome_executable}</p>
-      )}
-      {diagnostics?.current_page && (
-        <p className="break-all">Page: {diagnostics.current_page.title || diagnostics.current_page.url}</p>
-      )}
-      {diagnostics?.last_error && (
-        <p className="col-span-full break-all text-amber-300">Error: {diagnostics.last_error}</p>
-      )}
+      <div className="grid gap-2 sm:grid-cols-2">
+        {diagnostics?.current_mode === 'system' && diagnostics.current_system_connection && (
+          <ReadOnlyValue label="Connection" value={diagnostics.current_system_connection} />
+        )}
+        <ReadOnlyValue label="Strategy" value={diagnostics?.system_connection_strategy ?? draft.browser.system_connection_strategy} />
+        <ReadOnlyValue label="Debugging address" value={diagnostics?.system_cdp_url || draft.browser.system_cdp_url} />
+        {diagnostics?.chrome_executable && <ReadOnlyValue label="Chrome" value={diagnostics.chrome_executable} />}
+        {diagnostics?.current_page && (
+          <ReadOnlyValue label="Current page" value={diagnostics.current_page.title || diagnostics.current_page.url} />
+        )}
+      </div>
+      {diagnostics?.last_error && <Note tone="warn">{diagnostics.last_error}</Note>}
     </div>
   )
 }
@@ -2319,131 +2283,131 @@ function McpServerCard({
   onRemove: () => void
   onUpdate: (updater: (server: AgentSettings['mcp']['servers'][number]) => AgentSettings['mcp']['servers'][number]) => void
 }) {
-  const statusDot = diagnostic?.connected
-    ? 'bg-emerald-400'
-    : diagnostic?.last_error
-      ? 'bg-amber-400'
-      : 'bg-neutral-600'
+  const dotClass = diagnostic?.connected ? 'st-dot st-dot-ok' : diagnostic?.last_error ? 'st-dot st-dot-warn' : 'st-dot'
+  const isHttp = server.transport === 'streamable_http'
 
   return (
-    <div className="panel-muted rounded-xl p-3">
-      {/* Header: status dot + name + enabled toggle + delete */}
-      <div className="mb-2.5 flex items-center gap-2">
-        <span className={`h-2 w-2 shrink-0 rounded-full ${statusDot}`} />
+    <section className="st-card">
+      <header className="st-card-head flex items-center gap-2">
+        <span className={dotClass} />
         <input
           value={server.name}
+          aria-label={`Server name ${index + 1}`}
           onChange={(e) => onUpdate((current) => ({ ...current, name: e.target.value }))}
           placeholder="Server name"
-          className="control min-w-0 flex-1 rounded-lg px-2.5 py-1.5 text-sm font-medium"
+          className="st-input min-w-0 flex-1 font-medium"
         />
-        <label className="inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 text-[11px] text-neutral-300 transition-colors hover:text-neutral-100">
-          <input
-            type="checkbox"
-            checked={server.enabled}
-            onChange={(e) => onUpdate((current) => ({ ...current, enabled: e.target.checked }))}
-            className="h-3 w-3 accent-[#8bcf4f]"
-          />
-          <span>Enabled</span>
-        </label>
+        <Switch
+          label={`Enable server ${index + 1}`}
+          checked={server.enabled}
+          onChange={(checked) => onUpdate((current) => ({ ...current, enabled: checked }))}
+        />
         <button
           type="button"
           onClick={onRemove}
-          className="ghost-button h-7 w-7 shrink-0 rounded-lg hover:text-red-300"
+          className="st-btn st-btn-ghost st-btn-icon"
           aria-label={`Remove MCP server ${index + 1}`}
         >
           <Trash2 size={13} />
         </button>
-      </div>
+      </header>
 
-      {/* Command/URL + Transport inline */}
-      <div className="mb-2 flex items-center gap-2">
-        {server.transport === 'streamable_http' ? (
-          <input
-            value={server.url}
-            onChange={(e) => onUpdate((current) => ({ ...current, url: e.target.value }))}
-            placeholder="MCP URL"
-            className="control min-w-0 flex-1 rounded-lg px-2.5 py-1.5 font-mono text-xs"
-          />
-        ) : (
-          <input
-            value={server.command}
-            onChange={(e) => onUpdate((current) => ({ ...current, command: e.target.value }))}
-            placeholder="Command"
-            className="control min-w-0 flex-1 rounded-lg px-2.5 py-1.5 font-mono text-xs"
-          />
-        )}
-        <div className="flex shrink-0 items-center gap-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500">Transport</span>
-          <Dropdown<AgentSettings['mcp']['servers'][number]['transport']>
-            value={server.transport}
-            options={[
-              { value: 'stdio', label: 'stdio' },
-              { value: 'streamable_http', label: 'http' },
-            ]}
-            onChange={(transport) => onUpdate((current) => ({ ...current, transport }))}
-            size="sm"
-            align="right"
+      <SettingRow
+        label="How Monaw connects"
+        description={isHttp ? MCP_COPY.transportHttp : MCP_COPY.transportStdio}
+      >
+        <Dropdown<AgentSettings['mcp']['servers'][number]['transport']>
+          ariaLabel={`Transport for server ${index + 1}`}
+          value={server.transport}
+          options={[
+            { value: 'stdio', label: 'Run a local program' },
+            { value: 'streamable_http', label: 'Connect to a URL' },
+          ]}
+          onChange={(transport) => onUpdate((current) => ({ ...current, transport }))}
+        />
+      </SettingRow>
+
+      <StackedRow
+        label={isHttp ? 'Server URL' : 'Command'}
+        description={isHttp ? MCP_COPY.url : MCP_COPY.command}
+      >
+        <input
+          value={isHttp ? server.url : server.command}
+          aria-label={isHttp ? `Server URL ${index + 1}` : `Command ${index + 1}`}
+          onChange={(e) => onUpdate((current) => isHttp
+            ? { ...current, url: e.target.value }
+            : { ...current, command: e.target.value })}
+          placeholder={isHttp ? 'http://127.0.0.1:3000/mcp' : 'npx'}
+          className="st-input font-mono text-xs"
+        />
+      </StackedRow>
+
+      {!isHttp && (
+        <div className="st-row-stacked">
+          <EditableList
+            title="Arguments"
+            emptyText="No arguments. Most servers need at least one."
+            addLabel="Add argument"
+            values={server.args}
+            placeholder={(itemIndex) => `Argument ${itemIndex + 1}`}
+            onAdd={() => onUpdate((current) => ({ ...current, args: [...current.args, ''] }))}
+            onChange={(itemIndex, value) => onUpdate((current) => ({
+              ...current,
+              args: current.args.map((item, currentIndex) => currentIndex === itemIndex ? value : item),
+            }))}
+            onRemove={(itemIndex) => onUpdate((current) => ({
+              ...current,
+              args: current.args.filter((_, currentIndex) => currentIndex !== itemIndex),
+            }))}
           />
         </div>
-      </div>
-
-      {/* Working dir + description — secondary, muted */}
-      <div className="mb-2.5 grid gap-2 lg:grid-cols-2">
-        {server.transport === 'stdio' && (
-          <input
-            value={server.cwd}
-            onChange={(e) => onUpdate((current) => ({ ...current, cwd: e.target.value }))}
-            placeholder="Working directory (optional)"
-            className="control rounded-lg px-2.5 py-1.5 text-xs text-neutral-400"
-          />
-        )}
-        <input
-          value={server.description}
-          onChange={(e) => onUpdate((current) => ({ ...current, description: e.target.value }))}
-          placeholder="Description (optional)"
-          className={`control rounded-lg px-2.5 py-1.5 text-xs text-neutral-400 ${server.transport !== 'stdio' ? 'lg:col-span-2' : ''}`}
-        />
-      </div>
-
-      {server.transport === 'stdio' && (
-        <EditableList
-          title="Arguments"
-          emptyText="No arguments configured."
-          addLabel="Add arg"
-          values={server.args}
-          placeholder={(itemIndex) => `Arg ${itemIndex + 1}`}
-          onAdd={() => onUpdate((current) => ({ ...current, args: [...current.args, ''] }))}
-          onChange={(itemIndex, value) => onUpdate((current) => ({
-            ...current,
-            args: current.args.map((item, currentIndex) => currentIndex === itemIndex ? value : item),
-          }))}
-          onRemove={(itemIndex) => onUpdate((current) => ({
-            ...current,
-            args: current.args.filter((_, currentIndex) => currentIndex !== itemIndex),
-          }))}
-        />
       )}
 
-      {/* Footer: status + actions */}
-      <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-        <span className={diagnostic?.connected ? 'text-emerald-300' : diagnostic?.last_error ? 'text-amber-300' : 'text-neutral-500'}>
+      {!isHttp && (
+        <SettingRow label="Working directory" description={MCP_COPY.workingDir} wide>
+          <input
+            value={server.cwd}
+            aria-label={`Working directory ${index + 1}`}
+            onChange={(e) => onUpdate((current) => ({ ...current, cwd: e.target.value }))}
+            placeholder="Optional"
+            className="st-input font-mono text-xs"
+          />
+        </SettingRow>
+      )}
+
+      <SettingRow label="Description" description="A note for yourself. Not sent to the agent." wide>
+        <input
+          value={server.description}
+          aria-label={`Server description ${index + 1}`}
+          onChange={(e) => onUpdate((current) => ({ ...current, description: e.target.value }))}
+          placeholder="Optional"
+          className="st-input"
+        />
+      </SettingRow>
+
+      <div className="st-card-foot flex flex-wrap items-center justify-between gap-3">
+        <span
+          className="st-hint"
+          style={{
+            color: diagnostic?.connected
+              ? 'var(--st-ok)'
+              : diagnostic?.last_error
+                ? 'var(--st-warn)'
+                : 'var(--st-text-faint)',
+          }}
+        >
           {statusText}
           {diagnostic?.state ? ` · ${diagnostic.state}` : ''}
-          {diagnostic?.startup_phase ? ` · ${diagnostic.startup_phase}` : ''}
         </span>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onToggleAdvanced}
-            className="ghost-button rounded-lg px-2 py-1 text-xs"
-          >
-            {advancedOpen ? 'Hide Advanced' : 'Advanced'}
+          <button type="button" onClick={onToggleAdvanced} className="st-btn st-btn-ghost">
+            {advancedOpen ? 'Hide advanced' : 'Advanced'}
           </button>
           <button
             type="button"
             onClick={onReconnect}
             disabled={!server.name || reconnectingServer === server.name || !bridgeEnabled}
-            className="ghost-button rounded-lg px-2 py-1 text-xs disabled:opacity-50"
+            className="st-btn st-btn-secondary"
           >
             {reconnectingServer === server.name ? 'Reconnecting…' : 'Reconnect'}
           </button>
@@ -2451,110 +2415,120 @@ function McpServerCard({
       </div>
 
       {advancedOpen && (
-        <div className="mt-4 space-y-4 border-t border-white/[0.07] pt-4">
-          <div className="grid gap-2 sm:grid-cols-2">
-            <input
-              type="number"
-              min={1000}
-              value={server.startup_timeout_ms}
-              onChange={(e) => onUpdate((current) => ({ ...current, startup_timeout_ms: Number(e.target.value || 0) }))}
-              placeholder="Startup timeout (ms)"
-              className="control rounded-xl px-3 py-2 text-sm"
-            />
-            <input
-              type="number"
-              min={1000}
-              value={server.call_timeout_ms}
-              onChange={(e) => onUpdate((current) => ({ ...current, call_timeout_ms: Number(e.target.value || 0) }))}
-              placeholder="Call timeout (ms)"
-              className="control rounded-xl px-3 py-2 text-sm"
-            />
-          </div>
-
-          <ToggleRow
-            label="Reconnect on unhealthy"
+        <div className="st-divider-t">
+          <NumberRow
+            label="Startup timeout"
+            description={MCP_COPY.startupTimeout}
+            ariaLabel={`Startup timeout for server ${index + 1}`}
+            unit="ms"
+            min={1000}
+            value={server.startup_timeout_ms}
+            onChange={(value) => onUpdate((current) => ({ ...current, startup_timeout_ms: Number(value || 0) }))}
+          />
+          <NumberRow
+            label="Call timeout"
+            description={MCP_COPY.callTimeout}
+            ariaLabel={`Call timeout for server ${index + 1}`}
+            unit="ms"
+            min={1000}
+            value={server.call_timeout_ms}
+            onChange={(value) => onUpdate((current) => ({ ...current, call_timeout_ms: Number(value || 0) }))}
+          />
+          <SwitchRow
+            label="Reconnect automatically"
+            description={MCP_COPY.reconnect}
             checked={server.reconnect_on_unhealthy}
             onChange={(checked) => onUpdate((current) => ({ ...current, reconnect_on_unhealthy: checked }))}
           />
-
-          <EditableList
-            title="Allow list"
-            emptyText="Empty means all remote tools are exposed."
-            addLabel="Add tool"
-            values={server.allow_list}
-            placeholder={() => 'Tool name'}
-            onAdd={() => onUpdate((current) => ({ ...current, allow_list: [...current.allow_list, ''] }))}
-            onChange={(toolIndex, value) => onUpdate((current) => ({
-              ...current,
-              allow_list: current.allow_list.map((item, currentIndex) => currentIndex === toolIndex ? value : item),
-            }))}
-            onRemove={(toolIndex) => onUpdate((current) => ({
-              ...current,
-              allow_list: current.allow_list.filter((_, currentIndex) => currentIndex !== toolIndex),
-            }))}
-          />
-
-          {diagnostic && <McpDiagnostics diagnostic={diagnostic} />}
-
-          {server.transport === 'stdio' ? (
-            <KeyValueEditor
-              title="Environment"
-              addLabel="Add var"
-              emptyText="No environment variables configured."
-              entries={server.env}
-              keyPlaceholder="Key"
-              valuePlaceholder="Value"
-              onAdd={() => onUpdate((current) => ({ ...current, env: { ...current.env, '': '' } }))}
-              onChange={(entryIndex, key, value) => onUpdate((current) => {
-                const entries = Object.entries(current.env)
-                const nextEnv: Record<string, string> = {}
-                entries.forEach(([entryKey, entryValue], currentIndex) => {
-                  if (currentIndex === entryIndex) nextEnv[key] = value
-                  else nextEnv[entryKey] = entryValue
-                })
-                return { ...current, env: nextEnv }
-              })}
-              onRemove={(entryIndex) => onUpdate((current) => {
-                const entries = Object.entries(current.env)
-                const nextEnv: Record<string, string> = {}
-                entries.forEach(([entryKey, entryValue], currentIndex) => {
-                  if (currentIndex !== entryIndex) nextEnv[entryKey] = entryValue
-                })
-                return { ...current, env: nextEnv }
-              })}
+          <div className="st-row-stacked">
+            <EditableList
+              title="Tool allow list"
+              emptyText={MCP_COPY.allowList}
+              addLabel="Add tool"
+              values={server.allow_list}
+              placeholder={() => 'Tool name'}
+              onAdd={() => onUpdate((current) => ({ ...current, allow_list: [...current.allow_list, ''] }))}
+              onChange={(toolIndex, value) => onUpdate((current) => ({
+                ...current,
+                allow_list: current.allow_list.map((item, currentIndex) => currentIndex === toolIndex ? value : item),
+              }))}
+              onRemove={(toolIndex) => onUpdate((current) => ({
+                ...current,
+                allow_list: current.allow_list.filter((_, currentIndex) => currentIndex !== toolIndex),
+              }))}
             />
-          ) : (
-            <KeyValueEditor
-              title="HTTP headers"
-              addLabel="Add header"
-              emptyText="No HTTP headers configured."
-              entries={server.headers}
-              keyPlaceholder="Header"
-              valuePlaceholder="Value"
-              onAdd={() => onUpdate((current) => ({ ...current, headers: { ...current.headers, '': '' } }))}
-              onChange={(entryIndex, key, value) => onUpdate((current) => {
-                const entries = Object.entries(current.headers)
-                const nextHeaders: Record<string, string> = {}
-                entries.forEach(([entryKey, entryValue], currentIndex) => {
-                  if (currentIndex === entryIndex) nextHeaders[key] = value
-                  else nextHeaders[entryKey] = entryValue
-                })
-                return { ...current, headers: nextHeaders }
-              })}
-              onRemove={(entryIndex) => onUpdate((current) => {
-                const entries = Object.entries(current.headers)
-                const nextHeaders: Record<string, string> = {}
-                entries.forEach(([entryKey, entryValue], currentIndex) => {
-                  if (currentIndex !== entryIndex) nextHeaders[entryKey] = entryValue
-                })
-                return { ...current, headers: nextHeaders }
-              })}
-            />
+          </div>
+          <div className="st-row-stacked">
+            {isHttp ? (
+              <KeyValueEditor
+                title="HTTP headers"
+                addLabel="Add header"
+                emptyText="No headers configured."
+                entries={server.headers}
+                keyPlaceholder="Header"
+                valuePlaceholder="Value"
+                onAdd={() => onUpdate((current) => ({ ...current, headers: { ...current.headers, '': '' } }))}
+                onChange={(entryIndex, key, value) => onUpdate((current) => ({
+                  ...current,
+                  headers: renameEntry(current.headers, entryIndex, key, value),
+                }))}
+                onRemove={(entryIndex) => onUpdate((current) => ({
+                  ...current,
+                  headers: removeEntry(current.headers, entryIndex),
+                }))}
+              />
+            ) : (
+              <KeyValueEditor
+                title="Environment variables"
+                addLabel="Add variable"
+                emptyText="No environment variables configured."
+                entries={server.env}
+                keyPlaceholder="Name"
+                valuePlaceholder="Value"
+                onAdd={() => onUpdate((current) => ({ ...current, env: { ...current.env, '': '' } }))}
+                onChange={(entryIndex, key, value) => onUpdate((current) => ({
+                  ...current,
+                  env: renameEntry(current.env, entryIndex, key, value),
+                }))}
+                onRemove={(entryIndex) => onUpdate((current) => ({
+                  ...current,
+                  env: removeEntry(current.env, entryIndex),
+                }))}
+              />
+            )}
+          </div>
+          {diagnostic && (
+            <div className="st-row-stacked">
+              <McpDiagnostics diagnostic={diagnostic} />
+            </div>
           )}
         </div>
       )}
-    </div>
+    </section>
   )
+}
+
+/** Replace the entry at `index`, preserving key order. */
+function renameEntry(
+  entries: Record<string, string>,
+  index: number,
+  key: string,
+  value: string,
+): Record<string, string> {
+  const next: Record<string, string> = {}
+  Object.entries(entries).forEach(([entryKey, entryValue], currentIndex) => {
+    if (currentIndex === index) next[key] = value
+    else next[entryKey] = entryValue
+  })
+  return next
+}
+
+function removeEntry(entries: Record<string, string>, index: number): Record<string, string> {
+  const next: Record<string, string> = {}
+  Object.entries(entries).forEach(([entryKey, entryValue], currentIndex) => {
+    if (currentIndex !== index) next[entryKey] = entryValue
+  })
+  return next
 }
 
 function EditableList({
@@ -2577,32 +2551,33 @@ function EditableList({
   onRemove: (index: number) => void
 }) {
   return (
-    <div className="mt-4 space-y-2">
+    <div className="space-y-2">
       <div className="flex items-center justify-between gap-3">
-        <p className="section-label">{title}</p>
-        <button type="button" onClick={onAdd} className="ghost-button rounded-lg px-2 py-1 text-xs">
+        <p className="st-label">{title}</p>
+        <button type="button" onClick={onAdd} className="st-btn st-btn-ghost">
           <Plus size={12} />
           {addLabel}
         </button>
       </div>
       {values.length === 0 ? (
-        <p className="text-xs text-neutral-600">{emptyText}</p>
+        <p className="st-hint">{emptyText}</p>
       ) : (
         values.map((value, itemIndex) => (
           <div key={`${title}-${itemIndex}`} className="flex gap-2">
             <input
               value={value}
+              aria-label={`${title} ${itemIndex + 1}`}
               onChange={(e) => onChange(itemIndex, e.target.value)}
               placeholder={placeholder(itemIndex)}
-              className="control flex-1 rounded-xl px-3 py-2 text-sm"
+              className="st-input min-w-0 flex-1 font-mono text-xs"
             />
             <button
               type="button"
               onClick={() => onRemove(itemIndex)}
-              className="ghost-button h-10 w-10 rounded-xl hover:text-red-300"
+              className="st-btn st-btn-ghost st-btn-icon shrink-0"
               aria-label={`Remove ${title} item ${itemIndex + 1}`}
             >
-              <Trash2 size={14} />
+              <Trash2 size={13} />
             </button>
           </div>
         ))
@@ -2636,36 +2611,38 @@ function KeyValueEditor({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-3">
-        <p className="section-label">{title}</p>
-        <button type="button" onClick={onAdd} className="ghost-button rounded-lg px-2 py-1 text-xs">
+        <p className="st-label">{title}</p>
+        <button type="button" onClick={onAdd} className="st-btn st-btn-ghost">
           <Plus size={12} />
           {addLabel}
         </button>
       </div>
       {entryList.length === 0 ? (
-        <p className="text-xs text-neutral-600">{emptyText}</p>
+        <p className="st-hint">{emptyText}</p>
       ) : (
         entryList.map(([entryKey, entryValue], entryIndex) => (
           <div key={`${title}-${entryIndex}`} className="grid grid-cols-[1fr_1fr_auto] gap-2">
             <input
               value={entryKey}
+              aria-label={`${title} name ${entryIndex + 1}`}
               onChange={(e) => onChange(entryIndex, e.target.value, entryValue)}
               placeholder={keyPlaceholder}
-              className="control min-w-0 rounded-xl px-3 py-2 text-sm"
+              className="st-input min-w-0 font-mono text-xs"
             />
             <input
               value={entryValue}
+              aria-label={`${title} value ${entryIndex + 1}`}
               onChange={(e) => onChange(entryIndex, entryKey, e.target.value)}
               placeholder={valuePlaceholder}
-              className="control min-w-0 rounded-xl px-3 py-2 text-sm"
+              className="st-input min-w-0 font-mono text-xs"
             />
             <button
               type="button"
               onClick={() => onRemove(entryIndex)}
-              className="ghost-button h-10 w-10 rounded-xl hover:text-red-300"
+              className="st-btn st-btn-ghost st-btn-icon"
               aria-label={`Remove ${title} item ${entryIndex + 1}`}
             >
-              <Trash2 size={14} />
+              <Trash2 size={13} />
             </button>
           </div>
         ))
@@ -2676,27 +2653,32 @@ function KeyValueEditor({
 
 function McpDiagnostics({ diagnostic }: { diagnostic: MCPServerDiagnostics }) {
   return (
-    <div className="rounded-xl border border-white/[0.07] bg-black/15 px-3 py-3 text-xs text-neutral-500">
-      <div className="grid gap-2 md:grid-cols-2">
-        <p className="break-all">{diagnostic.transport === 'streamable_http' ? 'URL' : 'Command'}: {diagnostic.transport === 'streamable_http' ? diagnostic.url || '-' : [diagnostic.command, ...(diagnostic.args || [])].filter(Boolean).join(' ') || '-'}</p>
-        <p className="break-all">CWD: {diagnostic.cwd || '-'}</p>
-        <p className="break-all">Executable: {diagnostic.resolved_executable || '-'}</p>
-        <p>PID: {diagnostic.pid ?? '-'}</p>
-        <p className="break-all">Connected: {diagnostic.connected_at || '-'}</p>
-        <p>Last call: {diagnostic.last_call_duration_ms ?? '-'} ms</p>
-        <p>Failed calls: {diagnostic.failed_call_count}</p>
-        <p>Reflected: {diagnostic.reflected_tool_names?.length ?? 0}</p>
+    <div className="space-y-2">
+      <p className="st-label">Diagnostics</p>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <ReadOnlyValue
+          label={diagnostic.transport === 'streamable_http' ? 'URL' : 'Command'}
+          value={diagnostic.transport === 'streamable_http'
+            ? diagnostic.url || ''
+            : [diagnostic.command, ...(diagnostic.args || [])].filter(Boolean).join(' ')}
+        />
+        <ReadOnlyValue label="Working directory" value={diagnostic.cwd || ''} />
+        <ReadOnlyValue label="Executable" value={diagnostic.resolved_executable || ''} />
+        <ReadOnlyValue label="Process ID" value={diagnostic.pid ? String(diagnostic.pid) : ''} />
+        <ReadOnlyValue label="Connected at" value={diagnostic.connected_at || ''} />
+        <ReadOnlyValue
+          label="Last call"
+          value={diagnostic.last_call_duration_ms ? `${diagnostic.last_call_duration_ms} ms` : ''}
+        />
+        <ReadOnlyValue label="Failed calls" value={String(diagnostic.failed_call_count)} />
+        <ReadOnlyValue label="Tools exposed" value={String(diagnostic.reflected_tool_names?.length ?? 0)} />
       </div>
-      {diagnostic.unhealthy_reason && (
-        <p className="mt-2 break-all text-amber-300">Unhealthy: {diagnostic.unhealthy_reason}</p>
-      )}
+      {diagnostic.unhealthy_reason && <Note tone="warn">{diagnostic.unhealthy_reason}</Note>}
       {(diagnostic.reflected_tool_names?.length ?? 0) > 0 && (
-        <p className="mt-2 break-all">Tools: {diagnostic.reflected_tool_names.join(', ')}</p>
+        <ReadOnlyValue label="Tool names" value={diagnostic.reflected_tool_names.join(', ')} />
       )}
       {diagnostic.stderr_tail && (
-        <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap rounded-lg border border-white/[0.06] bg-black/30 p-2 text-[11px] text-neutral-400">
-          {diagnostic.stderr_tail}
-        </pre>
+        <pre className="st-code max-h-32 overflow-auto whitespace-pre-wrap">{diagnostic.stderr_tail}</pre>
       )}
     </div>
   )
@@ -2714,12 +2696,10 @@ function PathOverrides({
   setBlockedRootInput: (value: string) => void
 }) {
   return (
-    <div className="panel-muted rounded-xl p-3">
-      <div className="mb-2.5 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Folder size={13} className="text-neutral-400" />
-          <p className="text-xs font-semibold text-neutral-200">Path overrides</p>
-        </div>
+    <SettingsCard
+      title="Folder rules"
+      description={OVERRIDE_COPY.paths}
+      action={
         <button
           type="button"
           onClick={() => updateDraft((current) => ({
@@ -2729,25 +2709,29 @@ function PathOverrides({
               path_rules: [...current.permissions.path_rules, emptyPathRule()],
             },
           }))}
-          className="ghost-button rounded-lg px-2 py-1 text-xs"
+          className="st-btn st-btn-secondary"
         >
-          <Plus size={12} />
-          Add
+          <Plus size={13} />
+          Add folder
         </button>
-      </div>
-      <div className="space-y-3">
-        {draft.permissions.path_rules.map((rule, index) => (
-          <div key={`${rule.path}-${index}`} className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
+      }
+    >
+      {draft.permissions.path_rules.length === 0 ? (
+        <p className="st-hint p-4">No folder rules. The profile above applies everywhere.</p>
+      ) : (
+        draft.permissions.path_rules.map((rule, index) => (
+          <div key={`path-rule-${index}`} className="st-row-stacked">
             <div className="flex gap-2">
               <input
                 value={rule.path}
+                aria-label={`Folder path ${index + 1}`}
                 onChange={(e) => updateDraft((current) => {
                   const pathRules = [...current.permissions.path_rules]
                   pathRules[index] = { ...pathRules[index], path: e.target.value }
                   return { ...current, permissions: { ...current.permissions, path_rules: pathRules } }
                 })}
-                placeholder="Folder path"
-                className="control min-w-0 flex-1 rounded-xl px-3 py-2 text-sm"
+                placeholder="C:\Users\you\Projects"
+                className="st-input min-w-0 flex-1 font-mono text-xs"
               />
               <button
                 type="button"
@@ -2758,24 +2742,18 @@ function PathOverrides({
                     path_rules: current.permissions.path_rules.filter((_, pathIndex) => pathIndex !== index),
                   },
                 }))}
-                className="ghost-button h-10 w-10 rounded-xl hover:text-red-300"
+                className="st-btn st-btn-ghost st-btn-icon shrink-0"
                 aria-label={`Remove path override ${index + 1}`}
               >
-                <Trash2 size={14} />
+                <Trash2 size={13} />
               </button>
             </div>
-            <div className="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
-              {([
-                ['read', 'Read'],
-                ['write', 'Write'],
-                ['delete', 'Delete'],
-                ['launch', 'Launch'],
-                ['require_confirmation', 'Confirm'],
-                ['enabled', 'Enabled'],
-              ] as const).map(([key, label]) => (
-                <ToggleRow
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {(Object.keys(OVERRIDE_COPY.pathFlags) as Array<keyof typeof OVERRIDE_COPY.pathFlags>).map((key) => (
+                <FlagToggle
                   key={key}
-                  label={label}
+                  label={OVERRIDE_COPY.pathFlags[key]}
+                  ariaLabel={`${OVERRIDE_COPY.pathFlags[key]} for folder ${index + 1}`}
                   checked={rule[key]}
                   onChange={(checked) => updateDraft((current) => {
                     const pathRules = [...current.permissions.path_rules]
@@ -2786,66 +2764,71 @@ function PathOverrides({
               ))}
             </div>
           </div>
-        ))}
-      </div>
+        ))
+      )}
 
-      <div className="mt-4 space-y-2 border-t border-white/[0.07] pt-4">
-        <p className="section-label">Blocked roots always win</p>
-        {draft.permissions.blocked_roots.map((root, index) => (
-          <div key={`${root}-${index}`} className="flex gap-2">
+      <div className="st-row-stacked">
+        <p className="st-label">Never allowed</p>
+        <p className="st-desc mt-1">{OVERRIDE_COPY.blockedRoots}</p>
+        <div className="mt-2 space-y-2">
+          {draft.permissions.blocked_roots.map((root, index) => (
+            <div key={`blocked-root-${index}`} className="flex gap-2">
+              <input
+                value={root}
+                aria-label={`Blocked folder ${index + 1}`}
+                onChange={(e) => updateDraft((current) => {
+                  const blockedRoots = [...current.permissions.blocked_roots]
+                  blockedRoots[index] = e.target.value
+                  return { ...current, permissions: { ...current.permissions, blocked_roots: blockedRoots } }
+                })}
+                className="st-input min-w-0 flex-1 font-mono text-xs"
+              />
+              <button
+                type="button"
+                onClick={() => updateDraft((current) => ({
+                  ...current,
+                  permissions: {
+                    ...current.permissions,
+                    blocked_roots: current.permissions.blocked_roots.filter((_, rootIndex) => rootIndex !== index),
+                  },
+                }))}
+                className="st-btn st-btn-ghost st-btn-icon shrink-0"
+                aria-label={`Remove blocked root ${index + 1}`}
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+          <div className="flex gap-2">
             <input
-              value={root}
-              onChange={(e) => updateDraft((current) => {
-                const blockedRoots = [...current.permissions.blocked_roots]
-                blockedRoots[index] = e.target.value
-                return { ...current, permissions: { ...current.permissions, blocked_roots: blockedRoots } }
-              })}
-              className="control min-w-0 flex-1 rounded-xl px-3 py-2 text-sm"
+              value={blockedRootInput}
+              aria-label="New blocked folder"
+              onChange={(e) => setBlockedRootInput(e.target.value)}
+              placeholder="Add a folder the agent must never touch"
+              className="st-input min-w-0 flex-1 font-mono text-xs"
             />
             <button
               type="button"
-              onClick={() => updateDraft((current) => ({
-                ...current,
-                permissions: {
-                  ...current.permissions,
-                  blocked_roots: current.permissions.blocked_roots.filter((_, rootIndex) => rootIndex !== index),
-                },
-              }))}
-              className="ghost-button h-10 w-10 rounded-xl hover:text-red-300"
-              aria-label={`Remove blocked root ${index + 1}`}
+              onClick={() => {
+                if (!blockedRootInput.trim()) return
+                updateDraft((current) => ({
+                  ...current,
+                  permissions: {
+                    ...current.permissions,
+                    blocked_roots: [...current.permissions.blocked_roots, blockedRootInput.trim()],
+                  },
+                }))
+                setBlockedRootInput('')
+              }}
+              className="st-btn st-btn-primary st-btn-icon shrink-0"
+              aria-label="Add blocked root"
             >
-              <Trash2 size={14} />
+              <Plus size={14} />
             </button>
           </div>
-        ))}
-        <div className="flex gap-2">
-          <input
-            value={blockedRootInput}
-            onChange={(e) => setBlockedRootInput(e.target.value)}
-            placeholder="Add blocked root"
-            className="control min-w-0 flex-1 rounded-xl px-3 py-2 text-sm"
-          />
-          <button
-            type="button"
-            onClick={() => {
-              if (!blockedRootInput.trim()) return
-              updateDraft((current) => ({
-                ...current,
-                permissions: {
-                  ...current.permissions,
-                  blocked_roots: [...current.permissions.blocked_roots, blockedRootInput.trim()],
-                },
-              }))
-              setBlockedRootInput('')
-            }}
-            className="primary-button h-10 w-10 rounded-xl"
-            aria-label="Add blocked root"
-          >
-            <Plus size={14} />
-          </button>
         </div>
       </div>
-    </div>
+    </SettingsCard>
   )
 }
 
@@ -2857,12 +2840,10 @@ function AppOverrides({
   updateDraft: (updater: (current: AgentSettings) => AgentSettings) => void
 }) {
   return (
-    <div className="panel-muted rounded-xl p-3">
-      <div className="mb-2.5 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Bot size={13} className="text-neutral-400" />
-          <p className="text-xs font-semibold text-neutral-200">App overrides</p>
-        </div>
+    <SettingsCard
+      title="Application rules"
+      description={OVERRIDE_COPY.apps}
+      action={
         <button
           type="button"
           onClick={() => updateDraft((current) => ({
@@ -2872,39 +2853,45 @@ function AppOverrides({
               app_rules: [...current.permissions.app_rules, emptyAppRule()],
             },
           }))}
-          className="ghost-button rounded-lg px-2 py-1 text-xs"
+          className="st-btn st-btn-secondary"
         >
-          <Plus size={12} />
-          Add
+          <Plus size={13} />
+          Add app
         </button>
-      </div>
-      <div className="space-y-3">
-        {draft.permissions.app_rules.map((rule, index) => (
-          <div key={`app-rule-${index}`} className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
+      }
+    >
+      {draft.permissions.app_rules.length === 0 ? (
+        <p className="st-hint p-4">No application rules. The profile above applies to every app.</p>
+      ) : (
+        draft.permissions.app_rules.map((rule, index) => (
+          <div key={`app-rule-${index}`} className="st-row-stacked">
             <div className="grid gap-2 sm:grid-cols-2">
               <input
                 value={rule.alias}
+                aria-label={`App alias ${index + 1}`}
                 onChange={(e) => updateDraft((current) => {
                   const appRules = [...current.permissions.app_rules]
                   appRules[index] = { ...appRules[index], alias: e.target.value }
                   return { ...current, permissions: { ...current.permissions, app_rules: appRules } }
                 })}
                 placeholder="Alias"
-                className="control rounded-xl px-3 py-2 text-sm"
+                className="st-input"
               />
               <input
                 value={rule.display_name}
+                aria-label={`App display name ${index + 1}`}
                 onChange={(e) => updateDraft((current) => {
                   const appRules = [...current.permissions.app_rules]
                   appRules[index] = { ...appRules[index], display_name: e.target.value }
                   return { ...current, permissions: { ...current.permissions, app_rules: appRules } }
                 })}
                 placeholder="Display name"
-                className="control rounded-xl px-3 py-2 text-sm"
+                className="st-input"
               />
             </div>
             <input
               value={rule.exe_paths.join(', ')}
+              aria-label={`App executable paths ${index + 1}`}
               onChange={(e) => updateDraft((current) => {
                 const appRules = [...current.permissions.app_rules]
                 appRules[index] = {
@@ -2913,20 +2900,15 @@ function AppOverrides({
                 }
                 return { ...current, permissions: { ...current.permissions, app_rules: appRules } }
               })}
-              placeholder="Exe paths (comma separated)"
-              className="control mt-2 w-full rounded-xl px-3 py-2 text-sm"
+              placeholder="Executable paths, separated by commas"
+              className="st-input mt-2 font-mono text-xs"
             />
-            <div className="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
-              {([
-                ['launch_allowed', 'Launch'],
-                ['uia_allowed', 'UIA'],
-                ['screen_fallback_allowed', 'Screen'],
-                ['require_confirmation', 'Confirm'],
-                ['enabled', 'Enabled'],
-              ] as const).map(([key, label]) => (
-                <ToggleRow
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {(Object.keys(OVERRIDE_COPY.appFlags) as Array<keyof typeof OVERRIDE_COPY.appFlags>).map((key) => (
+                <FlagToggle
                   key={key}
-                  label={label}
+                  label={OVERRIDE_COPY.appFlags[key]}
+                  ariaLabel={`${OVERRIDE_COPY.appFlags[key]} for app ${index + 1}`}
                   checked={rule[key]}
                   onChange={(checked) => updateDraft((current) => {
                     const appRules = [...current.permissions.app_rules]
@@ -2945,14 +2927,14 @@ function AppOverrides({
                   app_rules: current.permissions.app_rules.filter((_, appIndex) => appIndex !== index),
                 },
               }))}
-              className="ghost-button mt-3 rounded-lg px-2 py-1 text-xs hover:text-red-300"
+              className="st-btn st-btn-danger mt-3"
             >
               <Trash2 size={12} />
-              Remove app rule
+              Remove this app rule
             </button>
           </div>
-        ))}
-      </div>
-    </div>
+        ))
+      )}
+    </SettingsCard>
   )
 }

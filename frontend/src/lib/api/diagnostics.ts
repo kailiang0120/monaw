@@ -1,4 +1,4 @@
-import { apiFetch, BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS, throwApiError } from './client'
 import type {
   BrowserUseDiagnostics,
   DataDeletionResult,
@@ -11,6 +11,7 @@ import type {
   ObservabilityRun,
   ObservabilityRunDetail,
   ObservabilitySummary,
+  ObservabilitySupportMode,
 } from './types'
 
 export async function fetchDiagnosticsSummary(signal?: AbortSignal): Promise<DiagnosticsSummary> {
@@ -96,10 +97,34 @@ export async function fetchObservabilityErrors(filters: {
   return res.json()
 }
 
+/**
+ * The backend log is gated behind support mode, so a 403 here is an expected
+ * state rather than a failure. Throw an ApiError so callers can tell the two
+ * apart by status instead of matching on the message.
+ */
 export async function fetchBackendLogTail(tail = 400, signal?: AbortSignal): Promise<ObservabilityBackendLog> {
   const params = new URLSearchParams({ tail: String(tail) })
   const res = await apiFetch(`${BASE}/api/observability/logs/backend?${params}`, { signal })
-  if (!res.ok) throw new Error('Failed to fetch backend log')
+  if (!res.ok) await throwApiError(res, 'Failed to fetch backend log')
+  return res.json()
+}
+
+export async function fetchSupportMode(signal?: AbortSignal): Promise<ObservabilitySupportMode> {
+  const res = await apiFetch(`${BASE}/api/observability/support-mode`, { signal })
+  if (!res.ok) await throwApiError(res, 'Failed to read support mode')
+  return res.json()
+}
+
+export async function enableSupportMode(durationSeconds = 600): Promise<ObservabilitySupportMode> {
+  const params = new URLSearchParams({ duration_seconds: String(durationSeconds) })
+  const res = await apiFetch(`${BASE}/api/observability/support-mode?${params}`, { method: 'POST' })
+  if (!res.ok) await throwApiError(res, 'Failed to enable support mode')
+  return res.json()
+}
+
+export async function disableSupportMode(): Promise<ObservabilitySupportMode> {
+  const res = await apiFetch(`${BASE}/api/observability/support-mode`, { method: 'DELETE' })
+  if (!res.ok) await throwApiError(res, 'Failed to disable support mode')
   return res.json()
 }
 

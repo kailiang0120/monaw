@@ -24,7 +24,9 @@ export function ScheduledTaskItem({
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false)
   const schedule = humanizeSchedule(task)
-  const next = task.enabled && task.nextRunAt ? `next ${relativeTime(task.nextRunAt)}` : 'off'
+  const next = task.enabled
+    ? (task.nextRunAt ? `next ${relativeTime(task.nextRunAt)}` : 'no run scheduled')
+    : 'paused'
 
   const openLastRun = () => {
     if (task.lastRunConversationId) onSelectRun(task.lastRunConversationId)
@@ -48,7 +50,11 @@ export function ScheduledTaskItem({
             {schedule} · {next}
           </span>
         </div>
-        <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(task)}`} />
+        <span
+          className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(task)}`}
+          title={statusLabel(task)}
+        />
+        <span className="sr-only">{statusLabel(task)}</span>
       </button>
 
       <button
@@ -105,6 +111,16 @@ function MenuButton({
       {label}
     </button>
   )
+}
+
+function statusLabel(task: ScheduledTask): string {
+  if (!task.enabled) return 'Paused'
+  if (task.running) return 'Running now'
+  if (task.lastRunStatus === 'ok') return 'Last run completed'
+  if (task.lastRunStatus === 'error') return 'Last run failed'
+  if (task.lastRunStatus === 'disabled_after_failures') return 'Paused after repeated failures'
+  if (task.lastRunStatus === 'skipped') return 'Last run was skipped'
+  return 'Has not run yet'
 }
 
 function statusDot(task: ScheduledTask): string {

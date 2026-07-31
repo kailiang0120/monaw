@@ -1,0 +1,577 @@
+/* ============================================================================
+   Monaw — Settings and dialog components
+   ----------------------------------------------------------------------------
+   Component styles for long-form configuration surfaces: the settings modal and
+   the scheduled-task dialog. Colors come entirely from the `--st-*` tokens
+   defined per theme in globals.css, so these classes work in both themes with
+   no per-theme duplication.
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- shell --- */
+
+.st-overlay {
+  background: rgba(12, 11, 10, 0.62);
+  backdrop-filter: blur(6px);
+}
+
+.theme-light .st-overlay {
+  background: rgba(40, 36, 28, 0.32);
+}
+
+.settings-shell {
+  background: var(--st-bg);
+  border: 1px solid var(--st-border);
+  box-shadow: var(--st-shadow);
+  color: var(--st-text);
+}
+
+.st-nav {
+  background: var(--st-bg-nav);
+  border-right: 1px solid var(--st-border);
+}
+
+.st-divider-b {
+  border-bottom: 1px solid var(--st-border);
+}
+
+.st-divider-t {
+  border-top: 1px solid var(--st-border);
+}
+
+/* ------------------------------------------------------------ typography --- */
+
+.st-title {
+  color: var(--st-text);
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.st-page-title {
+  color: var(--st-text);
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.st-page-desc {
+  color: var(--st-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  max-width: 62ch;
+}
+
+.st-group-label {
+  color: var(--st-text-faint);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.st-label {
+  color: var(--st-text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.st-desc {
+  color: var(--st-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  max-width: 58ch;
+}
+
+.st-hint {
+  color: var(--st-text-faint);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+/* ----------------------------------------------------------------- nav --- */
+
+.st-nav-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.625rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  padding: 0.4375rem 0.625rem;
+  text-align: left;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--st-text-muted);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.st-nav-item:hover {
+  background: var(--st-surface-hover);
+  color: var(--st-text);
+}
+
+.st-nav-item[aria-current='page'] {
+  background: var(--st-surface);
+  border-color: var(--st-border);
+  color: var(--st-text);
+}
+
+.st-nav-item[aria-current='page'] .st-nav-icon {
+  color: var(--st-accent-text);
+}
+
+.st-nav-icon {
+  flex-shrink: 0;
+  color: var(--st-text-faint);
+}
+
+/* ---------------------------------------------------------------- cards --- */
+
+.st-card {
+  background: var(--st-surface);
+  border: 1px solid var(--st-border);
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.st-card-head {
+  padding: 0.875rem 1rem;
+  border-bottom: 1px solid var(--st-border);
+}
+
+.st-card-foot {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--st-border);
+  background: var(--st-surface-sunken);
+}
+
+.st-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: 0.875rem 1rem;
+}
+
+.st-row + .st-row {
+  border-top: 1px solid var(--st-border);
+}
+
+.st-row-stacked {
+  display: block;
+  padding: 0.875rem 1rem;
+}
+
+.st-row-stacked + .st-row,
+.st-row + .st-row-stacked,
+.st-row-stacked + .st-row-stacked {
+  border-top: 1px solid var(--st-border);
+}
+
+.st-row-control {
+  flex-shrink: 0;
+  min-width: 11rem;
+  max-width: 16rem;
+}
+
+.st-row-control-auto {
+  flex-shrink: 0;
+}
+
+.st-status-cell + .st-status-cell {
+  border-left: 1px solid var(--st-border);
+}
+
+/* --------------------------------------------------------------- inputs --- */
+
+.st-input {
+  width: 100%;
+  border-radius: 0.5rem;
+  border: 1px solid var(--st-border-strong);
+  background: var(--st-surface-sunken);
+  color: var(--st-text);
+  font-size: 0.8125rem;
+  padding: 0.4375rem 0.625rem;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.st-input::placeholder {
+  color: var(--st-text-faint);
+}
+
+.st-input:focus {
+  outline: none;
+  border-color: var(--st-accent-border);
+  box-shadow: 0 0 0 3px var(--st-focus);
+}
+
+.st-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.st-input-number {
+  appearance: textfield;
+  text-align: right;
+  width: 6.5rem;
+}
+
+.st-input-number::-webkit-inner-spin-button,
+.st-input-number::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.st-search {
+  padding-left: 2rem;
+}
+
+/* ------------------------------------------------------- select / menu --- */
+
+.st-select {
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--st-border-strong);
+  background: var(--st-surface-sunken);
+  color: var(--st-text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 0.4375rem 0.625rem;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.st-select:hover:not(:disabled) {
+  border-color: var(--st-accent-border);
+}
+
+.st-select:focus-visible {
+  outline: none;
+  border-color: var(--st-accent-border);
+  box-shadow: 0 0 0 3px var(--st-focus);
+}
+
+.st-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.st-select-sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.st-menu {
+  z-index: 200;
+  max-height: 17rem;
+  overflow-y: auto;
+  border-radius: 0.625rem;
+  border: 1px solid var(--st-border-strong);
+  background: var(--st-surface);
+  box-shadow: var(--st-shadow);
+  padding: 0.25rem;
+}
+
+.st-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-radius: 0.375rem;
+  padding: 0.375rem 0.5rem;
+  text-align: left;
+  font-size: 0.8125rem;
+  color: var(--st-text-muted);
+  white-space: nowrap;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.st-menu-item:hover {
+  background: var(--st-surface-hover);
+  color: var(--st-text);
+}
+
+.st-menu-item[aria-selected='true'] {
+  background: var(--st-accent-soft);
+  color: var(--st-accent-text);
+}
+
+/* -------------------------------------------------------------- buttons --- */
+
+.st-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 0.4375rem 0.75rem;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+}
+
+.st-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--st-focus);
+}
+
+.st-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.st-btn-primary {
+  background: var(--st-accent);
+  color: var(--st-on-accent);
+}
+
+.st-btn-primary:not(:disabled):hover {
+  background: var(--st-accent-hover);
+}
+
+.st-btn-secondary {
+  background: var(--st-surface);
+  border-color: var(--st-border-strong);
+  color: var(--st-text);
+}
+
+.st-btn-secondary:not(:disabled):hover {
+  background: var(--st-surface-hover);
+}
+
+.st-btn-ghost {
+  background: transparent;
+  color: var(--st-text-muted);
+}
+
+.st-btn-ghost:not(:disabled):hover {
+  background: var(--st-surface-hover);
+  color: var(--st-text);
+}
+
+.st-btn-danger {
+  background: transparent;
+  border-color: var(--st-danger-border);
+  color: var(--st-danger);
+}
+
+.st-btn-danger:not(:disabled):hover {
+  background: var(--st-danger-soft);
+}
+
+.st-btn-icon {
+  padding: 0;
+  height: 1.875rem;
+  width: 1.875rem;
+}
+
+/* --------------------------------------------------------------- switch --- */
+
+.st-switch {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  height: 1.25rem;
+  width: 2.125rem;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--st-border-strong);
+  background: var(--st-surface-sunken);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  cursor: pointer;
+}
+
+.st-switch::after {
+  content: '';
+  position: absolute;
+  left: 0.1875rem;
+  height: 0.75rem;
+  width: 0.75rem;
+  border-radius: 999px;
+  background: var(--st-text-faint);
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.st-switch-input:checked + .st-switch {
+  background: var(--st-accent);
+  border-color: var(--st-accent);
+}
+
+.st-switch-input:checked + .st-switch::after {
+  transform: translateX(0.875rem);
+  background: var(--st-on-accent);
+}
+
+.st-switch-input:focus-visible + .st-switch {
+  box-shadow: 0 0 0 3px var(--st-focus);
+}
+
+.st-switch-input:disabled + .st-switch {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------- choice / badge --- */
+
+.st-choice {
+  display: block;
+  width: 100%;
+  border-radius: 0.625rem;
+  border: 1px solid var(--st-border);
+  background: var(--st-surface-sunken);
+  padding: 0.75rem;
+  text-align: left;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+
+.st-choice:hover {
+  border-color: var(--st-border-strong);
+}
+
+.st-choice[aria-pressed='true'] {
+  border-color: var(--st-accent-border);
+  background: var(--st-accent-soft);
+}
+
+.st-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 999px;
+  border: 1px solid var(--st-border);
+  background: var(--st-surface-sunken);
+  color: var(--st-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  padding: 0.125rem 0.5rem;
+  white-space: nowrap;
+}
+
+.st-badge-ok {
+  border-color: var(--st-ok-border);
+  background: var(--st-ok-soft);
+  color: var(--st-ok);
+}
+
+.st-badge-warn {
+  border-color: var(--st-warn-border);
+  background: var(--st-warn-soft);
+  color: var(--st-warn);
+}
+
+.st-badge-danger {
+  border-color: var(--st-danger-border);
+  background: var(--st-danger-soft);
+  color: var(--st-danger);
+}
+
+.st-badge-accent {
+  border-color: var(--st-accent-border);
+  background: var(--st-accent-soft);
+  color: var(--st-accent-text);
+}
+
+.st-dot {
+  height: 0.4375rem;
+  width: 0.4375rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: var(--st-text-faint);
+}
+
+.st-dot-ok { background: var(--st-ok); }
+.st-dot-warn { background: var(--st-warn); }
+.st-dot-danger { background: var(--st-danger); }
+
+/* --------------------------------------------------------------- notes --- */
+
+.st-note {
+  border-radius: 0.625rem;
+  border: 1px solid var(--st-border);
+  background: var(--st-surface-sunken);
+  color: var(--st-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.65;
+  padding: 0.625rem 0.75rem;
+}
+
+.st-note-info {
+  border-color: var(--st-accent-border);
+  background: var(--st-accent-soft);
+}
+
+.st-note-warn {
+  border-color: var(--st-warn-border);
+  background: var(--st-warn-soft);
+  color: var(--st-warn);
+}
+
+.st-note-danger {
+  border-color: var(--st-danger-border);
+  background: var(--st-danger-soft);
+  color: var(--st-danger);
+}
+
+.st-code {
+  border-radius: 0.5rem;
+  border: 1px solid var(--st-border);
+  background: var(--st-surface-sunken);
+  color: var(--st-text-muted);
+  font-family: theme('fontFamily.mono');
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  padding: 0.5rem 0.625rem;
+  word-break: break-all;
+}
+
+/* ------------------------------------------------------- segmented tabs --- */
+
+.st-segment {
+  display: inline-flex;
+  gap: 0.125rem;
+  border-radius: 0.625rem;
+  border: 1px solid var(--st-border);
+  background: var(--st-surface-sunken);
+  padding: 0.1875rem;
+}
+
+.st-segment-item {
+  border-radius: 0.4375rem;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--st-text-muted);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.st-segment-item:hover {
+  color: var(--st-text);
+}
+
+.st-segment-item[aria-pressed='true'] {
+  background: var(--st-surface);
+  color: var(--st-text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+/* -------------------------------------------------------------- scroll --- */
+
+.st-scroll {
+  scrollbar-gutter: stable;
+}
+
+.st-scroll-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.st-scroll-hidden::-webkit-scrollbar {
+  display: none;
+}

@@ -87,14 +87,16 @@ export function TimezoneSelect({ value, onChange }: Props) {
       <button
         type="button"
         onClick={open ? closeDropdown : openDropdown}
-        className="control flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm"
+        aria-label="Timezone"
+        aria-expanded={open}
+        className="st-select gap-2"
       >
-        <Globe size={13} className="shrink-0 text-neutral-500" />
-        <span className="min-w-0 flex-1 truncate text-left text-neutral-300">{value}</span>
-        <span className="shrink-0 font-mono text-[11px] text-neutral-500">{currentOffset}</span>
+        <Globe size={13} className="st-nav-icon" />
+        <span className="min-w-0 flex-1 truncate text-left">{value}</span>
+        <span className="st-hint shrink-0 font-mono">{currentOffset}</span>
         <ChevronDown
           size={13}
-          className={`shrink-0 text-neutral-500 transition-transform duration-150 ${open ? 'rotate-180' : ''}`}
+          className={`st-nav-icon transition-transform duration-150 ${open ? 'rotate-180' : ''}`}
         />
       </button>
 
@@ -103,41 +105,38 @@ export function TimezoneSelect({ value, onChange }: Props) {
         <div
           id="tz-dropdown"
           style={{ position: 'fixed', top: dropPos.top, left: dropPos.left, width: dropPos.width }}
-          className="z-[200] overflow-hidden rounded-xl border border-white/[0.1] bg-[#141312] shadow-2xl"
+          className="st-menu z-[200] overflow-hidden p-0"
         >
-          {/* Search */}
-          <div className="border-b border-white/[0.07] px-3 py-2">
+          <div className="st-divider-b px-3 py-2">
             <input
               ref={searchRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search timezone…"
-              className="w-full bg-transparent text-sm text-neutral-200 placeholder-neutral-600 outline-none"
+              aria-label="Search timezone"
+              className="w-full border-0 bg-transparent text-sm outline-none"
+              style={{ color: 'var(--st-text)' }}
               onKeyDown={(e) => e.key === 'Escape' && closeDropdown()}
             />
           </div>
 
-          {/* List */}
-          <div className="max-h-52 overflow-y-auto py-1">
+          <div className="max-h-52 overflow-y-auto p-1">
             {filtered.length === 0 ? (
-              <p className="px-4 py-3 text-xs text-neutral-500">No timezones found</p>
+              <p className="st-hint px-3 py-3">No timezones found</p>
             ) : (
               filtered.map((tz) => (
                 <button
                   key={tz}
                   type="button"
+                  aria-selected={tz === value}
                   onClick={() => {
                     onChange(tz)
                     closeDropdown()
                   }}
-                  className={`flex w-full items-center gap-3 px-3 py-1.5 text-left transition-colors hover:bg-white/[0.05] ${
-                    tz === value ? 'bg-accent/10 text-accent-light' : 'text-neutral-300'
-                  }`}
+                  className="st-menu-item justify-start gap-3"
                 >
-                  <span className="w-[4.5rem] shrink-0 font-mono text-[10px] text-neutral-500">
-                    {getOffset(tz)}
-                  </span>
-                  <span className="text-xs">{tz}</span>
+                  <span className="w-[4.5rem] shrink-0 font-mono text-[0.625rem]">{getOffset(tz)}</span>
+                  <span className="truncate text-xs">{tz}</span>
                 </button>
               ))
             )}

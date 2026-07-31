@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, ChevronDown, Clock, MessageSquare, Play, Send, X } from 'lucide-react'
+import { AlertCircle, Clock, Play, X } from 'lucide-react'
 import {
   createScheduledTask,
   fetchTelegramChats,
@@ -13,48 +13,41 @@ import type {
   ScheduledTaskOverlapPolicy,
   TelegramChatTarget,
 } from '../../lib/api/types'
+import {
+  ChoiceCard,
+  Note,
+  SettingsCard,
+  StackedRow,
+  SwitchRow,
+} from '../ui/Panel'
 import { Dropdown } from '../Dropdown'
 import { ScheduleEditor } from './ScheduleEditor'
 
-// ─── sub-components ───────────────────────────────────────────────────────────
-
-function Toggle({
-  checked,
-  onChange,
-}: {
-  checked: boolean
-  onChange: (v: boolean) => void
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-5 w-8 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-        checked ? 'bg-accent' : 'bg-white/[0.12]'
-      }`}
-    >
-      <span
-        className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
-          checked ? 'translate-x-[14px]' : 'translate-x-[3px]'
-        }`}
-      />
-    </button>
-  )
-}
-
-const OVERLAP_OPTIONS: {
+/**
+ * "Skip / Queue / Replace" tells you the mechanism but not the consequence.
+ * Each option says what actually happens to the run you care about.
+ */
+const OVERLAP_OPTIONS: Array<{
   value: ScheduledTaskOverlapPolicy
   label: string
-  desc: string
-}[] = [
-  { value: 'skip',            label: 'Skip',    desc: 'Ignore new fire while running' },
-  { value: 'queue',           label: 'Queue',   desc: 'Wait for current run to finish' },
-  { value: 'cancel_previous', label: 'Replace', desc: 'Cancel current, start fresh' },
+  summary: string
+}> = [
+  {
+    value: 'skip',
+    label: 'Skip the new run',
+    summary: 'Let the current run finish and wait for the next scheduled time.',
+  },
+  {
+    value: 'queue',
+    label: 'Wait in line',
+    summary: 'Start the new run as soon as the current one finishes.',
+  },
+  {
+    value: 'cancel_previous',
+    label: 'Cancel and restart',
+    summary: 'Stop the run in progress and start the new one immediately.',
+  },
 ]
-
-// ─── props ────────────────────────────────────────────────────────────────────
 
 interface Props {
   task?: ScheduledTask | null
@@ -63,36 +56,33 @@ interface Props {
   onRunConversation: (conversationId: string) => void
 }
 
-// ─── main component ───────────────────────────────────────────────────────────
-
 export function ScheduledTaskDialog({
   task,
   onClose,
   onSaved,
   onRunConversation,
 }: Props) {
-  const [title, setTitle]                   = useState(task?.title ?? '')
-  const [prompt, setPrompt]                 = useState(task?.prompt ?? '')
-  const [scheduleKind, setScheduleKind]     = useState<ScheduleKind>(task?.scheduleKind ?? 'interval')
-  const [cronExpr, setCronExpr]             = useState(task?.cronExpr ?? '0 8 * * 1-5')
-  const [intervalSeconds, setIntervalSecs]  = useState(task?.intervalSeconds ?? 3600)
-  const [runAt, setRunAt]                   = useState(toLocalDateTimeInput(task?.runAt))
-  const [timezone, setTimezone]             = useState(
+  const [title, setTitle] = useState(task?.title ?? '')
+  const [prompt, setPrompt] = useState(task?.prompt ?? '')
+  const [scheduleKind, setScheduleKind] = useState<ScheduleKind>(task?.scheduleKind ?? 'interval')
+  const [cronExpr, setCronExpr] = useState(task?.cronExpr ?? '0 8 * * 1-5')
+  const [intervalSeconds, setIntervalSecs] = useState(task?.intervalSeconds ?? 3600)
+  const [runAt, setRunAt] = useState(toLocalDateTimeInput(task?.runAt))
+  const [timezone, setTimezone] = useState(
     task?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC',
   )
-  const [enabled, setEnabled]               = useState(task?.enabled ?? true)
+  const [enabled, setEnabled] = useState(task?.enabled ?? true)
   const [notifyTelegram, setNotifyTelegram] = useState(task?.notifyTelegram ?? false)
   const [telegramChatId, setTelegramChatId] = useState(task?.telegramChatId ?? '')
-  const [telegramChats, setTelegramChats]   = useState<TelegramChatTarget[]>([])
+  const [telegramChats, setTelegramChats] = useState<TelegramChatTarget[]>([])
   const [reuseConversation, setReuseConversation] = useState(task?.reuseConversation ?? false)
-  const [overlapPolicy, setOverlapPolicy]   = useState<ScheduledTaskOverlapPolicy>(
+  const [overlapPolicy, setOverlapPolicy] = useState<ScheduledTaskOverlapPolicy>(
     task?.overlapPolicy ?? 'skip',
   )
-  const [advancedOpen, setAdvancedOpen]     = useState(false)
-  const [saving, setSaving]                 = useState(false)
-  const [error, setError]                   = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
 
-  // Auto-fill title from first line of prompt
+  // Auto-fill the title from the first line of the prompt, until it is edited.
   useEffect(() => {
     if (!title.trim() && prompt.trim()) {
       setTitle(prompt.trim().replace(/\s+/g, ' ').slice(0, 60))
@@ -100,13 +90,12 @@ export function ScheduledTaskDialog({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prompt])
 
-  // Escape key to close
   useEffect(() => {
-    const fn = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
     }
-    document.addEventListener('keydown', fn)
-    return () => document.removeEventListener('keydown', fn)
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
   useEffect(() => {
@@ -127,7 +116,7 @@ export function ScheduledTaskDialog({
   }, [notifyTelegram])
 
   const canSave = useMemo(
-    () => title.trim() && prompt.trim() && !saving,
+    () => Boolean(title.trim() && prompt.trim() && !saving),
     [title, prompt, saving],
   )
 
@@ -135,9 +124,9 @@ export function ScheduledTaskDialog({
     title: title.trim(),
     prompt: prompt.trim(),
     scheduleKind,
-    cronExpr:        scheduleKind === 'cron'     ? cronExpr.trim() : '',
+    cronExpr: scheduleKind === 'cron' ? cronExpr.trim() : '',
     intervalSeconds: scheduleKind === 'interval' ? intervalSeconds : 0,
-    runAt:           scheduleKind === 'once'     ? runAt : '',
+    runAt: scheduleKind === 'once' ? runAt : '',
     timezone,
     enabled,
     overlapPolicy,
@@ -184,247 +173,181 @@ export function ScheduledTaskDialog({
       setTelegramChats(chats)
       if (chats[0]) setTelegramChatId(chats[0].id)
     } catch {
-      // ignore
+      // A failed lookup just leaves the field for manual entry.
     }
   }
 
   return (
-    /* Overlay — no backdrop-click-to-close; use X or Cancel instead */
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-      {/* Panel */}
-      <div className="panel flex max-h-[92vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl">
-
-        {/* ── Header ─────────────────────────────────────── */}
-        <div className="flex items-center justify-between border-b border-white/[0.07] px-5 py-4">
+    <div className="st-overlay fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={task ? 'Edit scheduled task' : 'New scheduled task'}
+        className="settings-shell flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl"
+      >
+        <header className="st-divider-b flex items-center justify-between gap-3 px-5 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/20">
-              <Clock size={15} className="text-accent-light" />
+            <div
+              className="flex h-9 w-9 items-center justify-center rounded-lg"
+              style={{ background: 'var(--st-accent-soft)', color: 'var(--st-accent-text)' }}
+            >
+              <Clock size={16} />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-neutral-100">
-                {task ? 'Edit scheduled task' : 'New scheduled task'}
-              </h2>
-              <p className="text-[11px] text-neutral-500">
-                {reuseConversation ? 'Runs reuse one conversation' : 'Runs create normal conversations'}
+              <h2 className="st-title">{task ? 'Edit scheduled task' : 'New scheduled task'}</h2>
+              <p className="st-desc mt-0.5">
+                Monaw will send the prompt below to the agent on its own, on the schedule you set.
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="ghost-button h-8 w-8 rounded-lg"
+            className="st-btn st-btn-ghost st-btn-icon shrink-0"
             aria-label="Close"
           >
             <X size={15} />
           </button>
-        </div>
+        </header>
 
-        {/* ── Scrollable body ─────────────────────────────── */}
-        <div className="space-y-5 overflow-y-auto px-5 py-5">
+        <div className="st-scroll flex-1 space-y-4 overflow-y-auto px-5 py-5">
+          <SettingsCard title="What to run">
+            <StackedRow label="Title" description="Shown in the sidebar so you can find this task later.">
+              <input
+                value={title}
+                aria-label="Title"
+                onChange={(e) => setTitle(e.target.value)}
+                className="st-input"
+                placeholder="Morning briefing"
+              />
+            </StackedRow>
+            <StackedRow
+              label="Prompt"
+              description="Sent to the agent word for word on every run. Write it the way you would type it into the chat box."
+            >
+              <textarea
+                value={prompt}
+                aria-label="Prompt"
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={5}
+                className="st-input min-h-[100px] resize-y font-mono leading-relaxed"
+                placeholder="Summarise my unread emails and list today's calendar."
+              />
+            </StackedRow>
+          </SettingsCard>
 
-          {/* Title */}
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-neutral-400">Title</label>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="control w-full rounded-lg px-3 py-2 text-sm"
-              placeholder="Morning briefing"
-            />
-          </div>
-
-          {/* Prompt */}
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-neutral-400">Prompt</label>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={5}
-              className="control min-h-[100px] w-full resize-y rounded-lg px-3 py-2 font-mono text-sm leading-relaxed"
-              placeholder="Summarize my unread emails and list today's calendar."
-            />
-          </div>
-
-          {/* Schedule */}
-          <div className="space-y-1.5">
-            <span className="block text-xs font-medium text-neutral-400">Schedule</span>
-            <ScheduleEditor
-              scheduleKind={scheduleKind}
-              cronExpr={cronExpr}
-              intervalSeconds={intervalSeconds}
-              runAt={runAt}
-              timezone={timezone}
-              onScheduleKindChange={setScheduleKind}
-              onCronExprChange={setCronExpr}
-              onIntervalSecondsChange={setIntervalSecs}
-              onRunAtChange={setRunAt}
-              onTimezoneChange={setTimezone}
-            />
-          </div>
-
-          {/* ── Delivery section ─────────────────────────── */}
-          <div className="flex items-center gap-3 py-1">
-            <div className="h-px flex-1 bg-white/[0.06]" />
-            <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-neutral-600">
-              Delivery
-            </span>
-            <div className="h-px flex-1 bg-white/[0.06]" />
-          </div>
-
-          <div className="space-y-3 rounded-xl border border-white/[0.07] bg-white/[0.02] px-4 py-3">
-            {/* Chat mode */}
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-sm text-neutral-300">
-                {reuseConversation ? (
-                  <span className="flex h-4 w-4 items-center justify-center rounded-sm bg-accent/20">
-                    <Check size={10} className="text-accent-light" />
-                  </span>
-                ) : (
-                  <MessageSquare size={13} className="text-neutral-500" />
-                )}
-                Reuse chat
-              </div>
-              <Toggle checked={reuseConversation} onChange={setReuseConversation} />
+          <SettingsCard title="When to run">
+            <div className="p-4">
+              <ScheduleEditor
+                scheduleKind={scheduleKind}
+                cronExpr={cronExpr}
+                intervalSeconds={intervalSeconds}
+                runAt={runAt}
+                timezone={timezone}
+                onScheduleKindChange={setScheduleKind}
+                onCronExprChange={setCronExpr}
+                onIntervalSecondsChange={setIntervalSecs}
+                onRunAtChange={setRunAt}
+                onTimezoneChange={setTimezone}
+              />
             </div>
+          </SettingsCard>
 
-            {/* Telegram toggle */}
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-sm text-neutral-300">
-                <Send size={13} className="text-neutral-500" />
-                Send to Telegram
-              </div>
-              <Toggle checked={notifyTelegram} onChange={setNotifyTelegram} />
-            </div>
-
-            {/* Telegram target (conditional) */}
+          <SettingsCard title="Where the results go">
+            <SwitchRow
+              label="Keep all runs in one conversation"
+              description="Every run continues the same chat, so the agent can see what happened last time. Off means each run starts fresh with no memory of previous runs."
+              checked={reuseConversation}
+              onChange={setReuseConversation}
+            />
+            <SwitchRow
+              label="Send the result to Telegram"
+              description="Also delivers each finished run to a Telegram chat. Needs a bot token saved under Settings → Connections."
+              checked={notifyTelegram}
+              onChange={setNotifyTelegram}
+            />
             {notifyTelegram && (
-              <div className="flex gap-2 pt-0.5">
+              <StackedRow
+                label="Telegram chat"
+                description="Which conversation the result is delivered to."
+                action={
+                  <button type="button" onClick={fillTelegramChat} className="st-btn st-btn-ghost">
+                    Use most recent
+                  </button>
+                }
+              >
                 {telegramChats.length > 0 ? (
-                  <select
+                  <Dropdown
+                    ariaLabel="Telegram chat"
                     value={telegramChatId}
-                    onChange={(e) => setTelegramChatId(e.target.value)}
-                    className="control min-w-0 flex-1 rounded-lg px-3 py-2 text-sm"
-                    aria-label="Telegram chat"
-                  >
-                    {telegramChats.map((chat) => (
-                      <option key={chat.id} value={chat.id}>
-                        {chat.label}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setTelegramChatId}
+                    options={telegramChats.map((chat) => ({ value: chat.id, label: chat.label }))}
+                  />
                 ) : (
                   <input
                     value={telegramChatId}
+                    aria-label="Telegram chat"
                     onChange={(e) => setTelegramChatId(e.target.value)}
-                    className="control min-w-0 flex-1 rounded-lg px-3 py-2 text-sm"
-                    placeholder="Telegram chat"
+                    className="st-input"
+                    placeholder="Telegram chat ID"
                   />
                 )}
-                <button
-                  type="button"
-                  onClick={fillTelegramChat}
-                  className="ghost-button rounded-lg px-3 text-xs"
-                >
-                  Use last
-                </button>
-              </div>
+              </StackedRow>
             )}
-          </div>
+          </SettingsCard>
 
-          {/* ── Advanced ─────────────────────────────────── */}
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen((v) => !v)}
-            className="flex items-center gap-1.5 text-xs font-medium text-neutral-500 transition-colors hover:text-neutral-300"
-          >
-            <ChevronDown
-              size={12}
-              className={`transition-transform duration-150 ${advancedOpen ? 'rotate-180' : ''}`}
+          <SettingsCard title="Options">
+            <SwitchRow
+              label="Task is active"
+              description="Turn this off to pause the schedule without deleting the task."
+              checked={enabled}
+              onChange={setEnabled}
             />
-            {advancedOpen ? 'Hide advanced' : 'Advanced settings'}
-          </button>
-
-          {advancedOpen && (
-            <div className="space-y-4 rounded-xl border border-white/[0.08] bg-black/10 px-4 py-4">
-              {/* Overlap policy */}
-              <div className="space-y-2">
-                <p className="text-xs font-medium text-neutral-400">
-                  When a run is still in progress
-                </p>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {OVERLAP_OPTIONS.map(({ value, label, desc }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setOverlapPolicy(value)}
-                      className={`rounded-lg border px-3 py-2 text-left transition-all ${
-                        overlapPolicy === value
-                          ? 'border-accent/50 bg-accent/10 text-accent-light'
-                          : 'border-white/[0.07] text-neutral-500 hover:border-white/[0.15] hover:text-neutral-300'
-                      }`}
-                    >
-                      <p className="text-xs font-semibold">{label}</p>
-                      <p className="mt-0.5 text-[10px] leading-tight opacity-70">{desc}</p>
-                    </button>
-                  ))}
-                </div>
+            <StackedRow
+              label="If the previous run has not finished"
+              description="Long tasks can still be running when the next one is due. This decides what happens."
+            >
+              <div className="grid gap-2 sm:grid-cols-3">
+                {OVERLAP_OPTIONS.map(({ value, label, summary }) => (
+                  <ChoiceCard
+                    key={value}
+                    ariaLabel={label}
+                    title={label}
+                    summary={summary}
+                    selected={overlapPolicy === value}
+                    onSelect={() => setOverlapPolicy(value)}
+                  />
+                ))}
               </div>
+            </StackedRow>
+          </SettingsCard>
 
-              {/* Enabled */}
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-neutral-300">Active (enabled)</span>
-                <Toggle checked={enabled} onChange={setEnabled} />
-              </div>
-            </div>
-          )}
-
-          {/* Error */}
-          {error && (
-            <p className="rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-sm text-red-300">
-              {error}
-            </p>
-          )}
+          {error && <Note tone="danger" icon={AlertCircle}>{error}</Note>}
         </div>
 
-        {/* ── Footer ─────────────────────────────────────── */}
-        <div className="flex items-center justify-between gap-2 border-t border-white/[0.07] px-5 py-4">
+        <footer className="st-divider-t flex items-center justify-between gap-2 px-5 py-3.5">
           <div>
             {task && (
-              <button
-                type="button"
-                onClick={runNow}
-                disabled={saving}
-                className="ghost-button h-9 gap-1.5 rounded-lg px-3 text-sm"
-              >
+              <button type="button" onClick={runNow} disabled={saving} className="st-btn st-btn-secondary">
                 <Play size={13} />
                 Run now
               </button>
             )}
           </div>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="ghost-button h-9 rounded-lg px-4 text-sm"
-            >
+            <button type="button" onClick={onClose} className="st-btn st-btn-ghost">
               Cancel
             </button>
-            <button
-              type="button"
-              onClick={save}
-              disabled={!canSave}
-              className="primary-button h-9 rounded-lg px-4 text-sm"
-            >
-              {saving ? 'Saving…' : task ? 'Update' : 'Save'}
+            <button type="button" onClick={save} disabled={!canSave} className="st-btn st-btn-primary">
+              {saving ? 'Saving…' : task ? 'Update task' : 'Create task'}
             </button>
           </div>
-        </div>
+        </footer>
       </div>
     </div>
   )
 }
 
-// ─── helper ───────────────────────────────────────────────────────────────────
 function toLocalDateTimeInput(value?: string): string {
   if (!value) return ''
   const date = new Date(value)

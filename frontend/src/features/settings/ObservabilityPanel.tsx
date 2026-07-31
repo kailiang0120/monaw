@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import {
   deleteRuntimeData,
+  enableSupportMode,
   exportObservabilityDebugBundle,
   fetchBackendLogTail,
   fetchObservabilityErrors,
@@ -26,6 +27,8 @@ import {
   fetchObservabilitySummary,
   replayObservabilityRun,
 } from '../../lib/api/diagnostics'
+import { ApiError } from '../../lib/api/client'
+import { Dropdown } from '../../components/Dropdown'
 import type {
   ObservabilityBackendLog,
   ObservabilityError,
@@ -128,6 +131,8 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
   const [runs, setRuns] = useState<ObservabilityRun[]>([])
   const [errors, setErrors] = useState<ObservabilityError[]>([])
   const [backendLog, setBackendLog] = useState<ObservabilityBackendLog | null>(null)
+  const [supportModeRequired, setSupportModeRequired] = useState(false)
+  const [enablingSupportMode, setEnablingSupportMode] = useState(false)
   const [selectedRunId, setSelectedRunId] = useState('')
   const [selectedRun, setSelectedRun] = useState<ObservabilityRunDetail | null>(null)
   const [view, setView] = useState<ViewMode>('runs')
@@ -161,8 +166,23 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
     setErrors(await fetchObservabilityErrors({ q: query, limit: 100, signal }))
   }
 
+  /**
+   * Reading backend.log needs support mode, so a 403 is a normal state, not a
+   * failure — it means "ask the user to turn support mode on", and must not
+   * surface as a red banner over the rest of the panel.
+   */
   const loadBackendLog = async (signal?: AbortSignal) => {
-    setBackendLog(await fetchBackendLogTail(500, signal))
+    try {
+      setBackendLog(await fetchBackendLogTail(500, signal))
+      setSupportModeRequired(false)
+    } catch (exc) {
+      if (exc instanceof ApiError && exc.status === 403) {
+        setBackendLog(null)
+        setSupportModeRequired(true)
+        return
+      }
+      throw exc
+    }
   }
 
   const refreshAll = async () => {
@@ -176,7 +196,6 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
         loadSummary(controller.signal),
         loadRuns(controller.signal),
         loadErrors(controller.signal),
-        loadBackendLog(controller.signal),
       ])
       if (selectedRunId) {
         setSelectedRun(await fetchObservabilityRun(selectedRunId, controller.signal))
@@ -241,6 +260,19 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
     return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view])
+
+  const turnOnSupportMode = async () => {
+    setEnablingSupportMode(true)
+    setError('')
+    try {
+      await enableSupportMode(600)
+      await loadBackendLog()
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : 'Failed to enable support mode')
+    } finally {
+      setEnablingSupportMode(false)
+    }
+  }
 
   const selectRun = async (runId: string) => {
     setSelectedRunId(runId)
@@ -421,20 +453,35 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
         </div>
         {view === 'runs' && (
           <>
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="control h-8 rounded-lg px-2 text-xs">
-              <option value="">All status</option>
-              <option value="complete">Complete</option>
-              <option value="paused">Paused</option>
-              <option value="error">Error</option>
-              <option value="running">Running</option>
-            </select>
-            <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)} className="control h-8 rounded-lg px-2 text-xs">
-              <option value="">All sources</option>
-              <option value="desktop">Desktop</option>
-              <option value="telegram">Telegram</option>
-              <option value="scheduled">Scheduled</option>
-              <option value="replay">Replay</option>
-            </select>
+            <Dropdown
+              ariaLabel="Filter by status"
+              className="w-36"
+              size="sm"
+              value={statusFilter}
+              onChange={setStatusFilter}
+              options={[
+                { value: '', label: 'All status' },
+                { value: 'complete', label: 'Complete' },
+                { value: 'paused', label: 'Paused' },
+                { value: 'error', label: 'Error' },
+                { value: 'running', label: 'Running' },
+              ]}
+            />
+            <Dropdown
+              ariaLabel="Filter by source"
+              className="w-36"
+              size="sm"
+              value={sourceFilter}
+              onChange={setSourceFilter}
+              options={[
+                { value: '', label: 'All sources' },
+                { value: 'desktop', label: 'Desktop' },
+                { value: 'telegram', label: 'Telegram' },
+                { value: 'scheduled', label: 'Scheduled' },
+                { value: 'replay', label: 'Replay' },
+              ]}
+            />
+
           </>
         )}
       </div>
@@ -458,7 +505,15 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
       )}
 
       {view === 'errors' && <ErrorsList errors={errors} loading={loading} />}
-      {view === 'backend' && <BackendLogView log={backendLog} loading={loading} />}
+      {view === 'backend' && (
+        <BackendLogView
+          log={backendLog}
+          loading={loading}
+          supportModeRequired={supportModeRequired}
+          enabling={enablingSupportMode}
+          onEnableSupportMode={turnOnSupportMode}
+        />
+      )}
     </div>
   )
 }
@@ -799,12 +854,45 @@ function ErrorsList({
   )
 }
 
-function BackendLogView({ log, loading }: { log: ObservabilityBackendLog | null; loading: boolean }) {
+function BackendLogView({
+  log,
+  loading,
+  supportModeRequired,
+  enabling,
+  onEnableSupportMode,
+}: {
+  log: ObservabilityBackendLog | null
+  loading: boolean
+  supportModeRequired: boolean
+  enabling: boolean
+  onEnableSupportMode: () => void
+}) {
+  if (supportModeRequired) {
+    return (
+      <div className="st-card">
+        <div className="p-6 text-center">
+          <p className="st-label">Support mode is off</p>
+          <p className="st-desc mx-auto mt-2">
+            The raw backend log can contain file paths and request details, so it stays locked until you
+            unlock it. Turning support mode on grants access for 10 minutes, then it locks itself again.
+          </p>
+          <button
+            type="button"
+            onClick={onEnableSupportMode}
+            disabled={enabling}
+            className="st-btn st-btn-primary mx-auto mt-4"
+          >
+            {enabling ? 'Unlocking…' : 'Unlock for 10 minutes'}
+          </button>
+        </div>
+      </div>
+    )
+  }
   if (loading && !log) {
-    return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">Loading backend log...</div>
+    return <div className="st-card"><p className="st-desc p-10 text-center">Loading backend log…</p></div>
   }
   if (!log || !log.exists) {
-    return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">backend.log is not available yet.</div>
+    return <div className="st-card"><p className="st-desc p-10 text-center">backend.log has not been written yet.</p></div>
   }
   return (
     <div className="panel-muted rounded-xl p-3">

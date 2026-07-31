@@ -485,20 +485,20 @@ describe('SettingsModal', () => {
 
     expect(await screen.findByRole('heading', { name: 'Model' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Provider' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Google' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Google' }))
     expect(screen.getByText('gemini-3.1-pro-preview')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
-    expect(screen.getByRole('button', { name: 'High' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Medium' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Minimal' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'High' }))
+    expect(screen.getByRole('option', { name: 'High' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Medium' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Minimal' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: 'High' }))
     const modelButtons = screen.getAllByRole('button', { name: 'Model' })
     fireEvent.click(modelButtons[modelButtons.length - 1])
-    expect(screen.getByRole('button', { name: 'gemini-3-flash-preview' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'gemini-3-flash-preview' }))
+    expect(screen.getByRole('option', { name: 'gemini-3-flash-preview' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: 'gemini-3-flash-preview' }))
     fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
-    expect(screen.getByRole('button', { name: 'Minimal' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Medium' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Minimal' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Medium' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Connections/i }))
     expect(screen.getByText(/Google key saved: yes/i)).toBeInTheDocument()
   })
@@ -508,10 +508,10 @@ describe('SettingsModal', () => {
 
     await screen.findByRole('heading', { name: 'Model' })
     fireEvent.click(screen.getByRole('button', { name: 'Provider' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Google' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Google' }))
     const modelButtons = screen.getAllByRole('button', { name: 'Model' })
     fireEvent.click(modelButtons[modelButtons.length - 1])
-    fireEvent.click(screen.getByRole('button', { name: 'gemini-3-flash-preview' }))
+    fireEvent.click(screen.getByRole('option', { name: 'gemini-3-flash-preview' }))
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
     await waitFor(() => {
@@ -568,7 +568,7 @@ describe('SettingsModal', () => {
     expect(await screen.findByText(/OpenAI key saved: yes/i)).toBeInTheDocument()
     expect(screen.getAllByText(/Google key saved: yes/i).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: 'Portal' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Telegram' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Telegram' }))
     expect(screen.getByText(/Telegram token saved: yes/i)).toBeInTheDocument()
     expect(updateSettings).not.toHaveBeenCalledWith(expect.objectContaining({
       openai_api_key: expect.anything(),
@@ -594,7 +594,7 @@ describe('SettingsModal', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Portal' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Telegram' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Telegram' }))
     fireEvent.change(await screen.findByLabelText('Allowed user IDs'), {
       target: { value: '123456789' },
     })
@@ -676,7 +676,7 @@ describe('SettingsModal', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Portal' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Telegram' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Telegram' }))
     vi.mocked(updateSettings).mockClear()
     deleteCredential.mockClear()
 

@@ -26,20 +26,27 @@ export function ScheduledRunHistory({ task, onClose, onSelectRun }: Props) {
   }, [task.id])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-      <div className="panel w-full max-w-lg overflow-hidden rounded-2xl">
-        <div className="flex items-center justify-between border-b border-white/[0.07] px-5 py-4">
+    <div className="st-overlay fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Run history for ${task.title}`}
+        className="settings-shell w-full max-w-lg overflow-hidden rounded-2xl"
+      >
+        <header className="st-divider-b flex items-center justify-between gap-3 px-5 py-4">
           <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold text-neutral-100">{task.title}</h2>
-            <p className="text-xs text-neutral-500">Run history</p>
+            <h2 className="st-title truncate">{task.title}</h2>
+            <p className="st-desc mt-0.5">Every time this task has run. Select one to open its conversation.</p>
           </div>
-          <button type="button" onClick={onClose} className="ghost-button h-8 w-8 rounded-lg" aria-label="Close">
+          <button type="button" onClick={onClose} className="st-btn st-btn-ghost st-btn-icon shrink-0" aria-label="Close">
             <X size={15} />
           </button>
-        </div>
-        <div className="max-h-[420px] overflow-y-auto px-3 py-3">
+        </header>
+        <div className="st-scroll max-h-[420px] overflow-y-auto p-3">
           {runs.length === 0 ? (
-            <p className="px-2 py-8 text-center text-sm text-neutral-500">No runs yet.</p>
+            <p className="st-desc px-2 py-10 text-center">
+              This task has not run yet.
+            </p>
           ) : (
             <div className="space-y-1">
               {runs.map((run) => (
@@ -47,18 +54,18 @@ export function ScheduledRunHistory({ task, onClose, onSelectRun }: Props) {
                   key={run.id}
                   type="button"
                   onClick={() => onSelectRun(run.conversationId)}
-                  className="flex w-full items-center gap-3 rounded-lg border border-transparent px-3 py-2 text-left transition-colors hover:border-white/[0.08] hover:bg-white/[0.04]"
+                  className="st-nav-item items-start"
                 >
-                  <span className={`h-2 w-2 rounded-full ${statusDot(run.status)}`} />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-medium text-neutral-200" title={new Date(run.startedAt).toLocaleString()}>
-                      {run.status} · {relativeTime(run.startedAt)}
-                    </p>
-                    <p className="truncate text-[11px] text-neutral-600">
+                  <span className={`${statusDot(run.status)} mt-1.5`} />
+                  <span className="min-w-0 flex-1">
+                    <span className="st-label block" title={new Date(run.startedAt).toLocaleString()}>
+                      {describeStatus(run.status)} · {relativeTime(run.startedAt)}
+                    </span>
+                    <span className="st-hint block truncate">
                       {run.error || run.finalText || run.conversationId}
-                    </p>
-                  </div>
-                  <ExternalLink size={13} className="text-neutral-600" />
+                    </span>
+                  </span>
+                  <ExternalLink size={13} className="st-nav-icon mt-1" />
                 </button>
               ))}
             </div>
@@ -70,8 +77,16 @@ export function ScheduledRunHistory({ task, onClose, onSelectRun }: Props) {
 }
 
 function statusDot(status: string): string {
-  if (status === 'ok') return 'bg-emerald-400'
-  if (status === 'error') return 'bg-red-400'
-  if (status === 'running') return 'bg-amber-300'
-  return 'bg-neutral-600'
+  if (status === 'ok') return 'st-dot st-dot-ok'
+  if (status === 'error') return 'st-dot st-dot-danger'
+  if (status === 'running') return 'st-dot st-dot-warn'
+  return 'st-dot'
+}
+
+function describeStatus(status: string): string {
+  if (status === 'ok') return 'Completed'
+  if (status === 'error') return 'Failed'
+  if (status === 'running') return 'Running'
+  if (status === 'skipped') return 'Skipped'
+  return status
 }
