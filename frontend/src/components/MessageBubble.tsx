@@ -25,9 +25,10 @@ import mascotCurious from '../assets/mascots/curious.png'
 import mascotStart from '../assets/mascots/start.png'
 import mascotThinking from '../assets/mascots/thinking.gif'
 import { PlanProgress } from './PlanProgress'
+import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
 import { fetchMessageToolCalls } from '../lib/api/conversations'
-import { filePreviewUrl, fileUrl } from '../lib/api/files'
+import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
 import { formatAgentResponse } from '../lib/formatAgentResponse'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
 import type { UploadedAttachment } from '../lib/api/types'
@@ -35,6 +36,22 @@ import type { ActivityItem, ApprovalNotice, Message, ToolCall } from '../hooks/u
 
 const MIN_IMAGE_PREVIEW_DIMENSION_PX = 16
 const MAX_VISIBLE_THINKING_CHARS = 500
+const FORMATTED_RESPONSE_CACHE_LIMIT = 300
+const formattedResponseCache = new Map<string, string>()
+
+function cachedFormatAgentResponse(message: Message): string {
+  const revision = message.contentRevision ?? message.content.length
+  const key = `${message.id}:${revision}`
+  const cached = formattedResponseCache.get(key)
+  if (cached !== undefined) return cached
+  const formatted = formatAgentResponse(message.content)
+  formattedResponseCache.set(key, formatted)
+  if (formattedResponseCache.size > FORMATTED_RESPONSE_CACHE_LIMIT) {
+    const firstKey = formattedResponseCache.keys().next().value
+    if (firstKey) formattedResponseCache.delete(firstKey)
+  }
+  return formatted
+}
 
 function isDisplayableThinking(thinking?: string): thinking is string {
   const trimmed = thinking?.trim()
@@ -142,8 +159,8 @@ export const MessageBubble = memo(function MessageBubble({
   const status = streamingStatus(message)
   const hasBody = message.content.trim().length > 0
   const formattedContent = useMemo(
-    () => (hasBody ? formatAgentResponse(message.content) : ''),
-    [hasBody, message.content],
+    () => (hasBody ? cachedFormatAgentResponse(message) : ''),
+    [hasBody, message],
   )
   const showToolCalls = message.toolCalls && message.toolCalls.length > 0
   const showThinking = !message.streaming && isDisplayableThinking(message.thinking)
@@ -320,11 +337,7 @@ function ResponseTimer({
   const [now, setNow] = useState(() => Date.now())
   const isLive = startedAtMs !== undefined
 
-  useEffect(() => {
-    if (!isLive) return
-    const timer = window.setInterval(() => setNow(Date.now()), 250)
-    return () => window.clearInterval(timer)
-  }, [isLive])
+  useVisibleInterval(() => setNow(Date.now()), isLive ? 250 : null)
 
   const label = isLive
     ? `Elapsed time ${formatResponseDuration(Math.max(0, now - startedAtMs))}`
@@ -452,10 +465,7 @@ function LiveWorkPanel({
 
 function InlineElapsed({ startedAtMs }: { startedAtMs: number }) {
   const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 250)
-    return () => window.clearInterval(timer)
-  }, [])
+  useVisibleInterval(() => setNow(Date.now()), 250)
   const duration = formatResponseDuration(Math.max(0, now - startedAtMs))
   return (
     <span
@@ -496,12 +506,10 @@ function AttachmentStrip({
       {files.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {files.map((attachment) => (
-            <a
+            <button
+              type="button"
               key={attachment.id}
-              href={fileUrl(attachment)}
-              target="_blank"
-              rel="noreferrer"
-              download={attachment.name}
+              onClick={() => void downloadAttachment(attachment)}
               className={`inline-flex max-w-[240px] items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] transition-colors ${
                 compact
                   ? 'bg-black/15 text-white/85 hover:bg-black/25'
@@ -512,7 +520,7 @@ function AttachmentStrip({
               <FileText size={12} className="shrink-0" />
               <span className="truncate">{attachment.name}</span>
               {!compact && <Download size={11} className="shrink-0 text-neutral-600" />}
-            </a>
+            </button>
           ))}
         </div>
       )}
@@ -536,16 +544,31 @@ function ImageAttachmentCard({
 }) {
   const [previewFailed, setPreviewFailed] = useState(false)
   const [tooSmall, setTooSmall] = useState(false)
-  const href = fileUrl(attachment)
-  const previewHref = filePreviewUrl(attachment)
+  const [previewHref, setPreviewHref] = useState('')
+
+  useEffect(() => {
+    let active = true
+    let objectUrl = ''
+    void fetchAttachmentObjectUrl(attachment, true)
+      .then((value) => {
+        objectUrl = value
+        if (active) setPreviewHref(value)
+      })
+      .catch(() => {
+        if (active) setPreviewFailed(true)
+      })
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [attachment])
 
   if (tooSmall) return null
 
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
+    <button
+      type="button"
+      onClick={() => void downloadAttachment(attachment)}
       className={`group block shrink-0 overflow-hidden rounded-xl border transition-colors ${
         compact
           ? 'w-36 border-white/15 bg-black/10 hover:bg-black/15'
@@ -559,7 +582,7 @@ function ImageAttachmentCard({
           compact ? 'h-24' : 'h-32'
         }`}
       >
-        {!previewFailed ? (
+        {!previewFailed && previewHref ? (
           <img
             src={previewHref}
             alt={attachment.name}
@@ -578,13 +601,15 @@ function ImageAttachmentCard({
             }}
             onError={() => setPreviewFailed(true)}
           />
-        ) : (
+        ) : previewFailed ? (
           <span className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center">
             <Image size={24} className={compact ? 'text-white/70' : 'text-neutral-500'} aria-hidden />
             <span className={compact ? 'text-[11px] text-white/80' : 'text-[11px] text-neutral-400'}>
               Preview unavailable
             </span>
           </span>
+        ) : (
+          <Loader2 size={20} className="animate-spin text-neutral-500" aria-label="Loading preview" />
         )}
       </span>
       <span
@@ -602,7 +627,7 @@ function ImageAttachmentCard({
           </span>
         )}
       </span>
-    </a>
+    </button>
   )
 }
 

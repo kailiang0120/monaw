@@ -1,20 +1,30 @@
-const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme, safeStorage } = require('electron')
 const path = require('path')
 const os = require('os')
-const { spawn } = require('child_process')
+const { spawn, spawnSync } = require('child_process')
 const http = require('http')
 const fs = require('fs')
 const { fileURLToPath } = require('url')
 const runtimeConfig = require('../config/runtime.json')
+const {
+  generateControlSecret,
+  mintControlSession,
+  normalizeBackendHost,
+} = require('./control-auth')
+const { SECRET_FIELDS, createCredentialVault } = require('./credential-vault')
+const CREDENTIAL_IDS = new Set(Object.keys(SECRET_FIELDS))
+const MAX_IPC_STRING_LENGTH = 20_000
 
-const BACKEND_HOST = runtimeConfig.backendHost || '127.0.0.1'
+const BACKEND_HOST = normalizeBackendHost(
+  runtimeConfig.backendHost,
+  process.env.MONAW_ALLOW_UNSAFE_BACKEND_HOST === '1'
+)
 const BACKEND_PORT = runtimeConfig.backendPort || 8420
 const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`
+const CONTROL_SECRET = generateControlSecret()
 const BACKEND_RESTART_EXIT_CODE = 78
 const isDev = !app.isPackaged
 const APP_USER_MODEL_ID = 'com.monaw.agent'
-const STORE_KEYS = Array.isArray(runtimeConfig.allowedStoreKeys) ? runtimeConfig.allowedStoreKeys : []
-const ALLOWED_STORE_KEYS = new Set(STORE_KEYS)
 const LEGACY_USER_DATA_DIR_NAMES = ['AI Agent', 'ai-agent']
 const APP_THEME_COLORS = {
   dark: '#111b13',
@@ -23,7 +33,7 @@ const APP_THEME_COLORS = {
 
 let mainWindow = null
 let backendProcess = null
-let backendPythonCommand = null
+let backendUvCommand = null
 let appQuitting = false
 
 function getBackendPath() {
@@ -31,20 +41,6 @@ function getBackendPath() {
     return path.join(__dirname, '../../backend')
   }
   return path.join(process.resourcesPath, 'backend')
-}
-
-function assertAllowedStoreKey(key) {
-  if (typeof key !== 'string' || !ALLOWED_STORE_KEYS.has(key)) {
-    throw new Error(`Unsupported store key: ${String(key)}`)
-  }
-  return key
-}
-
-function assertStoreValue(value) {
-  if (typeof value !== 'string') {
-    throw new Error('Stored values must be strings')
-  }
-  return value
 }
 
 function getMonawHomeDir() {
@@ -102,7 +98,7 @@ function attachBackendLogging(runtimeDir, proc) {
       console.log('[main] Backend requested restart; respawning')
       setTimeout(() => {
         spawnBackend()
-        waitForBackend().catch((err) => {
+        waitForBackend().then(applyStoredCredentialsToBackend).catch((err) => {
           console.error('[main] Backend restart did not become ready:', err.message)
         })
       }, 500)
@@ -117,18 +113,23 @@ function spawnBackend() {
   fs.mkdirSync(workspaceDir, { recursive: true })
 
   const backendDir = getBackendPath()
-  const cmd = backendPythonCommand || (process.platform === 'win32' ? 'python' : 'python3')
+  const cmd = backendUvCommand || 'uv'
 
-  console.log('[main] Spawning Python backend from', backendDir, 'with', cmd)
+  console.log('[main] Spawning backend from', backendDir, 'with', cmd)
 
   const proc = spawn(
     cmd,
-    ['-m', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)],
+    ['run', '--locked', '--no-dev', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)],
     {
       cwd: backendDir,
       env: {
         ...process.env,
-        BACKEND_PYTHON_COMMAND: cmd,
+        MONAW_CONTROL_SECRET: CONTROL_SECRET,
+        MONAW_ALLOW_DEVELOPMENT_TOKEN: '0',
+        CORS_ALLOW_ORIGINS: isDev
+          ? 'http://localhost:5275,http://127.0.0.1:5275'
+          : 'null',
+        CORS_ALLOW_ORIGIN_REGEX: '',
         AGENT_RUNTIME_DIR: process.env.AGENT_RUNTIME_DIR || runtimeDir,
         AGENT_WORKSPACE_DIR: process.env.AGENT_WORKSPACE_DIR || workspaceDir,
       },
@@ -161,45 +162,44 @@ function runCommandAndCapture(cmd, args, options = {}) {
   })
 }
 
-function resolvePythonCandidates() {
+function resolveUvCandidates() {
   const candidates = []
-  if (process.env.AGENT_PYTHON_PATH) candidates.push(process.env.AGENT_PYTHON_PATH)
-  if (process.env.PYTHON_PATH) candidates.push(process.env.PYTHON_PATH)
-
-  const backendDir = getBackendPath()
-  const venvWin = path.join(backendDir, '.venv', 'Scripts', 'python.exe')
-  const venvUnix = path.join(backendDir, '.venv', 'bin', 'python')
-  if (fs.existsSync(venvWin)) candidates.push(venvWin)
-  if (fs.existsSync(venvUnix)) candidates.push(venvUnix)
-
-  if (process.platform === 'win32') {
-    candidates.push('python')
-    candidates.push('py')
-  } else {
-    candidates.push('python3')
-    candidates.push('python')
-  }
+  if (process.env.AGENT_UV_PATH) candidates.push(process.env.AGENT_UV_PATH)
+  candidates.push(process.platform === 'win32' ? 'uv.exe' : 'uv')
   return [...new Set(candidates)]
 }
 
-async function pickBackendPython() {
-  for (const candidate of resolvePythonCandidates()) {
-    const args = candidate === 'py' ? ['-3', '--version'] : ['--version']
-    const result = await runCommandAndCapture(candidate, args)
+async function pickBackendUv() {
+  for (const candidate of resolveUvCandidates()) {
+    const result = await runCommandAndCapture(candidate, ['--version'])
     if (result.ok) return candidate
   }
-  return process.platform === 'win32' ? 'python' : 'python3'
+  return process.platform === 'win32' ? 'uv.exe' : 'uv'
 }
 
 function killBackend() {
   if (!backendProcess) return
   const proc = backendProcess
+  backendProcess = null
   if (process.platform === 'win32') {
-    spawn('taskkill', ['/pid', String(proc.pid), '/f', '/t'])
+    const result = spawnSync(
+      'taskkill',
+      ['/pid', String(proc.pid), '/t', '/f'],
+      {
+        windowsHide: true,
+        stdio: 'ignore',
+      },
+    )
+    if (result.error || result.status !== 0) {
+      try {
+        proc.kill()
+      } catch {
+        // The backend may have exited between the check and taskkill.
+      }
+    }
   } else {
     proc.kill('SIGTERM')
   }
-  backendProcess = null
 }
 
 function waitForBackend(retries = 30, delay = 1000) {
@@ -244,6 +244,10 @@ function buildContentSecurityPolicy() {
       `img-src 'self' data: blob: ${backendHttp}`,
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'none'",
     ].join('; ')
   }
 
@@ -252,8 +256,12 @@ function buildContentSecurityPolicy() {
     "script-src 'self'",
     `connect-src 'self' ${backendHttp}`,
     `img-src 'self' data: blob: ${backendHttp}`,
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'none'",
   ].join('; ')
 }
 
@@ -286,6 +294,73 @@ function isTrustedRenderer(webContents, value) {
   return isTrustedRendererUrl(value || webContents.getURL())
 }
 
+function updateBackendSettings(payload) {
+  return new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify(payload), 'utf8')
+    const session = mintControlSession(CONTROL_SECRET)
+    const request = http.request(
+      `${BACKEND_BASE_URL}/api/settings`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${session.token}`,
+          'Content-Type': 'application/json',
+          'Content-Length': String(body.length),
+        },
+      },
+      (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(chunk))
+        response.on('end', () => {
+          if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+            resolve()
+            return
+          }
+          const detail = Buffer.concat(chunks).toString('utf8').slice(0, 500)
+          reject(new Error(`Backend credential sync failed (${response.statusCode}): ${detail}`))
+        })
+      },
+    )
+    request.setTimeout(10_000, () => request.destroy(new Error('Backend credential sync timed out')))
+    request.on('error', reject)
+    request.on('finish', () => body.fill(0))
+    request.end(body)
+  })
+}
+
+function assertTrustedIpcSender(event) {
+  if (!event?.sender || !isTrustedRenderer(event.sender, event.senderFrame?.url)) {
+    throw new Error('IPC request rejected from untrusted renderer')
+  }
+}
+
+function assertIpcString(value, name, maxLength = MAX_IPC_STRING_LENGTH) {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw new Error(`IPC request rejected: invalid ${name}`)
+  }
+  return value
+}
+
+function assertOptionalIpcString(value, name, maxLength = MAX_IPC_STRING_LENGTH) {
+  if (value === undefined || value === null || value === '') return ''
+  return assertIpcString(value, name, maxLength)
+}
+
+function assertCredentialId(id) {
+  const value = assertIpcString(id, 'credential id', 80)
+  if (!CREDENTIAL_IDS.has(value)) {
+    throw new Error('IPC request rejected: unsupported credential id')
+  }
+  return value
+}
+
+function assertTheme(value) {
+  if (value !== 'light' && value !== 'dark') {
+    throw new Error('IPC request rejected: invalid theme')
+  }
+  return value
+}
+
 function isExternalOpenableUrl(value) {
   try {
     const url = new URL(value)
@@ -301,6 +376,15 @@ function openExternalUrl(value) {
     console.warn('[main] Failed to open external URL', value, err.message)
   })
   return true
+}
+
+function handleUntrustedNavigation(event, url) {
+  if (isTrustedRendererUrl(url)) return
+  if (openExternalUrl(url)) {
+    event.preventDefault()
+    return
+  }
+  event.preventDefault()
 }
 
 function installMediaPermissionHandler() {
@@ -350,8 +434,9 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       devTools: isDev && process.env.MONAW_DEVTOOLS === '1',
+      additionalArguments: [`--monaw-backend-base-url=${BACKEND_BASE_URL}`],
     },
   })
 
@@ -370,14 +455,9 @@ function createWindow() {
     return { action: 'deny' }
   })
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (isTrustedRendererUrl(url)) return
-    if (openExternalUrl(url)) {
-      event.preventDefault()
-      return
-    }
-    event.preventDefault()
-  })
+  mainWindow.webContents.on('will-navigate', handleUntrustedNavigation)
+  mainWindow.webContents.on('will-frame-navigate', handleUntrustedNavigation)
+  mainWindow.webContents.on('will-redirect', handleUntrustedNavigation)
 
   mainWindow.on('closed', () => { mainWindow = null })
 }
@@ -385,14 +465,12 @@ function createWindow() {
 app.whenReady().then(async () => {
   installContentSecurityPolicy()
   installMediaPermissionHandler()
-  if (isDev) {
-    backendPythonCommand = await pickBackendPython()
-  }
+  backendUvCommand = await pickBackendUv()
   spawnBackend()
   createWindow()
 
-  waitForBackend().catch((err) => {
-    console.error('[main] Backend did not start in time:', err.message)
+  waitForBackend().then(applyStoredCredentialsToBackend).catch((err) => {
+    console.error('[main] Backend startup or credential sync failed:', err.message)
   })
 
   app.on('activate', () => {
@@ -401,9 +479,9 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
+  appQuitting = true
   killBackend()
   if (process.platform !== 'darwin') {
-    appQuitting = true
     app.quit()
   }
 })
@@ -454,65 +532,90 @@ function deleteLegacyStoreKey(key) {
   }
 }
 
-function migrateLegacySecrets(currentStore) {
-  const legacyData = readLegacyStoreData()
-  if (!legacyData) return
-  let migrated = false
-  for (const key of STORE_KEYS) {
-    const currentValue = currentStore.get(key)
-    const legacyValue = legacyData[key]
-    if (typeof currentValue === 'undefined' && typeof legacyValue === 'string' && legacyValue) {
-      currentStore.set(key, legacyValue)
-      migrated = true
-    }
-  }
-  if (migrated) {
-    console.log('[main] Migrated saved API keys from legacy app data store')
-  }
-}
-
 async function getStore() {
   if (!store) {
     const { default: Store } = await import('electron-store')
     store = new Store()
-    migrateLegacySecrets(store)
   }
   return store
 }
 
-ipcMain.handle('store:get', async (_, key) => {
-  const s = await getStore()
-  const safeKey = assertAllowedStoreKey(key)
-  return s.get(safeKey)
-})
-
-ipcMain.handle('store:set', async (_, key, value) => {
-  const s = await getStore()
-  const safeKey = assertAllowedStoreKey(key)
-  const safeValue = assertStoreValue(value)
-  if (safeValue === '') {
-    s.delete(safeKey)
-    deleteLegacyStoreKey(safeKey)
-    return
+let credentialVault = null
+async function getCredentialVault() {
+  if (!credentialVault) {
+    const currentStore = await getStore()
+    const candidate = createCredentialVault({
+      safeStorage,
+      store: currentStore,
+      legacyData: readLegacyStoreData() || {},
+      deleteLegacyValue: deleteLegacyStoreKey,
+    })
+    candidate.migrate()
+    credentialVault = candidate
   }
-  s.set(safeKey, safeValue)
+  return credentialVault
+}
+
+async function applyStoredCredentialsToBackend() {
+  const vault = await getCredentialVault()
+  const payload = vault.backendPayload()
+  try {
+    if (Object.keys(payload).length > 0) {
+      await updateBackendSettings(payload)
+    }
+    return vault.status()
+  } finally {
+    for (const key of Object.keys(payload)) {
+      payload[key] = ''
+    }
+  }
+}
+
+ipcMain.handle('control:get-session', async (event) => {
+  assertTrustedIpcSender(event)
+  return mintControlSession(CONTROL_SECRET)
 })
 
-ipcMain.handle('store:delete', async (_, key) => {
-  const s = await getStore()
-  const safeKey = assertAllowedStoreKey(key)
-  s.delete(safeKey)
-  deleteLegacyStoreKey(safeKey)
+ipcMain.handle('credentials:status', async (event) => {
+  assertTrustedIpcSender(event)
+  return (await getCredentialVault()).status()
 })
 
-ipcMain.handle('theme:set', async (_, theme) => {
-  applyNativeTheme(theme)
+ipcMain.handle('credentials:set', async (event, id, value) => {
+  assertTrustedIpcSender(event)
+  const credentialId = assertCredentialId(id)
+  const credentialValue = assertIpcString(value, 'credential value')
+  const vault = await getCredentialVault()
+  vault.setCredential(credentialId, credentialValue)
+  await updateBackendSettings({ [SECRET_FIELDS[credentialId].backendField]: credentialValue })
+  return vault.status()
 })
 
-ipcMain.handle('dialog:select-directory', async (_, defaultPath) => {
+ipcMain.handle('credentials:delete', async (event, id) => {
+  assertTrustedIpcSender(event)
+  const credentialId = assertCredentialId(id)
+  const vault = await getCredentialVault()
+  vault.deleteCredential(credentialId)
+  await updateBackendSettings({ [SECRET_FIELDS[credentialId].backendField]: '' })
+  return vault.status()
+})
+
+ipcMain.handle('credentials:apply', async (event) => {
+  assertTrustedIpcSender(event)
+  return applyStoredCredentialsToBackend()
+})
+
+ipcMain.handle('theme:set', async (event, theme) => {
+  assertTrustedIpcSender(event)
+  applyNativeTheme(assertTheme(theme))
+})
+
+ipcMain.handle('dialog:select-directory', async (event, defaultPath) => {
+  assertTrustedIpcSender(event)
+  const safeDefaultPath = assertOptionalIpcString(defaultPath, 'default path', 4096)
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Choose output folder',
-    defaultPath: defaultPath || undefined,
+    defaultPath: safeDefaultPath || undefined,
     properties: ['openDirectory', 'createDirectory'],
   })
   if (result.canceled || !result.filePaths.length) return ''

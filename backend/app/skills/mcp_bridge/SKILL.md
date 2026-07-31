@@ -11,7 +11,7 @@ Always start MCP troubleshooting with `mcp_status`. Use `mcp_reconnect_server` w
 
 Reflected remote tool names follow the pattern `mcp__<server>__<tool>`, with sanitization and deterministic shortening when needed. Prefer the structured JSON returned by MCP tools; if a call returns `mcp_timeout`, note the server/tool that timed out and reconnect or refresh before retrying.
 
-Read-only MCP tools can run directly. Destructive, mutating, unknown-risk, or open-world MCP tools require user approval. MCP ToolAnnotations are treated as hints only, not as proof that a tool is safe.
+Reflected MCP tools require user approval by default, including tools that look read-only or advertise `readOnlyHint`. Direct execution is allowed only for tools explicitly listed in the server's trusted-tool configuration. MCP ToolAnnotations are descriptive hints only, not proof that a tool is safe.
 
 Supported transports:
 - `stdio`: local command, args, env, and cwd.

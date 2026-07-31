@@ -5,6 +5,8 @@ import copy
 import inspect
 import logging
 import re
+import time
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_SAFE_CHUNK_SIZE = 3800
+TELEGRAM_RATE_LIMIT_WINDOW_SECONDS = 60.0
+TELEGRAM_CHAT_RATE_LIMIT = 12
+TELEGRAM_USER_RATE_LIMIT = 8
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 EventCallback = Callable[[dict], Awaitable[None] | None]
@@ -76,6 +81,11 @@ def build_runtime_settings():
 async def run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[dict]:
     from app.agent.runtime import run_agent_stream as runtime_run_agent_stream
 
+    kwargs.setdefault("execution_source", "telegram")
+    kwargs.setdefault("control_session_id", "telegram")
+    kwargs.setdefault("principal_id", "telegram")
+    kwargs.setdefault("permission_profile_id", "telegram-restricted")
+    kwargs.setdefault("interactive", False)
     async for event in runtime_run_agent_stream(*args, **kwargs):
         yield event
 
@@ -205,9 +215,30 @@ class TelegramAgentBridge:
         self.initialize_conversation = initialize_conversation
         self.get_conversation = get_conversation
         self.list_conversations = list_conversations
+        self._rate_limit_window_seconds = TELEGRAM_RATE_LIMIT_WINDOW_SECONDS
+        self._chat_rate_limit = TELEGRAM_CHAT_RATE_LIMIT
+        self._user_rate_limit = TELEGRAM_USER_RATE_LIMIT
+        self._rate_limit_events: dict[str, deque[float]] = {}
 
     def current_session(self, chat_id: int | str, thread_id: int | str | None = None) -> str:
         return self.session_store.get_current(chat_id, thread_id)
+
+    def _rate_limit_exceeded(self, *, chat_id: int | str, sender_name: str = "") -> str:
+        now = time.monotonic()
+        checks = [
+            (f"chat:{chat_id}", self._chat_rate_limit, "telegram_chat_rate_limited"),
+        ]
+        sender = str(sender_name or "unknown").strip() or "unknown"
+        checks.append((f"user:{chat_id}:{sender}", self._user_rate_limit, "telegram_user_rate_limited"))
+        for key, limit, reason_code in checks:
+            events = self._rate_limit_events.setdefault(key, deque())
+            while events and now - events[0] > self._rate_limit_window_seconds:
+                events.popleft()
+            if len(events) >= limit:
+                return reason_code
+        for key, _limit, _reason_code in checks:
+            self._rate_limit_events[key].append(now)
+        return ""
 
     def _initialize_current_conversation(
         self,
@@ -641,6 +672,15 @@ class TelegramAgentBridge:
                 conversation_id=conversation_id,
                 reply="Send a text message, photo, file, or voice message and I will continue this Telegram session.",
             )
+        rate_limit_reason = self._rate_limit_exceeded(chat_id=chat_id, sender_name=sender_name)
+        if rate_limit_reason:
+            return TelegramTurnResult(
+                conversation_id=conversation_id,
+                reply="This Telegram source is sending messages too quickly. Try again shortly.",
+                status="blocked",
+                incomplete=True,
+                reason_code=rate_limit_reason,
+            )
 
         chunks: list[str] = []
         done_summary = ""
@@ -658,6 +698,11 @@ class TelegramAgentBridge:
                 conversation_id=conversation_id,
                 settings=runtime_settings,
                 attachments=input_attachments,
+                execution_source="telegram",
+                control_session_id="telegram",
+                principal_id=f"telegram:{chat_id}:{sender_name or 'unknown'}",
+                permission_profile_id=f"telegram:{chat_id}:restricted",
+                interactive=False,
             ):
                 if on_event is not None:
                     callback_result = on_event(event)

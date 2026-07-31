@@ -60,13 +60,14 @@ export function ConnectionPortalPanel({
             saved={statuses[secret]}
             show={showSecrets}
             onChange={(value) => onSecretChange(secret, value)}
+            onDelete={() => onSecretChange(secret, '')}
             onToggle={onToggleSecrets}
           />
         )
       })}
 
       <p className="text-xs leading-relaxed text-neutral-600">
-        Secrets entered here are stored through the Electron bridge when available and also sent to the backend settings endpoint on save.
+        Saved credentials are encrypted by the operating system through Electron. Existing values are write-only and are never returned to this page.
       </p>
     </div>
   )
@@ -80,6 +81,7 @@ function SecretField({
   saved,
   show,
   onChange,
+  onDelete,
   onToggle,
 }: {
   label: string
@@ -89,6 +91,7 @@ function SecretField({
   saved: boolean
   show: boolean
   onChange: (value: string) => void
+  onDelete: () => void
   onToggle: () => void
 }) {
   return (
@@ -119,6 +122,16 @@ function SecretField({
           {show ? <EyeOff size={14} /> : <Eye size={14} />}
         </button>
       </div>
+      {saved && !value && (
+        <button
+          type="button"
+          onClick={onDelete}
+          className="text-[11px] text-red-300 hover:text-red-200 hover:underline"
+          aria-label={`Remove stored ${label}`}
+        >
+          Clear saved credential
+        </button>
+      )}
     </div>
   )
 }

@@ -22,7 +22,6 @@ backend/.tmp/manual-db-check/
 .env.*
 *.env
 *.env.*
-!.env.example
 !.env.*.example
 
 # Node / Electron
@@ -42,3 +41,4 @@ Thumbs.db
 .cursor/
 .runtime/
 .claude/
+.artifacts/

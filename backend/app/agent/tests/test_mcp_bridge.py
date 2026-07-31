@@ -67,7 +67,7 @@ def test_reflected_tool_name_sanitizes_dedupes_and_caps_length():
 
 
 def test_build_tool_entries_prefixes_names_uses_affinity_and_maps_original_tool():
-    cfg = MCPServerConfig(name="filesystem", command="npx")
+    cfg = MCPServerConfig(name="filesystem", command="npx", trusted_tools=["list_directory"])
     manager = SimpleNamespace(
         reflected_tool_names=[],
         call_tool_sync=lambda tool_name, arguments: json.dumps({"tool": tool_name, "arguments": arguments}),
@@ -85,9 +85,29 @@ def test_build_tool_entries_prefixes_names_uses_affinity_and_maps_original_tool(
     assert entries[0]["execution_mode"] == "sync_thread_affine"
     assert entries[0]["affinity_group"] == "mcp:filesystem"
     assert entries[0]["parameters"]["required"] == ["path"]
+    assert entries[0]["mcp_bridge"]["approval"]["reason"] == "explicitly_trusted_tool"
+    assert entries[0]["mcp_bridge"]["schema_hash"]
     assert json.loads(entries[0]["callable"](path=r"C:\Repo"))["tool"] == "list_directory"
     assert get_reflected_tool_map()["mcp__filesystem__list_directory"]["original_tool_name"] == "list_directory"
     assert manager.reflected_tool_names == ["mcp__filesystem__list_directory"]
+
+
+def test_read_like_mcp_tool_requires_approval_without_explicit_trust():
+    cfg = MCPServerConfig(name="filesystem", command="npx")
+    manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda _tool, _args: "{}")
+    tool = SimpleNamespace(
+        name="list_directory",
+        description="List directory contents",
+        inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
+        annotations=SimpleNamespace(readOnlyHint=True),
+    )
+
+    entry = build_tool_entries(cfg, manager, [tool])[0]
+    pending = json.loads(entry["callable"](path=r"C:\Repo"))
+
+    assert pending["status"] == "pending_approval"
+    assert pending["reason"] == "untrusted_read_tool"
+    assert pending["schema_hash"] == entry["mcp_bridge"]["schema_hash"]
 
 
 def test_unknown_reflected_tool_requires_approval_and_resumes_original_call():
@@ -140,6 +160,58 @@ def test_destructive_tool_requires_approval_even_with_read_only_hint():
 
     assert pending["status"] == "pending_approval"
     assert pending["reason"] == "destructive_or_mutating_tool"
+
+
+def test_changed_mcp_schema_invalidates_existing_approval():
+    calls: list[tuple[str, dict]] = []
+    cfg = MCPServerConfig(name="remote", command="npx")
+    manager = SimpleNamespace(
+        reflected_tool_names=[],
+        call_tool_sync=lambda tool_name, arguments: (
+            calls.append((tool_name, arguments)),
+            json.dumps({"ok": True}),
+        )[1],
+    )
+    first_tool = SimpleNamespace(
+        name="transform",
+        description="Transform data",
+        inputSchema={"type": "object", "properties": {"value": {"type": "string"}}},
+    )
+    second_tool = SimpleNamespace(
+        name="transform",
+        description="Transform data",
+        inputSchema={"type": "object", "properties": {"value": {"type": "integer"}}},
+    )
+
+    entry = build_tool_entries(cfg, manager, [first_tool])[0]
+    pending = json.loads(entry["callable"](value="abc"))
+    ticket = get_ticket(pending["ticket_id"])
+    assert ticket is not None
+    build_tool_entries(cfg, manager, [second_tool])
+
+    approved = approve_ticket(ticket.id)
+    assert approved is not None
+    resumed = resume_approved_ticket(approved)
+
+    assert resumed.status.value == "failed"
+    assert "schema changed" in (resumed.execution_result or "")
+    assert calls == []
+
+
+def test_oversized_mcp_arguments_are_rejected_before_approval():
+    cfg = MCPServerConfig(name="remote", command="npx")
+    manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda _tool, _args: "{}")
+    tool = SimpleNamespace(
+        name="transform",
+        description="Transform data",
+        inputSchema={"type": "object", "properties": {"value": {"type": "string"}}},
+    )
+
+    entry = build_tool_entries(cfg, manager, [tool])[0]
+    result = json.loads(entry["callable"](value="x" * (70 * 1024)))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "mcp_argument_size_exceeded"
 
 
 def test_server_manager_call_tool_sync_returns_structured_json():

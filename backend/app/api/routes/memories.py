@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.agent.memory_consolidation import close_session_async
 from app.agent.long_term_memory import get_long_term_memory
+from app.agent.ui_events import publish_ui_event
 from app.schemas import (
     MemoryAuditOut,
     MemoryCandidateOut,
@@ -21,6 +22,7 @@ from app.schemas import (
     MemorySessionCloseOut,
     MemoryStatsOut,
     MemoryUpdate,
+    OkResponse,
 )
 
 router = APIRouter()
@@ -58,6 +60,7 @@ async def create_memory(body: MemoryCreate):
     )
     if memory is None:
         raise HTTPException(status_code=400, detail="Memory was rejected by safety filters")
+    publish_ui_event("memory.changed", {"memory_id": memory.get("id", ""), "action": "created"})
     return memory
 
 
@@ -99,7 +102,9 @@ async def memory_audit(
 
 @router.post("/memories/session/close", response_model=MemorySessionCloseOut)
 async def close_memory_session(body: MemorySessionCloseIn):
-    return await close_session_async(body.conversation_id)
+    result = await close_session_async(body.conversation_id)
+    publish_ui_event("memory.changed", {"conversation_id": body.conversation_id, "action": "session_closed"})
+    return result
 
 
 @router.get("/memories/profile", response_model=list[MemoryProfileFieldOut])
@@ -110,7 +115,7 @@ async def memory_profile():
 @router.patch("/memories/profile/{field}", response_model=MemoryProfileFieldOut)
 async def update_memory_profile(field: str, body: MemoryProfileFieldUpdate):
     try:
-        return get_long_term_memory().update_profile_field(
+        field_record = get_long_term_memory().update_profile_field(
             field,
             body.value,
             privacy_level=body.privacy_level,
@@ -119,6 +124,8 @@ async def update_memory_profile(field: str, body: MemoryProfileFieldUpdate):
             source_conversation_id=body.source_conversation_id,
             source_message_id=body.source_message_id,
         )
+        publish_ui_event("memory.changed", {"field": field, "action": "profile_updated"})
+        return field_record
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -143,6 +150,7 @@ async def update_memory_candidate(candidate_id: str, body: MemoryCandidateUpdate
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if candidate is None:
         raise HTTPException(status_code=404, detail="Memory candidate not found")
+    publish_ui_event("memory.changed", {"candidate_id": candidate_id, "action": "candidate_updated"})
     return candidate
 
 
@@ -178,9 +186,11 @@ async def save_memory_file(category: str, body: MemoryFileUpdate):
     if normalized != category:
         raise HTTPException(status_code=400, detail="Invalid memory category")
     try:
-        return store.save_memory_file(category, body.raw_markdown)
+        memory_file = store.save_memory_file(category, body.raw_markdown)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    publish_ui_event("memory.changed", {"category": category, "action": "file_saved"})
+    return memory_file
 
 
 @router.patch("/memories/sections/{section_id}", response_model=MemoryFileSectionOut)
@@ -194,6 +204,7 @@ async def update_memory_section(section_id: str, body: MemorySectionUpdate):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if section is None:
         raise HTTPException(status_code=404, detail="Memory section not found")
+    publish_ui_event("memory.changed", {"section_id": section_id, "action": "section_updated"})
     return section
 
 
@@ -202,6 +213,7 @@ async def get_memory(memory_id: str):
     memory = get_long_term_memory().get(memory_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
+    publish_ui_event("memory.changed", {"memory_id": memory_id, "action": "updated"})
     return memory
 
 
@@ -219,8 +231,9 @@ async def update_memory(memory_id: str, body: MemoryUpdate):
     return memory
 
 
-@router.delete("/memories/{memory_id}")
+@router.delete("/memories/{memory_id}", response_model=OkResponse)
 async def delete_memory(memory_id: str):
     if not get_long_term_memory().delete(memory_id):
         raise HTTPException(status_code=404, detail="Memory not found")
+    publish_ui_event("memory.changed", {"memory_id": memory_id, "action": "deleted"})
     return {"ok": True}

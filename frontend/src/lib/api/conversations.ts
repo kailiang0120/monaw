@@ -1,14 +1,15 @@
-import { BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS } from './client'
 import type { ContextUsage, Conversation, MessagesResponse, SavedMessage } from './types'
 
-export async function fetchConversations(): Promise<Conversation[]> {
-  const res = await fetch(`${BASE}/api/conversations`)
+export async function fetchConversations(limit = 100, offset = 0): Promise<Conversation[]> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  const res = await apiFetch(`${BASE}/api/conversations?${params}`)
   if (!res.ok) throw new Error('Failed to fetch conversations')
   return res.json()
 }
 
 export async function createConversation(title?: string): Promise<Conversation> {
-  const res = await fetch(`${BASE}/api/conversations`, {
+  const res = await apiFetch(`${BASE}/api/conversations`, {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify({ title: title ?? 'New Conversation' }),
@@ -18,11 +19,11 @@ export async function createConversation(title?: string): Promise<Conversation> 
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  await fetch(`${BASE}/api/conversations/${id}`, { method: 'DELETE' })
+  await apiFetch(`${BASE}/api/conversations/${id}`, { method: 'DELETE' })
 }
 
 export async function renameConversation(id: string, title: string): Promise<Conversation> {
-  const res = await fetch(`${BASE}/api/conversations/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`${BASE}/api/conversations/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: JSON_HEADERS,
     body: JSON.stringify({ title }),
@@ -31,8 +32,11 @@ export async function renameConversation(id: string, title: string): Promise<Con
   return res.json()
 }
 
-export async function fetchContextUsage(conversationId: string): Promise<ContextUsage> {
-  const res = await fetch(`${BASE}/api/conversations/${encodeURIComponent(conversationId)}/context-usage`)
+export async function fetchContextUsage(conversationId: string, signal?: AbortSignal): Promise<ContextUsage> {
+  const res = await apiFetch(
+    `${BASE}/api/conversations/${encodeURIComponent(conversationId)}/context-usage`,
+    { signal },
+  )
   if (!res.ok) throw new Error('Failed to fetch context usage')
   return res.json()
 }
@@ -46,7 +50,7 @@ export async function fetchMessages(
   const params = new URLSearchParams({ limit: String(limit) })
   if (beforeId !== undefined) params.set('before_id', String(beforeId))
   params.set('tool_call_mode', 'summary')
-  const res = await fetch(
+  const res = await apiFetch(
     `${BASE}/api/conversations/${encodeURIComponent(conversationId)}/messages?${params}`,
     { signal },
   )
@@ -58,8 +62,13 @@ export async function fetchMessageToolCalls(
   messageId: number,
   signal?: AbortSignal,
 ): Promise<SavedMessage['tool_calls']> {
-  const res = await fetch(
-    `${BASE}/api/messages/${encodeURIComponent(String(messageId))}/tool-calls`,
+  const params = new URLSearchParams({
+    limit: '100',
+    offset: '0',
+    tool_payload_limit: '20000',
+  })
+  const res = await apiFetch(
+    `${BASE}/api/messages/${encodeURIComponent(String(messageId))}/tool-calls?${params}`,
     { signal },
   )
   if (!res.ok) throw new Error('Failed to fetch message tool calls')

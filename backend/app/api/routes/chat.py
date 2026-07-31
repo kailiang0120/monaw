@@ -2,14 +2,16 @@ import asyncio
 import json
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.agent.job_manager import cancel_job, create_job, get_job, list_jobs, run_job
+from app.agent.response_attachments import runtime_attachment_from_ref
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
+from app.agent.ui_events import publish_ui_event
 from app.config import settings
 from app.debug_ndjson import dbg_log
-from app.schemas import ChatRequest
+from app.schemas import ChatJobCreateResponse, ChatJobOut, ChatRequest, OkResponse
 
 router = APIRouter()
 
@@ -22,7 +24,7 @@ def _message_with_attachments(req: ChatRequest) -> str:
     lines = [
         message,
         "",
-        "Attached files are saved on this machine and are available for tool use:",
+        "Attached files are available for tool use by opaque handle:",
     ]
     for attachment in req.attachments:
         details = [attachment.name]
@@ -31,18 +33,39 @@ def _message_with_attachments(req: ChatRequest) -> str:
         if attachment.size:
             details.append(f"{attachment.size} bytes")
         lines.append(f"- {' | '.join(details)}")
-        lines.append(f"  path: {attachment.path}")
+        lines.append(f"  handle: attachment://{attachment.id}")
     lines.append("")
     lines.append(
-        "Use the file path exactly as provided when reading, analyzing, editing, or converting the attachment."
+        "Use the attachment handle exactly as provided with filesystem tools when reading, analyzing, editing, or converting the attachment."
     )
     return "\n".join(lines).strip()
 
 
+def _runtime_attachments(req: ChatRequest, *, control_session_id: str, conversation_id: str) -> list[dict]:
+    attachments: list[dict] = []
+    for attachment in req.attachments:
+        runtime_attachment = runtime_attachment_from_ref(
+            attachment,
+            control_session_id=control_session_id,
+            principal_id=control_session_id,
+            conversation_id=conversation_id,
+        )
+        if runtime_attachment is None:
+            raise HTTPException(status_code=404, detail=f"Attachment not found: {attachment.id}")
+        attachments.append(runtime_attachment)
+    return attachments
+
+
 @router.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     conv_id = req.conversation_id or str(uuid.uuid4())
     message = _message_with_attachments(req)
+    control_session_id = request.state.control_session.session_id
+    runtime_attachments = _runtime_attachments(
+        req,
+        control_session_id=control_session_id,
+        conversation_id=conv_id,
+    )
 
     async def stream():
         dbg_log(
@@ -60,10 +83,22 @@ async def chat(req: ChatRequest):
                 message=message,
                 conversation_id=conv_id,
                 settings=merged,
-                attachments=[attachment.model_dump() for attachment in req.attachments],
+                attachments=runtime_attachments,
+                control_session_id=control_session_id,
+                execution_source="desktop",
+                principal_id=control_session_id,
+                permission_profile_id="desktop-current",
+                interactive=True,
             ):
                 event_name = event_dict.get("event", "message")
                 event_data = json.dumps(event_dict.get("data", {}))
+                if event_name == "done":
+                    publish_ui_event(
+                        "conversation.changed",
+                        {"conversation_id": conv_id, "action": "messages_changed"},
+                    )
+                    publish_ui_event("usage.changed", {"conversation_id": conv_id})
+                    publish_ui_event("observability.changed", {"conversation_id": conv_id})
                 yield f"event: {event_name}\ndata: {event_data}\n\n".encode()
         except Exception as e:
             dbg_log(
@@ -79,22 +114,39 @@ async def chat(req: ChatRequest):
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@router.post("/chat/jobs")
-async def create_chat_job(req: ChatRequest):
+@router.post("/chat/jobs", response_model=ChatJobCreateResponse)
+async def create_chat_job(req: ChatRequest, request: Request):
     """Start a detached background job. Returns job_id immediately."""
     conv_id = req.conversation_id or str(uuid.uuid4())
     message = _message_with_attachments(req)
     job = create_job(conv_id)
     merged = build_runtime_namespace(settings, load_agent_settings(settings))
+    control_session_id = request.state.control_session.session_id
+    runtime_attachments = _runtime_attachments(
+        req,
+        control_session_id=control_session_id,
+        conversation_id=conv_id,
+    )
 
     async def _start():
-        await run_job(job, message, merged)
+        await run_job(
+            job,
+            message,
+            merged,
+            attachments=runtime_attachments,
+            control_session_id=control_session_id,
+            execution_source="desktop",
+            principal_id=control_session_id,
+            permission_profile_id="desktop-current",
+            interactive=True,
+        )
 
     asyncio.create_task(_start())
+    publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "job_created"})
     return {"job_id": job.job_id, "conversation_id": conv_id}
 
 
-@router.get("/chat/jobs")
+@router.get("/chat/jobs", response_model=list[ChatJobOut])
 async def list_chat_jobs():
     """List all known jobs and their statuses."""
     return [
@@ -139,10 +191,15 @@ async def stream_chat_job(
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
-@router.post("/chat/jobs/{job_id}/cancel")
+@router.post("/chat/jobs/{job_id}/cancel", response_model=OkResponse)
 async def cancel_chat_job(job_id: str):
     """Cancel a running job."""
     ok = await cancel_job(job_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Job not found or already finished")
+    job = get_job(job_id)
+    publish_ui_event(
+        "conversation.changed",
+        {"conversation_id": job.conversation_id if job is not None else "", "action": "job_cancelled"},
+    )
     return {"ok": True}

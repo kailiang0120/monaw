@@ -1,37 +1,35 @@
 # Sandboxing
 
-Monaw routes shell execution through the sandbox layer before a process starts. Approval and access grants still run first; sandbox selection and environment hardening run after those gates.
-
-For the approval, permission profile, and access-grant layer that runs before sandbox selection, see [permissions.md](permissions.md).
+Monaw evaluates shell commands before process creation and produces a policy decision containing the command trust class, required isolation strength, selected backend, effective network/filesystem policy, reason code, and approval requirement.
 
 ## Modes
 
-- `disabled` / `off`: compatibility mode. Sync `exec` uses `local_direct`, which is not isolated.
-- `auto`: chooses by command profile. Untrusted commands use Docker when available and are blocked when a strong backend is required but unavailable. Standard and host-required commands prefer `local_restricted`, then `local_direct` for compatibility.
-- `enforce`: requires a strong backend. If Docker is unavailable, sync `exec` is blocked with `sandbox_backend_unavailable`.
+- `off` / legacy `disabled`: shell execution is disabled.
+- `auto`: untrusted commands require Docker or another strong backend. Standard commands prefer strong isolation and may use a host runner only after explicit host-execution approval. Host-required commands always need that approval.
+- `enforce`: every command requires strong isolation; unavailable isolation returns `sandbox_backend_unavailable`.
+- `host`: explicit host execution. Every command requires approval and displays a no-isolation warning.
 - `docker`: explicitly require Docker.
-- `local_restricted`: explicitly use advisory local execution.
+- `local_restricted`: explicit advisory host execution; it still requires host-execution approval.
 
-## Backends
+## Isolation guarantees
 
-- `local_direct`: runs on the host with scrubbed environment variables. It provides no filesystem, process, or network isolation.
-- `local_restricted`: runs on the host with process cleanup and timeout handling. This is advisory only and does not isolate filesystem or network access.
-- `docker`: runs sync bash commands in a named container with `--network none`, `--cap-drop ALL`, optional `--security-opt no-new-privileges`, optional read-only root filesystem, tmpfs temp, Docker pull policy, timeout cleanup, and CPU/memory/PID limits.
+- `strong`: Docker container process/filesystem isolation with enforced network denial when requested.
+- `advisory`: `local_restricted` host execution with process cleanup and resource controls, but no filesystem or network isolation.
+- `none`: `local_direct` host execution. It is never selected silently.
 
-## Environment
+Docker images must be pinned as `name@sha256:<64-hex-digest>`. Unpinned images are reported unavailable and execution returns `docker_image_not_pinned`.
 
-Subprocesses no longer inherit the full host environment. Local backends inherit only a small OS allowlist, and secret-looking host variables such as `OPENAI_API_KEY` are stripped. Docker containers do not inherit host environment variables; only explicit non-secret env values are passed into the container. Explicit env keys that look like secrets are blocked with `secret_env_not_supported`.
+## Resource and environment controls
 
-## Filesystem And Artifacts
+All runners clamp execution time and captured output. Docker additionally applies memory, CPU, and PID limits. Subprocesses receive a minimal environment allowlist; secret-looking explicit variables are rejected with `secret_env_not_supported`.
 
-Sandbox path handling is centralized in `app.agent.sandbox.path_policy`. Copy-in/copy-out helpers canonicalize paths, validate run IDs, and enforce allowed roots and size limits. The current sync runners do not bind arbitrary host paths into Docker by default. Runner output is capped by sandbox resource settings, artifacts are written under `backend/.runtime`, and a manifest path is included in sandbox metadata.
+Docker network denial uses `--network none`, drops capabilities, enables no-new-privileges when configured, uses a read-only root filesystem by default, and mounts no arbitrary host paths. Local host runners never claim network or filesystem isolation.
+
+Sandbox metadata and audit events record the selected backend, trust class, required isolation, effective restrictions, and reason code.
 
 ## Troubleshooting
 
-- Docker not installed or not running: use `auto` or `disabled`, or install/start Docker before using `docker` or `enforce`.
-- Enforce mode blocks commands: Docker is unavailable or disabled.
-- Command cannot see expected files: Docker does not mount arbitrary host paths by default.
-- Bash command fails in Docker: the configured image must include `bash`.
-- Network calls fail in Docker: the strong backend defaults to no network.
-
-Sandbox metadata in tool results and audit events is intended to be honest: local direct is never reported as isolated, and local restricted is reported as advisory.
+- `sandbox_backend_unavailable`: install/start Docker, configure a pinned image digest, or explicitly choose host mode and approve the host run.
+- `docker_image_not_pinned`: replace a tag such as `python:3.12-slim` with an immutable digest reference.
+- `shell_execution_disabled`: change mode from `off` only if shell execution is intended.
+- Docker commands currently require the `bash` shell.

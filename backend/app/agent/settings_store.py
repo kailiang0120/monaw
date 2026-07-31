@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -44,7 +45,7 @@ DEFAULT_SKILLS = {
     "computer-use": True,
     "filesystem": True,
     "memory": True,
-    "skill-creator": True,
+    "skill-creator": False,
     "background-check": False,
     "browser-use": True,
 }
@@ -175,6 +176,8 @@ class MCPServerConfig(BaseModel):
     call_timeout_ms: int = 30000
     reconnect_on_unhealthy: bool = True
     allow_list: list[str] = Field(default_factory=list)
+    trusted_tools: list[str] = Field(default_factory=list)
+    tool_risk_overrides: dict[str, Literal["low", "medium", "high"]] = Field(default_factory=dict)
     description: str = ""
 
 
@@ -291,7 +294,7 @@ class SandboxWslSettings(BaseModel):
 
 class SandboxSettings(BaseModel):
     enabled: bool = True
-    mode: Literal["off", "disabled", "auto", "enforce", "docker", "local_restricted", "wsl"] = "auto"
+    mode: Literal["off", "disabled", "auto", "enforce", "host", "docker", "local_restricted", "wsl"] = "auto"
     default_profile: Literal["standard", "untrusted", "project_write", "host_required"] = "standard"
     require_strong_for_untrusted: bool = True
     default_write_strategy: Literal["discard", "copy_out", "direct_rw"] = "copy_out"
@@ -379,7 +382,7 @@ def _legacy_tools_to_skills(payload: dict[str, Any]) -> dict[str, bool]:
         "computer-use": windows_tools or windows_controller,
         "filesystem": windows_controller,
         "memory": True,
-        "skill-creator": True,
+        "skill-creator": False,
         "background-check": False,
         "browser-use": True,
     }
@@ -676,6 +679,13 @@ def save_agent_settings(settings_data: AgentSettings, *, settings_path: Path | N
     return settings_data
 
 
+def settings_version(settings_data: AgentSettings) -> str:
+    """Stable optimistic-concurrency token for the persisted settings payload."""
+
+    raw = settings_data.model_dump_json().encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def merge_agent_settings(current: AgentSettings, patch: dict[str, Any]) -> AgentSettings:
     merged = current.model_dump()
 
@@ -772,6 +782,7 @@ def api_settings_payload(base_settings, agent_settings: AgentSettings) -> dict[s
     runtime_settings = build_runtime_namespace(base_settings, agent_settings)
     return {
         **agent_settings.model_dump(),
+        "settings_version": settings_version(agent_settings),
         "available_skills": available_skill_payload(runtime_settings),
         "api_keys": {
             "has_openai_key": bool(base_settings.openai_api_key),

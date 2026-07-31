@@ -1,4 +1,4 @@
-import { Suspense, lazy, useState, useEffect, useCallback } from 'react'
+import { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { ChatWindow } from './components/ChatWindow'
 import { InputBar } from './components/InputBar'
@@ -14,6 +14,8 @@ import {
 } from './lib/api/scheduledTasks'
 import { fetchSettings, updateSettings } from './lib/api/settings'
 import { syncStoredApiKeysToBackendWithRetry } from './lib/apiKeySync'
+import { fetchPendingAccessGrants } from './lib/api/accessGrants'
+import { subscribeServerEvents, type ServerEvent } from './lib/api/serverEvents'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from './lib/identity'
 import type { AgentSettings, Conversation, ScheduledTask, UploadedAttachment } from './lib/api/types'
 
@@ -23,6 +25,7 @@ type ThemeMode = 'dark' | 'light'
 const THEME_STORAGE_KEY = 'agent_theme'
 const STARTUP_REFRESH_RETRIES = 20
 const STARTUP_REFRESH_DELAY_MS = 1000
+const RECOVERY_POLL_MS = 60_000
 
 const SettingsModal = lazy(() =>
   import('./features/settings/SettingsModal').then((module) => ({ default: module.SettingsModal })),
@@ -50,7 +53,16 @@ function sameConversations(a: Conversation[], b: Conversation[]): boolean {
 
 function sameScheduledTasks(a: ScheduledTask[], b: ScheduledTask[]): boolean {
   if (a.length !== b.length) return false
-  return a.every((item, index) => JSON.stringify(item) === JSON.stringify(b[index]))
+  return a.every((item, index) => {
+    const other = b[index]
+    return other !== undefined
+      && item.id === other.id
+      && item.updatedAt === other.updatedAt
+      && item.nextRunAt === other.nextRunAt
+      && item.lastRunAt === other.lastRunAt
+      && item.lastRunStatus === other.lastRunStatus
+      && item.running === other.running
+  })
 }
 
 export default function App() {
@@ -66,6 +78,13 @@ export default function App() {
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([])
   const [showScheduledTaskDialog, setShowScheduledTaskDialog] = useState(false)
   const [editingScheduledTaskId, setEditingScheduledTaskId] = useState<string | null>(null)
+  const [eventChannelConnected, setEventChannelConnected] = useState(false)
+  const [approvalRefreshKey, setApprovalRefreshKey] = useState(0)
+  const [usageRefreshKey, setUsageRefreshKey] = useState(0)
+  const [memoryRefreshKey, setMemoryRefreshKey] = useState(0)
+  const [observabilityRefreshKey, setObservabilityRefreshKey] = useState(0)
+  const [diagnosticsRefreshKey, setDiagnosticsRefreshKey] = useState(0)
+  const activeConvIdRef = useRef<string | null>(activeConvId)
 
   const {
     messages,
@@ -81,6 +100,10 @@ export default function App() {
     stopStreaming,
     clearMessages,
   } = useChat(activeConvId)
+
+  useEffect(() => {
+    activeConvIdRef.current = activeConvId
+  }, [activeConvId])
 
   const loadConversations = useCallback(async () => {
     try {
@@ -123,6 +146,23 @@ export default function App() {
     await loadVisibleSettings()
   }
 
+  const loadPendingAccessGrant = useCallback(async () => {
+    try {
+      const pending = await fetchPendingAccessGrants(activeConvIdRef.current ?? undefined, 1)
+      const ticket = pending[0]
+      if (!ticket) return
+      setPendingAccessGrant({
+        ticket_id: ticket.id,
+        target_type: ticket.target_type,
+        target_identifier: ticket.target_identifier,
+        display_name: ticket.display_name,
+        action_context: ticket.action_context,
+      })
+    } catch {
+      // Event-driven refresh should never interrupt the chat UI.
+    }
+  }, [setPendingAccessGrant])
+
   useEffect(() => {
     syncStoredApiKeysToBackendWithRetry()
 
@@ -143,28 +183,99 @@ export default function App() {
     }
 
     void refreshStartupData()
-    const refreshConversationsWhenVisible = () => {
-      if (document.visibilityState !== 'hidden') void loadConversations()
+    return () => {
+      cancelled = true
+      if (retryTimer) window.clearTimeout(retryTimer)
     }
-    const refreshScheduledTasksWhenVisible = () => {
-      if (document.visibilityState !== 'hidden') void loadScheduledTasks()
+  }, [loadConversations, loadScheduledTasks, loadVisibleSettings])
+
+  useEffect(() => {
+    const handleServerEvent = (event: ServerEvent) => {
+      const eventConversationId = typeof event.data.conversation_id === 'string'
+        ? event.data.conversation_id
+        : ''
+      const affectsActiveConversation = !eventConversationId || eventConversationId === activeConvIdRef.current
+
+      if (event.event === 'backend.ready') {
+        setIsBackendReady(true)
+        void loadConversations()
+        void loadScheduledTasks()
+        void loadVisibleSettings()
+        return
+      }
+      if (event.event === 'conversation.changed') {
+        void loadConversations()
+        if (affectsActiveConversation) {
+          refreshMessages()
+          setUsageRefreshKey((value) => value + 1)
+        }
+        return
+      }
+      if (event.event === 'scheduled_tasks.changed') {
+        void loadScheduledTasks()
+        return
+      }
+      if (event.event === 'approval_ticket.created' || event.event === 'approval_ticket.changed') {
+        setApprovalRefreshKey((value) => value + 1)
+        return
+      }
+      if (event.event === 'access_grant.created') {
+        if (affectsActiveConversation) void loadPendingAccessGrant()
+        return
+      }
+      if (event.event === 'access_grant.changed') {
+        if (affectsActiveConversation) setPendingAccessGrant(null)
+        return
+      }
+      if (event.event === 'usage.changed') {
+        if (affectsActiveConversation) setUsageRefreshKey((value) => value + 1)
+        return
+      }
+      if (event.event === 'memory.changed') {
+        setMemoryRefreshKey((value) => value + 1)
+        return
+      }
+      if (event.event === 'observability.changed') {
+        setObservabilityRefreshKey((value) => value + 1)
+        return
+      }
+      if (event.event === 'settings.changed') {
+        void loadVisibleSettings()
+        setDiagnosticsRefreshKey((value) => value + 1)
+      }
     }
+
+    return subscribeServerEvents({
+      onEvent: handleServerEvent,
+      onStatus: setEventChannelConnected,
+    })
+  }, [
+    loadConversations,
+    loadPendingAccessGrant,
+    loadScheduledTasks,
+    loadVisibleSettings,
+    refreshMessages,
+    setPendingAccessGrant,
+  ])
+
+  useEffect(() => {
+    if (eventChannelConnected) return
     const refreshWhenVisible = () => {
       if (document.visibilityState !== 'visible') return
       void loadConversations()
       void loadScheduledTasks()
+      void loadVisibleSettings()
+      setApprovalRefreshKey((value) => value + 1)
+      setUsageRefreshKey((value) => value + 1)
     }
-    const interval = window.setInterval(refreshConversationsWhenVisible, 5000)
-    const scheduledInterval = window.setInterval(refreshScheduledTasksWhenVisible, 15000)
+    refreshWhenVisible()
+    const interval = window.setInterval(refreshWhenVisible, RECOVERY_POLL_MS)
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
-      cancelled = true
-      if (retryTimer) window.clearTimeout(retryTimer)
       window.clearInterval(interval)
-      window.clearInterval(scheduledInterval)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
-  }, [loadConversations, loadScheduledTasks, loadVisibleSettings])
+  }, [eventChannelConnected, loadConversations, loadScheduledTasks, loadVisibleSettings])
 
   useEffect(() => {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme)
@@ -328,6 +439,7 @@ export default function App() {
             isStreaming={isStreaming}
             conversationId={activeConvId}
             contextRefreshKey={messages.length}
+            usageRefreshKey={usageRefreshKey}
             disabled={isLoadingHistory || !isBackendReady}
             disabledReason={!isBackendReady ? 'Waiting for the local backend to finish starting…' : undefined}
             approvalMode={approvalMode}
@@ -337,7 +449,11 @@ export default function App() {
         </main>
       </div>
 
-      <ApprovalToast conversationId={activeConvId} isStreaming={isStreaming} />
+      <ApprovalToast
+        conversationId={activeConvId}
+        isStreaming={isStreaming}
+        refreshKey={approvalRefreshKey}
+      />
 
       {pendingAccessGrant && (
         <AccessGrantDialog
@@ -349,6 +465,9 @@ export default function App() {
       {showSettings && (
         <Suspense fallback={null}>
           <SettingsModal
+            diagnosticsRefreshKey={diagnosticsRefreshKey}
+            memoryRefreshKey={memoryRefreshKey}
+            observabilityRefreshKey={observabilityRefreshKey}
             onClose={() => {
               setShowSettings(false)
               void refreshVisibleSettings()

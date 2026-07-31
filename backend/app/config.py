@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     vision_fallback_model: str = DEFAULT_VISION_FALLBACK_MODEL
     vision_fallback_max_output_tokens: int = 1000
     port: int = 8435
-    cors_allow_origins: str = "file://,null"
-    cors_allow_origin_regex: str = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+    cors_allow_origins: str = "null"
+    cors_allow_origin_regex: str = ""
     allow_arbitrary_app_paths: bool = False
     telegram_bot_token: str = ""
     telegram_allowed_user_ids: str = ""

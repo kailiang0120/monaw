@@ -79,8 +79,7 @@ Monaw currently targets Windows. macOS has not been tested yet.
 - Windows 10 or 11. macOS is not tested yet.
 - Git.
 - Node.js 18+ and npm. The one-click setup can install this for you.
-- Python 3.10+; Python 3.11 is recommended. The one-click setup can install Python 3.11 for you.
-- Conda or Python `venv` for manual setup. The one-click setup creates `backend\.venv` for you.
+- `uv`. The one-click setup can install it for you, and `uv` installs the pinned Python 3.11 runtime automatically.
 - Optional: Docker Desktop for stronger shell-command sandboxing.
 
 ## Install
@@ -102,11 +101,11 @@ setup.bat
 
 The setup launcher will:
 
-- Install Python 3.11 with Windows Package Manager if Python is missing.
+- Install `uv` with Windows Package Manager if it is missing.
 - Install Node.js LTS with Windows Package Manager if Node/npm is missing.
-- Create `backend\.venv`.
-- Install Python packages from `backend\requirements.txt`.
-- Run `npm install` in `frontend`.
+- Install the Python version pinned in `backend\.python-version`.
+- Create `backend\.venv` and sync the dependencies locked in `backend\uv.lock`.
+- Run `npm ci` in `frontend`.
 
 When setup finishes, double-click [start.bat](start.bat):
 
@@ -122,27 +121,12 @@ If setup fails, check:
 
 ### Option B: Manual Developer Setup
 
-Create and install the Python backend environment first.
-
-Conda. The launcher tries to activate a Conda environment named `agent`:
+Install `uv`, then sync the locked backend environment:
 
 ```powershell
-conda create -n agent python=3.11 -y
-conda activate agent
+winget install --id=astral-sh.uv -e
 cd backend
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-cd ..
-```
-
-Local `venv`. Monaw auto-detects `backend\.venv`:
-
-```powershell
-cd backend
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+uv sync --locked
 cd ..
 ```
 
@@ -150,7 +134,7 @@ Install the frontend packages:
 
 ```powershell
 cd frontend
-npm install
+npm ci
 cd ..
 ```
 
@@ -188,12 +172,11 @@ Start the app from the repo root:
 
 The launcher starts the desktop app and exits after startup succeeds.
 
-If you use Conda, keep the environment named `agent`, or activate your preferred environment before launching.
-
-If you use a custom Python path, set `AGENT_PYTHON_PATH` before launching:
+`uv` selects the pinned Python runtime and keeps `backend\.venv` in sync. If
+`uv` is installed at a custom path, set `AGENT_UV_PATH` before launching:
 
 ```powershell
-$env:AGENT_PYTHON_PATH = "C:\path\to\python.exe"
+$env:AGENT_UV_PATH = "C:\path\to\uv.exe"
 .\start.bat
 ```
 
@@ -232,6 +215,18 @@ Telegram is optional. Keep the bot token private and keep the allowlist narrow. 
 
 Permissions, approvals, access grants, and sandbox settings are configured in Settings. See [docs/permissions.md](docs/permissions.md) and [docs/sandboxing.md](docs/sandboxing.md).
 
+The backend API is a privileged local control plane. The desktop application
+authenticates every `/api` request with a short-lived session and binds the
+backend to loopback by default. Do not expose the backend through port
+forwarding, reverse proxies, tunnels, permissive firewall rules, or non-loopback
+binds. See [docs/operations.md](docs/operations.md).
+
+Provider keys and the Telegram bot token are encrypted through Electron's
+OS-backed `safeStorage`. Saved credential values are write-only from the
+renderer: the UI can see whether a value exists, but cannot read it back.
+
+The generated endpoint reference is [docs/api.md](docs/api.md).
+
 ## Troubleshooting
 
 If `start.bat` fails before the app opens, check:
@@ -247,18 +242,18 @@ If the app opens but cannot connect to the backend, check:
 %USERPROFILE%\.monaw\runtime\
 ```
 
-If backend imports fail, reinstall backend packages in your Python environment:
+If backend imports fail, restore the locked backend environment:
 
 ```powershell
 cd backend
-python -m pip install -r requirements.txt
+uv sync --locked
 ```
 
 If frontend startup fails, reinstall frontend packages:
 
 ```powershell
 cd frontend
-npm install
+npm ci
 ```
 
 If Vite reports port `5275` is already in use, stop the existing Vite process or reuse it intentionally.

@@ -1,4 +1,4 @@
-import { BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, decodeApiError, JSON_HEADERS } from './client'
 import type {
   AccessGrantRequiredEvent,
   ApprovalEvent,
@@ -269,7 +269,7 @@ export function chatStream(
     }
 
     try {
-      const res = await fetch(`${BASE}/api/chat`, {
+      const res = await apiFetch(`${BASE}/api/chat`, {
         method: 'POST',
         headers: JSON_HEADERS,
         body: JSON.stringify({ message, conversation_id: conversationId, attachments }),
@@ -282,8 +282,14 @@ export function chatStream(
         hasBody: !!res.body,
       })
 
-      if (!res.ok || !res.body) {
-        onError('Request failed')
+      if (!res.ok) {
+        const error = await decodeApiError(res, 'Request failed')
+        onError(error.message, { code: error.code, message: error.message })
+        return
+      }
+
+      if (!res.body) {
+        onError('Response stream is unavailable')
         return
       }
 

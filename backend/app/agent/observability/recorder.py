@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
-import re
 import sqlite3
 import threading
 import time
@@ -17,8 +16,29 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from app.agent.privacy import (
+    OBSERVABILITY_EVENT_FIELD_CLASSIFICATION,
+    OBSERVABILITY_RUN_FIELD_CLASSIFICATION,
+)
 from app.agent.runtime_paths import RUNTIME_DIR
-from app.agent.run_context import current_conversation_id
+from app.agent.run_context import (
+    current_control_session_id,
+    current_conversation_id,
+    current_execution_principal,
+)
+from app.agent.secure_artifacts import decrypt_bytes, encrypt_bytes
+from app.agent.ui_events import ui_event_metrics
+from app.agent.observability.redaction import (
+    MAX_TEXT_CHARS,
+    json_dumps as _json_dumps,
+    redact,
+    redact_text as _redact_text,
+    safe_preview as _safe_preview,
+    without_sensitive_event_content as _without_sensitive_event_content,
+    without_sensitive_run_content as _without_sensitive_run_content,
+)
+from app.agent.observability.storage import initialize_observability_db
+from app.security.support_mode import support_mode_status
 
 
 OBSERVABILITY_DIR = RUNTIME_DIR / "observability"
@@ -29,10 +49,11 @@ DB_PATH = OBSERVABILITY_DIR / "observability.sqlite3"
 PRICING_PATH = OBSERVABILITY_DIR / "model_pricing.json"
 BACKEND_LOG_PATH = RUNTIME_DIR / "backend.log"
 
-MAX_TEXT_CHARS = 200_000
 MAX_TAIL_BYTES = 1_000_000
 RETENTION_DAYS = 30
 MAX_STORAGE_BYTES = 500 * 1024 * 1024
+MAX_EXPORT_BYTES = 100 * 1024 * 1024
+ENCRYPTED_TEXT_PREFIX = "enc:v1:"
 
 _CURRENT_RUN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "agent_current_observability_run_id",
@@ -40,28 +61,6 @@ _CURRENT_RUN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _RECORDER: "ObservabilityRecorder | None" = None
 _HANDLER_INSTALLED = False
-
-SECRET_KEY_RE = re.compile(
-    r"(api[_-]?key|token|secret|password|authorization|cookie|session|bearer)",
-    re.IGNORECASE,
-)
-BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)
-OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}\b")
-GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-GOOGLE_API_KEY_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{20,}\b")
-INLINE_SECRET_RE = re.compile(
-    r"\b(api[_-]?key|token|secret|password|authorization|cookie|session(?:id)?|bearer)\b(\s*[:=]\s*)([^\s,;]+)",
-    re.IGNORECASE,
-)
-# High-confidence secret/PII value patterns kept in sync with
-# long_term_memory._SENSITIVE_PATTERNS so secrets that the memory layer refuses to
-# store are not leaked verbatim into observability dumps. (key, replacement) pairs.
-_VALUE_REDACTIONS = (
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL), "[REDACTED PRIVATE KEY]"),
-    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED SSN]"),
-    (re.compile(r"\b(?:\d[ -]*?){13,16}\b"), "[REDACTED CARD]"),
-)
-
 
 @dataclass
 class UsageStats:
@@ -164,60 +163,16 @@ def _to_int(value: Any) -> int:
         return 0
 
 
-def _redact_text(value: str) -> str:
-    text = BEARER_RE.sub("Bearer [REDACTED]", str(value or ""))
-    text = OPENAI_KEY_RE.sub("sk-[REDACTED]", text)
-    text = GITHUB_TOKEN_RE.sub("[REDACTED GITHUB TOKEN]", text)
-    text = GOOGLE_API_KEY_RE.sub("[REDACTED GOOGLE API KEY]", text)
-    text = INLINE_SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
-    for pattern, replacement in _VALUE_REDACTIONS:
-        text = pattern.sub(replacement, text)
-    return text
-
-
-def _safe_preview(value: str, limit: int = MAX_TEXT_CHARS) -> str:
-    text = _redact_text(str(value or ""))
-    if len(text) > limit:
-        return text[:limit] + "\n[truncated]"
-    return text
-
-
-def redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if SECRET_KEY_RE.search(key_text):
-                redacted[key_text] = "[REDACTED]"
-            else:
-                redacted[key_text] = redact(item)
-        return redacted
-    if isinstance(value, list):
-        return [redact(item) for item in value]
-    if isinstance(value, tuple):
-        return [redact(item) for item in value]
-    if isinstance(value, str):
-        return _safe_preview(value)
-    return value
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        return model_dump(exclude_none=True)
-    if hasattr(value, "__dict__"):
-        return {
-            key: item
-            for key, item in vars(value).items()
-            if not key.startswith("_")
-        }
-    return str(value)
-
-
-def _json_dumps(value: Any) -> str:
-    return json.dumps(redact(value), ensure_ascii=False, default=_json_default)
+def _execution_metadata(metadata: dict | None = None) -> dict[str, Any]:
+    principal = current_execution_principal()
+    merged = dict(metadata or {})
+    merged.setdefault("execution_source", principal.source)
+    merged.setdefault("principal_id", principal.principal_id)
+    merged.setdefault("permission_profile_id", principal.permission_profile_id)
+    merged.setdefault("interactive", principal.interactive)
+    if principal.conversation_id:
+        merged.setdefault("context_conversation_id", principal.conversation_id)
+    return merged
 
 
 def classify_failure(reason: str, status: str = "") -> str:
@@ -248,7 +203,12 @@ def classify_failure(reason: str, status: str = "") -> str:
 class ObservabilityRecorder:
     """Append-only JSONL recorder with a SQLite dashboard index."""
 
-    def __init__(self, root: Path = OBSERVABILITY_DIR) -> None:
+    def __init__(
+        self,
+        root: Path = OBSERVABILITY_DIR,
+        *,
+        capture_sensitive_content: bool | None = None,
+    ) -> None:
         self.root = root
         self.events_dir = root / "events"
         self.errors_dir = root / "errors"
@@ -257,6 +217,17 @@ class ObservabilityRecorder:
         self.pricing_path = root / "model_pricing.json"
         self._lock = threading.RLock()
         self._connection: sqlite3.Connection | None = None
+        self.capture_sensitive_content = capture_sensitive_content
+        self._metrics = {
+            "dropped_events": 0,
+            "redaction_failures": 0,
+            "db_latency_ms": 0,
+            "db_operations": 0,
+            "model_latency_ms": 0,
+            "model_latency_count": 0,
+            "tool_latency_ms": 0,
+            "tool_latency_count": 0,
+        }
         self._ensure_dirs()
         self._init_db()
         self._ensure_pricing_file()
@@ -292,93 +263,7 @@ class ObservabilityRecorder:
 
     def _init_db(self) -> None:
         with self._lock, self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS observability_runs (
-                    run_id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    message_id TEXT DEFAULT '',
-                    source TEXT DEFAULT 'desktop',
-                    model TEXT DEFAULT '',
-                    provider TEXT DEFAULT '',
-                    status TEXT DEFAULT 'running',
-                    failure_reason TEXT DEFAULT '',
-                    failure_pattern TEXT DEFAULT '',
-                    started_at TEXT NOT NULL,
-                    finished_at TEXT DEFAULT '',
-                    duration_ms INTEGER DEFAULT 0,
-                    user_message TEXT DEFAULT '',
-                    final_output TEXT DEFAULT '',
-                    input_tokens INTEGER DEFAULT 0,
-                    output_tokens INTEGER DEFAULT 0,
-                    reasoning_tokens INTEGER DEFAULT 0,
-                    cached_tokens INTEGER DEFAULT 0,
-                    image_tokens INTEGER DEFAULT 0,
-                    total_tokens INTEGER DEFAULT 0,
-                    usage_source TEXT DEFAULT 'unknown',
-                    estimated_cost_usd REAL DEFAULT 0,
-                    cost_source TEXT DEFAULT 'unknown',
-                    tool_count INTEGER DEFAULT 0,
-                    tool_error_count INTEGER DEFAULT 0,
-                    event_count INTEGER DEFAULT 0,
-                    metadata_json TEXT DEFAULT '{}'
-                );
-                CREATE TABLE IF NOT EXISTS observability_events (
-                    event_id TEXT PRIMARY KEY,
-                    run_id TEXT DEFAULT '',
-                    conversation_id TEXT DEFAULT '',
-                    message_id TEXT DEFAULT '',
-                    event_type TEXT NOT NULL,
-                    level TEXT DEFAULT 'info',
-                    status TEXT DEFAULT '',
-                    source TEXT DEFAULT '',
-                    model TEXT DEFAULT '',
-                    provider TEXT DEFAULT '',
-                    tool_name TEXT DEFAULT '',
-                    error_code TEXT DEFAULT '',
-                    error_message TEXT DEFAULT '',
-                    duration_ms INTEGER DEFAULT 0,
-                    input_json TEXT DEFAULT '',
-                    output_json TEXT DEFAULT '',
-                    tokens_json TEXT DEFAULT '',
-                    metadata_json TEXT DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS observability_errors (
-                    error_id TEXT PRIMARY KEY,
-                    run_id TEXT DEFAULT '',
-                    conversation_id TEXT DEFAULT '',
-                    message_id TEXT DEFAULT '',
-                    level TEXT DEFAULT 'error',
-                    logger_name TEXT DEFAULT '',
-                    module TEXT DEFAULT '',
-                    error_type TEXT DEFAULT '',
-                    message TEXT DEFAULT '',
-                    traceback TEXT DEFAULT '',
-                    metadata_json TEXT DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS observability_replays (
-                    replay_id TEXT PRIMARY KEY,
-                    source_run_id TEXT NOT NULL,
-                    replay_run_id TEXT DEFAULT '',
-                    conversation_id TEXT DEFAULT '',
-                    status_change TEXT DEFAULT '',
-                    duration_delta_ms INTEGER DEFAULT 0,
-                    token_delta INTEGER DEFAULT 0,
-                    tool_sequence_diff TEXT DEFAULT '',
-                    failure_reason_diff TEXT DEFAULT '',
-                    metadata_json TEXT DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_obs_runs_started ON observability_runs(started_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_obs_runs_status ON observability_runs(status);
-                CREATE INDEX IF NOT EXISTS idx_obs_runs_conversation ON observability_runs(conversation_id);
-                CREATE INDEX IF NOT EXISTS idx_obs_events_run ON observability_events(run_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_obs_errors_created ON observability_errors(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_obs_errors_run ON observability_errors(run_id);
-                """
-            )
+            initialize_observability_db(conn)
 
     def _ensure_pricing_file(self) -> None:
         if self.pricing_path.exists():
@@ -415,26 +300,190 @@ class ObservabilityRecorder:
                 for path in directory.glob("*.jsonl"):
                     if path.stem < cutoff_day:
                         path.unlink(missing_ok=True)
+            for path in self.exports_dir.glob("*"):
+                try:
+                    if path.is_file() and not path.is_symlink() and path.stat().st_mtime < cutoff_dt.timestamp():
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    continue
             self._enforce_storage_cap()
         except Exception:
             pass
 
     def _enforce_storage_cap(self) -> None:
-        # Stat each file once and reuse the result for the size sum, the mtime sort,
-        # and the per-file size, instead of calling stat() up to three times per file.
-        sized = [
-            (path, path.stat())
-            for path in self.root.rglob("*")
-            if path.is_file() and path.name != self.db_path.name
-        ]
-        total = sum(st.st_size for _path, st in sized)
+        all_sized = [(path, path.stat()) for path in self.root.rglob("*") if path.is_file()]
+        total = sum(st.st_size for _path, st in all_sized)
         if total <= MAX_STORAGE_BYTES:
             return
-        for path, st in sorted(sized, key=lambda item: item[1].st_mtime):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        candidates = [
+            (path, st)
+            for path, st in all_sized
+            if (
+                self.exports_dir in path.parents
+                or (self.errors_dir in path.parents and path.stem != today)
+                or (self.events_dir in path.parents and path.stem != today)
+            )
+        ]
+        for path, st in sorted(candidates, key=lambda item: item[1].st_mtime):
             if total <= MAX_STORAGE_BYTES:
                 break
             path.unlink(missing_ok=True)
             total -= st.st_size
+
+    def enforce_retention(self) -> None:
+        """Apply age and storage retention without deleting active-day event files."""
+        self._cleanup_retention()
+
+    def delete_all(self) -> dict[str, int]:
+        """Delete all persisted observability rows and artifacts."""
+        counts = {
+            "observability_runs": 0,
+            "observability_events": 0,
+            "observability_errors": 0,
+            "observability_replays": 0,
+            "observability_files": 0,
+        }
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    for table in (
+                        "observability_replays",
+                        "observability_errors",
+                        "observability_events",
+                        "observability_runs",
+                    ):
+                        row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                        counts[table] = int(row[0] if row else 0)
+                        conn.execute(f"DELETE FROM {table}")
+            except Exception:
+                self._increment_metric("dropped_events")
+            for directory in (self.events_dir, self.errors_dir, self.exports_dir):
+                if not directory.exists() or directory.is_symlink():
+                    continue
+                for path in directory.rglob("*"):
+                    try:
+                        if path.is_file() and not path.is_symlink():
+                            path.unlink()
+                            counts["observability_files"] += 1
+                    except OSError:
+                        continue
+        return counts
+
+    def _capture_sensitive_content(self) -> bool:
+        if self.capture_sensitive_content is not None:
+            return bool(self.capture_sensitive_content)
+        session_id = current_control_session_id()
+        return bool(session_id and support_mode_status(session_id).enabled)
+
+    def _content_capture_metadata(self, capture_enabled: bool) -> dict[str, Any]:
+        return {
+            "content_capture": "support_mode" if capture_enabled else "metadata_only",
+            "retention_class": "support_diagnostics" if capture_enabled else "operational_metadata",
+            "field_classification": {
+                "run": OBSERVABILITY_RUN_FIELD_CLASSIFICATION,
+                "event": OBSERVABILITY_EVENT_FIELD_CLASSIFICATION,
+            },
+        }
+
+    def _safe_json(self, value: Any) -> str:
+        try:
+            return _json_dumps(value)
+        except Exception:
+            self._increment_metric("redaction_failures")
+            return _json_dumps("[redaction_failed]")
+
+    def _encrypt_text(self, value: str) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        token = encrypt_bytes(self.root, text.encode("utf-8")).decode("ascii")
+        return f"{ENCRYPTED_TEXT_PREFIX}{token}"
+
+    def _decrypt_text(self, value: str) -> str:
+        text = str(value or "")
+        if not text.startswith(ENCRYPTED_TEXT_PREFIX):
+            return text
+        token = text[len(ENCRYPTED_TEXT_PREFIX):].encode("ascii")
+        try:
+            return decrypt_bytes(self.root, token).decode("utf-8", errors="replace")
+        except Exception:
+            self._increment_metric("redaction_failures")
+            return ""
+
+    def _encrypted_json(self, value: Any) -> str:
+        return self._encrypt_text(self._safe_json(value))
+
+    def _encrypted_json_marker(self, value: Any) -> dict[str, str]:
+        return {"encrypted": "fernet", "ciphertext": self._encrypted_json(value)}
+
+    def _increment_metric(self, name: str, amount: int = 1) -> None:
+        with self._lock:
+            self._metrics[name] = int(self._metrics.get(name, 0)) + int(amount)
+
+    def _record_db_latency(self, started: float) -> None:
+        elapsed = max(0, round((time.perf_counter() - started) * 1000))
+        with self._lock:
+            self._metrics["db_latency_ms"] = int(self._metrics.get("db_latency_ms", 0)) + elapsed
+            self._metrics["db_operations"] = int(self._metrics.get("db_operations", 0)) + 1
+
+    def _record_event_latency(self, event_type: str, duration_ms: int) -> None:
+        if duration_ms <= 0:
+            return
+        normalized = str(event_type or "").lower()
+        if "llm" in normalized or "model" in normalized:
+            self._increment_metric("model_latency_ms", duration_ms)
+            self._increment_metric("model_latency_count")
+        if "tool" in normalized:
+            self._increment_metric("tool_latency_ms", duration_ms)
+            self._increment_metric("tool_latency_count")
+
+    def _storage_metrics(self) -> dict[str, int]:
+        files = [path for path in self.root.rglob("*") if path.is_file()]
+        by_dir = {
+            "events_bytes": 0,
+            "errors_bytes": 0,
+            "exports_bytes": 0,
+            "database_bytes": 0,
+            "total_bytes": 0,
+        }
+        for path in files:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            by_dir["total_bytes"] += size
+            if self.events_dir in path.parents:
+                by_dir["events_bytes"] += size
+            elif self.errors_dir in path.parents:
+                by_dir["errors_bytes"] += size
+            elif self.exports_dir in path.parents:
+                by_dir["exports_bytes"] += size
+            elif path == self.db_path:
+                by_dir["database_bytes"] += size
+        by_dir["max_storage_bytes"] = MAX_STORAGE_BYTES
+        by_dir["retention_days"] = RETENTION_DAYS
+        return by_dir
+
+    def _runtime_metrics(self) -> dict[str, int]:
+        metrics = dict(self._metrics)
+        metrics.update(ui_event_metrics())
+        db_ops = max(1, int(metrics.get("db_operations", 0)))
+        tool_count = max(1, int(metrics.get("tool_latency_count", 0)))
+        model_count = max(1, int(metrics.get("model_latency_count", 0)))
+        metrics["average_db_latency_ms"] = int(metrics.get("db_latency_ms", 0)) // db_ops
+        metrics["average_tool_latency_ms"] = int(metrics.get("tool_latency_ms", 0)) // tool_count
+        metrics["average_model_latency_ms"] = int(metrics.get("model_latency_ms", 0)) // model_count
+        return metrics
+
+    def _safe_export_path(self, filename: str) -> Path:
+        export_root = self.exports_dir.resolve(strict=False)
+        if self.exports_dir.exists() and self.exports_dir.is_symlink():
+            raise ValueError("export directory cannot be a symlink")
+        candidate = (self.exports_dir / filename).resolve(strict=False)
+        if candidate.parent != export_root:
+            raise ValueError("export path escapes diagnostics directory")
+        return candidate
 
     def start_run(
         self,
@@ -450,6 +499,12 @@ class ObservabilityRecorder:
         run_id = f"run_{uuid.uuid4().hex}"
         created_at = now_iso()
         resolved_source = source or infer_source(conversation_id)
+        capture_enabled = self._capture_sensitive_content()
+        run_metadata = _execution_metadata({
+            **self._content_capture_metadata(capture_enabled),
+            **(metadata or {}),
+        })
+        db_started = time.perf_counter()
         try:
             with self._lock, self._connect() as conn:
                 conn.execute(
@@ -467,10 +522,11 @@ class ObservabilityRecorder:
                         model,
                         provider,
                         created_at,
-                        _safe_preview(user_message),
-                        _json_dumps(metadata or {}),
+                        self._encrypt_text(_safe_preview(user_message)) if capture_enabled else "",
+                        self._safe_json(run_metadata),
                     ),
                 )
+            self._record_db_latency(db_started)
             self.log_event(
                 run_id=run_id,
                 conversation_id=conversation_id,
@@ -479,10 +535,11 @@ class ObservabilityRecorder:
                 source=resolved_source,
                 model=model,
                 provider=provider,
-                input={"user_message": user_message},
-                metadata=metadata or {},
+                input={"user_message": user_message} if capture_enabled else None,
+                metadata=run_metadata,
             )
         except Exception:
+            self._increment_metric("dropped_events")
             return run_id
         return run_id
 
@@ -510,8 +567,15 @@ class ObservabilityRecorder:
         event_id = f"evt_{uuid.uuid4().hex}"
         created_at = now_iso()
         usage = usage_from_any(tokens)
+        capture_enabled = self._capture_sensitive_content()
+        event_metadata = _execution_metadata({
+            **self._content_capture_metadata(capture_enabled),
+            **(metadata or {}),
+        })
         safe_error_code = _safe_preview(str(redact(error_code))) if error_code else ""
         safe_error_message = _safe_preview(str(redact(error_message))) if error_message else ""
+        stored_input = input if capture_enabled else None
+        stored_output = output if capture_enabled else None
         payload = {
             "event_id": event_id,
             "run_id": run_id,
@@ -527,12 +591,13 @@ class ObservabilityRecorder:
             "error_code": safe_error_code,
             "error_message": safe_error_message,
             "duration_ms": int(duration_ms or 0),
-            "input": input,
-            "output": output,
+            "input": self._encrypted_json_marker(stored_input) if stored_input is not None else None,
+            "output": self._encrypted_json_marker(stored_output) if stored_output is not None else None,
             "tokens": usage.to_dict(),
-            "metadata": metadata or {},
+            "metadata": event_metadata,
             "created_at": created_at,
         }
+        db_started = time.perf_counter()
         try:
             self._append_jsonl(self.events_dir, created_at, payload)
             with self._lock, self._connect() as conn:
@@ -559,10 +624,10 @@ class ObservabilityRecorder:
                         safe_error_code,
                         safe_error_message,
                         int(duration_ms or 0),
-                        _json_dumps(input) if input is not None else "",
-                        _json_dumps(output) if output is not None else "",
-                        _json_dumps(usage.to_dict()) if usage.total_tokens else "",
-                        _json_dumps(metadata or {}),
+                        self._encrypted_json(stored_input) if stored_input is not None else "",
+                        self._encrypted_json(stored_output) if stored_output is not None else "",
+                        self._safe_json(usage.to_dict()) if usage.total_tokens else "",
+                        self._safe_json(event_metadata),
                         created_at,
                     ),
                 )
@@ -571,8 +636,10 @@ class ObservabilityRecorder:
                         "UPDATE observability_runs SET event_count = event_count + 1 WHERE run_id = ?",
                         (run_id,),
                     )
+            self._record_db_latency(db_started)
+            self._record_event_latency(event_type, int(duration_ms or 0))
         except Exception:
-            pass
+            self._increment_metric("dropped_events")
         return event_id
 
     def log_error(
@@ -593,6 +660,7 @@ class ObservabilityRecorder:
         created_at = now_iso()
         resolved_run_id = run_id or current_run_id()
         resolved_conversation_id = conversation_id or current_conversation_id()
+        event_metadata = _execution_metadata(metadata)
         payload = {
             "error_id": error_id,
             "run_id": resolved_run_id,
@@ -604,9 +672,10 @@ class ObservabilityRecorder:
             "error_type": error_type,
             "message": message,
             "traceback": traceback,
-            "metadata": metadata or {},
+            "metadata": event_metadata,
             "created_at": created_at,
         }
+        db_started = time.perf_counter()
         try:
             self._append_jsonl(self.errors_dir, created_at, payload)
             with self._lock, self._connect() as conn:
@@ -628,10 +697,11 @@ class ObservabilityRecorder:
                         error_type,
                         _safe_preview(message),
                         _safe_preview(traceback),
-                        _json_dumps(metadata or {}),
+                        self._safe_json(event_metadata),
                         created_at,
                     ),
                 )
+            self._record_db_latency(db_started)
             if resolved_run_id:
                 self.log_event(
                     run_id=resolved_run_id,
@@ -642,10 +712,10 @@ class ObservabilityRecorder:
                     status="error",
                     error_code=error_type or "error",
                     error_message=message,
-                    metadata=metadata or {},
+                    metadata=event_metadata,
                 )
         except Exception:
-            pass
+            self._increment_metric("dropped_events")
         return error_id
 
     def finish_run(
@@ -667,6 +737,12 @@ class ObservabilityRecorder:
         finished_at = now_iso()
         normalized_usage = usage_from_any(usage)
         failure_pattern = classify_failure(failure_reason, status)
+        capture_enabled = self._capture_sensitive_content()
+        finish_metadata = {
+            **self._content_capture_metadata(capture_enabled),
+            **(metadata or {}),
+        }
+        db_started = time.perf_counter()
         try:
             with self._lock, self._connect() as conn:
                 row = conn.execute(
@@ -723,7 +799,7 @@ class ObservabilityRecorder:
                         failure_pattern,
                         finished_at,
                         int(duration_ms or 0),
-                        _safe_preview(final_output),
+                        self._encrypt_text(_safe_preview(final_output)) if capture_enabled else "",
                         normalized_usage.input_tokens,
                         normalized_usage.output_tokens,
                         normalized_usage.reasoning_tokens,
@@ -736,10 +812,11 @@ class ObservabilityRecorder:
                         int(tool_count or 0),
                         int(tool_error_count or 0),
                         message_id,
-                        _json_dumps(metadata or {}),
+                        self._safe_json(finish_metadata),
                         run_id,
                     ),
                 )
+            self._record_db_latency(db_started)
             self.log_event(
                 run_id=run_id,
                 conversation_id=str(row["conversation_id"] or "") if row else "",
@@ -749,13 +826,13 @@ class ObservabilityRecorder:
                 model=str(row["model"] or "") if row else "",
                 provider=str(row["provider"] or "") if row else "",
                 duration_ms=duration_ms,
-                output={"assistant_output": final_output},
+                output={"assistant_output": final_output} if capture_enabled else None,
                 tokens=normalized_usage,
                 error_code=failure_reason if status != "complete" else "",
-                metadata={"failure_pattern": failure_pattern, **(metadata or {})},
+                metadata={"failure_pattern": failure_pattern, **finish_metadata},
             )
         except Exception:
-            pass
+            self._increment_metric("dropped_events")
 
     def finish_open_run_for_conversation(
         self,
@@ -868,7 +945,13 @@ class ObservabilityRecorder:
                 "top_error_reasons": error_reasons,
                 "top_failing_tools": failing_tools,
                 "model_usage": model_usage,
-                "storage_path": str(self.root),
+                "storage_path": "",
+                "storage_metrics": self._storage_metrics(),
+                "runtime_metrics": self._runtime_metrics(),
+                "field_classification": {
+                    "run": OBSERVABILITY_RUN_FIELD_CLASSIFICATION,
+                    "event": OBSERVABILITY_EVENT_FIELD_CLASSIFICATION,
+                },
             }
         except Exception:
             return {
@@ -885,7 +968,13 @@ class ObservabilityRecorder:
                 "top_error_reasons": [],
                 "top_failing_tools": [],
                 "model_usage": [],
-                "storage_path": str(self.root),
+                "storage_path": "",
+                "storage_metrics": self._storage_metrics(),
+                "runtime_metrics": self._runtime_metrics(),
+                "field_classification": {
+                    "run": OBSERVABILITY_RUN_FIELD_CLASSIFICATION,
+                    "event": OBSERVABILITY_EVENT_FIELD_CLASSIFICATION,
+                },
             }
 
     def list_runs(
@@ -918,7 +1007,7 @@ class ObservabilityRecorder:
         params.append(max(1, min(int(limit or 100), 500)))
         try:
             with self._lock, self._connect() as conn:
-                return self._fetch_all(
+                rows = self._fetch_all(
                     conn,
                     f"""
                     SELECT * FROM observability_runs
@@ -928,10 +1017,11 @@ class ObservabilityRecorder:
                     """,
                     params,
                 )
+            return [_without_sensitive_run_content(row) for row in rows]
         except Exception:
             return []
 
-    def get_run(self, run_id: str) -> dict | None:
+    def get_run(self, run_id: str, *, include_sensitive: bool = False) -> dict | None:
         try:
             with self._lock, self._connect() as conn:
                 run = conn.execute(
@@ -955,10 +1045,17 @@ class ObservabilityRecorder:
                     "SELECT * FROM observability_replays WHERE source_run_id = ? ORDER BY created_at DESC",
                     (run_id,),
                 )
-            payload = _row_to_dict(run)
+            run_payload = _row_to_dict(run)
+            if include_sensitive:
+                run_payload["user_message"] = self._decrypt_text(str(run_payload.get("user_message") or ""))
+                run_payload["final_output"] = self._decrypt_text(str(run_payload.get("final_output") or ""))
+            payload = redact(run_payload) if include_sensitive else _without_sensitive_run_content(run_payload)
+            payload["metadata"] = _json_loads(str(payload.pop("metadata_json", "{}") or "{}")) or {}
             payload["events"] = [self._decode_event(item) for item in events]
             payload["errors"] = [self._decode_metadata(item) for item in errors]
             payload["replays"] = [self._decode_metadata(item) for item in replays]
+            if not include_sensitive:
+                payload["events"] = [_without_sensitive_event_content(item) for item in payload["events"]]
             payload["tool_sequence"] = [
                 event.get("tool_name", "")
                 for event in payload["events"]
@@ -1015,7 +1112,7 @@ class ObservabilityRecorder:
     def read_backend_log_tail(self, tail: int = 400) -> dict:
         line_limit = max(1, min(int(tail or 400), 5000))
         if not BACKEND_LOG_PATH.exists():
-            return {"path": str(BACKEND_LOG_PATH), "exists": False, "lines": [], "truncated": False}
+            return {"path": "", "exists": False, "lines": [], "truncated": False}
         try:
             size = BACKEND_LOG_PATH.stat().st_size
             with BACKEND_LOG_PATH.open("rb") as handle:
@@ -1029,7 +1126,7 @@ class ObservabilityRecorder:
             text = chunk.decode("utf-8", errors="replace")
             lines = _redact_text(text).splitlines()[-line_limit:]
             return {
-                "path": str(BACKEND_LOG_PATH),
+                "path": "",
                 "exists": True,
                 "size_bytes": size,
                 "lines": lines,
@@ -1037,7 +1134,7 @@ class ObservabilityRecorder:
             }
         except Exception as exc:
             return {
-                "path": str(BACKEND_LOG_PATH),
+                "path": "",
                 "exists": True,
                 "lines": [],
                 "truncated": False,
@@ -1101,17 +1198,31 @@ class ObservabilityRecorder:
         return payload
 
     def export_debug_bundle(self, run_id: str) -> dict:
-        run = self.get_run(run_id)
+        run = self.get_run(run_id, include_sensitive=True)
         if run is None:
             raise KeyError(run_id)
         payload = {
             "created_at": now_iso(),
             "run": run,
             "backend_log_tail": self.read_backend_log_tail(500),
+            "field_classification": {
+                "run": OBSERVABILITY_RUN_FIELD_CLASSIFICATION,
+                "event": OBSERVABILITY_EVENT_FIELD_CLASSIFICATION,
+            },
         }
-        path = self.exports_dir / f"{run_id}.json"
-        path.write_text(json.dumps(redact(payload), ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"path": str(path), "run_id": run_id, "size_bytes": path.stat().st_size}
+        path = self._safe_export_path(f"{run_id}.json.enc")
+        raw = json.dumps(redact(payload), ensure_ascii=False, indent=2).encode("utf-8")
+        encrypted = encrypt_bytes(self.exports_dir, raw)
+        if len(encrypted) > MAX_EXPORT_BYTES:
+            raise ValueError("debug bundle exceeds export size limit")
+        path.write_bytes(encrypted)
+        self._enforce_storage_cap()
+        return {
+            "filename": path.name,
+            "run_id": run_id,
+            "size_bytes": path.stat().st_size,
+            "encrypted": True,
+        }
 
     def _estimate_cost(
         self,
@@ -1173,11 +1284,10 @@ class ObservabilityRecorder:
         decoded["metadata"] = _json_loads(decoded.pop("metadata_json", "{}")) or {}
         return decoded
 
-    @staticmethod
-    def _decode_event(item: dict) -> dict:
+    def _decode_event(self, item: dict) -> dict:
         decoded = ObservabilityRecorder._decode_metadata(item)
-        decoded["input"] = _json_loads(decoded.pop("input_json", ""))
-        decoded["output"] = _json_loads(decoded.pop("output_json", ""))
+        decoded["input"] = _json_loads(self._decrypt_text(decoded.pop("input_json", "")))
+        decoded["output"] = _json_loads(self._decrypt_text(decoded.pop("output_json", "")))
         decoded["tokens"] = _json_loads(decoded.pop("tokens_json", ""))
         return decoded
 

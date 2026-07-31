@@ -116,7 +116,7 @@ def test_exec_tool_does_not_leak_host_secret_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "should-not-leak")
     shell, command = _python_env_command("OPENAI_API_KEY")
 
-    result = json.loads(exec_tools.exec_tool(command, shell=shell, workdir=str(tmp_path)))
+    result = json.loads(exec_tools.exec_tool(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
 
     assert result["status"] == "ok"
     assert "should-not-leak" not in result["stdout"]
@@ -135,6 +135,7 @@ def test_exec_tool_allows_explicit_benign_env(monkeypatch, tmp_path):
             shell=shell,
             workdir=str(tmp_path),
             env={"MONAW_TEST_VALUE": "hello"},
+            _bypass_gate=True,
         )
     )
 
@@ -168,7 +169,7 @@ def test_exec_start_uses_sanitized_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "should-not-leak")
     shell, command = _python_env_command("OPENAI_API_KEY")
 
-    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path)))
+    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
     assert started["status"] == "running"
     assert started["sandbox"]["env_inheritance"] == "scrubbed"
 

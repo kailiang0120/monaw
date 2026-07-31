@@ -1,9 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
 import hashlib
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,16 +13,31 @@ from app.agent.access_grant_broker import create_grant_ticket
 from app.agent.approval_broker import create_ticket
 from app.agent.controller_policy import ActionType, canonical, resolve_permission
 from app.agent.execution_resume import register_executor
+from app.agent.response_attachments import ATTACHMENT_HANDLE_PREFIX, resolve_attachment_handle_path
 
 _MAX_READ_BYTES = 1024 * 1024
 _DEFAULT_READ_BYTES = 65536
 _MAX_LIST_LIMIT = 1000
 _MAX_SEARCH_RESULTS = 200
+_MAX_WRITE_BYTES = 16 * 1024 * 1024
+_MAX_RECURSIVE_ITEMS = 5000
+_MAX_RECURSIVE_BYTES = 512 * 1024 * 1024
 
+
+@dataclass(frozen=True, slots=True)
+class FilesystemTarget:
+    raw: str
+    resolved: Path
+    parent: Path
+    exists: bool
+    is_symlink: bool
 
 def _json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False)
 
+
+def _error(reason_code: str, error: str, **extra: Any) -> str:
+    return _json({"status": "error", "reason_code": reason_code, "error": error, **extra})
 
 def _safe_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
     try:
@@ -134,17 +150,18 @@ def _gate_path(
     action_description: str,
     payload_args: dict[str, Any],
 ) -> str | None:
-    decision = resolve_permission(action, target_path=path)
+    target_path = _policy_target_path(path)
+    decision = resolve_permission(action, target_path=target_path)
     if decision.blocked:
         return _blocked_result(decision)
     if decision.requires_access_grant:
-        return _pending_access_grant_result(decision, path=path, action_context=action_description)
+        return _pending_access_grant_result(decision, path=target_path, action_context=action_description)
     if decision.requires_confirmation:
         return _pending_approval_result(
             decision,
             tool_name=tool_name,
             action_type=action.value,
-            path=path,
+            path=target_path,
             action_description=action_description,
             payload_args=payload_args,
         )
@@ -152,16 +169,124 @@ def _gate_path(
 
 
 def _resolve_path(path: str) -> Path:
+    attachment_path = resolve_attachment_handle_path(path)
+    if attachment_path is not None:
+        return attachment_path
     return Path(canonical(path))
+
+
+def _policy_target_path(path: str) -> str:
+    attachment_path = resolve_attachment_handle_path(path)
+    return str(attachment_path) if attachment_path is not None else path
 
 
 def _same_resolved_path(left: Path, right: Path) -> bool:
     return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(os.path.abspath(str(right)))
 
 
+def _filesystem_target(path: str) -> FilesystemTarget:
+    raw_path = Path(path).expanduser()
+    resolved = _resolve_path(path)
+    parent_source = raw_path.parent if str(raw_path.parent) else Path(".")
+    return FilesystemTarget(
+        raw=path,
+        resolved=resolved,
+        parent=_resolve_path(str(parent_source)),
+        exists=resolved.exists(),
+        is_symlink=raw_path.is_symlink() or resolved.is_symlink(),
+    )
+
+
+def _has_path_traversal(path: str) -> bool:
+    return any(part == ".." for part in Path(path).parts)
+
+
+def _validate_path_shape(path: str, *, operation: str) -> str | None:
+    if str(path or "").strip().startswith(ATTACHMENT_HANDLE_PREFIX):
+        if resolve_attachment_handle_path(path) is None:
+            return _error("attachment_not_found", f"{operation} attachment handle is not available in this context.")
+        return None
+    if _has_path_traversal(path):
+        return _error("path_traversal_rejected", f"{operation} path contains parent traversal segments.")
+    return None
+
+
+def _validate_write_budget(content: str, encoding: str) -> str | None:
+    size = len(str(content or "").encode(encoding or "utf-8", errors="replace"))
+    if size > _MAX_WRITE_BYTES:
+        return _error(
+            "write_size_limit_exceeded",
+            "Write content exceeds filesystem write budget.",
+            bytes=size,
+            max_bytes=_MAX_WRITE_BYTES,
+        )
+    return None
+
+
+def _tree_budget(path: Path) -> tuple[int, int, str | None]:
+    if path.is_symlink():
+        return 0, 0, f"Symlink or junction recursion is not allowed: {path}"
+    if not path.is_dir():
+        try:
+            return 1, path.stat().st_size, None
+        except OSError as exc:
+            return 0, 0, str(exc)
+    count = 0
+    total = 0
+    for item in path.rglob("*"):
+        if item.is_symlink():
+            return count, total, f"Symlink or junction recursion is not allowed: {item}"
+        count += 1
+        if count > _MAX_RECURSIVE_ITEMS:
+            return count, total, "Recursive filesystem item limit exceeded."
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError as exc:
+                return count, total, str(exc)
+            if total > _MAX_RECURSIVE_BYTES:
+                return count, total, "Recursive filesystem byte limit exceeded."
+    return count, total, None
+
+
+def _validate_recursive_budget(path: Path, *, operation: str) -> str | None:
+    count, total, error = _tree_budget(path)
+    if error:
+        reason = "symlink_target_rejected" if "Symlink" in error else "recursive_budget_exceeded"
+        return _error(
+            reason,
+            error,
+            operation=operation,
+            items=count,
+            bytes=total,
+            max_items=_MAX_RECURSIVE_ITEMS,
+            max_bytes=_MAX_RECURSIVE_BYTES,
+        )
+    return None
+
+
+def _revalidate_mutation_target(path: str) -> str | None:
+    target = _filesystem_target(path)
+    decision = resolve_permission(ActionType.MUTATE, target_path=str(target.parent if not target.exists else target.resolved))
+    if decision.blocked:
+        return _blocked_result(decision)
+    if decision.requires_access_grant:
+        return _pending_access_grant_result(
+            decision,
+            path=str(target.resolved),
+            action_context="Revalidate filesystem mutation target",
+        )
+    if target.is_symlink:
+        return _error("symlink_target_rejected", f"Refusing to mutate a symlink or junction: {target.resolved}")
+    return None
+
+
 def file_stat(path: str) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="filesystem")
+    if shape_error:
+        return shape_error
     pending = _gate_path(
         ActionType.READ,
         path=path,
@@ -179,6 +304,9 @@ def file_stat(path: str) -> str:
 def file_list(path: str, pattern: str = "*", recursive: bool = False, limit: int = 200) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="filesystem")
+    if shape_error:
+        return shape_error
     pending = _gate_path(
         ActionType.READ,
         path=path,
@@ -212,6 +340,9 @@ def file_list(path: str, pattern: str = "*", recursive: bool = False, limit: int
 def file_read(path: str, start: int = 0, max_bytes: int = _DEFAULT_READ_BYTES, encoding: str = "utf-8") -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="filesystem")
+    if shape_error:
+        return shape_error
     pending = _gate_path(
         ActionType.READ,
         path=path,
@@ -263,6 +394,12 @@ def file_write(
 ) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="write")
+    if shape_error:
+        return shape_error
+    budget_error = _validate_write_budget(content, encoding)
+    if budget_error:
+        return budget_error
     payload_args = {
         "path": path,
         "content": content,
@@ -282,6 +419,9 @@ def file_write(
         if pending:
             return pending
 
+    revalidate = _revalidate_mutation_target(path)
+    if revalidate:
+        return revalidate
     resolved = _resolve_path(path)
     before = _stat_payload(resolved) if resolved.exists() else _missing_stat_payload(resolved)
     if resolved.exists() and resolved.is_dir():
@@ -312,6 +452,12 @@ def file_append(
 ) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="append")
+    if shape_error:
+        return shape_error
+    budget_error = _validate_write_budget(content, encoding)
+    if budget_error:
+        return budget_error
     payload_args = {
         "path": path,
         "content": content,
@@ -330,6 +476,9 @@ def file_append(
         if pending:
             return pending
 
+    revalidate = _revalidate_mutation_target(path)
+    if revalidate:
+        return revalidate
     resolved = _resolve_path(path)
     before = _stat_payload(resolved) if resolved.exists() else _missing_stat_payload(resolved)
     if resolved.exists() and resolved.is_dir():
@@ -358,6 +507,9 @@ def file_search(
         return _json({"status": "error", "error": "path is required"})
     if not query:
         return _json({"status": "error", "error": "query is required"})
+    shape_error = _validate_path_shape(path, operation="filesystem")
+    if shape_error:
+        return shape_error
     pending = _gate_path(
         ActionType.READ,
         path=path,
@@ -414,6 +566,9 @@ def file_search(
 def file_exists(path: str) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="filesystem")
+    if shape_error:
+        return shape_error
     pending = _gate_path(
         ActionType.READ,
         path=path,
@@ -435,6 +590,9 @@ def file_glob(path: str, pattern: str = "**/*", limit: int = 200) -> str:
 def file_tree(path: str, depth: int = 2, limit: int = 200) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="filesystem")
+    if shape_error:
+        return shape_error
     pending = _gate_path(
         ActionType.READ,
         path=path,
@@ -472,6 +630,9 @@ def file_tree(path: str, depth: int = 2, limit: int = 200) -> str:
 def file_hash(path: str, algorithm: str = "sha256") -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="filesystem")
+    if shape_error:
+        return shape_error
     pending = _gate_path(
         ActionType.READ,
         path=path,
@@ -510,6 +671,18 @@ def file_patch(
         return _json({"status": "error", "error": "path is required"})
     if old == "":
         return _json({"status": "error", "error": "old text is required"})
+    shape_error = _validate_path_shape(path, operation="patch")
+    if shape_error:
+        return shape_error
+    budget_error = _validate_write_budget(new, encoding)
+    if budget_error:
+        return budget_error
+    shape_error = _validate_path_shape(path, operation="patch")
+    if shape_error:
+        return shape_error
+    budget_error = _validate_write_budget(new, encoding)
+    if budget_error:
+        return budget_error
     payload_args = {"path": path, "old": old, "new": new, "count": count, "encoding": encoding, "dry_run": dry_run}
     if not _bypass_gate:
         pending = _gate_path(
@@ -551,6 +724,12 @@ def fs_mkdir(
 ) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="mkdir")
+    if shape_error:
+        return shape_error
+    shape_error = _validate_path_shape(path, operation="mkdir")
+    if shape_error:
+        return shape_error
     payload_args = {"path": path, "parents": parents, "exist_ok": exist_ok, "dry_run": dry_run}
     if not _bypass_gate:
         pending = _gate_path(
@@ -615,6 +794,10 @@ def fs_copy(
 ) -> str:
     if not source or not destination:
         return _json({"status": "error", "error": "source and destination are required"})
+    for label, candidate in (("source", source), ("destination", destination)):
+        shape_error = _validate_path_shape(candidate, operation=f"copy {label}")
+        if shape_error:
+            return shape_error
     payload_args = {
         "source": source,
         "destination": destination,
@@ -633,6 +816,9 @@ def fs_copy(
         )
         if pending:
             return pending
+    revalidate = _revalidate_mutation_target(destination)
+    if revalidate:
+        return revalidate
     src = _resolve_path(source)
     dst = _resolve_path(destination)
     if not src.exists():
@@ -640,6 +826,9 @@ def fs_copy(
     if _same_resolved_path(src, dst):
         stat = _stat_payload(src)
         return _json({"status": "ok", "operation": "copy", "source": str(src), "destination": str(dst), "same_path": True, "before": stat, "after": stat})
+    budget_error = _validate_recursive_budget(src, operation="copy")
+    if budget_error:
+        return budget_error
     if dst.exists() and not overwrite:
         return _json({"status": "error", "operation": "copy", "error": f"Destination already exists: {dst}", "reason_code": "destination_exists"})
     before = _stat_payload(dst) if dst.exists() else _missing_stat_payload(dst)
@@ -667,6 +856,10 @@ def fs_move(
 ) -> str:
     if not source or not destination:
         return _json({"status": "error", "error": "source and destination are required"})
+    for label, candidate in (("source", source), ("destination", destination)):
+        shape_error = _validate_path_shape(candidate, operation=f"move {label}")
+        if shape_error:
+            return shape_error
     payload_args = {
         "source": source,
         "destination": destination,
@@ -685,6 +878,9 @@ def fs_move(
         )
         if pending:
             return pending
+    revalidate = _revalidate_mutation_target(source) or _revalidate_mutation_target(destination)
+    if revalidate:
+        return revalidate
     src = _resolve_path(source)
     dst = _resolve_path(destination)
     if not src.exists():
@@ -692,6 +888,9 @@ def fs_move(
     if _same_resolved_path(src, dst):
         stat = _stat_payload(src)
         return _json({"status": "ok", "operation": "move", "source": str(src), "destination": str(dst), "same_path": True, "before_source": stat, "before_destination": stat, "after": stat})
+    budget_error = _validate_recursive_budget(src, operation="move")
+    if budget_error:
+        return budget_error
     if dst.exists() and not overwrite:
         return _json({"status": "error", "operation": "move", "error": f"Destination already exists: {dst}", "reason_code": "destination_exists"})
     before_source = _stat_payload(src)
@@ -714,6 +913,11 @@ def fs_move(
 def fs_rename(path: str, new_name: str, overwrite: bool = False, dry_run: bool = False, *, _bypass_gate: bool = False) -> str:
     if not path or not new_name:
         return _json({"status": "error", "error": "path and new_name are required"})
+    shape_error = _validate_path_shape(path, operation="rename")
+    if shape_error:
+        return shape_error
+    if Path(new_name).name != new_name or _has_path_traversal(new_name):
+        return _error("invalid_target_name", "new_name must be a single path segment.")
     source_label = path
     destination_label = str(Path(path).with_name(new_name))
     payload_args = {"path": path, "new_name": new_name, "overwrite": overwrite, "dry_run": dry_run}
@@ -728,6 +932,9 @@ def fs_rename(path: str, new_name: str, overwrite: bool = False, dry_run: bool =
         )
         if pending:
             return pending
+    revalidate = _revalidate_mutation_target(path)
+    if revalidate:
+        return revalidate
     source = _resolve_path(path)
     destination = source.with_name(new_name)
     if not source.exists():
@@ -753,6 +960,9 @@ def fs_rename(path: str, new_name: str, overwrite: bool = False, dry_run: bool =
 def fs_delete(path: str, recursive: bool = True, dry_run: bool = False, *, _bypass_gate: bool = False) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
+    shape_error = _validate_path_shape(path, operation="delete")
+    if shape_error:
+        return shape_error
     payload_args = {"path": path, "recursive": recursive, "dry_run": dry_run}
     if not _bypass_gate:
         pending = _gate_path(
@@ -764,9 +974,15 @@ def fs_delete(path: str, recursive: bool = True, dry_run: bool = False, *, _bypa
         )
         if pending:
             return pending
+    revalidate = _revalidate_mutation_target(path)
+    if revalidate:
+        return revalidate
     resolved = _resolve_path(path)
     if not resolved.exists():
         return _json({"status": "error", "operation": "delete", "error": f"Path not found: {resolved}"})
+    budget_error = _validate_recursive_budget(resolved, operation="delete")
+    if budget_error:
+        return budget_error
     before = _stat_payload(resolved)
     if dry_run:
         return _json({"status": "ok", "operation": "delete", "dry_run": True, "path": str(resolved), "before": before})
@@ -963,3 +1179,4 @@ register_executor("file_write", _resume_file_write)
 register_executor("file_append", _resume_file_append)
 register_executor("create_file", _resume_create_file)
 register_executor("file_patch", _resume_file_patch)
+

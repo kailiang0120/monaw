@@ -70,6 +70,14 @@ After 5 consecutive `error` runs, Monaw disables the task.
 
 One-time tasks disable themselves after they run or after their scheduled time can no longer fire.
 
+## Security Notes
+
+Scheduled tasks are non-interactive source principals. They run with the saved
+owner principal and restricted scheduled permission profile snapshot, recover
+expired leases on restart, and should not receive broad persistent grants
+without local review. See [operations.md](operations.md) for source-specific
+restrictions, backup, retention, deletion, and incident guidance.
+
 ## Cron Notes
 
 Cron expressions are five-field cron expressions:

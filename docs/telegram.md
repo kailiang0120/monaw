@@ -210,6 +210,9 @@ Keep these rules:
 | Keep approval gates enabled for risky actions. | Telegram and desktop can both resolve the same pending permission ticket. |
 | Avoid sending secrets through Telegram. | Telegram messages are stored in conversation history. |
 
+See [operations.md](operations.md) for source-specific restrictions, credential
+rotation, backup, retention, deletion, and incident guidance.
+
 ## Troubleshooting
 
 | Symptom | Check |

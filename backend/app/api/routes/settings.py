@@ -18,7 +18,9 @@ from app.agent.settings_store import (
     load_agent_settings,
     merge_agent_settings,
     save_agent_settings,
+    settings_version,
 )
+from app.agent.ui_events import publish_ui_event
 from app.agent.speech_to_text import (
     SpeechToTextDependencyMissing,
     delete_stt_model,
@@ -33,10 +35,17 @@ from app.agent.workspace_instructions import (
 )
 from app.config import settings
 from app.schemas import (
+    AgentSettingsPayload,
     AppEntryCreate,
     AppEntryOut,
     ControllerPolicyOut,
+    ControllerPolicyMarkdownPayload,
+    ControllerPolicyUpdate,
+    ModelOptionsPayload,
+    OkResponse,
     SettingsUpdate,
+    SpeechToTextStatusPayload,
+    WorkspaceInstructionsPayload,
     WorkspaceInstructionsUpdate,
 )
 from app.skills.mcp_bridge.connection import restart_enabled_mcp_servers
@@ -99,7 +108,7 @@ def _settings_patch_from_body(body: SettingsUpdate) -> dict:
     return patch
 
 
-@router.put("/settings")
+@router.put("/settings", response_model=AgentSettingsPayload)
 async def update_settings(body: SettingsUpdate):
     changed = False
     runtime_changed = False
@@ -108,6 +117,18 @@ async def update_settings(body: SettingsUpdate):
     telegram_changed = False
     patch = _settings_patch_from_body(body)
     current = load_agent_settings(settings)
+    current_version = settings_version(current)
+    if body.expected_settings_version is not None and body.expected_settings_version != current_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "settings_version_conflict",
+                "message": "Settings were changed by another session. Reload settings and try again.",
+                "details": {
+                    "current_settings_version": current_version,
+                },
+            },
+        )
     updated = current
     if patch:
         updated = merge_agent_settings(current, patch)
@@ -198,25 +219,26 @@ async def update_settings(body: SettingsUpdate):
                 await restart_telegram_bot(settings.telegram_bot_token)
             except Exception:
                 logger.exception("Failed to restart Telegram bot after settings update.")
+        publish_ui_event("settings.changed", {"settings_version": settings_version(updated)})
     return api_settings_payload(settings, updated)
 
 
-@router.get("/settings")
+@router.get("/settings", response_model=AgentSettingsPayload)
 async def get_settings():
     return api_settings_payload(settings, load_agent_settings(settings))
 
 
-@router.get("/settings/model-options")
+@router.get("/settings/model-options", response_model=ModelOptionsPayload)
 async def get_model_options():
     return model_options_payload()
 
 
-@router.get("/settings/workspace-instructions")
+@router.get("/settings/workspace-instructions", response_model=WorkspaceInstructionsPayload)
 async def get_workspace_instructions():
     return workspace_instruction_payload()
 
 
-@router.put("/settings/workspace-instructions")
+@router.put("/settings/workspace-instructions", response_model=WorkspaceInstructionsPayload)
 async def update_workspace_instructions(body: WorkspaceInstructionsUpdate):
     try:
         return save_workspace_instruction_content(body.content)
@@ -224,17 +246,17 @@ async def update_workspace_instructions(body: WorkspaceInstructionsUpdate):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.delete("/settings/workspace-instructions")
+@router.delete("/settings/workspace-instructions", response_model=WorkspaceInstructionsPayload)
 async def reset_workspace_instructions():
     return reset_workspace_instruction_file()
 
 
-@router.get("/settings/speech-to-text")
+@router.get("/settings/speech-to-text", response_model=SpeechToTextStatusPayload)
 async def get_speech_to_text_status():
     return speech_to_text_status()
 
 
-@router.post("/settings/speech-to-text/download")
+@router.post("/settings/speech-to-text/download", response_model=SpeechToTextStatusPayload)
 async def download_speech_to_text_model():
     try:
         return await asyncio.to_thread(download_default_stt_model)
@@ -245,12 +267,12 @@ async def download_speech_to_text_model():
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.post("/settings/speech-to-text/offload")
+@router.post("/settings/speech-to-text/offload", response_model=SpeechToTextStatusPayload)
 async def offload_speech_to_text_model():
     return offload_stt_model()
 
 
-@router.delete("/settings/speech-to-text/model")
+@router.delete("/settings/speech-to-text/model", response_model=SpeechToTextStatusPayload)
 async def delete_speech_to_text_model():
     return delete_stt_model()
 
@@ -276,18 +298,19 @@ async def get_controller_policy():
     )
 
 
-@router.put("/settings/controller-policy")
-async def update_controller_policy(body: dict):
+@router.put("/settings/controller-policy", response_model=OkResponse)
+async def update_controller_policy(body: ControllerPolicyUpdate):
     state = load_policy()
-    if "mode" in body:
-        mode = body["mode"]
-        state.mode = PermissionMode.USER_CONFIG if mode in {"custom", "user_config"} else PermissionMode(mode)
-    if "permitted_roots" in body:
-        state.permitted_roots = body["permitted_roots"]
-    if "allow_delete" in body:
-        state.allow_delete = bool(body["allow_delete"])
-    if "dangerous_actions_require_confirm" in body:
-        state.dangerous_actions_require_confirm = body["dangerous_actions_require_confirm"]
+    if body.mode is not None:
+        state.mode = PermissionMode.USER_CONFIG if body.mode in {"custom", "user_config"} else PermissionMode(body.mode)
+    if body.permitted_roots is not None:
+        state.permitted_roots = body.permitted_roots
+    if body.blocked_roots is not None:
+        state.blocked_roots = body.blocked_roots
+    if body.allow_delete is not None:
+        state.allow_delete = body.allow_delete
+    if body.dangerous_actions_require_confirm is not None:
+        state.dangerous_actions_require_confirm = body.dangerous_actions_require_confirm
     save_policy(state)
     return {"ok": True}
 
@@ -326,13 +349,13 @@ async def create_allowlisted_app(body: AppEntryCreate):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/settings/allowlisted-apps/{alias}")
+@router.delete("/settings/allowlisted-apps/{alias}", response_model=OkResponse)
 async def delete_allowlisted_app(alias: str):
     remove_allowlisted_app(alias)
     return {"ok": True}
 
 
-@router.get("/settings/controller-policy-markdown")
+@router.get("/settings/controller-policy-markdown", response_model=ControllerPolicyMarkdownPayload)
 async def get_controller_policy_markdown():
     from app.agent.controller_policy import _ALLOWLIST_FILE, _POLICY_FILE
 

@@ -5,8 +5,10 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 SandboxBackend = Literal["none", "local_direct", "docker", "local_restricted", "wsl"]
-SandboxMode = Literal["off", "disabled", "auto", "enforce", "docker", "local_restricted", "wsl"]
+SandboxMode = Literal["off", "disabled", "auto", "enforce", "host", "docker", "local_restricted", "wsl"]
 SandboxProfile = Literal["standard", "untrusted", "project_write", "host_required", "blocked"]
+SandboxTrustClass = Literal["trusted", "untrusted", "blocked"]
+SandboxIsolationStrength = Literal["none", "strong"]
 SandboxSecurityLabel = Literal["none", "compat", "advisory", "medium", "strong"]
 SandboxNetworkMode = Literal["deny", "allow"]
 SandboxNetworkEnforcement = Literal["none", "advisory", "enforced"]
@@ -171,6 +173,8 @@ class SandboxCapabilities(BaseModel):
 class SandboxDecision(BaseModel):
     allowed: bool
     required: bool
+    trust_class: SandboxTrustClass = "trusted"
+    required_isolation: SandboxIsolationStrength = "none"
     profile: SandboxProfile
     backend: SandboxBackend
     mode: SandboxMode
@@ -178,6 +182,8 @@ class SandboxDecision(BaseModel):
     network: SandboxNetworkMode
     network_enforcement: SandboxNetworkEnforcement
     write_strategy: SandboxWriteStrategy
+    filesystem_policy: str = "none"
+    explicit_approval_required: bool = False
     reason: str = ""
     reason_code: str = "allowed"
 

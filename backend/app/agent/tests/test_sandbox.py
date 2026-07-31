@@ -161,7 +161,7 @@ def test_policy_blocks_untrusted_when_strong_backend_is_required_but_unavailable
     assert decision.allowed is False
     assert decision.profile == "untrusted"
     assert decision.reason_code == "sandbox_backend_unavailable"
-    assert "Strong sandbox required" in decision.reason
+    assert "strong sandbox backend" in decision.reason.lower()
 
 
 def test_policy_falls_back_to_local_restricted_for_standard_commands():
@@ -189,7 +189,7 @@ def test_policy_falls_back_to_local_direct_when_no_backend_available():
     assert decision.security_label == "none"
 
 
-def test_policy_does_not_auto_route_standard_commands_to_docker():
+def test_policy_routes_standard_commands_to_docker_when_available():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
         capabilities=_capabilities(docker=True, local=True),
@@ -197,8 +197,8 @@ def test_policy_does_not_auto_route_standard_commands_to_docker():
 
     assert decision.allowed is True
     assert decision.profile == "standard"
-    assert decision.backend == "local_restricted"
-    assert decision.security_label == "advisory"
+    assert decision.backend == "docker"
+    assert decision.security_label == "strong"
 
 
 def test_policy_uses_local_restricted_for_host_required_commands():

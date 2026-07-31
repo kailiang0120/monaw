@@ -1,19 +1,16 @@
 @echo off
+setlocal
 echo Starting Monaw Agent...
-set "CONDA_ENV_NAME=agent"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-windows.ps1"
+set "START_EXIT=%ERRORLEVEL%"
 
-rem Try regular conda activation first (works if shell is initialized)
-call conda activate %CONDA_ENV_NAME% >nul 2>&1
-if errorlevel 1 (
-  rem Fallback: activate via common install paths
-  if exist "%USERPROFILE%\miniconda3\Scripts\activate.bat" (
-    call "%USERPROFILE%\miniconda3\Scripts\activate.bat" %CONDA_ENV_NAME%
-  ) else if exist "%USERPROFILE%\anaconda3\Scripts\activate.bat" (
-    call "%USERPROFILE%\anaconda3\Scripts\activate.bat" %CONDA_ENV_NAME%
-  ) else (
-    echo [WARN] Conda activation script not found. Continuing without conda env.
-  )
+if not "%START_EXIT%"=="0" (
+  echo.
+  echo [ERROR] Monaw Agent failed to start. Exit code: %START_EXIT%
+  echo Check launcher logs in:
+  echo   %USERPROFILE%\.monaw\runtime\launcher\
+  echo.
+  pause
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-windows.ps1"
-exit /b %ERRORLEVEL%
+exit /b %START_EXIT%

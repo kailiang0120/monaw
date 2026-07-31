@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -24,8 +24,6 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
-import { MemorySettingsPanel } from './MemorySettingsPanel'
-import { ObservabilityPanel } from './ObservabilityPanel'
 import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel'
 import {
   DEFAULT_CONNECTION_PORTAL,
@@ -89,6 +87,9 @@ import {
 
 interface Props {
   onClose: () => void
+  diagnosticsRefreshKey?: number
+  memoryRefreshKey?: number
+  observabilityRefreshKey?: number
 }
 
 type SettingsTab = 'model' | 'apiKeys' | 'identity' | 'memory' | 'skills' | 'browser' | 'mcp' | 'observability' | 'permissions' | 'sandbox'
@@ -117,7 +118,19 @@ const SETTINGS_TABS: Array<{
   { id: 'sandbox', label: 'Sandbox', description: 'Exec isolation', icon: Container },
 ]
 
-export function SettingsModal({ onClose }: Props) {
+const MemorySettingsPanel = lazy(() =>
+  import('./MemorySettingsPanel').then((module) => ({ default: module.MemorySettingsPanel })),
+)
+const ObservabilityPanel = lazy(() =>
+  import('./ObservabilityPanel').then((module) => ({ default: module.ObservabilityPanel })),
+)
+
+export function SettingsModal({
+  onClose,
+  diagnosticsRefreshKey = 0,
+  memoryRefreshKey = 0,
+  observabilityRefreshKey = 0,
+}: Props) {
   const [draft, setDraft] = useState<AgentSettings | null>(null)
   const [modelOptions, setModelOptions] = useState<ModelOptionsCatalog>(FALLBACK_MODEL_OPTIONS)
   const [activeTab, setActiveTab] = useState<SettingsTab>('model')
@@ -129,7 +142,6 @@ export function SettingsModal({ onClose }: Props) {
   const [telegramAllowedUserIds, setTelegramAllowedUserIds] = useState('')
   const [telegramAllowedChatIds, setTelegramAllowedChatIds] = useState('')
   const [dirtySecrets, setDirtySecrets] = useState<Set<ConnectionSecretId>>(() => new Set())
-  const [dirtyTelegramAllowlist, setDirtyTelegramAllowlist] = useState(false)
   const [showKey, setShowKey] = useState(false)
   const [activeConnectionPortal, setActiveConnectionPortal] = useState<ConnectionPortalId>(DEFAULT_CONNECTION_PORTAL)
   const [mcpTemplate, setMcpTemplate] = useState<MCPServerTemplateKey>('filesystem')
@@ -165,48 +177,53 @@ export function SettingsModal({ onClose }: Props) {
     setMcpDiagnostics(next)
   }
 
-  const loadMcpDiagnostics = async () => {
+  const loadMcpDiagnostics = async (signal?: AbortSignal) => {
     try {
-      storeMcpDiagnostics(await fetchMCPDiagnostics())
+      storeMcpDiagnostics(await fetchMCPDiagnostics(signal))
     } catch {
+      if (signal?.aborted) return
       setMcpDiagnostics({})
     }
   }
 
-  const loadBrowserDiagnostics = async () => {
+  const loadBrowserDiagnostics = async (signal?: AbortSignal) => {
     try {
-      setBrowserDiagnostics(await fetchBrowserUseDiagnostics())
+      setBrowserDiagnostics(await fetchBrowserUseDiagnostics(signal))
     } catch {
+      if (signal?.aborted) return
       setBrowserDiagnostics(null)
     }
   }
 
-  const loadSandboxStatus = async () => {
+  const loadSandboxStatus = async (signal?: AbortSignal) => {
     try {
-      setSandboxStatus(await fetchSandboxStatus())
+      setSandboxStatus(await fetchSandboxStatus(signal))
     } catch {
+      if (signal?.aborted) return
       setSandboxStatus(null)
     }
   }
 
-  const loadSpeechToTextStatus = async () => {
+  const loadSpeechToTextStatus = async (signal?: AbortSignal) => {
     try {
-      setSpeechToTextStatus(await fetchSpeechToTextStatus())
+      setSpeechToTextStatus(await fetchSpeechToTextStatus(signal))
       setSpeechToTextError('')
     } catch (error) {
+      if (signal?.aborted) return
       setSpeechToTextStatus(null)
       setSpeechToTextError(error instanceof Error ? error.message : 'Speech-to-text status could not be loaded.')
     }
   }
 
-  const loadWorkspaceInstructions = async () => {
+  const loadWorkspaceInstructions = async (signal?: AbortSignal) => {
     try {
-      const instructions = await fetchWorkspaceInstructions()
+      const instructions = await fetchWorkspaceInstructions(signal)
       setCustomInstructions(instructions.content)
       setCustomInstructionsSavedContent(instructions.content)
       setCustomInstructionsPath(instructions.path)
       setCustomInstructionsError('')
     } catch (error) {
+      if (signal?.aborted) return
       setCustomInstructions('')
       setCustomInstructionsSavedContent('')
       setCustomInstructionsPath('')
@@ -216,9 +233,11 @@ export function SettingsModal({ onClose }: Props) {
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
+    const signal = controller.signal
 
     const load = async () => {
-      const modelOptionsPromise = fetchModelOptions().catch(() => FALLBACK_MODEL_OPTIONS)
+      const modelOptionsPromise = fetchModelOptions(signal).catch(() => FALLBACK_MODEL_OPTIONS)
       modelOptionsPromise.then((loadedModelOptions) => {
         if (cancelled) return
         setModelOptions(loadedModelOptions)
@@ -227,12 +246,15 @@ export function SettingsModal({ onClose }: Props) {
 
       let settings: AgentSettings | null = null
       try {
-        settings = normalizeDraft(await fetchSettings())
+        settings = normalizeDraft(await fetchSettings(signal))
         if (!cancelled) {
           setLoadError('')
           setDraft(settings)
+          setTelegramAllowedUserIds(settings.telegram_allowed_user_ids)
+          setTelegramAllowedChatIds(settings.telegram_allowed_chat_ids)
         }
       } catch (error) {
+        if (signal.aborted) return
         console.error('[settings] Failed to load settings', error)
         if (!cancelled) {
           setLoadError(error instanceof Error ? error.message : 'Settings could not be loaded.')
@@ -241,62 +263,54 @@ export function SettingsModal({ onClose }: Props) {
       }
 
       void Promise.all([
-        loadMcpDiagnostics(),
-        loadBrowserDiagnostics(),
-        loadSandboxStatus(),
-        loadSpeechToTextStatus(),
-        loadWorkspaceInstructions(),
+        loadMcpDiagnostics(signal),
+        loadBrowserDiagnostics(signal),
+        loadSandboxStatus(signal),
+        loadSpeechToTextStatus(signal),
+        loadWorkspaceInstructions(signal),
       ])
 
       if (window.electronAPI) {
         try {
-          const {
-            openaiKey: oai,
-            deepseekKey: dsk,
-            googleKey: ggl,
-            tavilyKey: tvly,
-            telegramBotToken: tbot,
-            telegramAllowedUserIds: tUsers,
-            telegramAllowedChatIds: tChats,
-          } = await syncStoredApiKeysToBackend()
+          const credentialStatus = await syncStoredApiKeysToBackend()
           if (cancelled) return
-          setOpenaiKey(oai)
-          setDeepseekKey(dsk)
-          setGoogleKey(ggl)
-          setTavilyKey(tvly)
-          setTelegramBotToken(tbot)
-          setTelegramAllowedUserIds(tUsers)
-          setTelegramAllowedChatIds(tChats)
           setDirtySecrets(new Set())
-          setDirtyTelegramAllowlist(false)
           setDraft((current) => current ? {
             ...current,
-            telegram_allowed_user_ids: tUsers || current.telegram_allowed_user_ids,
-            telegram_allowed_chat_ids: tChats || current.telegram_allowed_chat_ids,
             api_keys: {
               ...current.api_keys,
-              has_openai_key: current.api_keys.has_openai_key || Boolean(oai),
-              has_deepseek_key: current.api_keys.has_deepseek_key || Boolean(dsk),
-              has_google_key: current.api_keys.has_google_key || Boolean(ggl),
-              has_tavily_key: current.api_keys.has_tavily_key || Boolean(tvly),
-              has_telegram_bot_token: current.api_keys.has_telegram_bot_token || Boolean(tbot),
-              has_telegram_allowlist: current.api_keys.has_telegram_allowlist || Boolean(tUsers || tChats),
+              has_openai_key: current.api_keys.has_openai_key || credentialStatus.openai,
+              has_deepseek_key: current.api_keys.has_deepseek_key || credentialStatus.deepseek,
+              has_google_key: current.api_keys.has_google_key || credentialStatus.google,
+              has_tavily_key: current.api_keys.has_tavily_key || credentialStatus.tavily,
+              has_telegram_bot_token:
+                current.api_keys.has_telegram_bot_token || credentialStatus.telegramBot,
             },
           } : current)
         } catch {
           // Stored key sync should not prevent the settings UI from opening.
         }
-      } else if (settings) {
-        setTelegramAllowedUserIds(settings.telegram_allowed_user_ids)
-        setTelegramAllowedChatIds(settings.telegram_allowed_chat_ids)
       }
     }
     load()
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [])
+
+  useEffect(() => {
+    if (!diagnosticsRefreshKey) return
+    const controller = new AbortController()
+    void Promise.all([
+      loadMcpDiagnostics(controller.signal),
+      loadBrowserDiagnostics(controller.signal),
+      loadSandboxStatus(controller.signal),
+    ])
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diagnosticsRefreshKey])
 
   const updateDraft = (updater: (current: AgentSettings) => AgentSettings) => {
     setDraft((current) => (current ? updater(current) : current))
@@ -455,27 +469,20 @@ export function SettingsModal({ onClose }: Props) {
   }
 
   const saveKeys = async () => {
-    if (!window.electronAPI) return
-    const writes: Array<[ConnectionSecretId, string, string]> = [
-      ['openai', 'openai_api_key', openaiKey],
-      ['deepseek', 'deepseek_api_key', deepseekKey],
-      ['google', 'google_api_key', googleKey],
-      ['tavily', 'tavily_api_key', tavilyKey],
-      ['telegramBot', 'telegram_bot_token', telegramBotToken],
+    if (!window.electronAPI) return null
+    const writes: Array<[ConnectionSecretId, string]> = [
+      ['openai', openaiKey],
+      ['deepseek', deepseekKey],
+      ['google', googleKey],
+      ['tavily', tavilyKey],
+      ['telegramBot', telegramBotToken],
     ]
-    for (const [secret, storeKey, value] of writes) {
+    for (const [secret, value] of writes) {
       if (!dirtySecrets.has(secret)) continue
-      if (value) await window.electronAPI.storeSet(storeKey, value)
-      else await window.electronAPI.storeDelete(storeKey)
+      if (value) await window.electronAPI.setCredential(secret, value)
+      else await window.electronAPI.deleteCredential(secret)
     }
-    if (dirtyTelegramAllowlist) {
-      const userIds = telegramAllowedUserIds.trim()
-      const chatIds = telegramAllowedChatIds.trim()
-      if (userIds) await window.electronAPI.storeSet('telegram_allowed_user_ids', userIds)
-      else await window.electronAPI.storeDelete('telegram_allowed_user_ids')
-      if (chatIds) await window.electronAPI.storeSet('telegram_allowed_chat_ids', chatIds)
-      else await window.electronAPI.storeDelete('telegram_allowed_chat_ids')
-    }
+    return window.electronAPI.applyStoredCredentials()
   }
 
   const updateConnectionSecret = (secret: ConnectionSecretId, value: string) => {
@@ -507,20 +514,23 @@ export function SettingsModal({ onClose }: Props) {
     if (duplicateMcpServerNames(draft.mcp.servers).length > 0) return
     setSaving(true)
     try {
-      const secretPayload: {
+      const browserSecretPayload: {
         openai_api_key?: string
         deepseek_api_key?: string
         google_api_key?: string
         tavily_api_key?: string
         telegram_bot_token?: string
       } = {}
-      if (dirtySecrets.has('openai')) secretPayload.openai_api_key = openaiKey
-      if (dirtySecrets.has('deepseek')) secretPayload.deepseek_api_key = deepseekKey
-      if (dirtySecrets.has('google')) secretPayload.google_api_key = googleKey
-      if (dirtySecrets.has('tavily')) secretPayload.tavily_api_key = tavilyKey
-      if (dirtySecrets.has('telegramBot')) secretPayload.telegram_bot_token = telegramBotToken
+      if (!window.electronAPI) {
+        if (dirtySecrets.has('openai')) browserSecretPayload.openai_api_key = openaiKey
+        if (dirtySecrets.has('deepseek')) browserSecretPayload.deepseek_api_key = deepseekKey
+        if (dirtySecrets.has('google')) browserSecretPayload.google_api_key = googleKey
+        if (dirtySecrets.has('tavily')) browserSecretPayload.tavily_api_key = tavilyKey
+        if (dirtySecrets.has('telegramBot')) browserSecretPayload.telegram_bot_token = telegramBotToken
+      }
 
       const savedSettings = await updateSettings({
+        ...(draft.settings_version ? { expected_settings_version: draft.settings_version } : {}),
         llm: draft.llm,
         speech_to_text: draft.speech_to_text,
         mcp: draft.mcp,
@@ -533,15 +543,24 @@ export function SettingsModal({ onClose }: Props) {
         deepseek_base_url: 'https://api.deepseek.com',
         telegram_allowed_user_ids: telegramAllowedUserIds.trim(),
         telegram_allowed_chat_ids: telegramAllowedChatIds.trim(),
-        ...secretPayload,
+        ...browserSecretPayload,
       })
       const normalizedSavedSettings = normalizeDraft(savedSettings, modelOptions)
-      setDraft(normalizedSavedSettings)
+      const credentialStatus = await saveKeys()
+      setDraft(credentialStatus ? {
+        ...normalizedSavedSettings,
+        api_keys: {
+          ...normalizedSavedSettings.api_keys,
+          has_openai_key: credentialStatus.openai,
+          has_deepseek_key: credentialStatus.deepseek,
+          has_google_key: credentialStatus.google,
+          has_tavily_key: credentialStatus.tavily,
+          has_telegram_bot_token: credentialStatus.telegramBot,
+        },
+      } : normalizedSavedSettings)
       setTelegramAllowedUserIds(normalizedSavedSettings.telegram_allowed_user_ids)
       setTelegramAllowedChatIds(normalizedSavedSettings.telegram_allowed_chat_ids)
-      await saveKeys()
       setDirtySecrets(new Set())
-      setDirtyTelegramAllowlist(false)
       await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
@@ -1078,7 +1097,6 @@ export function SettingsModal({ onClose }: Props) {
                           value={telegramAllowedUserIds}
                           onChange={(e) => {
                             setTelegramAllowedUserIds(e.target.value)
-                            setDirtyTelegramAllowlist(true)
                           }}
                           placeholder="123456789, 987654321"
                           className="control w-full rounded-xl px-3 py-2 text-sm"
@@ -1089,7 +1107,6 @@ export function SettingsModal({ onClose }: Props) {
                           value={telegramAllowedChatIds}
                           onChange={(e) => {
                             setTelegramAllowedChatIds(e.target.value)
-                            setDirtyTelegramAllowlist(true)
                           }}
                           placeholder="-1001234567890"
                           className="control w-full rounded-xl px-3 py-2 text-sm"
@@ -1313,7 +1330,13 @@ export function SettingsModal({ onClose }: Props) {
                 title="Memory"
                 description="Review durable user preferences, behavior, workflow context, and memory retrieval settings."
               >
-                <MemorySettingsPanel draft={draft} updateDraft={updateDraft} />
+                <Suspense fallback={null}>
+                  <MemorySettingsPanel
+                    draft={draft}
+                    updateDraft={updateDraft}
+                    refreshKey={memoryRefreshKey}
+                  />
+                </Suspense>
               </SettingsPanel>
             )}
 
@@ -1687,7 +1710,9 @@ export function SettingsModal({ onClose }: Props) {
                 title="Observability"
                 description="Inspect structured traces, token usage, local errors, and replay diagnosis."
               >
-                <ObservabilityPanel />
+                <Suspense fallback={null}>
+                  <ObservabilityPanel refreshKey={observabilityRefreshKey} />
+                </Suspense>
               </SettingsPanel>
             )}
 
@@ -1827,11 +1852,12 @@ export function SettingsModal({ onClose }: Props) {
                           className="w-40"
                           value={draft.sandbox.mode}
                           options={[
-                            { value: 'disabled', label: 'Disabled' },
+                            { value: 'off', label: 'Off (shell disabled)' },
                             { value: 'auto', label: 'Auto' },
-                            { value: 'enforce', label: 'Enforce' },
+                            { value: 'enforce', label: 'Enforce strong isolation' },
+                            { value: 'host', label: 'Host (approval required)' },
                             { value: 'docker', label: 'Docker' },
-                            { value: 'local_restricted', label: 'Local restricted' },
+                            { value: 'local_restricted', label: 'Host advisory (approval)' },
                           ]}
                           onChange={(mode) => updateDraft((current) => ({
                             ...current,
@@ -1884,7 +1910,7 @@ export function SettingsModal({ onClose }: Props) {
                     <div className="panel-muted rounded-xl p-3">
                       <p className="mb-2 text-xs font-semibold text-neutral-200">Backends</p>
                       <div className="space-y-2 text-xs">
-                        {['docker', 'local_restricted', 'wsl'].map((backend) => {
+                        {['docker', 'local_restricted', 'host', 'wsl'].map((backend) => {
                           const status = sandboxStatus?.backends?.[backend]
                           return (
                             <div key={backend} className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-black/10 px-3 py-2">
@@ -1915,7 +1941,7 @@ export function SettingsModal({ onClose }: Props) {
                               docker: { ...current.sandbox.docker, image: e.target.value },
                             },
                           }))}
-                          placeholder="Docker image"
+                          placeholder="Docker image pinned with @sha256:..."
                           className="control w-full rounded-xl px-3 py-2 text-sm"
                         />
                         <ToggleRow

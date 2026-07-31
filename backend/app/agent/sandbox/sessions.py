@@ -205,7 +205,7 @@ class SandboxSessionRegistry:
             session_ids = [
                 session_id
                 for session_id, session in self._sessions.items()
-                if session["started_at"] < cutoff
+                if session["started_at"] <= cutoff
             ]
         for session_id in session_ids:
             self.stop(session_id, "kill")

@@ -14,6 +14,9 @@ from app.agent.settings_store import MCPServerConfig
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_NAME_LENGTH = 64
+MAX_ARGUMENT_BYTES = 64 * 1024
+MAX_ARGUMENT_DEPTH = 12
+MAX_SCALAR_LENGTH = 16 * 1024
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
 _REFLECTED_TOOL_MAP: dict[str, dict[str, Any]] = {}
@@ -127,7 +130,45 @@ def reflected_tool_name(server_name: str, tool_name: str, *, used: set[str] | No
         suffix += 1
 
 
-def _approval_decision(tool_name: str, description: str, annotations: Any) -> dict[str, Any]:
+def _schema_hash(schema: Any) -> str:
+    try:
+        payload = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        payload = json.dumps(str(schema), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_json_value(value: Any, *, depth: int = 0) -> str:
+    if depth > MAX_ARGUMENT_DEPTH:
+        return "mcp_argument_depth_exceeded"
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if len(str(key)) > MAX_SCALAR_LENGTH:
+                return "mcp_argument_scalar_too_large"
+            error = _validate_json_value(item, depth=depth + 1)
+            if error:
+                return error
+    elif isinstance(value, list):
+        for item in value:
+            error = _validate_json_value(item, depth=depth + 1)
+            if error:
+                return error
+    elif isinstance(value, str) and len(value) > MAX_SCALAR_LENGTH:
+        return "mcp_argument_scalar_too_large"
+    return ""
+
+
+def _validate_arguments(arguments: dict[str, Any]) -> str:
+    try:
+        encoded = json.dumps(arguments, ensure_ascii=False)
+    except TypeError:
+        return "mcp_arguments_not_json_serializable"
+    if len(encoded.encode("utf-8")) > MAX_ARGUMENT_BYTES:
+        return "mcp_argument_size_exceeded"
+    return _validate_json_value(arguments)
+
+
+def _approval_decision(cfg: MCPServerConfig, tool_name: str, description: str, annotations: Any) -> dict[str, Any]:
     haystack = f"{tool_name} {description}".lower()
     destructive = any(keyword in haystack for keyword in _DESTRUCTIVE_KEYWORDS)
     open_world = any(keyword in haystack for keyword in _OPEN_WORLD_KEYWORDS)
@@ -146,13 +187,27 @@ def _approval_decision(tool_name: str, description: str, annotations: Any) -> di
     if destructive or open_world:
         read_only = False
 
-    if read_only:
-        return {"requires_approval": False, "risk": "low", "reason": "read_only"}
+    configured_risk = cfg.tool_risk_overrides.get(tool_name)
+    if configured_risk:
+        risk = configured_risk
+    elif destructive:
+        risk = "high"
+    elif open_world:
+        risk = "medium"
+    elif read_only:
+        risk = "low"
+    else:
+        risk = "medium"
+
+    if tool_name in set(cfg.trusted_tools or []):
+        return {"requires_approval": False, "risk": risk, "reason": "explicitly_trusted_tool"}
     if destructive:
-        return {"requires_approval": True, "risk": "high", "reason": "destructive_or_mutating_tool"}
+        return {"requires_approval": True, "risk": risk, "reason": "destructive_or_mutating_tool"}
     if open_world:
-        return {"requires_approval": True, "risk": "medium", "reason": "open_world_tool"}
-    return {"requires_approval": True, "risk": "medium", "reason": "unknown_tool_risk"}
+        return {"requires_approval": True, "risk": risk, "reason": "open_world_tool"}
+    if read_only:
+        return {"requires_approval": True, "risk": risk, "reason": "untrusted_read_tool"}
+    return {"requires_approval": True, "risk": risk, "reason": "unknown_tool_risk"}
 
 
 def _pending_mcp_approval(
@@ -162,11 +217,20 @@ def _pending_mcp_approval(
     original_tool_name: str,
     arguments: dict[str, Any],
     decision: dict[str, Any],
+    schema_hash: str,
 ) -> str:
+    validation_error = _validate_arguments(arguments)
+    if validation_error:
+        return json.dumps({"status": "error", "error": validation_error, "reason_code": validation_error})
     action = f"Run MCP tool {server_name}/{original_tool_name}"
     payload = {
-        "input_str": json.dumps(arguments, ensure_ascii=False, sort_keys=True),
+        "input_str": json.dumps(
+            {"args": arguments, "schema_hash": schema_hash},
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
         "args": arguments,
+        "schema_hash": schema_hash,
         "server": server_name,
         "tool": original_tool_name,
         "reflected_tool": reflected_name,
@@ -189,9 +253,27 @@ def _pending_mcp_approval(
             "server": server_name,
             "tool": original_tool_name,
             "reflected_tool": reflected_name,
+            "schema_hash": schema_hash,
         },
         ensure_ascii=False,
     )
+
+
+def _call_mcp_tool(manager, reflected_name: str, tool_name: str, arguments: dict[str, Any], schema_hash: str) -> str:
+    validation_error = _validate_arguments(arguments)
+    if validation_error:
+        return json.dumps({"status": "error", "error": validation_error, "reason_code": validation_error})
+    current = get_reflected_tool_map().get(reflected_name, {})
+    if current.get("schema_hash") != schema_hash:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "MCP tool schema changed after approval.",
+                "reason_code": "mcp_schema_changed",
+            },
+            ensure_ascii=False,
+        )
+    return manager.call_tool_sync(tool_name, arguments)
 
 
 def get_reflected_tool_map() -> dict[str, dict[str, Any]]:
@@ -228,16 +310,28 @@ def build_tool_entries(cfg: MCPServerConfig, manager, mcp_tools: list[Any]) -> l
         description = str(getattr(tool, "description", "") or "").strip()
         annotations = _tool_annotations(tool)
         annotations_payload = _annotations_payload(annotations)
-        decision = _approval_decision(tool_name, description, annotations)
+        schema_digest = _schema_hash(schema)
+        decision = _approval_decision(cfg, tool_name, description, annotations)
 
-        def _raw_executor(input_str: str, _tool_name: str = tool_name) -> str:
+        def _raw_executor(
+            input_str: str,
+            _tool_name: str = tool_name,
+            _reflected_name: str = reflected_name,
+        ) -> str:
             try:
-                arguments = json.loads(input_str) if input_str else {}
+                parsed = json.loads(input_str) if input_str else {}
             except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict) and "args" in parsed:
+                arguments = parsed.get("args") if isinstance(parsed.get("args"), dict) else {}
+                approved_schema_hash = str(parsed.get("schema_hash") or "")
+            elif isinstance(parsed, dict):
+                arguments = parsed
+                approved_schema_hash = ""
+            else:
                 arguments = {}
-            if not isinstance(arguments, dict):
-                arguments = {}
-            return manager.call_tool_sync(_tool_name, arguments)
+                approved_schema_hash = ""
+            return _call_mcp_tool(manager, _reflected_name, _tool_name, arguments, approved_schema_hash)
 
         register_executor(reflected_name, _raw_executor)
 
@@ -245,6 +339,7 @@ def build_tool_entries(cfg: MCPServerConfig, manager, mcp_tools: list[Any]) -> l
             _tool_name: str = tool_name,
             _reflected_name: str = reflected_name,
             _decision: dict[str, Any] = decision,
+            _schema_hash: str = schema_digest,
             **arguments,
         ):
             if _decision["requires_approval"]:
@@ -254,8 +349,9 @@ def build_tool_entries(cfg: MCPServerConfig, manager, mcp_tools: list[Any]) -> l
                     original_tool_name=_tool_name,
                     arguments=arguments,
                     decision=_decision,
+                    schema_hash=_schema_hash,
                 )
-            return manager.call_tool_sync(_tool_name, arguments)
+            return _call_mcp_tool(manager, _reflected_name, _tool_name, arguments, _schema_hash)
 
         entries.append(
             {
@@ -271,6 +367,7 @@ def build_tool_entries(cfg: MCPServerConfig, manager, mcp_tools: list[Any]) -> l
                     "original_tool_name": tool_name,
                     "annotations": annotations_payload,
                     "approval": decision,
+                    "schema_hash": schema_digest,
                 },
             }
         )
@@ -279,6 +376,7 @@ def build_tool_entries(cfg: MCPServerConfig, manager, mcp_tools: list[Any]) -> l
             "original_tool_name": tool_name,
             "annotations": annotations_payload,
             "approval": decision,
+            "schema_hash": schema_digest,
         }
 
     with _REFLECTED_TOOL_LOCK:

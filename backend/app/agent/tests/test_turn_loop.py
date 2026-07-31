@@ -6,6 +6,7 @@ from app.agent.iteration_budget import IterationBudget
 from app.agent.tool_registry import ToolRegistry
 from app.agent.turn_loop import TurnLoop, _extract_image_attachments, _repeat_key
 from app.agent.run_context import current_conversation_id
+from app.agent.controller_policy import load_policy, update_permitted_roots
 from app.agent.llm_client import LLMResponse, ToolCallRequest
 
 
@@ -105,6 +106,29 @@ class PersistingFakeMemory(FakeMemory):
         )
 
 
+class FakeObservability:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def start_run(self, **kwargs):
+        self.events.append({"method": "start_run", **kwargs})
+        return "obs-test"
+
+    def log_event(self, **kwargs):
+        self.events.append({"method": "log_event", **kwargs})
+        return "event-test"
+
+    def log_error(self, **kwargs):
+        self.events.append({"method": "log_error", **kwargs})
+        return "error-test"
+
+    def finish_run(self, **kwargs):
+        self.events.append({"method": "finish_run", **kwargs})
+
+    def finish_open_run_for_conversation(self, **kwargs):
+        self.events.append({"method": "finish_open_run_for_conversation", **kwargs})
+
+
 class FakeLLM:
     def __init__(self) -> None:
         self.calls = 0
@@ -126,6 +150,20 @@ class FakeLLM:
                 finish_reason="tool_calls",
             )
         return final_answer_response("All done.")
+
+
+def test_turn_loop_accepts_observability_port():
+    registry = ToolRegistry()
+    observability = FakeObservability()
+
+    loop = TurnLoop(
+        llm_client=FakeLLM(),
+        registry=registry,
+        memory=FakeMemory(),
+        observability=observability,
+    )
+
+    assert loop.observability is observability
 
 
 class SlowLLM:
@@ -1776,6 +1814,8 @@ def test_turn_loop_attaches_browser_screenshot_ephemerally():
 def test_turn_loop_includes_generated_screenshot_when_user_requests_image_delivery(tmp_path: Path):
     screenshot_path = tmp_path / "browser_page_result.png"
     screenshot_path.write_bytes(png_header(536, 320))
+    prior_roots = list(load_policy().permitted_roots)
+    update_permitted_roots([*prior_roots, str(tmp_path)])
     registry = ToolRegistry(
         [
             {
@@ -1809,14 +1849,17 @@ def test_turn_loop_includes_generated_screenshot_when_user_requests_image_delive
             )
         ]
 
-    events = asyncio.run(collect())
+    try:
+        events = asyncio.run(collect())
 
-    done_event = next(event for event in events if event["event"] == "done")
-    attachments = done_event["data"]["attachments"]
-    assert [attachment["name"] for attachment in attachments] == ["browser_page_result.png"]
-    assert [attachment["name"] for attachment in memory.persisted_turns[0]["response_attachments"]] == [
-        "browser_page_result.png"
-    ]
+        done_event = next(event for event in events if event["event"] == "done")
+        attachments = done_event["data"]["attachments"]
+        assert [attachment["name"] for attachment in attachments] == ["browser_page_result.png"]
+        assert [attachment["name"] for attachment in memory.persisted_turns[0]["response_attachments"]] == [
+            "browser_page_result.png"
+        ]
+    finally:
+        update_permitted_roots(prior_roots)
 
 
 def test_turn_loop_appends_vision_fallback_for_text_only_model():

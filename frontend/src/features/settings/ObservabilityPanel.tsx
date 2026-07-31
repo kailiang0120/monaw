@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -12,10 +12,12 @@ import {
   RefreshCw,
   Search,
   Timer,
+  Trash2,
   Wrench,
   type LucideIcon,
 } from 'lucide-react'
 import {
+  deleteRuntimeData,
   exportObservabilityDebugBundle,
   fetchBackendLogTail,
   fetchObservabilityErrors,
@@ -33,6 +35,10 @@ import type {
 } from '../../lib/api/types'
 
 type ViewMode = 'runs' | 'errors' | 'backend'
+const VIRTUALIZE_OBSERVABILITY_THRESHOLD = 60
+const RUN_ROW_HEIGHT_PX = 58
+const ERROR_ROW_HEIGHT_PX = 72
+const VIRTUAL_OVERSCAN = 8
 
 const EMPTY_SUMMARY: ObservabilitySummary = {
   total_runs: 0,
@@ -49,6 +55,9 @@ const EMPTY_SUMMARY: ObservabilitySummary = {
   top_error_reasons: [],
   top_failing_tools: [],
   model_usage: [],
+  storage_metrics: {},
+  runtime_metrics: {},
+  field_classification: {},
 }
 
 function formatNumber(value: number): string {
@@ -58,6 +67,23 @@ function formatNumber(value: number): string {
 function formatCost(value: number): string {
   if (!value) return '$0.00'
   return `$${value.toFixed(value < 0.01 ? 5 : 2)}`
+}
+
+function metricNumber(metrics: Record<string, unknown>, key: string): number {
+  const value = metrics[key]
+  return typeof value === 'number' ? value : 0
+}
+
+function formatBytes(value: number): string {
+  if (!value) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let amount = value
+  let index = 0
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024
+    index += 1
+  }
+  return `${amount.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
 function formatDuration(value: number): string {
@@ -97,7 +123,7 @@ function jsonText(value: unknown): string {
   }
 }
 
-export function ObservabilityPanel() {
+export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) {
   const [summary, setSummary] = useState<ObservabilitySummary>(EMPTY_SUMMARY)
   const [runs, setRuns] = useState<ObservabilityRun[]>([])
   const [errors, setErrors] = useState<ObservabilityError[]>([])
@@ -111,76 +137,108 @@ export function ObservabilityPanel() {
   const [loading, setLoading] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [actionRunId, setActionRunId] = useState('')
+  const [deletingData, setDeletingData] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const refreshAbortRef = useRef<AbortController | null>(null)
+  const detailAbortRef = useRef<AbortController | null>(null)
 
-  const loadSummary = async () => {
-    setSummary(await fetchObservabilitySummary())
+  const loadSummary = async (signal?: AbortSignal) => {
+    setSummary(await fetchObservabilitySummary(signal))
   }
 
-  const loadRuns = async () => {
+  const loadRuns = async (signal?: AbortSignal) => {
     setRuns(await fetchObservabilityRuns({
       status: statusFilter,
       source: sourceFilter,
       q: query,
       limit: 100,
+      signal,
     }))
   }
 
-  const loadErrors = async () => {
-    setErrors(await fetchObservabilityErrors({ q: query, limit: 100 }))
+  const loadErrors = async (signal?: AbortSignal) => {
+    setErrors(await fetchObservabilityErrors({ q: query, limit: 100, signal }))
   }
 
-  const loadBackendLog = async () => {
-    setBackendLog(await fetchBackendLogTail(500))
+  const loadBackendLog = async (signal?: AbortSignal) => {
+    setBackendLog(await fetchBackendLogTail(500, signal))
   }
 
   const refreshAll = async () => {
+    refreshAbortRef.current?.abort()
+    const controller = new AbortController()
+    refreshAbortRef.current = controller
     setLoading(true)
     setError('')
     try {
-      await Promise.all([loadSummary(), loadRuns(), loadErrors(), loadBackendLog()])
+      await Promise.all([
+        loadSummary(controller.signal),
+        loadRuns(controller.signal),
+        loadErrors(controller.signal),
+        loadBackendLog(controller.signal),
+      ])
       if (selectedRunId) {
-        setSelectedRun(await fetchObservabilityRun(selectedRunId))
+        setSelectedRun(await fetchObservabilityRun(selectedRunId, controller.signal))
       }
     } catch (exc) {
+      if (controller.signal.aborted) return
       setError(exc instanceof Error ? exc.message : 'Failed to load observability data')
     } finally {
-      setLoading(false)
+      if (refreshAbortRef.current === controller) {
+        refreshAbortRef.current = null
+        setLoading(false)
+      }
     }
   }
 
   useEffect(() => {
     void refreshAll()
+    return () => {
+      refreshAbortRef.current?.abort()
+      detailAbortRef.current?.abort()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
+    if (!refreshKey) return
+    void refreshAll()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey])
+
+  useEffect(() => {
+    const controller = new AbortController()
     void (async () => {
       try {
         if (view === 'runs') {
-          await loadRuns()
+          await loadRuns(controller.signal)
           return
         }
         if (view === 'errors') {
-          await loadErrors()
+          await loadErrors(controller.signal)
         }
       } catch (exc) {
+        if (controller.signal.aborted) return
         setError(exc instanceof Error ? exc.message : 'Failed to apply filters')
       }
     })()
+    return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, sourceFilter, query, view])
 
   useEffect(() => {
     if (view !== 'backend') return
+    const controller = new AbortController()
     void (async () => {
       try {
-        await loadBackendLog()
+        await loadBackendLog(controller.signal)
       } catch (exc) {
+        if (controller.signal.aborted) return
         setError(exc instanceof Error ? exc.message : 'Failed to load backend log')
       }
     })()
+    return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view])
 
@@ -188,12 +246,19 @@ export function ObservabilityPanel() {
     setSelectedRunId(runId)
     setDetailLoading(true)
     setError('')
+    detailAbortRef.current?.abort()
+    const controller = new AbortController()
+    detailAbortRef.current = controller
     try {
-      setSelectedRun(await fetchObservabilityRun(runId))
+      setSelectedRun(await fetchObservabilityRun(runId, controller.signal))
     } catch (exc) {
+      if (controller.signal.aborted) return
       setError(exc instanceof Error ? exc.message : 'Failed to load run detail')
     } finally {
-      setDetailLoading(false)
+      if (detailAbortRef.current === controller) {
+        detailAbortRef.current = null
+        setDetailLoading(false)
+      }
     }
   }
 
@@ -218,11 +283,32 @@ export function ObservabilityPanel() {
     setError('')
     try {
       const result = await exportObservabilityDebugBundle(runId)
-      setNotice(`Debug bundle exported to ${result.path}.`)
+      setNotice(`Debug bundle exported: ${result.filename}${result.encrypted ? ' (encrypted)' : ''}.`)
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : 'Export failed')
     } finally {
       setActionRunId('')
+    }
+  }
+
+  const deleteData = async () => {
+    if (!window.confirm('Delete runtime diagnostics, observability data, support artifacts, memory files, approvals, and scheduled-task output?')) {
+      return
+    }
+    setDeletingData(true)
+    setNotice('')
+    setError('')
+    try {
+      const result = await deleteRuntimeData()
+      const deletedCount = Object.values(result.deleted).reduce((total, value) => total + Number(value || 0), 0)
+      setSelectedRunId('')
+      setSelectedRun(null)
+      setNotice(`Runtime data deleted across ${formatNumber(deletedCount)} stored item${deletedCount === 1 ? '' : 's'}.`)
+      await refreshAll()
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : 'Deletion failed')
+    } finally {
+      setDeletingData(false)
     }
   }
 
@@ -239,15 +325,26 @@ export function ObservabilityPanel() {
             <p className="mt-1 truncate text-[11px] text-neutral-600">{summary.storage_path}</p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => void refreshAll()}
-          disabled={loading}
-          className="ghost-button h-8 rounded-lg px-3 text-xs disabled:opacity-50"
-        >
-          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void deleteData()}
+            disabled={loading || deletingData}
+            className="ghost-button h-8 rounded-lg px-3 text-xs text-red-200 disabled:opacity-50"
+          >
+            <Trash2 size={13} />
+            Delete Data
+          </button>
+          <button
+            type="button"
+            onClick={() => void refreshAll()}
+            disabled={loading || deletingData}
+            className="ghost-button h-8 rounded-lg px-3 text-xs disabled:opacity-50"
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -270,6 +367,8 @@ export function ObservabilityPanel() {
         <Metric icon={Coins} label="Estimated cost" value={formatCost(summary.estimated_cost_usd)} />
         <Metric icon={Wrench} label="Tool errors" value={formatNumber(summary.tool_error_count)} tone={summary.tool_error_count ? 'amber' : 'default'} />
         <Metric icon={Bug} label="Error patterns" value={formatNumber(summary.top_error_reasons.length)} />
+        <Metric icon={Archive} label="Storage used" value={formatBytes(metricNumber(summary.storage_metrics, 'total_bytes'))} />
+        <Metric icon={AlertTriangle} label="Dropped events" value={formatNumber(metricNumber(summary.runtime_metrics, 'dropped_events'))} tone={metricNumber(summary.runtime_metrics, 'dropped_events') ? 'amber' : 'default'} />
       </div>
 
       <div className="grid gap-3 xl:grid-cols-5">
@@ -467,6 +566,21 @@ function RunsTable({
   loading: boolean
   onSelect: (runId: string) => void
 }) {
+  const [scrollTop, setScrollTop] = useState(0)
+  const viewportHeight = 520
+  const virtualized = runs.length >= VIRTUALIZE_OBSERVABILITY_THRESHOLD
+  const startIndex = virtualized
+    ? Math.max(0, Math.floor(scrollTop / RUN_ROW_HEIGHT_PX) - VIRTUAL_OVERSCAN)
+    : 0
+  const visibleCount = virtualized
+    ? Math.ceil(viewportHeight / RUN_ROW_HEIGHT_PX) + VIRTUAL_OVERSCAN * 2
+    : runs.length
+  const visibleRuns = runs.slice(startIndex, startIndex + visibleCount)
+  const topPadding = virtualized ? startIndex * RUN_ROW_HEIGHT_PX : 0
+  const bottomPadding = virtualized
+    ? Math.max(0, (runs.length - startIndex - visibleRuns.length) * RUN_ROW_HEIGHT_PX)
+    : 0
+
   if (runs.length === 0 && !loading) {
     return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">No traces recorded yet.</div>
   }
@@ -479,8 +593,12 @@ function RunsTable({
         <span>Tokens</span>
         <span>Tools</span>
       </div>
-      <div className="max-h-[520px] overflow-auto">
-        {runs.map((run) => (
+      <div
+        className="max-h-[520px] overflow-auto"
+        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      >
+        {topPadding > 0 && <div aria-hidden style={{ height: topPadding }} />}
+        {visibleRuns.map((run) => (
           <button
             key={run.run_id}
             type="button"
@@ -504,6 +622,7 @@ function RunsTable({
             </span>
           </button>
         ))}
+        {bottomPadding > 0 && <div aria-hidden style={{ height: bottomPadding }} />}
       </div>
     </div>
   )
@@ -634,12 +753,32 @@ function ErrorsList({
   errors: ObservabilityError[]
   loading?: boolean
 }) {
+  const [scrollTop, setScrollTop] = useState(0)
+  const viewportHeight = 520
+  const virtualized = errors.length >= VIRTUALIZE_OBSERVABILITY_THRESHOLD
+  const startIndex = virtualized
+    ? Math.max(0, Math.floor(scrollTop / ERROR_ROW_HEIGHT_PX) - VIRTUAL_OVERSCAN)
+    : 0
+  const visibleCount = virtualized
+    ? Math.ceil(viewportHeight / ERROR_ROW_HEIGHT_PX) + VIRTUAL_OVERSCAN * 2
+    : errors.length
+  const visibleErrors = errors.slice(startIndex, startIndex + visibleCount)
+  const topPadding = virtualized ? startIndex * ERROR_ROW_HEIGHT_PX : 0
+  const bottomPadding = virtualized
+    ? Math.max(0, (errors.length - startIndex - visibleErrors.length) * ERROR_ROW_HEIGHT_PX)
+    : 0
+
   if (errors.length === 0 && !loading) {
     return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">No structured errors recorded.</div>
   }
   return (
-    <div className="space-y-2">
-      {errors.map((item) => (
+    <div
+      className={virtualized ? 'max-h-[520px] overflow-auto' : 'space-y-2'}
+      onScroll={virtualized ? (event) => setScrollTop(event.currentTarget.scrollTop) : undefined}
+    >
+      {topPadding > 0 && <div aria-hidden style={{ height: topPadding }} />}
+      <div className="space-y-2">
+      {visibleErrors.map((item) => (
         <details key={item.error_id} className="rounded-xl border border-red-400/15 bg-red-400/5 px-3 py-2">
           <summary className="cursor-pointer">
             <div className="inline-flex max-w-full flex-wrap items-center gap-2 text-xs">
@@ -654,6 +793,8 @@ function ErrorsList({
           </pre>
         </details>
       ))}
+      </div>
+      {bottomPadding > 0 && <div aria-hidden style={{ height: bottomPadding }} />}
     </div>
   )
 }

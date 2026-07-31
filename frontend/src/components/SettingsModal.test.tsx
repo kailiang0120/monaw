@@ -243,6 +243,7 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
       user_identity: '',
       communication_style: '',
     },
+    settings_version: 'settings-v1',
     available_skills: [
       {
         slug: 'browser_use',
@@ -515,6 +516,7 @@ describe('SettingsModal', () => {
 
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        expected_settings_version: 'settings-v1',
         llm: expect.objectContaining({
           provider: 'gemini',
           model_name: 'gemini-3-flash-preview',
@@ -536,7 +538,7 @@ describe('SettingsModal', () => {
     expect(await screen.findByRole('button', { name: /Download local speech model/i })).toBeDisabled()
   })
 
-  it('uses Electron-stored keys for backend sync and visible key status', async () => {
+  it('uses masked Electron credential status without reading plaintext keys', async () => {
     vi.mocked(fetchSettings).mockResolvedValue(buildSettings({
       api_keys: {
         has_openai_key: false,
@@ -548,16 +550,16 @@ describe('SettingsModal', () => {
     }) as any)
     ;(window as any).electronAPI = {
       isElectron: true,
-      storeGet: vi.fn((key: string) => Promise.resolve({
-        openai_api_key: 'stored-openai',
-        deepseek_api_key: 'stored-deepseek',
-        google_api_key: 'stored-google',
-        tavily_api_key: 'stored-tavily',
-        telegram_bot_token: 'stored-telegram',
-        telegram_allowed_user_ids: '123456789',
-      }[key] ?? '')),
-      storeSet: vi.fn(),
-      storeDelete: vi.fn(),
+      applyStoredCredentials: vi.fn().mockResolvedValue({
+        openai: true,
+        deepseek: true,
+        google: true,
+        tavily: true,
+        telegramBot: true,
+      }),
+      credentialStatus: vi.fn(),
+      setCredential: vi.fn(),
+      deleteCredential: vi.fn(),
     }
 
     render(<SettingsModal onClose={() => {}} />)
@@ -568,25 +570,24 @@ describe('SettingsModal', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Portal' }))
     fireEvent.click(screen.getByRole('button', { name: 'Telegram' }))
     expect(screen.getByText(/Telegram token saved: yes/i)).toBeInTheDocument()
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledWith({
-        openai_api_key: 'stored-openai',
-        deepseek_api_key: 'stored-deepseek',
-        google_api_key: 'stored-google',
-        tavily_api_key: 'stored-tavily',
-        telegram_bot_token: 'stored-telegram',
-        telegram_allowed_user_ids: '123456789',
-      })
-    })
+    expect(updateSettings).not.toHaveBeenCalledWith(expect.objectContaining({
+      openai_api_key: expect.anything(),
+    }))
   })
 
   it('saves Telegram allowlist fields from the Telegram connection portal', async () => {
-    const storeSet = vi.fn()
     ;(window as any).electronAPI = {
       isElectron: true,
-      storeGet: vi.fn(() => Promise.resolve('')),
-      storeSet,
-      storeDelete: vi.fn(),
+      applyStoredCredentials: vi.fn().mockResolvedValue({
+        openai: false,
+        deepseek: false,
+        google: false,
+        tavily: false,
+        telegramBot: false,
+      }),
+      credentialStatus: vi.fn(),
+      setCredential: vi.fn(),
+      deleteCredential: vi.fn(),
     }
 
     render(<SettingsModal onClose={() => {}} />)
@@ -608,8 +609,6 @@ describe('SettingsModal', () => {
         telegram_allowed_chat_ids: '-1001234567890',
       }))
     })
-    expect(storeSet).toHaveBeenCalledWith('telegram_allowed_user_ids', '123456789')
-    expect(storeSet).toHaveBeenCalledWith('telegram_allowed_chat_ids', '-1001234567890')
   })
 
   it('does not delete saved Electron keys when secret fields were not edited', async () => {
@@ -622,12 +621,19 @@ describe('SettingsModal', () => {
         has_telegram_bot_token: true,
       },
     }) as any)
-    const storeDelete = vi.fn()
+    const deleteCredential = vi.fn()
     ;(window as any).electronAPI = {
       isElectron: true,
-      storeGet: vi.fn(() => Promise.resolve('')),
-      storeSet: vi.fn(),
-      storeDelete,
+      applyStoredCredentials: vi.fn().mockResolvedValue({
+        openai: true,
+        deepseek: true,
+        google: true,
+        tavily: true,
+        telegramBot: true,
+      }),
+      credentialStatus: vi.fn(),
+      setCredential: vi.fn(),
+      deleteCredential,
     }
 
     render(<SettingsModal onClose={() => {}} />)
@@ -641,18 +647,29 @@ describe('SettingsModal', () => {
         openai_api_key: expect.anything(),
       }))
     })
-    expect(storeDelete).not.toHaveBeenCalled()
+    expect(deleteCredential).not.toHaveBeenCalled()
   })
 
   it('deletes a cleared Telegram token from the Electron store', async () => {
-    const storeDelete = vi.fn()
+    const deleteCredential = vi.fn().mockResolvedValue({
+      openai: false,
+      deepseek: false,
+      google: false,
+      tavily: false,
+      telegramBot: false,
+    })
     ;(window as any).electronAPI = {
       isElectron: true,
-      storeGet: vi.fn((key: string) => Promise.resolve({
-        telegram_bot_token: 'stored-telegram',
-      }[key] ?? '')),
-      storeSet: vi.fn(),
-      storeDelete,
+      applyStoredCredentials: vi.fn().mockResolvedValue({
+        openai: false,
+        deepseek: false,
+        google: false,
+        tavily: false,
+        telegramBot: true,
+      }),
+      credentialStatus: vi.fn(),
+      setCredential: vi.fn(),
+      deleteCredential,
     }
 
     render(<SettingsModal onClose={() => {}} />)
@@ -660,26 +677,19 @@ describe('SettingsModal', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Portal' }))
     fireEvent.click(screen.getByRole('button', { name: 'Telegram' }))
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        telegram_bot_token: 'stored-telegram',
-      }))
-    })
-
     vi.mocked(updateSettings).mockClear()
-    storeDelete.mockClear()
+    deleteCredential.mockClear()
 
-    fireEvent.change(screen.getByPlaceholderText('Telegram Bot Token'), {
-      target: { value: '' },
-    })
+    fireEvent.click(screen.getByRole('button', { name: 'Remove stored Telegram Bot Token' }))
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
     await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        telegram_bot_token: '',
-      }))
+      expect(updateSettings).toHaveBeenCalled()
     })
-    expect(storeDelete).toHaveBeenCalledWith('telegram_bot_token')
+    expect(updateSettings).not.toHaveBeenCalledWith(expect.objectContaining({
+      telegram_bot_token: expect.anything(),
+    }))
+    expect(deleteCredential).toHaveBeenCalledWith('telegramBot')
   })
 
   it('saves identity settings with the rest of the runtime settings', async () => {

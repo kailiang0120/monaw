@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.agent.database import get_db
 from app.agent.scheduler import ScheduledTaskService, get_scheduled_task_service
+from app.agent.ui_events import publish_ui_event
 from app.integrations.telegram.session import TelegramSessionStore
 
 router = APIRouter(prefix="/scheduled-tasks")
@@ -195,6 +196,7 @@ async def create_scheduled_task(body: ScheduledTaskCreate):
     service = get_scheduled_task_service()
     if service is not None:
         await service.refresh(str(task["id"]))
+    publish_ui_event("scheduled_tasks.changed", {"task_id": str(task["id"]), "action": "created"})
     return _normalize_task_row(task)
 
 
@@ -223,6 +225,7 @@ async def update_scheduled_task(task_id: str, body: ScheduledTaskUpdate):
     service = get_scheduled_task_service()
     if service is not None:
         await service.refresh(task_id)
+    publish_ui_event("scheduled_tasks.changed", {"task_id": task_id, "action": "updated"})
     return _normalize_task_row(
         updated,
         running=task_id in db.list_running_scheduled_task_ids(),
@@ -233,6 +236,7 @@ async def update_scheduled_task(task_id: str, body: ScheduledTaskUpdate):
 async def delete_scheduled_task(task_id: str):
     if not get_db().delete_scheduled_task(task_id):
         raise HTTPException(status_code=404, detail="Scheduled task not found")
+    publish_ui_event("scheduled_tasks.changed", {"task_id": task_id, "action": "deleted"})
     return Response(status_code=204)
 
 
@@ -244,9 +248,15 @@ async def run_scheduled_task_now(task_id: str):
     if service is None:
         raise HTTPException(status_code=503, detail="Scheduled task service is not running")
     try:
-        return await service.run_now(task_id)
+        result = await service.run_now(task_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Scheduled task not found") from None
+    publish_ui_event("scheduled_tasks.changed", {"task_id": task_id, "action": "run_now"})
+    publish_ui_event(
+        "conversation.changed",
+        {"conversation_id": result.get("conversation_id", ""), "action": "scheduled_run"},
+    )
+    return result
 
 
 @router.get("/{task_id}/runs", response_model=list[ScheduledTaskRunOut])

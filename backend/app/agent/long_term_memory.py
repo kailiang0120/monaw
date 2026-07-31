@@ -8,24 +8,33 @@ human-readable Markdown under the memory root.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 import sqlite3
 import threading
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from app.agent.database import Database, get_db
 from app.agent.identity import DEFAULT_AGENT_NAME
-from app.agent.runtime_paths import MONAW_HOME_DIR
+from app.agent.memory_documents import (
+    SCHEMA_VERSION,
+    SECTIONED_SCHEMA,
+    SearchDocument,
+    Section,
+    content_hash as _content_hash,
+    default_memory_root,
+    read_markdown as _read_markdown,
+    safe_id as _safe_id,
+    slug as _slug,
+    split_markdown as _split_markdown,
+    tokens as _tokens,
+    write_markdown as _write_markdown,
+)
+from app.agent.memory_repository import MemorySectionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +45,7 @@ VALID_REVIEW_STATES = ("new", "reviewed")
 VALID_KINDS = ("fact", "reflection")
 HEURISTIC_MERGE_MIN_SIMILARITY = 0.8
 
-SCHEMA_VERSION = 1
-SECTIONED_SCHEMA = "sectioned-v1"
 MAX_TRANSCRIPT_CHARS = 14000
-
-_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'-]*")
-_SAFE_ID_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
-_FRONT_MATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)(.*)\Z", re.S)
-_SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)(?:\s+\{#([A-Za-z0-9_.-]+)\})?\s*$")
-_SECTION_META_RE = re.compile(r"^<!--\s*meta:\s*(\{.*\})\s*-->\s*$")
 
 _SENSITIVE_PATTERNS = [
     re.compile(r"\b(api[_ -]?key|secret|password|passwd|token|bearer)\b", re.I),
@@ -54,14 +55,6 @@ _SENSITIVE_PATTERNS = [
     re.compile(r"\b(?:\d[ -]*?){13,16}\b"),
     re.compile(r"\b(cvv|bank account|medical record|diagnosis)\b", re.I),
 ]
-
-
-def default_memory_root() -> Path:
-    explicit = os.getenv("AGENT_MEMORY_DIR")
-    if explicit:
-        return Path(explicit).expanduser()
-
-    return MONAW_HOME_DIR / "memory"
 
 
 def _now() -> str:
@@ -80,78 +73,6 @@ def _coerce_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-def _tokens(text: str) -> list[str]:
-    return [token.lower() for token in _TOKEN_RE.findall(text or "")]
-
-
-def _slug(text: str, fallback: str = "memory") -> str:
-    tokens = _tokens(text)
-    value = "-".join(tokens[:8]) or fallback
-    value = _SAFE_ID_RE.sub("-", value).strip("-_.").lower()
-    return value[:64] or fallback
-
-
-def _safe_id(value: str) -> str:
-    safe = _SAFE_ID_RE.sub("-", str(value or "")).strip("-_.").lower()
-    return safe[:160] or hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
-
-
-def _content_hash(content: str) -> str:
-    normalized = " ".join(str(content or "").split()).lower()
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def _split_markdown(raw: str) -> tuple[dict[str, Any], str]:
-    match = _FRONT_MATTER_RE.match(raw or "")
-    if match is None:
-        return {}, (raw or "").strip()
-    meta = yaml.safe_load(match.group(1)) or {}
-    if not isinstance(meta, dict):
-        meta = {}
-    return meta, match.group(2).strip()
-
-
-def _dump_markdown(meta: dict[str, Any], body: str) -> str:
-    cleaned = {
-        key: value
-        for key, value in meta.items()
-        if value is not None
-    }
-    front = yaml.safe_dump(cleaned, sort_keys=False, allow_unicode=False).strip()
-    body_text = str(body or "").strip()
-    return f"---\n{front}\n---\n\n{body_text}\n"
-
-
-def _read_markdown(path: Path) -> tuple[dict[str, Any], str]:
-    return _split_markdown(path.read_text(encoding="utf-8"))
-
-
-def _write_markdown(path: Path, meta: dict[str, Any], body: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp")
-    tmp.write_text(_dump_markdown(meta, body), encoding="utf-8")
-    tmp.replace(path)
-
-
-@dataclass
-class Section:
-    id: str
-    title: str
-    meta: dict[str, Any]
-    body: str
-
-
-@dataclass
-class SearchDocument:
-    record: dict[str, Any]
-    haystack: str
-    tokens: frozenset[str]
-    category: str
-    importance_score: float
-    use_score: float
-    recency_score: float
 
 
 def _table_exists(db: Database, table: str) -> bool:
@@ -180,6 +101,11 @@ class LongTermMemory:
         self._records_cache: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         self._search_documents_cache: dict[tuple[Any, ...], list[SearchDocument]] = {}
         self._tokenized_record_cache: dict[tuple[str, str, str, str], tuple[str, frozenset[str]]] = {}
+        self._section_repository = MemorySectionRepository(
+            self.root,
+            VALID_CATEGORIES,
+            now=_now,
+        )
         self._ensure_layout()
 
     @property
@@ -357,114 +283,28 @@ class LongTermMemory:
         return self._category_file(category)
 
     def _normalize_category(self, category: str) -> str:
-        value = str(category or "fact").strip().lower()
-        if value == "style":
-            return "preference"
-        return value if value in VALID_CATEGORIES else "fact"
+        return self._section_repository.normalize_category(category)
 
     def _category_file(self, category: str) -> Path:
-        return self.root / "long-term" / f"{self._normalize_category(category)}.md"
+        return self._section_repository.category_file(category)
 
     def _archive_category_file(self, category: str) -> Path:
-        return self.root / "archive" / f"{self._normalize_category(category)}.md"
+        return self._section_repository.archive_category_file(category)
 
     def _section_default_meta(self, section_id: str, category: str) -> dict[str, Any]:
-        now = _now()
-        return {
-            "id": _safe_id(section_id),
-            "importance": 5,
-            "confidence": 1.0,
-            "created_at": now,
-            "updated_at": now,
-            "review_state": "new",
-            "kind": "reflection" if self._normalize_category(category) == "reflection" else "fact",
-            "status": "active",
-            "source": "",
-            "source_conversation_id": "",
-            "source_message_id": None,
-            "last_used_at": "",
-            "use_count": 0,
-            "sources": [],
-        }
+        return self._section_repository.section_default_meta(section_id, category)
 
     def _parse_sectioned(self, text: str, *, category: str = "fact") -> list[Section]:
-        _meta, body = _split_markdown(text or "")
-        lines = body.splitlines()
-        sections: list[Section] = []
-        index = 0
-        while index < len(lines):
-            line = lines[index]
-            if not line.strip():
-                index += 1
-                continue
-            match = _SECTION_HEADING_RE.match(line)
-            if match is None:
-                raise ValueError("Sectioned memory files may only contain level-2 sections after frontmatter")
-            title = match.group(1).strip()
-            section_id = _safe_id(match.group(2) or f"sec_{_slug(title, 'memory')}")
-            index += 1
-            while index < len(lines) and not lines[index].strip():
-                index += 1
-            meta = self._section_default_meta(section_id, category)
-            if index < len(lines):
-                meta_match = _SECTION_META_RE.match(lines[index].strip())
-                if meta_match is not None:
-                    try:
-                        loaded = json.loads(meta_match.group(1))
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(f"Invalid section metadata for {section_id}") from exc
-                    if not isinstance(loaded, dict):
-                        raise ValueError(f"Invalid section metadata for {section_id}")
-                    meta.update(loaded)
-                    index += 1
-            meta["id"] = _safe_id(str(meta.get("id") or section_id))
-            section_id = meta["id"]
-            body_lines: list[str] = []
-            while index < len(lines) and _SECTION_HEADING_RE.match(lines[index]) is None:
-                body_lines.append(lines[index])
-                index += 1
-            section_body = "\n".join(body_lines).strip()
-            if section_body:
-                sections.append(Section(id=section_id, title=title, meta=meta, body=section_body))
-        return sections
+        return self._section_repository.parse_sectioned(text, category=category)
 
     def _dump_sectioned(self, category: str, sections: list[Section]) -> str:
-        parts: list[str] = []
-        for section in sections:
-            section_id = _safe_id(section.id)
-            title = str(section.title or section_id).strip() or section_id
-            meta = dict(section.meta)
-            meta["id"] = section_id
-            parts.append(f"## {title} {{#{section_id}}}")
-            parts.append(f"<!-- meta: {json.dumps(meta, ensure_ascii=False, sort_keys=True)} -->")
-            parts.append("")
-            parts.append(str(section.body or "").strip())
-            parts.append("")
-        return _dump_markdown(
-            {
-                "category": self._normalize_category(category),
-                "schema": SECTIONED_SCHEMA,
-                "updated_at": _now(),
-            },
-            "\n".join(parts).strip(),
-        )
+        return self._section_repository.dump_sectioned(category, sections)
 
     def _load_sections(self, category: str, *, archived: bool = False) -> list[Section]:
-        path = self._archive_category_file(category) if archived else self._category_file(category)
-        if not path.exists():
-            return []
-        try:
-            return self._parse_sectioned(path.read_text(encoding="utf-8"), category=category)
-        except Exception as exc:
-            logger.warning("Unable to read sectioned memory file %s: %s", path, exc)
-            return []
+        return self._section_repository.load_sections(category, archived=archived)
 
     def _save_sections(self, category: str, sections: list[Section], *, archived: bool = False) -> None:
-        path = self._archive_category_file(category) if archived else self._category_file(category)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.tmp")
-        tmp.write_text(self._dump_sectioned(category, sections), encoding="utf-8")
-        tmp.replace(path)
+        self._section_repository.save_sections(category, sections, archived=archived)
         self._invalidate_records_cache()
 
     def _section_to_record(
@@ -496,15 +336,12 @@ class LongTermMemory:
         return first[:80] or "Memory"
 
     def _remove_section_by_id(self, memory_id: str, *, include_archived: bool = True) -> bool:
-        wanted = _safe_id(str(memory_id))
-        removed = False
-        for category in VALID_CATEGORIES:
-            for archived in ([False, True] if include_archived else [False]):
-                sections = self._load_sections(category, archived=archived)
-                kept = [section for section in sections if section.id != wanted]
-                if len(kept) != len(sections):
-                    self._save_sections(category, kept, archived=archived)
-                    removed = True
+        removed = self._section_repository.remove_section_by_id(
+            memory_id,
+            include_archived=include_archived,
+        )
+        if removed:
+            self._invalidate_records_cache()
         return removed
 
     def _normalize_record(self, path: Path, meta: dict[str, Any], content: str) -> dict[str, Any]:
@@ -532,6 +369,10 @@ class LongTermMemory:
             "source": str(meta.get("source") or ""),
             "source_conversation_id": str(meta.get("source_conversation_id") or ""),
             "source_message_id": meta.get("source_message_id"),
+            "source_principal_id": str(meta.get("source_principal_id") or ""),
+            "source_permission_profile_id": str(meta.get("source_permission_profile_id") or ""),
+            "source_execution_source": str(meta.get("source_execution_source") or ""),
+            "sensitivity": str(meta.get("sensitivity") or "normal"),
             "created_at": str(meta.get("created_at") or now),
             "updated_at": str(meta.get("updated_at") or now),
             "last_used_at": str(meta.get("last_used_at") or ""),
@@ -552,6 +393,10 @@ class LongTermMemory:
             "source": record.get("source", ""),
             "source_conversation_id": record.get("source_conversation_id", ""),
             "source_message_id": record.get("source_message_id"),
+            "source_principal_id": record.get("source_principal_id", ""),
+            "source_permission_profile_id": record.get("source_permission_profile_id", ""),
+            "source_execution_source": record.get("source_execution_source", ""),
+            "sensitivity": record.get("sensitivity", "normal"),
             "created_at": record["created_at"],
             "updated_at": record["updated_at"],
             "last_used_at": record.get("last_used_at", ""),
@@ -836,6 +681,9 @@ class LongTermMemory:
         source: str = "",
         source_conversation_id: str = "",
         source_message_id: int | None = None,
+        source_principal_id: str = "",
+        source_permission_profile_id: str = "",
+        source_execution_source: str = "",
         memory_id: str | None = None,
     ) -> dict[str, Any] | None:
         text = str(content or "").strip()
@@ -864,6 +712,10 @@ class LongTermMemory:
                     "source": source or existing.get("source", ""),
                     "source_conversation_id": source_conversation_id or existing.get("source_conversation_id", ""),
                     "source_message_id": source_message_id if source_message_id is not None else existing.get("source_message_id"),
+                    "source_principal_id": source_principal_id or existing.get("source_principal_id", ""),
+                    "source_permission_profile_id": source_permission_profile_id or existing.get("source_permission_profile_id", ""),
+                    "source_execution_source": source_execution_source or existing.get("source_execution_source", ""),
+                    "sensitivity": "sensitive" if self._contains_sensitive(text) else existing.get("sensitivity", "normal"),
                     "updated_at": now,
                     "collection": "long-term",
                 }
@@ -896,6 +748,10 @@ class LongTermMemory:
                             "source": source or section.meta.get("source", ""),
                             "source_conversation_id": source_conversation_id or section.meta.get("source_conversation_id", ""),
                             "source_message_id": source_message_id if source_message_id is not None else section.meta.get("source_message_id"),
+                            "source_principal_id": source_principal_id or section.meta.get("source_principal_id", ""),
+                            "source_permission_profile_id": source_permission_profile_id or section.meta.get("source_permission_profile_id", ""),
+                            "source_execution_source": source_execution_source or section.meta.get("source_execution_source", ""),
+                            "sensitivity": "sensitive" if self._contains_sensitive(section.body) else section.meta.get("sensitivity", "normal"),
                         }
                     )
                     sections[index] = section
@@ -917,6 +773,10 @@ class LongTermMemory:
                 "source": source,
                 "source_conversation_id": source_conversation_id,
                 "source_message_id": source_message_id,
+                "source_principal_id": source_principal_id,
+                "source_permission_profile_id": source_permission_profile_id,
+                "source_execution_source": source_execution_source,
+                "sensitivity": "sensitive" if self._contains_sensitive(str(decision.get("new_body") or text)) else "normal",
                 "created_at": now,
                 "updated_at": now,
                 "last_used_at": "",
@@ -1267,6 +1127,7 @@ class LongTermMemory:
 
     def _prompt_content(self, content: str) -> str:
         text = re.sub(r"^[-*]\s+", "", " ".join(str(content or "").split()))
+        text = re.sub(r"(?i)\b(ignore|override|forget)\b[^.?!]*(previous|system|developer|policy|instruction)[^.?!]*[.?!]?", "", text).strip()
         replacements = [
             (re.compile(r"^The user prefers\b", re.I), "You prefer"),
             (re.compile(r"^The user likes\b", re.I), "You like"),

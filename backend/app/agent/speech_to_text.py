@@ -117,7 +117,8 @@ def download_default_stt_model() -> dict[str, Any]:
         from faster_whisper.utils import download_model
     except Exception as exc:
         raise SpeechToTextDependencyMissing(
-            "faster-whisper is not installed. Install backend requirements before downloading the speech-to-text model."
+            "faster-whisper is not installed. Run `uv sync --locked` from the backend directory "
+            "before downloading the speech-to-text model."
         ) from exc
 
     model_dir = stt_model_dir()
@@ -257,7 +258,8 @@ def _load_model():
         from faster_whisper import WhisperModel
     except Exception as exc:
         raise SpeechToTextDependencyMissing(
-            "faster-whisper is not installed. Install backend requirements before using speech-to-text."
+            "faster-whisper is not installed. Run `uv sync --locked` from the backend directory "
+            "before using speech-to-text."
         ) from exc
 
     model_dir = stt_model_dir()

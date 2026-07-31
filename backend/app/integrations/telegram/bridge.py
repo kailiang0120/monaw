@@ -19,7 +19,12 @@ from app.agent.approval_broker import (
     signal_resume as signal_approval_resume,
 )
 from app.agent.identity import DEFAULT_AGENT_NAME
-from app.agent.response_attachments import register_attachment_path
+from app.agent.response_attachments import (
+    attachment_handle,
+    public_attachment_payload,
+    register_attachment_path,
+    resolve_attachment_path,
+)
 from app.agent.runtime_paths import runtime_path
 from app.agent.settings_store import load_agent_settings
 from app.integrations.telegram.agent_bridge import (
@@ -303,8 +308,8 @@ def _attachment_summary(attachments: list[dict]) -> str:
     for attachment in attachments:
         name = str(attachment.get("name") or Path(str(attachment.get("path") or "")).name or "file")
         mime_type = str(attachment.get("mime_type") or "application/octet-stream")
-        path = str(attachment.get("path") or "")
-        lines.append(f"- {name} ({mime_type}): {path}")
+        handle = str(attachment.get("handle") or attachment.get("path") or "")
+        lines.append(f"- {name} ({mime_type}): {handle}")
     return "\n".join(lines)
 
 
@@ -337,20 +342,24 @@ async def _download_attachment(
     safe_name = _safe_filename(filename)
     target_path = runtime_path("uploads", conversation_id or "telegram", upload_id, safe_name)
     await _download_telegram_file(bot, file_id, target_path)
-    actual_size = target_path.stat().st_size if target_path.exists() else size
     resolved_mime = mime_type or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
-    register_attachment_path(upload_id, target_path)
+    record = register_attachment_path(
+        upload_id,
+        target_path,
+        control_session_id="telegram",
+        conversation_id=conversation_id,
+        mime_type=resolved_mime,
+        width=width,
+        height=height,
+    )
+    if record is None:
+        raise ValueError("Telegram upload could not be registered as an attachment.")
+    public_payload = public_attachment_payload(record)
     attachment = {
-        "id": upload_id,
-        "name": safe_name,
+        **public_payload,
         "path": str(target_path),
-        "mime_type": resolved_mime,
-        "size": actual_size,
+        "handle": attachment_handle(upload_id),
     }
-    if width:
-        attachment["width"] = int(width)
-    if height:
-        attachment["height"] = int(height)
     return attachment
 
 
@@ -491,7 +500,12 @@ async def send_response_attachments(bot, chat_id: int | str, attachments: tuple[
             )
 
     for attachment in attachments:
-        path = Path(str(attachment.get("path") or ""))
+        raw_path = str(attachment.get("path") or "")
+        resolved = resolve_attachment_path(
+            str(attachment.get("id") or raw_path),
+            allow_internal=True,
+        ) if raw_path.startswith("attachment://") or attachment.get("id") else None
+        path = resolved or Path(raw_path)
         if not path.is_file():
             continue
         try:
@@ -501,7 +515,7 @@ async def send_response_attachments(bot, chat_id: int | str, attachments: tuple[
         if size > TELEGRAM_MAX_ATTACHMENT_BYTES:
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"File is too large to send through Telegram: {path.name}\n{path}",
+                text=f"File is too large to send through Telegram: {path.name}",
             )
             continue
 
@@ -521,7 +535,7 @@ async def send_response_attachments(bot, chat_id: int | str, attachments: tuple[
         except TelegramError as exc:
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"Could not send attachment through Telegram: {path.name}\n{exc}",
+                text=f"Could not send attachment through Telegram: {path.name}",
             )
 
 

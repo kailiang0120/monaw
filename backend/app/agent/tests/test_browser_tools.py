@@ -178,6 +178,50 @@ def test_browser_fetch_blocks_cloud_metadata_ip(monkeypatch):
     assert result["reason_code"] == "blocked_host"
 
 
+
+
+def test_browser_fetch_blocks_redirect_to_loopback_host(monkeypatch):
+    class RedirectedPage:
+        status = 200
+        url = "http://127.0.0.1/admin"
+        body = b"<html><body>internal</body></html>"
+        encoding = "utf-8"
+        headers = {"content-type": "text/html"}
+
+    monkeypatch.setattr(
+        browser_tools_module,
+        "_fetch_http_with_scrapling",
+        lambda url, *, timeout_ms: (RedirectedPage(), "http"),
+    )
+    manager = SimpleNamespace(config={"allowed_domains": []})
+
+    result = json.loads(asyncio.run(browser_fetch(manager, "https://example.com", mode="http")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "blocked_redirect_host"
+    assert result["final_url"] == "http://127.0.0.1/admin"
+
+
+def test_browser_fetch_blocks_redirect_outside_allowed_domain(monkeypatch):
+    class RedirectedPage:
+        status = 200
+        url = "https://evil.example.net/"
+        body = b"<html><body>evil</body></html>"
+        encoding = "utf-8"
+        headers = {"content-type": "text/html"}
+
+    monkeypatch.setattr(
+        browser_tools_module,
+        "_fetch_http_with_scrapling",
+        lambda url, *, timeout_ms: (RedirectedPage(), "http"),
+    )
+    manager = SimpleNamespace(config={"allowed_domains": ["example.com"]})
+
+    result = json.loads(asyncio.run(browser_fetch(manager, "https://example.com", mode="http")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "redirect_domain_not_allowed"
+
 def test_browser_fetch_auto_falls_back_to_dynamic_for_js_empty_page(monkeypatch):
     class StaticPage:
         status = 200
@@ -339,6 +383,169 @@ def test_browser_click_awaits_async_page_mouse_property():
     assert result["status"] == "ok"
     assert manager.page.mouse_requests == 1
     assert manager.page.mouse_obj.click_calls == [(11, 22, "left", 2)]
+
+
+def test_browser_manager_disables_automatic_downloads_by_default(tmp_path):
+    manager = BrowserUseManager(
+        {
+            "headless": False,
+            "keep_alive": True,
+            "downloads_dir": str(tmp_path / "downloads"),
+            "traces_dir": str(tmp_path / "traces"),
+            "allowed_domains": [],
+            "managed_profile_dir": str(tmp_path / "profile"),
+        }
+    )
+
+    kwargs = manager._browser_kwargs()
+
+    assert kwargs["accept_downloads"] is False
+    assert kwargs["auto_download_pdfs"] is False
+
+
+def test_browser_click_file_input_requires_approval(monkeypatch):
+    created = []
+
+    monkeypatch.setattr(browser_tools_module, "current_interactive", lambda: True)
+    monkeypatch.setattr(
+        browser_tools_module,
+        "create_ticket",
+        lambda **kwargs: created.append(kwargs) or SimpleNamespace(id="ticket-file"),
+    )
+
+    class FakeElement:
+        async def click(self, **_kwargs):
+            raise AssertionError("file input should not be clicked before approval")
+
+    class FakePage:
+        async def get_elements_by_css_selector(self, _selector):
+            return [FakeElement()]
+
+        async def evaluate(self, _script, *_args):
+            return json.dumps({"tag": "input", "type": "file", "text": "Upload"})
+
+    class FakeManager:
+        async def ensure_browser(self, mode="auto", profile_directory=""):
+            return SimpleNamespace()
+
+        async def get_page(self, **_kwargs):
+            return FakePage()
+
+        async def tabs(self):
+            return []
+
+    result = json.loads(asyncio.run(browser_click(FakeManager(), selector="#upload")))
+
+    assert result["status"] == "pending_approval"
+    assert result["reason_code"] == "browser_file_chooser_approval_required"
+    assert created[0]["tool_name"] == "browser_click"
+    assert created[0]["action_type"] == "browser_file_upload"
+
+
+def test_browser_click_download_link_requires_approval(monkeypatch):
+    created = []
+
+    monkeypatch.setattr(browser_tools_module, "current_interactive", lambda: True)
+    monkeypatch.setattr(
+        browser_tools_module,
+        "create_ticket",
+        lambda **kwargs: created.append(kwargs) or SimpleNamespace(id="ticket-download"),
+    )
+
+    class FakeElement:
+        async def click(self, **_kwargs):
+            raise AssertionError("download link should not be clicked before approval")
+
+    class FakePage:
+        async def get_elements_by_css_selector(self, _selector):
+            return [FakeElement()]
+
+        async def evaluate(self, _script, *_args):
+            return json.dumps(
+                {
+                    "tag": "a",
+                    "role": "link",
+                    "href": "https://example.com/report.pdf",
+                    "text": "Download report",
+                }
+            )
+
+    class FakeManager:
+        async def ensure_browser(self, mode="auto", profile_directory=""):
+            return SimpleNamespace()
+
+        async def get_page(self, **_kwargs):
+            return FakePage()
+
+        async def tabs(self):
+            return []
+
+    result = json.loads(asyncio.run(browser_click(FakeManager(), selector="#report")))
+
+    assert result["status"] == "pending_approval"
+    assert result["reason_code"] == "browser_download_approval_required"
+    assert created[0]["tool_name"] == "browser_click"
+    assert created[0]["target_path"] == "https://example.com/report.pdf"
+
+
+def test_browser_type_file_input_requires_approval(monkeypatch):
+    created = []
+
+    monkeypatch.setattr(browser_tools_module, "current_interactive", lambda: True)
+    monkeypatch.setattr(
+        browser_tools_module,
+        "create_ticket",
+        lambda **kwargs: created.append(kwargs) or SimpleNamespace(id="ticket-type-file"),
+    )
+
+    class FakeElement:
+        async def fill(self, *_args, **_kwargs):
+            raise AssertionError("file input should not be filled before approval")
+
+    class FakePage:
+        async def get_elements_by_css_selector(self, _selector):
+            return [FakeElement()]
+
+        async def evaluate(self, _script, *_args):
+            return json.dumps({"tag": "input", "type": "file", "text": "Choose file"})
+
+    class FakeManager:
+        async def ensure_browser(self, mode="auto", profile_directory=""):
+            return SimpleNamespace()
+
+        async def get_page(self, **_kwargs):
+            return FakePage()
+
+    result = json.loads(asyncio.run(browser_type(FakeManager(), text="C:/secret.txt", selector="#upload")))
+
+    assert result["status"] == "pending_approval"
+    assert result["reason_code"] == "browser_file_chooser_approval_required"
+    assert created[0]["tool_name"] == "browser_type"
+    assert created[0]["action_type"] == "browser_file_upload"
+
+
+def test_browser_downloads_clear_requires_approval(monkeypatch, tmp_path):
+    created = []
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    kept = downloads / "report.csv"
+    kept.write_text("data")
+
+    monkeypatch.setattr(browser_tools_module, "current_interactive", lambda: True)
+    monkeypatch.setattr(
+        browser_tools_module,
+        "create_ticket",
+        lambda **kwargs: created.append(kwargs) or SimpleNamespace(id="ticket-clear-downloads"),
+    )
+
+    manager = SimpleNamespace(config={"downloads_dir": str(downloads)})
+
+    result = json.loads(asyncio.run(browser_tools_module.browser_downloads(manager, action="clear")))
+
+    assert result["status"] == "pending_approval"
+    assert result["reason_code"] == "browser_downloads_clear_approval_required"
+    assert kept.exists()
+    assert created[0]["tool_name"] == "browser_downloads"
 
 
 def test_browser_scroll_awaits_async_page_mouse_property():
@@ -1350,3 +1557,34 @@ def test_wait_for_cdp_endpoint_bails_when_process_exits(monkeypatch):
 
     assert resolved == ""
     assert probe_calls == []
+
+
+
+def test_browser_navigate_blocks_non_interactive_without_allowed_domains(monkeypatch):
+    monkeypatch.setattr(browser_tools_module, "current_interactive", lambda: False)
+
+    class FakeManager:
+        config = {"allowed_domains": []}
+
+        async def get_page(self, *args, **kwargs):
+            raise AssertionError("navigation should be blocked before opening a page")
+
+    result = json.loads(asyncio.run(browser_navigate(FakeManager(), "https://example.com")))
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "non_interactive_domain_policy_required"
+
+
+def test_browser_open_rejects_external_protocol_before_session_start(monkeypatch):
+    monkeypatch.setattr(browser_tools_module, "current_interactive", lambda: True)
+
+    class FakeManager:
+        config = {"allowed_domains": []}
+
+        async def ensure_browser(self, *args, **kwargs):
+            raise AssertionError("invalid URL should be rejected before browser startup")
+
+    result = json.loads(asyncio.run(browser_tools_module.browser_open(FakeManager(), "file:///C:/Windows/win.ini")))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "invalid_url"

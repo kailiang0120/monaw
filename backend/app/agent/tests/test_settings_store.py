@@ -23,6 +23,7 @@ from app.agent.settings_store import (
     load_agent_settings,
     merge_agent_settings,
     save_agent_settings,
+    settings_version,
 )
 from app.agent.runtime_paths import MONAW_HOME_DIR
 
@@ -288,7 +289,7 @@ def test_default_skills_use_recommended_profile():
         "computer-use": True,
         "filesystem": True,
         "memory": True,
-        "skill-creator": True,
+        "skill-creator": False,
         "background-check": False,
         "browser-use": True,
     }
@@ -346,7 +347,7 @@ def test_load_settings_preserves_legacy_skill_defaults_when_keys_are_missing(tmp
         "computer-use": True,
         "filesystem": True,
         "memory": True,
-        "skill-creator": True,
+        "skill-creator": False,
         "background-check": False,
         "browser-use": True,
     }
@@ -476,6 +477,14 @@ def test_api_payload_exposes_key_status_without_secret_values():
     assert payload["telegram_allowed_user_ids"] == "123456789"
     assert "secret-google-key" not in json.dumps(payload)
     assert "secret-deepseek-key" not in json.dumps(payload)
+    assert payload["settings_version"] == settings_version(AgentSettings())
+
+
+def test_settings_version_changes_when_persisted_settings_change():
+    current = AgentSettings()
+    updated = merge_agent_settings(current, {"identity": {"user_name": "Kai"}})
+
+    assert settings_version(current) != settings_version(updated)
 
 
 def test_runtime_namespace_uses_settings_json_values():

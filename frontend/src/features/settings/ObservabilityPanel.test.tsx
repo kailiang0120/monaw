@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ObservabilityPanel } from './ObservabilityPanel'
 import {
+  deleteRuntimeData,
   fetchBackendLogTail,
   fetchObservabilityErrors,
   fetchObservabilityRun,
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   fetchBackendLogTail: vi.fn(),
   replayObservabilityRun: vi.fn(),
   exportObservabilityDebugBundle: vi.fn(),
+  deleteRuntimeData: vi.fn(),
 }))
 
 vi.mock('../../lib/api/diagnostics', () => mocks)
@@ -37,6 +39,9 @@ const summary = {
   top_error_reasons: [{ reason: 'repeat_guard', count: 1 }],
   top_failing_tools: [{ tool_name: 'browser_click', count: 1 }],
   model_usage: [{ provider: 'openai', model: 'gpt-test', runs: 2, tokens: 1234 }],
+  storage_metrics: { total_bytes: 2048 },
+  runtime_metrics: { dropped_events: 0 },
+  field_classification: {},
 }
 
 const run = {
@@ -109,6 +114,11 @@ describe('ObservabilityPanel', () => {
       lines: ['backend ready'],
       truncated: false,
     })
+    vi.mocked(deleteRuntimeData).mockResolvedValue({
+      ok: true,
+      deleted: { observability_runs: 1, memory_files_deleted: 2 },
+      deleted_at: '2026-05-23T00:00:02Z',
+    })
   })
 
   afterEach(() => {
@@ -124,7 +134,7 @@ describe('ObservabilityPanel', () => {
     fireEvent.click(await screen.findByText('Check AMD'))
 
     await waitFor(() => {
-      expect(fetchObservabilityRun).toHaveBeenCalledWith(run.run_id)
+      expect(fetchObservabilityRun).toHaveBeenCalledWith(run.run_id, expect.any(AbortSignal))
     })
     expect(await screen.findByText('Timeline')).toBeInTheDocument()
     expect(screen.getByText('tool_call_finished')).toBeInTheDocument()
@@ -140,14 +150,34 @@ describe('ObservabilityPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Errors' }))
 
     await waitFor(() => {
-      expect(fetchObservabilityErrors).toHaveBeenCalledWith({ q: '', limit: 100 })
+      expect(fetchObservabilityErrors).toHaveBeenCalledWith({
+        q: '',
+        limit: 100,
+        signal: expect.any(AbortSignal),
+      })
     })
 
     vi.clearAllMocks()
     fireEvent.click(screen.getByRole('button', { name: 'Backend log' }))
 
     await waitFor(() => {
-      expect(fetchBackendLogTail).toHaveBeenCalledWith(500)
+      expect(fetchBackendLogTail).toHaveBeenCalledWith(500, expect.any(AbortSignal))
     })
+  })
+
+  it('confirms and deletes runtime data', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<ObservabilityPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete Data' }))
+
+    await waitFor(() => {
+      expect(deleteRuntimeData).toHaveBeenCalled()
+    })
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(await screen.findByText('Runtime data deleted across 3 stored items.')).toBeInTheDocument()
+
+    confirmSpy.mockRestore()
   })
 })

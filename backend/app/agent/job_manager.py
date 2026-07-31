@@ -12,16 +12,29 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import AsyncIterator
 
 MAX_LOG_EVENTS = 2000
+MAX_SUBSCRIBER_QUEUE_EVENTS = 512
+
+
+class RunState(str, Enum):
+    RUNNING = "running"
+    DONE = "done"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+
+
+_TERMINAL_RUN_STATES = {RunState.DONE, RunState.PAUSED, RunState.CANCELLED, RunState.ERROR}
 
 
 @dataclass
 class JobState:
     job_id: str
     conversation_id: str
-    status: str = "running"  # "running" | "done" | "paused" | "cancelled" | "error"
+    status: RunState = RunState.RUNNING
     started_at: float = field(default_factory=time.time)
     workflow_engine: str = ""
     active_graph_node: str = ""
@@ -31,6 +44,7 @@ class JobState:
     event_log: list[tuple[int, dict]] = field(default_factory=list)
     _seq: int = 0
     _task: asyncio.Task | None = None
+    dropped_subscriber_events: int = 0
     _subscribers: list[asyncio.Queue] = field(default_factory=list)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -55,17 +69,23 @@ class JobState:
                 try:
                     q.put_nowait(entry)
                 except asyncio.QueueFull:
-                    pass
+                    self.dropped_subscriber_events += 1
         if event.get("event") in ("done", "error"):
             if event.get("event") == "done":
                 event_data = event.get("data", {})
-                self.status = "paused" if isinstance(event_data, dict) and event_data.get("incomplete") else "done"
+                self.transition(RunState.PAUSED if isinstance(event_data, dict) and event_data.get("incomplete") else RunState.DONE)
             else:
-                self.status = "error"
+                self.transition(RunState.ERROR)
+
+    def transition(self, next_state: RunState | str) -> None:
+        state = next_state if isinstance(next_state, RunState) else RunState(str(next_state))
+        if self.status in _TERMINAL_RUN_STATES and self.status != state:
+            return
+        self.status = state
 
     async def subscribe(self, last_event_id: int | None = None) -> AsyncIterator[tuple[int, dict]]:
         """Yield (seq_id, event) starting from last_event_id+1, then live."""
-        q: asyncio.Queue = asyncio.Queue(maxsize=512)
+        q: asyncio.Queue = asyncio.Queue(maxsize=MAX_SUBSCRIBER_QUEUE_EVENTS)
 
         async with self._lock:
             # Replay buffered events after last_event_id
@@ -84,7 +104,7 @@ class JobState:
             for entry in replay:
                 yield entry
 
-            if self.status != "running":
+            if self.status != RunState.RUNNING:
                 return
 
             while True:
@@ -128,6 +148,13 @@ async def run_job(
     job: JobState,
     message: str,
     settings,
+    *,
+    attachments: list[dict] | None = None,
+    control_session_id: str = "",
+    execution_source: str = "desktop",
+    principal_id: str = "",
+    permission_profile_id: str = "",
+    interactive: bool = True,
 ) -> None:
     """Run the agent loop for a job, feeding all events into the job's ring buffer."""
     from app.agent.runtime import run_agent_stream
@@ -138,12 +165,18 @@ async def run_job(
                 message=message,
                 conversation_id=job.conversation_id,
                 settings=settings,
+                attachments=attachments,
+                control_session_id=control_session_id,
+                execution_source=execution_source,
+                principal_id=principal_id,
+                permission_profile_id=permission_profile_id,
+                interactive=interactive,
             ):
                 await job.append_event(event)
                 if event.get("event") == "done":
                     break
         except asyncio.CancelledError:
-            job.status = "cancelled"
+            job.transition(RunState.CANCELLED)
             await job.append_event({
                 "event": "error",
                 "data": {"code": "cancelled", "message": "Job was cancelled."},
@@ -153,7 +186,7 @@ async def run_job(
                 "data": {"conversation_id": job.conversation_id, "summary": "Cancelled."},
             })
         except Exception as exc:
-            job.status = "error"
+            job.transition(RunState.ERROR)
             await job.append_event({
                 "event": "error",
                 "data": {"code": "internal_error", "message": str(exc)},

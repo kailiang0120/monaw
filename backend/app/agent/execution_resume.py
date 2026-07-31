@@ -9,11 +9,18 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from app.agent.run_context import (
+    current_control_session_id,
+    current_conversation_id,
+    current_execution_source,
+)
+
 from app.agent.approval_broker import (
     ApprovalTicket,
     TicketStatus,
     mark_applied,
     mark_failed,
+    ticket_validation_error,
 )
 
 # Registry: tool_name -> callable that accepts the original input string
@@ -34,9 +41,15 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
     if ticket.status != TicketStatus.APPROVED:
         return ticket
 
-    current_hash = ticket.compute_hash()
-    if current_hash != ticket.payload_hash:
-        mark_failed(ticket.id, error="Payload hash mismatch – ticket invalidated")
+    validation_error = ticket_validation_error(
+        ticket,
+        expected_session_id=current_control_session_id(),
+        expected_conversation_id=current_conversation_id(),
+        expected_execution_source=current_execution_source(),
+        require_approved=True,
+    )
+    if validation_error:
+        mark_failed(ticket.id, error=f"Approval invalidated: {validation_error}")
         return ticket
 
     executor = _EXECUTORS.get(ticket.tool_name)

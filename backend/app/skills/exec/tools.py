@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 from app.agent.access_grant_broker import create_grant_ticket
@@ -74,6 +75,8 @@ def _sandbox_metadata(decision: SandboxDecision, workdir: str) -> dict[str, Any]
     return {
         "enabled": decision.required or decision.mode not in {"off", "disabled"},
         "mode": decision.mode,
+        "trust_class": decision.trust_class,
+        "required_isolation": decision.required_isolation,
         "profile": decision.profile,
         "backend": backend,
         "selected_backend": backend,
@@ -81,6 +84,8 @@ def _sandbox_metadata(decision: SandboxDecision, workdir: str) -> dict[str, Any]
         "network": decision.network,
         "network_enforcement": decision.network_enforcement,
         "write_strategy": decision.write_strategy,
+        "filesystem_policy": decision.filesystem_policy,
+        "explicit_approval_required": decision.explicit_approval_required,
         "reason": decision.reason,
         "reason_code": decision.reason_code,
         "workdir": workdir,
@@ -204,6 +209,7 @@ def _permission_check(
     workdir: str,
     env: dict[str, str] | None,
     sandbox: dict[str, Any],
+    host_approval_required: bool = False,
     timeout: int = 60,
     host: str = "local",
     elevated: bool = False,
@@ -226,10 +232,20 @@ def _permission_check(
         )
     if decision.requires_access_grant:
         return _pending_access_grant(workdir)
-    if decision.requires_confirmation and not bypass_confirmation:
+    if (decision.requires_confirmation or host_approval_required) and not bypass_confirmation:
+        if host_approval_required:
+            decision = SimpleNamespace(
+                reason="This command will run on the host without strong isolation.",
+                reason_code="host_execution_approval_required",
+                policy_source="sandbox_policy",
+            )
         return _pending_approval(
             decision,
-            f"Execute command in {workdir}: {command[:120]}",
+            (
+                f"Approve host execution in {workdir}: {command[:120]}"
+                if host_approval_required
+                else f"Execute command in {workdir}: {command[:120]}"
+            ),
             {
                 "tool_name": tool_name,
                 "command": command,
@@ -304,6 +320,7 @@ def exec_tool(
         workdir=effective_workdir,
         env=env,
         sandbox=sandbox_meta,
+        host_approval_required=decision.explicit_approval_required,
         timeout=timeout,
         host=host,
         elevated=elevated,
@@ -345,7 +362,11 @@ def exec_tool(
             "sandbox_profile": result.sandbox.get("profile"),
             "sandbox_mode": result.sandbox.get("mode"),
             "sandbox_security_label": result.sandbox.get("security_label"),
+            "sandbox_trust_class": result.sandbox.get("trust_class"),
+            "sandbox_required_isolation": result.sandbox.get("required_isolation"),
             "sandbox_network": result.sandbox.get("network"),
+            "sandbox_network_enforcement": result.sandbox.get("network_enforcement"),
+            "sandbox_filesystem_policy": result.sandbox.get("filesystem_policy"),
             "env_inheritance": result.sandbox.get("env_inheritance"),
             "env_keys": result.sandbox.get("env_keys", []),
             "explicit_env_keys": sanitized_env.explicit_keys,
@@ -399,6 +420,7 @@ def exec_start(
         workdir=effective_workdir,
         env=env,
         sandbox=sandbox_meta,
+        host_approval_required=decision.explicit_approval_required,
         timeout=0,
         host=host,
         elevated=elevated,

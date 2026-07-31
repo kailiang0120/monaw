@@ -2029,7 +2029,10 @@ def _ctrl_list_processes(filter_name: str = "") -> str:
         return json.dumps({"status": "ok", "count": len(results), "processes": results[:50]})
 
     except ImportError:
-        return json.dumps({"status": "error", "error": "psutil not installed. Run: pip install psutil"})
+        return json.dumps({
+            "status": "error",
+            "error": "psutil not installed. Run `uv sync --locked` from the backend directory.",
+        })
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -2065,7 +2068,10 @@ def _ctrl_screenshot_region(x: int, y: int, width: int, height: int) -> str:
         })
 
     except ImportError:
-        return json.dumps({"status": "error", "error": "mss not installed. Run: pip install mss"})
+        return json.dumps({
+            "status": "error",
+            "error": "mss not installed. Run `uv sync --locked` from the backend directory.",
+        })
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 

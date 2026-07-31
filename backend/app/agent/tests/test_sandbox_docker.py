@@ -34,6 +34,7 @@ def _docker_image_available(image: str) -> bool:
 
 def test_docker_command_defaults_to_hardened_flags():
     settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
     request = _request("python -c \"print('ok')\"")
     request.shell = "bash"
 
@@ -53,6 +54,7 @@ def test_docker_command_defaults_to_hardened_flags():
 
 def test_docker_command_does_not_mount_host_paths_by_default():
     settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
     request = _request("echo ok")
     request.shell = "bash"
     command = DockerRunner(settings.sandbox).docker_command(request)
@@ -64,6 +66,7 @@ def test_docker_command_does_not_mount_host_paths_by_default():
 
 def test_docker_command_honors_configured_pull_and_hardening_flags():
     settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
     settings.sandbox.docker.pull_policy = "never"
     settings.sandbox.docker.read_only_root = False
     settings.sandbox.docker.no_new_privileges = False
@@ -77,15 +80,16 @@ def test_docker_command_honors_configured_pull_and_hardening_flags():
     assert "no-new-privileges" not in command
 
 
-def test_auto_mode_does_not_select_docker_without_policy_request(monkeypatch):
+def test_auto_mode_selects_docker_when_strong_backend_is_available(monkeypatch):
     settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
     manager = SandboxManager(settings.sandbox, capabilities=_capabilities(docker=True, local=True))
 
-    monkeypatch.setattr(manager.local_restricted, "is_available", lambda: True)
-    monkeypatch.setattr(manager.local_restricted, "run", lambda request: manager._blocked_result(
+    monkeypatch.setattr(manager.docker, "is_available", lambda: True)
+    monkeypatch.setattr(manager.docker, "run", lambda request: manager._blocked_result(
         request,
-        backend="local_restricted",
-        reason="fake local restricted selected",
+        backend="docker",
+        reason="fake docker selected",
         reason_code="fake_selected",
     ))
 
@@ -93,11 +97,12 @@ def test_auto_mode_does_not_select_docker_without_policy_request(monkeypatch):
 
     assert result.status == "blocked"
     assert result.reason_code == "fake_selected"
-    assert result.sandbox["selected_backend"] == "local_restricted"
+    assert result.sandbox["selected_backend"] == "docker"
 
 
 def test_enforce_mode_allows_docker_when_available(monkeypatch):
     settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
     settings.sandbox.mode = "enforce"
     manager = SandboxManager(settings.sandbox, capabilities=_capabilities(docker=True, local=True))
 
@@ -118,6 +123,7 @@ def test_enforce_mode_allows_docker_when_available(monkeypatch):
 
 def test_docker_runner_blocks_unsupported_shell():
     settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
     request = _request("Write-Output ok")
     request.backend = "docker"
     request.shell = "powershell"
@@ -131,6 +137,7 @@ def test_docker_runner_blocks_unsupported_shell():
 
 def test_docker_timeout_removes_named_container(monkeypatch):
     settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
     runner = DockerRunner(settings.sandbox)
     request = _request("sleep 5")
     request.shell = "bash"
@@ -163,6 +170,7 @@ def test_docker_timeout_removes_named_container(monkeypatch):
 )
 def test_docker_integration_executes_simple_command_when_available():
     settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
     runner = DockerRunner(settings.sandbox)
     request = _request("python -c \"print('ok')\"")
     request.shell = "bash"

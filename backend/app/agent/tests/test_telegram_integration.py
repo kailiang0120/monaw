@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import BadRequest
 
+from app.agent import response_attachments as attachments_module
 from app.agent.llm_constants import DEEPSEEK_CHAT_MODELS, OPENAI_CHAT_MODELS
 from app.agent.response_attachments import collect_response_attachments, resolve_attachment_path
 from app.agent.speech_to_text import (
@@ -232,7 +233,8 @@ def test_simplify_telegram_text_removes_markdown_formatting():
     assert "](" not in text
 
 
-def test_telegram_agent_bridge_returns_simplified_reply_but_keeps_attachment_detection():
+def test_telegram_agent_bridge_returns_simplified_reply_but_keeps_attachment_detection(monkeypatch):
+    monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
     tmp_dir = _workspace_tmp_dir("telegram-plain-reply")
     try:
         output_path = tmp_dir / "report.md"
@@ -260,7 +262,8 @@ def test_telegram_agent_bridge_returns_simplified_reply_but_keeps_attachment_det
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def test_telegram_agent_bridge_reuses_chat_session():
+def test_telegram_agent_bridge_reuses_chat_session(monkeypatch):
+    monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
     tmp_dir = _workspace_tmp_dir("telegram-agent-bridge")
     try:
         calls = []
@@ -295,6 +298,11 @@ def test_telegram_agent_bridge_reuses_chat_session():
         assert first.conversation_id == second.conversation_id
         assert [call["conversation_id"] for call in calls] == [first.conversation_id, first.conversation_id]
         assert [call["message"] for call in calls] == ["Hello", "Continue"]
+        assert calls[0]["execution_source"] == "telegram"
+        assert calls[0]["control_session_id"] == "telegram"
+        assert calls[0]["principal_id"] == "telegram:12345:unknown"
+        assert calls[0]["permission_profile_id"] == "telegram:12345:restricted"
+        assert calls[0]["interactive"] is False
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -765,7 +773,8 @@ def test_telegram_permission_callback_resumes_access_grant(monkeypatch):
     assert any(call[0] == "edit" and "Granted session for ticket grant-1" in call[1] for call in calls)
 
 
-def test_collect_response_attachments_from_tool_output():
+def test_collect_response_attachments_from_tool_output(monkeypatch):
+    monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
     tmp_dir = _workspace_tmp_dir("telegram-attachments")
     try:
         image_path = tmp_dir / "result image.png"
@@ -849,7 +858,23 @@ def test_prepare_telegram_message_input_downloads_photo_and_document(monkeypatch
                 return TelegramFile({"photo-large": b"jpg", "doc-1": b"pdf"}[file_id])
 
         monkeypatch.setattr(telegram_bridge, "runtime_path", lambda *parts: tmp_dir.joinpath(*parts))
-        monkeypatch.setattr(telegram_bridge, "register_attachment_path", lambda _id, _path: None)
+        def fake_register(attachment_id, path, **kwargs):
+            return SimpleNamespace(
+                id=attachment_id,
+                path=str(path),
+                name=Path(path).name,
+                mime_type=kwargs.get("mime_type") or "application/octet-stream",
+                size=Path(path).stat().st_size,
+                width=kwargs.get("width"),
+                height=kwargs.get("height"),
+                control_session_id=kwargs.get("control_session_id", ""),
+                principal_id=kwargs.get("principal_id", ""),
+                conversation_id=kwargs.get("conversation_id", ""),
+                created_at=0.0,
+                expires_at=9999999999.0,
+            )
+
+        monkeypatch.setattr(telegram_bridge, "register_attachment_path", fake_register)
 
         message = SimpleNamespace(
             text="",
@@ -876,6 +901,8 @@ def test_prepare_telegram_message_input_downloads_photo_and_document(monkeypatch
 
         assert prepared.text.startswith("Please inspect these")
         assert "Uploaded file(s):" in prepared.text
+        assert "attachment://" in prepared.text
+        assert str(tmp_dir) not in prepared.text
         assert [attachment["mime_type"] for attachment in prepared.attachments] == [
             "image/jpeg",
             "application/pdf",
@@ -1122,5 +1149,36 @@ def test_telegram_handler_reports_delivery_failure(monkeypatch):
                 "text": "The agent finished, but Telegram delivery failed: telegram send failed",
             },
         ) in calls
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+
+def test_telegram_agent_bridge_rate_limits_per_user():
+    tmp_dir = _workspace_tmp_dir("telegram-rate-limit")
+    try:
+        calls = []
+
+        async def fake_runner(**kwargs):
+            calls.append(kwargs)
+            yield {"event": "done", "data": {"summary": "Reply", "status": "complete"}}
+
+        bridge = TelegramAgentBridge(
+            session_store=TelegramSessionStore(tmp_dir / "sessions.json"),
+            settings_factory=lambda: object(),
+            runner=fake_runner,
+            initialize_conversation=lambda _conv_id, _title: None,
+        )
+        bridge._user_rate_limit = 1
+        bridge._chat_rate_limit = 10
+        bridge._rate_limit_window_seconds = 60
+
+        first = asyncio.run(bridge.run_chat_message(chat_id=12345, sender_name="kai", text="one"))
+        second = asyncio.run(bridge.run_chat_message(chat_id=12345, sender_name="kai", text="two"))
+
+        assert first.status == "complete"
+        assert second.status == "blocked"
+        assert second.reason_code == "telegram_user_rate_limited"
+        assert len(calls) == 1
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
