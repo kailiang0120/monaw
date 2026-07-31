@@ -3,7 +3,7 @@
 This file is generated from FastAPI route definitions. Update it with:
 
 ```powershell
-python scripts/generate-api-docs.py
+uv run --project backend python scripts/generate-api-docs.py
 ```
 
 The backend API is a privileged local control plane. All `/api` routes

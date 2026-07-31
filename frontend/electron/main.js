@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme, safeStorage } = require('electron')
 const path = require('path')
 const os = require('os')
-const { spawn } = require('child_process')
+const { spawn, spawnSync } = require('child_process')
 const http = require('http')
 const fs = require('fs')
 const { fileURLToPath } = require('url')
@@ -33,7 +33,7 @@ const APP_THEME_COLORS = {
 
 let mainWindow = null
 let backendProcess = null
-let backendPythonCommand = null
+let backendUvCommand = null
 let appQuitting = false
 
 function getBackendPath() {
@@ -113,18 +113,17 @@ function spawnBackend() {
   fs.mkdirSync(workspaceDir, { recursive: true })
 
   const backendDir = getBackendPath()
-  const cmd = backendPythonCommand || (process.platform === 'win32' ? 'python' : 'python3')
+  const cmd = backendUvCommand || 'uv'
 
-  console.log('[main] Spawning Python backend from', backendDir, 'with', cmd)
+  console.log('[main] Spawning backend from', backendDir, 'with', cmd)
 
   const proc = spawn(
     cmd,
-    ['-m', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)],
+    ['run', '--locked', '--no-dev', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)],
     {
       cwd: backendDir,
       env: {
         ...process.env,
-        BACKEND_PYTHON_COMMAND: cmd,
         MONAW_CONTROL_SECRET: CONTROL_SECRET,
         MONAW_ALLOW_DEVELOPMENT_TOKEN: '0',
         CORS_ALLOW_ORIGINS: isDev
@@ -163,45 +162,44 @@ function runCommandAndCapture(cmd, args, options = {}) {
   })
 }
 
-function resolvePythonCandidates() {
+function resolveUvCandidates() {
   const candidates = []
-  if (process.env.AGENT_PYTHON_PATH) candidates.push(process.env.AGENT_PYTHON_PATH)
-  if (process.env.PYTHON_PATH) candidates.push(process.env.PYTHON_PATH)
-
-  const backendDir = getBackendPath()
-  const venvWin = path.join(backendDir, '.venv', 'Scripts', 'python.exe')
-  const venvUnix = path.join(backendDir, '.venv', 'bin', 'python')
-  if (fs.existsSync(venvWin)) candidates.push(venvWin)
-  if (fs.existsSync(venvUnix)) candidates.push(venvUnix)
-
-  if (process.platform === 'win32') {
-    candidates.push('python')
-    candidates.push('py')
-  } else {
-    candidates.push('python3')
-    candidates.push('python')
-  }
+  if (process.env.AGENT_UV_PATH) candidates.push(process.env.AGENT_UV_PATH)
+  candidates.push(process.platform === 'win32' ? 'uv.exe' : 'uv')
   return [...new Set(candidates)]
 }
 
-async function pickBackendPython() {
-  for (const candidate of resolvePythonCandidates()) {
-    const args = candidate === 'py' ? ['-3', '--version'] : ['--version']
-    const result = await runCommandAndCapture(candidate, args)
+async function pickBackendUv() {
+  for (const candidate of resolveUvCandidates()) {
+    const result = await runCommandAndCapture(candidate, ['--version'])
     if (result.ok) return candidate
   }
-  return process.platform === 'win32' ? 'python' : 'python3'
+  return process.platform === 'win32' ? 'uv.exe' : 'uv'
 }
 
 function killBackend() {
   if (!backendProcess) return
   const proc = backendProcess
+  backendProcess = null
   if (process.platform === 'win32') {
-    spawn('taskkill', ['/pid', String(proc.pid), '/f', '/t'])
+    const result = spawnSync(
+      'taskkill',
+      ['/pid', String(proc.pid), '/t', '/f'],
+      {
+        windowsHide: true,
+        stdio: 'ignore',
+      },
+    )
+    if (result.error || result.status !== 0) {
+      try {
+        proc.kill()
+      } catch {
+        // The backend may have exited between the check and taskkill.
+      }
+    }
   } else {
     proc.kill('SIGTERM')
   }
-  backendProcess = null
 }
 
 function waitForBackend(retries = 30, delay = 1000) {
@@ -438,6 +436,7 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       devTools: isDev && process.env.MONAW_DEVTOOLS === '1',
+      additionalArguments: [`--monaw-backend-base-url=${BACKEND_BASE_URL}`],
     },
   })
 
@@ -466,9 +465,7 @@ function createWindow() {
 app.whenReady().then(async () => {
   installContentSecurityPolicy()
   installMediaPermissionHandler()
-  if (isDev) {
-    backendPythonCommand = await pickBackendPython()
-  }
+  backendUvCommand = await pickBackendUv()
   spawnBackend()
   createWindow()
 
@@ -482,9 +479,9 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
+  appQuitting = true
   killBackend()
   if (process.platform !== 'darwin') {
-    appQuitting = true
     app.quit()
   }
 })

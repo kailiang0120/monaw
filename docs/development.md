@@ -6,6 +6,7 @@ This document is for contributors and maintainers. The root README is for end us
 
 - Frontend: Electron, React, Vite, TypeScript, Tailwind CSS.
 - Backend: FastAPI, Uvicorn, Pydantic.
+- Python environment and dependencies: `uv`, `pyproject.toml`, and `uv.lock`.
 - LLM providers: OpenAI SDK, Google GenAI SDK, DeepSeek through an OpenAI-compatible API.
 - Storage: SQLite plus local markdown memory files.
 - Automation: `browser-use`, MCP, and Windows desktop automation packages.
@@ -40,7 +41,7 @@ Run only the backend:
 ```powershell
 cd backend
 $env:MONAW_CONTROL_SECRET = 'replace-with-at-least-32-random-characters'
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8435 --reload
+uv run --locked uvicorn app.main:app --host 127.0.0.1 --port 8435 --reload
 ```
 
 Health check:
@@ -84,6 +85,11 @@ entered in that mode are sent directly to the authenticated backend for the
 current process and should be treated as development-only configuration.
 
 Frontend npm commands must run from `frontend`, not the repo root.
+
+Backend dependency commands must run from `backend`. Use `uv add <package>` to
+add a runtime dependency, `uv add --dev <package>` to add a development
+dependency, and commit both `pyproject.toml` and `uv.lock`. Use
+`uv sync --locked` when reproducing a committed environment.
 
 ## Related Module Docs
 

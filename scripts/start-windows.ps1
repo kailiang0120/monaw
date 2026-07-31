@@ -20,6 +20,15 @@ $launcherLogDir = Join-Path $runtimeDir 'launcher'
 
 New-Item -ItemType Directory -Force -Path $launcherLogDir | Out-Null
 
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$env:Path = @($machinePath, $userPath, $env:Path) -join ';'
+
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+  Write-Host "[ERROR] uv is required. Run setup.bat first."
+  exit 1
+}
+
 function Get-JsonValueOrDefault {
   param(
     [Parameter(Mandatory = $true)] [object] $Object,
@@ -111,7 +120,7 @@ function Assert-RuntimeDirectory {
   }
   $probe = Join-Path $Path ('.startup-check-{0}.tmp' -f ([guid]::NewGuid().ToString('N')))
   try {
-    Set-Content -LiteralPath $probe -Value 'ok' -Encoding utf8NoBOM
+    Set-Content -LiteralPath $probe -Value 'ok' -Encoding UTF8
     if ((Get-Content -Raw -LiteralPath $probe) -notmatch '^ok') {
       throw 'Runtime directory write verification failed.'
     }

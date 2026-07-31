@@ -3,8 +3,6 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendDir = Join-Path $repoRoot 'backend'
 $frontendDir = Join-Path $repoRoot 'frontend'
-$venvDir = Join-Path $backendDir '.venv'
-$venvPython = Join-Path $venvDir 'Scripts\python.exe'
 $monawHome = if ($env:MONAW_HOME) {
   $env:MONAW_HOME
 } elseif ($env:AGENT_HOME) {
@@ -45,10 +43,16 @@ function Invoke-LoggedCommand {
   "[$(Get-Date -Format o)] > $FilePath $($ArgumentList -join ' ')" | Add-Content -Path $setupLog
 
   Push-Location $WorkingDirectory
+  $previousErrorActionPreference = $ErrorActionPreference
   try {
+    # Native tools such as uv write normal progress messages to stderr.
+    # Windows PowerShell turns redirected native stderr into ErrorRecord
+    # objects, which must not become terminating errors when the process exits 0.
+    $ErrorActionPreference = 'Continue'
     $output = & $FilePath @ArgumentList 2>&1
     $exitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
   } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
     Pop-Location
   }
 
@@ -62,34 +66,39 @@ function Invoke-LoggedCommand {
   }
 }
 
-function Test-PythonCommand {
-  param(
-    [Parameter(Mandatory = $true)] [string] $Command,
-    [string[]] $PrefixArgs = @()
+function Assert-MonawStopped {
+  $escapedRepoRoot = [regex]::Escape($repoRoot)
+  $blockingProcesses = @(
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object {
+        $_.Name -in @('electron.exe', 'node.exe', 'npm.exe', 'uv.exe', 'uvicorn.exe', 'python.exe') -and
+        $_.CommandLine -and
+        $_.CommandLine -match $escapedRepoRoot
+      }
   )
 
-  try {
-    & $Command @PrefixArgs -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
-    return $LASTEXITCODE -eq 0
-  } catch {
-    return $false
-  }
-}
+  $blockingPorts = @(
+    Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+      Where-Object { $_.LocalPort -in @(5275, 8420) }
+  )
 
-function Resolve-Python {
-  if (Test-Path $venvPython) {
-    return [pscustomobject]@{ Command = $venvPython; Args = @(); Display = $venvPython }
+  if ($blockingProcesses.Count -eq 0 -and $blockingPorts.Count -eq 0) {
+    return
   }
-  if (Test-PythonCommand -Command 'py' -PrefixArgs @('-3.11')) {
-    return [pscustomobject]@{ Command = 'py'; Args = @('-3.11'); Display = 'py -3.11' }
+
+  $details = @()
+  if ($blockingProcesses.Count -gt 0) {
+    $processDetails = $blockingProcesses |
+      ForEach-Object { "$($_.Name) (PID $($_.ProcessId))" }
+    $details += "processes: $($processDetails -join ', ')"
   }
-  if (Test-PythonCommand -Command 'py' -PrefixArgs @('-3')) {
-    return [pscustomobject]@{ Command = 'py'; Args = @('-3'); Display = 'py -3' }
+  if ($blockingPorts.Count -gt 0) {
+    $portDetails = $blockingPorts |
+      ForEach-Object { "$($_.LocalPort) (PID $($_.OwningProcess))" }
+    $details += "ports: $($portDetails -join ', ')"
   }
-  if (Test-PythonCommand -Command 'python') {
-    return [pscustomobject]@{ Command = 'python'; Args = @(); Display = 'python' }
-  }
-  return $null
+
+  throw "Monaw appears to be running ($($details -join '; ')). Close Monaw and its launcher, then run setup.bat again."
 }
 
 function Install-WithWinget {
@@ -118,21 +127,19 @@ function Install-WithWinget {
   Update-ProcessPath
 }
 
-function Ensure-Python {
-  Write-Step "Checking Python"
-  $python = Resolve-Python
-  if ($python) {
-    Write-Host "Using Python: $($python.Display)"
-    return $python
+function Ensure-Uv {
+  Write-Step "Checking uv"
+  Update-ProcessPath
+  $uv = Get-Command uv -ErrorAction SilentlyContinue
+  if (-not $uv) {
+    Install-WithWinget -PackageId 'astral-sh.uv' -Name 'uv'
+    $uv = Get-Command uv -ErrorAction SilentlyContinue
   }
-
-  Install-WithWinget -PackageId 'Python.Python.3.11' -Name 'Python 3.11'
-  $python = Resolve-Python
-  if (-not $python) {
-    throw "Python was installed, but setup cannot find it yet. Close this window, open setup.bat again, and it should continue."
+  if (-not $uv) {
+    throw "uv was installed, but setup cannot find it yet. Close this window, open setup.bat again, and it should continue."
   }
-  Write-Host "Using Python: $($python.Display)"
-  return $python
+  Write-Host "Using uv: $($uv.Source)"
+  return $uv.Source
 }
 
 function Ensure-Node {
@@ -175,22 +182,17 @@ try {
   Write-Host "Log file: $setupLog"
   "[$(Get-Date -Format o)] Monaw Agent setup started" | Set-Content -Path $setupLog
 
-  $python = Ensure-Python
+  Write-Step "Checking for running Monaw processes"
+  Assert-MonawStopped
+
+  $uv = Ensure-Uv
   $npm = Ensure-Node
 
-  Write-Step "Creating Python virtual environment"
-  if (-not (Test-Path $venvPython)) {
-    Invoke-LoggedCommand -FilePath $python.Command -ArgumentList @($python.Args + @('-m', 'venv', $venvDir)) -WorkingDirectory $backendDir
-  } else {
-    Write-Host "Virtual environment already exists: $venvDir"
-  }
-
-  Write-Step "Installing Python backend requirements"
-  Invoke-LoggedCommand -FilePath $venvPython -ArgumentList @('-m', 'pip', 'install', '--upgrade', 'pip') -WorkingDirectory $backendDir
-  Invoke-LoggedCommand -FilePath $venvPython -ArgumentList @('-m', 'pip', 'install', '-r', 'requirements.txt') -WorkingDirectory $backendDir
+  Write-Step "Syncing the locked Python backend environment"
+  Invoke-LoggedCommand -FilePath $uv -ArgumentList @('sync', '--locked') -WorkingDirectory $backendDir
 
   Write-Step "Installing frontend packages"
-  Invoke-LoggedCommand -FilePath $npm -ArgumentList @('install') -WorkingDirectory $frontendDir
+  Invoke-LoggedCommand -FilePath $npm -ArgumentList @('ci') -WorkingDirectory $frontendDir
 
   Write-Step "Setup complete"
   Write-Host "You can now double-click start.bat to run Monaw Agent."

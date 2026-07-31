@@ -147,6 +147,6 @@ The endpoint table in [api.md](api.md) is generated from FastAPI route
 definitions:
 
 ```powershell
-python scripts/generate-api-docs.py
-python scripts/generate-api-docs.py --check
+uv run --project backend python scripts/generate-api-docs.py
+uv run --project backend python scripts/generate-api-docs.py --check
 ```

@@ -87,6 +87,16 @@ function developmentSession(): ControlSession | null {
   return token ? { token, expiresAt: Number.MAX_SAFE_INTEGER } : null
 }
 
+function authenticationUnavailableMessage(): string {
+  const isElectronRuntime = (
+    typeof navigator !== 'undefined' &&
+    navigator.userAgent.toLowerCase().includes('electron')
+  )
+  return isElectronRuntime
+    ? 'The desktop authentication bridge failed to initialize. Restart Monaw and check the launcher logs if the problem continues.'
+    : 'This page is running outside the Monaw desktop app. Start Monaw with start.bat.'
+}
+
 async function requestControlSession(forceRefresh = false): Promise<ControlSession> {
   if (!forceRefresh && controlSession && controlSession.expiresAt > Date.now() + 15_000) {
     return controlSession
@@ -97,9 +107,7 @@ async function requestControlSession(forceRefresh = false): Promise<ControlSessi
     const electronSession = await window.electronAPI?.getControlSession?.()
     const session = electronSession ?? developmentSession()
     if (!session?.token) {
-      throw new Error(
-        'Control-plane authentication is unavailable. Start Monaw through Electron or configure VITE_MONAW_CONTROL_TOKEN for browser development.',
-      )
+      throw new Error(authenticationUnavailableMessage())
     }
     controlSession = session
     return session

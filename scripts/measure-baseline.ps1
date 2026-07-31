@@ -21,7 +21,7 @@ $result = [ordered]@{
     machine = [ordered]@{
         os = [System.Environment]::OSVersion.VersionString
         processor_count = [System.Environment]::ProcessorCount
-        python = (& python --version 2>&1 | Out-String).Trim()
+        python = (& uv run --project (Join-Path $repoRoot "backend") --locked python --version 2>&1 | Out-String).Trim()
         node = (& node --version 2>&1 | Out-String).Trim()
     }
     backend_test_seconds = $null

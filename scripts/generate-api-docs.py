@@ -18,6 +18,20 @@ from fastapi.routing import APIRoute  # noqa: E402
 from app.main import app  # noqa: E402
 
 
+def _iter_api_routes():
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            yield route
+            continue
+
+        effective_route_contexts = getattr(route, "effective_route_contexts", None)
+        if not callable(effective_route_contexts):
+            continue
+        for context in effective_route_contexts():
+            if isinstance(getattr(context, "original_route", None), APIRoute):
+                yield context
+
+
 def _route_scope(path: str, methods: set[str]) -> str:
     method = sorted(methods)[0] if methods else "GET"
     if not path.startswith("/api"):
@@ -37,9 +51,7 @@ def _route_scope(path: str, methods: set[str]) -> str:
 
 def generate() -> str:
     rows: list[tuple[str, str, str, str]] = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+    for route in _iter_api_routes():
         methods = {method for method in route.methods or set() if method not in {"HEAD", "OPTIONS"}}
         if not methods:
             continue
@@ -57,7 +69,7 @@ def generate() -> str:
         "This file is generated from FastAPI route definitions. Update it with:",
         "",
         "```powershell",
-        "python scripts/generate-api-docs.py",
+        "uv run --project backend python scripts/generate-api-docs.py",
         "```",
         "",
         "The backend API is a privileged local control plane. All `/api` routes",
@@ -81,7 +93,11 @@ def main() -> int:
     if args.check:
         existing = DOC_PATH.read_text(encoding="utf-8") if DOC_PATH.exists() else ""
         if existing.replace("\r\n", "\n") != content:
-            print("docs/api.md is stale; run python scripts/generate-api-docs.py", file=sys.stderr)
+            print(
+                "docs/api.md is stale; run "
+                "uv run --project backend python scripts/generate-api-docs.py",
+                file=sys.stderr,
+            )
             return 1
         return 0
     DOC_PATH.write_text(content, encoding="utf-8")

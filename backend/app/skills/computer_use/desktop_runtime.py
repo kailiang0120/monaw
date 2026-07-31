@@ -510,7 +510,10 @@ def capture_full_screenshot(monitor: int = 0) -> str:
         import mss
         import mss.tools
     except ImportError:
-        return json.dumps({"status": "error", "error": "'mss' package not installed. Run: pip install mss"})
+        return json.dumps({
+            "status": "error",
+            "error": "'mss' package not installed. Run `uv sync --locked` from the backend directory.",
+        })
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filepath = configured_screenshots_dir() / f"screenshot_{timestamp}.png"

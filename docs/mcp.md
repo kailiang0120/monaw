@@ -145,7 +145,7 @@ Monaw requires approval for tools that appear destructive, mutating, open-world,
 | Symptom | Check |
 | --- | --- |
 | No MCP tools appear. | Check Settings -> MCP enabled state, server enabled state, and `mcp_status`. |
-| `mcp package is not installed`. | Install backend dependencies with `python -m pip install -r backend\requirements.txt`. |
+| `mcp package is not installed`. | Run `uv sync --locked` from the `backend` directory. |
 | Server startup times out. | Increase `startup_timeout_ms`, verify `command`, `args`, `cwd`, and `env`. |
 | `stdio` command not found. | Use an absolute command path or confirm it is on PATH for the backend Python process. |
 | HTTP server fails. | Verify `url`, headers, and that the server supports streamable HTTP MCP. |

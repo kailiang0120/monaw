@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendRoot = Join-Path $repoRoot "backend"
 
-$pytestArgs = @("-m", "pytest")
+$pytestArgs = @("run", "--locked", "pytest")
 if ($Group -ne "all") {
     $pytestArgs += @("-m", $Group)
 }
@@ -17,7 +17,7 @@ $runId = [guid]::NewGuid().ToString("N")
 $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) "monaw-pytest-$runId.stdout.log"
 $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) "monaw-pytest-$runId.stderr.log"
 $process = Start-Process `
-    -FilePath "python" `
+    -FilePath "uv" `
     -ArgumentList $pytestArgs `
     -WorkingDirectory $backendRoot `
     -NoNewWindow `

@@ -702,7 +702,10 @@ def _terminate_process(name_or_pid: str, force: bool = False) -> str:
         _audit.log("computer_functions.kill_process", data={"target": target, "force": force, "count": len(killed)})
         return json.dumps({"status": "ok", "killed": killed}, ensure_ascii=False)
     except ImportError:
-        return json.dumps({"status": "error", "error": "psutil not installed. Run: pip install psutil"})
+        return json.dumps({
+            "status": "error",
+            "error": "psutil not installed. Run `uv sync --locked` from the backend directory.",
+        })
     except Exception as exc:
         return json.dumps({"status": "error", "error": str(exc)})
 

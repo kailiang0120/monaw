@@ -1020,7 +1020,7 @@ def _browser_fetch_sync(
             "reason_code": "missing_browser_dependencies",
             "url": normalized_url,
             "error": str(exc),
-            "setup": 'pip install "scrapling>=0.4.8,<0.5.0"',
+            "setup": "Run `uv sync --locked` from the backend directory.",
         }
     except Exception as exc:
         return {
@@ -2232,7 +2232,7 @@ async def _browser_fetch_rendered(
             "reason_code": "missing_browser_dependencies",
             "url": normalized_url,
             "error": str(exc),
-            "setup": 'pip install "scrapling>=0.4.8,<0.5.0"',
+            "setup": "Run `uv sync --locked` from the backend directory.",
         }
     except Exception as exc:
         return {

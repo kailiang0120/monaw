@@ -1,7 +1,13 @@
 const { contextBridge, ipcRenderer } = require('electron')
-const runtimeConfig = require('../config/runtime.json')
 
-const backendBaseUrl = `http://${runtimeConfig.backendHost || '127.0.0.1'}:${runtimeConfig.backendPort || 8420}`
+const backendBaseUrlPrefix = '--monaw-backend-base-url='
+const backendBaseUrlArgument = process.argv.find((value) => value.startsWith(backendBaseUrlPrefix))
+const backendBaseUrlCandidate = backendBaseUrlArgument
+  ? backendBaseUrlArgument.slice(backendBaseUrlPrefix.length)
+  : ''
+const backendBaseUrl = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(backendBaseUrlCandidate)
+  ? backendBaseUrlCandidate
+  : ''
 const credentialIds = new Set(['openai', 'deepseek', 'google', 'tavily', 'telegramBot'])
 
 function credentialId(value) {
