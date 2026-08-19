@@ -680,8 +680,6 @@ def _format_resume_options(options) -> str:
 
 def _model_provider_label(provider: str) -> str:
     normalized = provider.strip().lower()
-    if normalized == "deepseek":
-        return "DeepSeek"
     if normalized == "gemini":
         return "Google"
     return "OpenAI"

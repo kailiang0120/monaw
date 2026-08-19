@@ -109,7 +109,6 @@ import {
   providerLabel,
   providerOptions,
   reasoningEffortsForProvider,
-  visionFallbackModels,
   type ModelOptionsCatalog,
   type MCPServerTemplateKey,
 } from './settingsConfig'
@@ -195,7 +194,6 @@ export function SettingsModal({
   const [activeTab, setActiveTab] = useState<SettingsTab>('model')
   const [navQuery, setNavQuery] = useState('')
   const [openaiKey, setOpenaiKey] = useState('')
-  const [deepseekKey, setDeepseekKey] = useState('')
   const [tavilyKey, setTavilyKey] = useState('')
   const [googleKey, setGoogleKey] = useState('')
   const [telegramBotToken, setTelegramBotToken] = useState('')
@@ -350,7 +348,6 @@ export function SettingsModal({
             api_keys: {
               ...current.api_keys,
               has_openai_key: current.api_keys.has_openai_key || credentialStatus.openai,
-              has_deepseek_key: current.api_keys.has_deepseek_key || credentialStatus.deepseek,
               has_google_key: current.api_keys.has_google_key || credentialStatus.google,
               has_tavily_key: current.api_keys.has_tavily_key || credentialStatus.tavily,
               has_telegram_bot_token:
@@ -547,7 +544,6 @@ export function SettingsModal({
     if (!window.electronAPI) return null
     const writes: Array<[ConnectionSecretId, string]> = [
       ['openai', openaiKey],
-      ['deepseek', deepseekKey],
       ['google', googleKey],
       ['tavily', tavilyKey],
       ['telegramBot', telegramBotToken],
@@ -570,9 +566,6 @@ export function SettingsModal({
       case 'openai':
         setOpenaiKey(value)
         return
-      case 'deepseek':
-        setDeepseekKey(value)
-        return
       case 'google':
         setGoogleKey(value)
         return
@@ -592,14 +585,12 @@ export function SettingsModal({
     try {
       const browserSecretPayload: {
         openai_api_key?: string
-        deepseek_api_key?: string
         google_api_key?: string
         tavily_api_key?: string
         telegram_bot_token?: string
       } = {}
       if (!window.electronAPI) {
         if (dirtySecrets.has('openai')) browserSecretPayload.openai_api_key = openaiKey
-        if (dirtySecrets.has('deepseek')) browserSecretPayload.deepseek_api_key = deepseekKey
         if (dirtySecrets.has('google')) browserSecretPayload.google_api_key = googleKey
         if (dirtySecrets.has('tavily')) browserSecretPayload.tavily_api_key = tavilyKey
         if (dirtySecrets.has('telegramBot')) browserSecretPayload.telegram_bot_token = telegramBotToken
@@ -616,7 +607,6 @@ export function SettingsModal({
         permissions: draft.permissions,
         sandbox: draft.sandbox,
         identity: draft.identity,
-        deepseek_base_url: 'https://api.deepseek.com',
         telegram_allowed_user_ids: telegramAllowedUserIds.trim(),
         telegram_allowed_chat_ids: telegramAllowedChatIds.trim(),
         ...browserSecretPayload,
@@ -628,7 +618,6 @@ export function SettingsModal({
         api_keys: {
           ...normalizedSavedSettings.api_keys,
           has_openai_key: credentialStatus.openai,
-          has_deepseek_key: credentialStatus.deepseek,
           has_google_key: credentialStatus.google,
           has_tavily_key: credentialStatus.tavily,
           has_telegram_bot_token: credentialStatus.telegramBot,
@@ -782,14 +771,12 @@ export function SettingsModal({
   const duplicateMcpNames = duplicateMcpServerNames(draft.mcp.servers)
   const connectionSecretValues: ConnectionSecretValues = {
     openai: openaiKey,
-    deepseek: deepseekKey,
     google: googleKey,
     tavily: tavilyKey,
     telegramBot: telegramBotToken,
   }
   const connectionSecretStatuses: ConnectionSecretStatuses = {
     openai: draft.api_keys.has_openai_key,
-    deepseek: draft.api_keys.has_deepseek_key,
     google: draft.api_keys.has_google_key,
     tavily: draft.api_keys.has_tavily_key,
     telegramBot: Boolean(draft.api_keys.has_telegram_bot_token),
@@ -949,7 +936,7 @@ export function SettingsModal({
                   <div className="space-y-4">
                     <SettingsCard
                       title="Which model to use"
-                      footnote="DeepSeek is reached through its OpenAI-compatible endpoint at https://api.deepseek.com."
+                      footnote="Each provider needs its own API key saved under Connections."
                     >
                       <SettingRow label="Provider" description={MODEL_COPY.provider}>
                         <Dropdown<AgentSettings['llm']['provider']>
@@ -1013,32 +1000,9 @@ export function SettingsModal({
                     </SettingsCard>
 
                     <SettingsCard title="Reading images and screenshots">
-                      <SwitchRow
-                        label="Vision fallback"
-                        description={MODEL_COPY.visionFallback}
-                        checked={draft.llm.vision_fallback_enabled}
-                        onChange={(vision_fallback_enabled) => updateDraft((current) => ({
-                          ...current,
-                          llm: { ...current.llm, vision_fallback_enabled },
-                        }))}
-                      />
-                      <SettingRow label="Vision model" description={MODEL_COPY.visionModel}>
-                        <Dropdown<string>
-                          ariaLabel="Vision model"
-                          value={draft.llm.vision_fallback_model}
-                          options={visionFallbackModels(modelOptions).map((m) => ({ value: m, label: m }))}
-                          disabled={!draft.llm.vision_fallback_enabled}
-                          onChange={(vision_fallback_model) => updateDraft((current) => ({
-                            ...current,
-                            llm: { ...current.llm, vision_fallback_model },
-                          }))}
-                        />
-                      </SettingRow>
-                      {draft.llm.vision_fallback_enabled && !draft.api_keys.has_google_key && (
-                        <div className="px-4 pb-4">
-                          <Note tone="warn" icon={AlertCircle}>{MODEL_COPY.visionRequiresKey}</Note>
-                        </div>
-                      )}
+                      <div className="px-4 py-4">
+                        <Note tone="info">{MODEL_COPY.vision}</Note>
+                      </div>
                     </SettingsCard>
 
                     <SettingsCard

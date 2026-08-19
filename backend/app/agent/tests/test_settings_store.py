@@ -37,17 +37,13 @@ def _workspace_tmp_dir(name: str) -> Path:
 def _base_settings() -> SimpleNamespace:
     return SimpleNamespace(
         model_provider="openai",
-        model_name="gpt-5.4",
+        model_name="gpt-5.6-luna",
         openai_api_key="secret-openai-key",
-        deepseek_api_key="secret-deepseek-key",
-        deepseek_base_url="https://api.deepseek.com",
         google_api_key="secret-google-key",
         tavily_api_key="tvly",
         telegram_allowed_user_ids="",
         telegram_allowed_chat_ids="",
         reasoning_effort="medium",
-        vision_fallback_enabled=True,
-        vision_fallback_model="gemini-2.5-flash",
         allow_arbitrary_app_paths=False,
     )
 
@@ -264,7 +260,56 @@ def test_merge_settings_update_applies_llm_runtime_limit_patch():
     assert updated.llm.max_iterations_per_turn == 180
 
 
-def test_gemini_provider_uses_chat_model_list_not_vision_fallback_models():
+def test_retired_provider_in_stored_settings_migrates_to_openai_default(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "llm": {
+                    "provider": "deepseek",
+                    "model_name": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "vision_fallback_enabled": True,
+                    "vision_fallback_model": "gemini-3.1-flash-lite-preview",
+                    "vision_fallback_max_output_tokens": 1200,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_agent_settings(settings_path=settings_path)
+
+    assert loaded.llm.provider == "openai"
+    assert loaded.llm.model_name == "gpt-5.6-luna"
+    assert loaded.llm.reasoning_effort == "high"
+    assert not hasattr(loaded.llm, "vision_fallback_enabled")
+
+
+def test_retired_openai_model_in_stored_settings_migrates_to_current_model(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"llm": {"provider": "openai", "model_name": "gpt-5.4-mini"}}),
+        encoding="utf-8",
+    )
+
+    assert load_agent_settings(settings_path=settings_path).llm.model_name == "gpt-5.6-luna"
+
+
+def test_stored_gemini_selection_survives_migration(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"llm": {"provider": "gemini", "model_name": "gemini-3.1-flash-lite"}}),
+        encoding="utf-8",
+    )
+
+    loaded = load_agent_settings(settings_path=settings_path)
+
+    assert loaded.llm.provider == "gemini"
+    assert loaded.llm.model_name == "gemini-3.1-flash-lite"
+
+
+def test_gemini_provider_falls_back_to_a_supported_chat_model():
     settings_data = AgentSettings.model_validate(
         {
             "llm": {
@@ -282,7 +327,7 @@ def test_default_skills_use_recommended_profile():
     settings_data = AgentSettings()
 
     assert settings_data.llm.provider == "openai"
-    assert settings_data.llm.model_name == "gpt-5.4"
+    assert settings_data.llm.model_name == "gpt-5.6-luna"
     assert settings_data.tools.skills == {
         "core": True,
         "exec": True,
@@ -310,7 +355,7 @@ def test_load_settings_preserves_legacy_skill_defaults_when_keys_are_missing(tmp
     settings_path.write_text(json.dumps({
         "llm": {
             "provider": "openai",
-            "model_name": "gpt-5.4-mini",
+            "model_name": "gpt-5.6-luna",
             "reasoning_effort": "medium",
         },
         "tools": {
@@ -407,7 +452,7 @@ def test_load_settings_normalizes_preset_mode_confirmations(tmp_path):
     settings_path.write_text(json.dumps({
         "llm": {
             "provider": "openai",
-            "model_name": "gpt-5.4-mini",
+            "model_name": "gpt-5.6-luna",
             "reasoning_effort": "high",
         },
         "tools": {"skills": {"core": True}},
@@ -471,12 +516,11 @@ def test_api_payload_exposes_key_status_without_secret_values():
     payload = api_settings_payload(base, AgentSettings())
 
     assert payload["api_keys"]["has_google_key"] is True
-    assert payload["api_keys"]["has_deepseek_key"] is True
+    assert "has_deepseek_key" not in payload["api_keys"]
     assert payload["api_keys"]["has_tavily_key"] is True
     assert payload["api_keys"]["has_telegram_allowlist"] is True
     assert payload["telegram_allowed_user_ids"] == "123456789"
     assert "secret-google-key" not in json.dumps(payload)
-    assert "secret-deepseek-key" not in json.dumps(payload)
     assert payload["settings_version"] == settings_version(AgentSettings())
 
 
@@ -540,19 +584,6 @@ def test_runtime_namespace_includes_llm_runtime_limits():
     assert runtime.llm.max_iterations_per_turn == 180
     assert runtime.llm.max_turn_seconds == 3600
     assert runtime.llm.max_llm_call_seconds == 600
-
-
-def test_runtime_namespace_includes_vision_fallback_settings():
-    settings_data = AgentSettings()
-    settings_data.llm.vision_fallback_enabled = False
-    settings_data.llm.vision_fallback_model = "gemini-3.1-flash-lite-preview"
-    settings_data.llm.vision_fallback_max_output_tokens = 1200
-
-    runtime = build_runtime_namespace(_base_settings(), settings_data)
-
-    assert runtime.llm.vision_fallback_enabled is False
-    assert runtime.llm.vision_fallback_model == "gemini-3.1-flash-lite-preview"
-    assert runtime.llm.vision_fallback_max_output_tokens == 1200
 
 
 def test_runtime_namespace_includes_memory_settings():

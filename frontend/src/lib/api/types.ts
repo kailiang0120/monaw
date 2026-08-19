@@ -654,11 +654,9 @@ export interface MemoryEpisode {
 
 export interface AgentSettings {
   llm: {
-    provider: 'openai' | 'deepseek' | 'gemini'
+    provider: 'openai' | 'gemini'
     model_name: string
     reasoning_effort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
-    vision_fallback_enabled: boolean
-    vision_fallback_model: string
     max_iterations_per_turn: number
     max_turn_seconds: number
     max_llm_call_seconds: number
@@ -768,7 +766,6 @@ export interface AgentSettings {
   available_skills: SkillDescriptor[]
   api_keys: {
     has_openai_key: boolean
-    has_deepseek_key: boolean
     has_google_key: boolean
     has_tavily_key: boolean
     has_telegram_bot_token: boolean
@@ -784,7 +781,6 @@ export interface ModelOptions {
     label: string
     models: string[]
   }>
-  vision_fallback_models: string[]
 }
 
 export interface SpeechToTextStatus {
@@ -824,8 +820,6 @@ export interface SettingsUpdatePayload {
   sandbox?: AgentSettings['sandbox']
   identity?: AgentSettings['identity']
   openai_api_key?: string
-  deepseek_api_key?: string
-  deepseek_base_url?: string
   google_api_key?: string
   tavily_api_key?: string
   telegram_bot_token?: string

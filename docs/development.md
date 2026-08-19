@@ -7,7 +7,7 @@ This document is for contributors and maintainers. The root README is for end us
 - Frontend: Electron, React, Vite, TypeScript, Tailwind CSS.
 - Backend: FastAPI, Uvicorn, Pydantic.
 - Python environment and dependencies: `uv`, `pyproject.toml`, and `uv.lock`.
-- LLM providers: OpenAI SDK, Google GenAI SDK, DeepSeek through an OpenAI-compatible API.
+- LLM providers: OpenAI SDK, Google GenAI SDK.
 - Storage: SQLite plus local markdown memory files.
 - Automation: `browser-use`, MCP, and Windows desktop automation packages.
 
@@ -159,7 +159,7 @@ backend/app/config.py                  Environment-backed defaults used before r
 backend/app/api/routes/                HTTP API routes for chat, settings, memory, files, uploads, sandbox, diagnostics, approvals, access grants, conversations, and scheduled tasks
 backend/app/agent/runtime.py           Runtime assembly for settings, LLM client, memory, tools, MCP, and run execution
 backend/app/agent/turn_loop.py         Main agent turn loop and tool-call flow
-backend/app/agent/llm_client.py        OpenAI, DeepSeek, and Gemini client abstraction
+backend/app/agent/llm_client.py        OpenAI and Gemini client abstraction
 backend/app/agent/settings_store.py    Local runtime settings persistence
 backend/app/agent/long_term_memory.py  Sectioned markdown long-term memory storage
 backend/app/agent/scheduler.py         Scheduled task service and run orchestration
@@ -208,16 +208,17 @@ Default backend settings:
 
 ```text
 provider: openai
-model: gpt-5.4
+model: gpt-5.6-luna
 reasoning_effort: medium
-vision_fallback_model: gemini-3.1-flash-lite-preview
 ```
+
+Images and screenshots are sent to the configured chat model, which reads them
+natively. There is no separate vision model.
 
 Current curated chat model groups:
 
 ```text
-OpenAI:   gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.4-nano
-DeepSeek: deepseek-v4-flash, deepseek-v4-pro
+OpenAI:   gpt-5.6-luna
 Google:   gemini-3.1-pro-preview, gemini-3.1-flash-lite, gemini-3.1-flash-lite-preview, gemini-3-flash-preview
 ```
 

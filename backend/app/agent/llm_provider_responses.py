@@ -221,20 +221,3 @@ def openai_response_provider_messages(response: Any) -> list[dict]:
         if item_type in {"function_call", "reasoning"}:
             messages.append(obj_to_dict(item))
     return messages
-
-
-def extract_openai_tool_calls(raw_tool_calls: Any, tool_call_factory: Callable[..., Any]) -> list[Any]:
-    result: list[Any] = []
-    for tc in raw_tool_calls or []:
-        try:
-            args_str = tc.function.arguments or "{}"
-            try:
-                args = json.loads(args_str)
-            except json.JSONDecodeError:
-                args = {"_raw": args_str}
-            result.append(
-                tool_call_factory(call_id=tc.id, tool_name=tc.function.name, arguments=args)
-            )
-        except Exception as exc:
-            logger.warning("Failed to parse OpenAI tool call: %s", exc)
-    return result

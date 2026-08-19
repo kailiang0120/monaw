@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.agent.llm_constants import DEFAULT_VISION_FALLBACK_MODEL
+from app.agent.llm_constants import DEFAULT_OPENAI_CHAT_MODEL
 
 
 def _detect_env_file_encoding(env_file: str = ".env") -> str:
@@ -23,15 +23,10 @@ def _detect_env_file_encoding(env_file: str = ".env") -> str:
 class Settings(BaseSettings):
     model_provider: str = "openai"
     openai_api_key: str = ""
-    deepseek_api_key: str = ""
-    deepseek_base_url: str = "https://api.deepseek.com"
     google_api_key: str = ""
     tavily_api_key: str = ""
-    model_name: str = "gpt-5.4"
+    model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: str = "medium"
-    vision_fallback_enabled: bool = True
-    vision_fallback_model: str = DEFAULT_VISION_FALLBACK_MODEL
-    vision_fallback_max_output_tokens: int = 1000
     port: int = 8435
     cors_allow_origins: str = "null"
     cors_allow_origin_regex: str = ""

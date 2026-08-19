@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import Any
 
 from app.agent.llm_client import _normalise_messages_for_openai, _tools_to_openai
+from app.agent.llm_constants import DEFAULT_OPENAI_CHAT_MODEL
 
 try:
     import tiktoken
@@ -24,10 +25,7 @@ _TOOL_OVERHEAD_TOKENS = 12
 _IMAGE_ATTACHMENT_TOKEN_FALLBACK = 850
 _CHARS_PER_TOKEN_FALLBACK = 4
 _OPENAI_CONTEXT_WINDOWS = {
-    "gpt-5.5": 200_000,
-    "gpt-5.4": 200_000,
-    "gpt-5.4-mini": 200_000,
-    "gpt-5.4-nano": 200_000,
+    "gpt-5.6-luna": 200_000,
 }
 _GEMINI_CONTEXT_WINDOWS = {
     "gemini-3.1-pro-preview": 200_000,
@@ -35,18 +33,13 @@ _GEMINI_CONTEXT_WINDOWS = {
     "gemini-3.1-flash-lite-preview": 200_000,
     "gemini-3-flash-preview": 200_000,
 }
-_DEEPSEEK_CONTEXT_WINDOWS = {
-    "deepseek-v4-flash": 200_000,
-    "deepseek-v4-pro": 200_000,
-}
-
 
 def _provider_name(llm_client) -> str:
     return str(getattr(llm_client, "provider", "openai") or "openai").lower()
 
 
 def _model_name(llm_client) -> str:
-    return str(getattr(llm_client, "model_name", "gpt-5.4") or "gpt-5.4")
+    return str(getattr(llm_client, "model_name", DEFAULT_OPENAI_CHAT_MODEL) or DEFAULT_OPENAI_CHAT_MODEL)
 
 
 def _normalize_model_id(model_name: str) -> str:
@@ -79,8 +72,6 @@ def model_context_token_limit(llm_client) -> int:
     model = _model_name(llm_client)
     if provider == "openai":
         return _lookup_context_window(model, _OPENAI_CONTEXT_WINDOWS)
-    if provider == "deepseek":
-        return _lookup_context_window(model, _DEEPSEEK_CONTEXT_WINDOWS)
     if provider == "gemini":
         return _lookup_context_window(model, _GEMINI_CONTEXT_WINDOWS)
     return DEFAULT_CONTEXT_TOKEN_LIMIT
@@ -92,7 +83,7 @@ def model_compaction_threshold(llm_client) -> int:
 
 def _encoding_name(provider: str, model_name: str) -> str:
     model = model_name.lower()
-    if provider in {"openai", "deepseek"}:
+    if provider == "openai":
         try:
             return tiktoken.encoding_for_model(model_name).name if tiktoken is not None else ""
         except Exception:
@@ -167,7 +158,7 @@ def _count_content_tokens(content: Any, *, llm_client) -> int:
 
 def estimate_message_tokens(messages: list[dict], *, llm_client) -> int:
     provider = _provider_name(llm_client)
-    if provider in {"openai", "deepseek"}:
+    if provider == "openai":
         return _estimate_openai_message_tokens(messages, llm_client=llm_client)
 
     total = 2
@@ -208,7 +199,7 @@ def _estimate_openai_message_tokens(messages: list[dict], *, llm_client) -> int:
 def estimate_tool_schema_tokens(tools: list[dict], *, llm_client) -> int:
     provider = _provider_name(llm_client)
     normalized_tools: list[dict]
-    if provider in {"openai", "deepseek"}:
+    if provider == "openai":
         normalized_tools = _tools_to_openai(tools)
     else:
         normalized_tools = [

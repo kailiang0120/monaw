@@ -11,7 +11,7 @@ from app.schemas import SettingsUpdate
 def _runtime_settings(*, servers: list[dict]) -> SimpleNamespace:
     return SimpleNamespace(
         model_provider="openai",
-        model_name="gpt-5.4-mini",
+        model_name="gpt-5.6-luna",
         openai_api_key="key",
         google_api_key="",
         reasoning_effort="medium",
@@ -86,23 +86,24 @@ def test_settings_patch_from_body_includes_streamable_http_mcp_server():
     assert patch["mcp"]["enabled"] is False
 
 
-def test_settings_patch_from_body_includes_vision_fallback_llm_fields():
+def test_settings_patch_from_body_includes_llm_fields():
     body = SettingsUpdate.model_validate(
         {
             "llm": {
-                "provider": "deepseek",
-                "model_name": "deepseek-v4-pro",
+                "provider": "gemini",
+                "model_name": "gemini-3.1-pro-preview",
                 "reasoning_effort": "high",
-                "vision_fallback_enabled": False,
-                "vision_fallback_model": "gemini-3.1-flash-lite-preview",
             }
         }
     )
 
     patch = _settings_patch_from_body(body)
 
-    assert patch["llm"]["vision_fallback_enabled"] is False
-    assert patch["llm"]["vision_fallback_model"] == "gemini-3.1-flash-lite-preview"
+    assert patch["llm"]["provider"] == "gemini"
+    assert patch["llm"]["model_name"] == "gemini-3.1-pro-preview"
+    assert patch["llm"]["reasoning_effort"] == "high"
+    assert "vision_fallback_enabled" not in patch["llm"]
+    assert "vision_fallback_model" not in patch["llm"]
 
 
 def test_settings_update_rejects_duplicate_mcp_server_names():

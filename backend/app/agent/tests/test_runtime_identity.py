@@ -24,25 +24,19 @@ def _runtime_settings(
     user_identity: str = "",
     communication_style: str = "",
     max_iterations_per_turn: int = 40,
-    vision_fallback_enabled: bool = True,
-    vision_fallback_model: str = "gemini-2.5-flash",
     google_api_key: str = "",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_provider=provider,
-        model_name="gpt-5.4",
+        model_name="gpt-5.6-luna",
         reasoning_effort="medium",
-        deepseek_base_url="https://api.deepseek.com",
         openai_api_key="",
-        deepseek_api_key="",
         google_api_key=google_api_key,
         tools=SimpleNamespace(skills={}),
         llm=SimpleNamespace(
             max_iterations_per_turn=max_iterations_per_turn,
             max_turn_seconds=1800,
             max_llm_call_seconds=300,
-            vision_fallback_enabled=vision_fallback_enabled,
-            vision_fallback_model=vision_fallback_model,
         ),
         mcp=SimpleNamespace(enabled=True, servers=[]),
         browser=SimpleNamespace(),
@@ -270,12 +264,8 @@ def test_llm_limits_are_part_of_runtime_cache_key():
     assert first != second
 
 
-def test_vision_fallback_settings_are_part_of_runtime_cache_key():
-    first = _settings_cache_key(_runtime_settings(vision_fallback_enabled=True))
-    second = _settings_cache_key(_runtime_settings(vision_fallback_enabled=False))
-    third = _settings_cache_key(_runtime_settings(vision_fallback_model="gemini-3.1-flash-lite-preview"))
-    fourth = _settings_cache_key(_runtime_settings(google_api_key="google-key"))
+def test_google_api_key_is_part_of_runtime_cache_key():
+    first = _settings_cache_key(_runtime_settings())
+    second = _settings_cache_key(_runtime_settings(google_api_key="google-key"))
 
     assert first != second
-    assert first != third
-    assert first != fourth

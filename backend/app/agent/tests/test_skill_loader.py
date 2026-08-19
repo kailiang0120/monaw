@@ -7,7 +7,7 @@ from app.agent.skill_loader import available_skill_payload, discover_skills, loa
 def _base_settings() -> SimpleNamespace:
     return SimpleNamespace(
         model_provider="openai",
-        model_name="gpt-5.4-mini",
+        model_name="gpt-5.6-luna",
         openai_api_key="key",
         google_api_key="",
         tavily_api_key="",

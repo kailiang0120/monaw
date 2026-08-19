@@ -10,7 +10,7 @@ import pytest
 from telegram.error import BadRequest
 
 from app.agent import response_attachments as attachments_module
-from app.agent.llm_constants import DEEPSEEK_CHAT_MODELS, OPENAI_CHAT_MODELS
+from app.agent.llm_constants import GEMINI_CHAT_MODELS, OPENAI_CHAT_MODELS
 from app.agent.response_attachments import collect_response_attachments, resolve_attachment_path
 from app.agent.speech_to_text import (
     VOICE_MODEL_NOT_READY_MESSAGE,
@@ -93,10 +93,10 @@ def test_telegram_session_store_persists_model_selection():
         selection = store.set_model_selection(
             "conv-alpha",
             provider="openai",
-            model_name="gpt-5.4-mini",
+            model_name="gpt-5.6-luna",
         )
 
-        assert selection == {"provider": "openai", "model_name": "gpt-5.4-mini"}
+        assert selection == {"provider": "openai", "model_name": "gpt-5.6-luna"}
         assert store.get_model_selection("conv-alpha") == selection
 
         reloaded = TelegramSessionStore(tmp_dir / "sessions.json")
@@ -358,11 +358,11 @@ def test_telegram_bridge_sets_model_for_chat_runtime():
         store = TelegramSessionStore(tmp_dir / "sessions.json")
         base_settings = SimpleNamespace(
             model_provider="openai",
-            model_name="gpt-5.4",
+            model_name="gpt-5.6-luna",
             reasoning_effort="medium",
             llm=SimpleNamespace(
                 provider="openai",
-                model_name="gpt-5.4",
+                model_name="gpt-5.6-luna",
                 reasoning_effort="medium",
             ),
             browser=SimpleNamespace(allowed_domains=["localhost"]),
@@ -374,22 +374,22 @@ def test_telegram_bridge_sets_model_for_chat_runtime():
             initialize_conversation=lambda _conv_id, _title: None,
         )
 
-        model, error = bridge.set_model_selection(12345, "gpt-5.4-mini")
+        model, error = bridge.set_model_selection(12345, "gemini-3.1-pro-preview")
         result = asyncio.run(bridge.run_chat_message(chat_id=12345, text="Hello"))
 
         assert error == ""
         assert model is not None
-        assert model.provider == "openai"
-        assert model.model_name == "gpt-5.4-mini"
+        assert model.provider == "gemini"
+        assert model.model_name == "gemini-3.1-pro-preview"
         assert result.reply == "Reply"
         runtime_settings = calls[0]["settings"]
-        assert runtime_settings.model_provider == "openai"
-        assert runtime_settings.model_name == "gpt-5.4-mini"
-        assert runtime_settings.llm.provider == "openai"
-        assert runtime_settings.llm.model_name == "gpt-5.4-mini"
+        assert runtime_settings.model_provider == "gemini"
+        assert runtime_settings.model_name == "gemini-3.1-pro-preview"
+        assert runtime_settings.llm.provider == "gemini"
+        assert runtime_settings.llm.model_name == "gemini-3.1-pro-preview"
         assert runtime_settings.browser is not base_settings.browser
-        assert base_settings.model_name == "gpt-5.4"
-        assert base_settings.llm.model_name == "gpt-5.4"
+        assert base_settings.model_name == "gpt-5.6-luna"
+        assert base_settings.llm.model_name == "gpt-5.6-luna"
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -416,24 +416,24 @@ def test_telegram_bridge_lists_models_and_selects_by_number_or_name():
         ]
         assert first_three == [
             (1, "openai", OPENAI_CHAT_MODELS[0], True),
-            (2, "openai", OPENAI_CHAT_MODELS[1], False),
-            (3, "openai", OPENAI_CHAT_MODELS[2], False),
+            (2, "gemini", GEMINI_CHAT_MODELS[0], False),
+            (3, "gemini", GEMINI_CHAT_MODELS[1], False),
         ]
 
         selected, error = bridge.set_model_selection(12345, "2")
         assert error == ""
         assert selected is not None
-        assert selected.model_name == OPENAI_CHAT_MODELS[1]
+        assert selected.model_name == GEMINI_CHAT_MODELS[0]
 
-        selected, error = bridge.set_model_selection(12345, f"deepseek:{DEEPSEEK_CHAT_MODELS[0]}")
+        selected, error = bridge.set_model_selection(12345, f"gemini:{GEMINI_CHAT_MODELS[1]}")
         assert error == ""
         assert selected is not None
-        assert selected.provider == "deepseek"
-        assert selected.model_name == DEEPSEEK_CHAT_MODELS[0]
+        assert selected.provider == "gemini"
+        assert selected.model_name == GEMINI_CHAT_MODELS[1]
 
         current = bridge.current_model_summary(12345)
         assert current.is_override is True
-        assert current.model_name == DEEPSEEK_CHAT_MODELS[0]
+        assert current.model_name == GEMINI_CHAT_MODELS[1]
 
         default = bridge.clear_model_selection(12345)
         assert default.is_override is False
@@ -598,25 +598,26 @@ def test_format_resume_options_uses_chat_names_only():
 def test_format_model_options_uses_model_names_only():
     current = TelegramModelSummary(
         provider="openai",
-        model_name="gpt-5.4-mini",
+        model_name="gpt-5.6-luna",
         is_current=True,
         is_override=True,
     )
     text = _format_model_options(
         [
-            TelegramModelSummary(index=1, provider="openai", model_name="gpt-5.4"),
             TelegramModelSummary(
-                index=2,
+                index=1,
                 provider="openai",
-                model_name="gpt-5.4-mini",
+                model_name="gpt-5.6-luna",
                 is_current=True,
             ),
+            TelegramModelSummary(index=2, provider="gemini", model_name="gemini-3.1-pro-preview"),
         ],
         current,
     )
 
-    assert "Current model: OpenAI - gpt-5.4-mini" in text
-    assert "2. OpenAI - gpt-5.4-mini (current)" in text
+    assert "Current model: OpenAI - gpt-5.6-luna" in text
+    assert "1. OpenAI - gpt-5.6-luna (current)" in text
+    assert "2. Google - gemini-3.1-pro-preview" in text
     assert "conv-" not in text
     assert "session" not in text.casefold()
 

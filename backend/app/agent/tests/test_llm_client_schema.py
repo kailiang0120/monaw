@@ -8,10 +8,7 @@ from pathlib import Path
 from app.agent.llm_client import (
     LLMClient,
     LLMResponse,
-    VisionDescriber,
     build_tool_result_message,
-    build_vision_describer,
-    _deepseek_reasoning_effort,
     _gemini_thinking_config,
     _json_schema_prop_to_gemini,
     _model_supports_vision,
@@ -111,30 +108,6 @@ def test_gemini_message_normalization_attaches_inline_image_parts():
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def test_deepseek_uses_openai_client_with_base_url(monkeypatch):
-    captured = {}
-
-    class FakeAsyncOpenAI:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
-
-    client = LLMClient(
-        provider="deepseek",
-        model_name="deepseek-v4-pro",
-        api_key="deepseek-key",
-        base_url="https://api.deepseek.com",
-        reasoning_effort="high",
-    )
-
-    assert captured == {
-        "api_key": "deepseek-key",
-        "base_url": "https://api.deepseek.com",
-    }
-    assert client.reasoning_effort == "high"
-
-
 def test_llm_client_public_chat_routes_through_provider_adapter(monkeypatch):
     class FakeAsyncOpenAI:
         def __init__(self, **_kwargs):
@@ -181,20 +154,10 @@ def test_llm_client_selects_provider_adapter(monkeypatch):
     monkeypatch.setattr("google.genai.Client", FakeGeminiClient)
 
     openai_client = LLMClient(provider="openai", model_name="gpt-test", api_key="openai-key")
-    deepseek_client = LLMClient(provider="deepseek", model_name="deepseek-test", api_key="deepseek-key")
     gemini_client = LLMClient(provider="gemini", model_name="gemini-test", api_key="google-key")
 
     assert isinstance(openai_client.provider_adapter, OpenAICompatibleProviderAdapter)
-    assert isinstance(deepseek_client.provider_adapter, OpenAICompatibleProviderAdapter)
     assert isinstance(gemini_client.provider_adapter, GeminiProviderAdapter)
-
-
-def test_deepseek_reasoning_effort_maps_to_provider_contract():
-    assert _deepseek_reasoning_effort("low") == "high"
-    assert _deepseek_reasoning_effort("medium") == "high"
-    assert _deepseek_reasoning_effort("high") == "high"
-    assert _deepseek_reasoning_effort("xhigh") == "max"
-    assert _deepseek_reasoning_effort("max") == "max"
 
 
 def test_openai_reasoning_effort_maps_to_responses_contract():
@@ -232,9 +195,8 @@ def test_gemini_thinking_effort_maps_to_provider_contract():
     assert gemini_25_pro.include_thoughts is True
 
 
-def test_model_supports_vision_detects_text_only_providers():
-    assert _model_supports_vision("deepseek", "deepseek-v4-pro") is False
-    assert _model_supports_vision("openai", "gpt-5.4") is True
+def test_model_supports_vision_covers_enabled_providers():
+    assert _model_supports_vision("openai", "gpt-5.6-luna") is True
     assert _model_supports_vision("gemini", "gemini-2.5-flash") is True
     assert _model_supports_vision("new-compatible-provider", "vision-model") is True
 
@@ -398,134 +360,6 @@ def test_gemini_tool_round_trip_uses_function_response_parts():
     assert response_part.response == {"status": "ok"}
 
 
-def test_build_vision_describer_only_for_text_only_primary_with_google_key():
-    settings = SimpleNamespace(
-        model_provider="deepseek",
-        model_name="deepseek-v4-pro",
-        google_api_key="google-key",
-        llm=SimpleNamespace(
-            provider="deepseek",
-            model_name="deepseek-v4-pro",
-            vision_fallback_enabled=True,
-            vision_fallback_model="gemini-3.1-flash-lite-preview",
-            vision_fallback_max_output_tokens=1200,
-        ),
-    )
-
-    describer = build_vision_describer(settings)
-
-    assert isinstance(describer, VisionDescriber)
-    assert describer.model_name == "gemini-3.1-flash-lite-preview"
-    assert describer.max_output_tokens == 1200
-
-
-def test_build_vision_describer_skips_native_vision_or_missing_key():
-    native_vision = SimpleNamespace(
-        model_provider="openai",
-        model_name="gpt-5.4",
-        google_api_key="google-key",
-        llm=SimpleNamespace(vision_fallback_enabled=True, vision_fallback_model="gemini-2.5-flash"),
-    )
-    missing_key = SimpleNamespace(
-        model_provider="deepseek",
-        model_name="deepseek-v4-pro",
-        google_api_key="",
-        llm=SimpleNamespace(vision_fallback_enabled=True, vision_fallback_model="gemini-2.5-flash"),
-    )
-
-    assert build_vision_describer(native_vision) is None
-    assert build_vision_describer(missing_key) is None
-
-
-def test_deepseek_chat_payload_enables_thinking_with_high_or_max_effort(monkeypatch):
-    captured = {}
-
-    class FakeCompletions:
-        async def create(self, **kwargs):
-            captured.update(kwargs)
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        finish_reason="stop",
-                        message=SimpleNamespace(content="ok", tool_calls=[]),
-                    )
-                ]
-            )
-
-    class FakeAsyncOpenAI:
-        def __init__(self, **_kwargs):
-            self.chat = SimpleNamespace(completions=FakeCompletions())
-
-    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
-
-    client = LLMClient(
-        provider="deepseek",
-        model_name="deepseek-v4-pro",
-        api_key="deepseek-key",
-        reasoning_effort="xhigh",
-    )
-    response = asyncio.run(client._openai_chat([{"role": "user", "content": "hello"}], [], "", None))
-
-    assert response.content == "ok"
-    assert captured["reasoning_effort"] == "max"
-    assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
-
-
-def test_deepseek_chat_payload_omits_tool_choice_when_tools_are_available(monkeypatch):
-    captured = {}
-
-    class FakeCompletions:
-        async def create(self, **kwargs):
-            captured.update(kwargs)
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        finish_reason="tool_calls",
-                        message=SimpleNamespace(
-                            content="",
-                            tool_calls=[
-                                SimpleNamespace(
-                                    id="call-final",
-                                    function=SimpleNamespace(
-                                        name="final_answer",
-                                        arguments='{"answer":"done"}',
-                                    ),
-                                )
-                            ],
-                        ),
-                    )
-                ]
-            )
-
-    class FakeAsyncOpenAI:
-        def __init__(self, **_kwargs):
-            self.chat = SimpleNamespace(completions=FakeCompletions())
-
-    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
-
-    client = LLMClient(
-        provider="deepseek",
-        model_name="deepseek-v4-pro",
-        api_key="deepseek-key",
-        reasoning_effort="high",
-    )
-    response = asyncio.run(client._openai_chat(
-        [{"role": "user", "content": "hello"}],
-        [
-            {
-                "name": "final_answer",
-                "description": "Finish",
-                "parameters": {"type": "object", "properties": {"answer": {"type": "string"}}},
-            }
-        ],
-        "",
-        None,
-    ))
-
-    assert "tool_choice" not in captured
-    assert response.tool_calls[0].tool_name == "final_answer"
-
-
 def test_openai_responses_payload_can_require_tool_choice(monkeypatch):
     captured = {}
 
@@ -633,7 +467,7 @@ def test_openai_responses_payload_requests_reasoning_summary(monkeypatch):
 
     client = LLMClient(
         provider="openai",
-        model_name="gpt-5.4",
+        model_name="gpt-5.6-luna",
         api_key="openai-key",
         reasoning_effort="high",
     )
@@ -683,42 +517,6 @@ def test_openai_responses_extracts_provider_usage(monkeypatch):
     assert response.usage.reasoning_tokens == 10
     assert response.usage.cached_tokens == 7
     assert response.usage.total_tokens == 130
-    assert response.usage.source == "provider"
-
-
-def test_deepseek_chat_extracts_openai_compatible_usage(monkeypatch):
-    class FakeCompletions:
-        async def create(self, **_kwargs):
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        finish_reason="stop",
-                        message=SimpleNamespace(content="ok", tool_calls=[]),
-                    )
-                ],
-                usage=SimpleNamespace(
-                    prompt_tokens=8,
-                    completion_tokens=4,
-                    total_tokens=12,
-                    prompt_tokens_details=SimpleNamespace(cached_tokens=3),
-                    completion_tokens_details=SimpleNamespace(reasoning_tokens=2),
-                ),
-            )
-
-    class FakeAsyncOpenAI:
-        def __init__(self, **_kwargs):
-            self.chat = SimpleNamespace(completions=FakeCompletions())
-
-    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
-
-    client = LLMClient(provider="deepseek", model_name="deepseek-test", api_key="deepseek-key")
-    response = asyncio.run(client._openai_chat([{"role": "user", "content": "hello"}], [], "", None))
-
-    assert response.usage.input_tokens == 8
-    assert response.usage.output_tokens == 4
-    assert response.usage.reasoning_tokens == 2
-    assert response.usage.cached_tokens == 3
-    assert response.usage.total_tokens == 12
     assert response.usage.source == "provider"
 
 
@@ -786,7 +584,7 @@ def test_openai_responses_stream_separates_reasoning_from_answer(monkeypatch):
 
     client = LLMClient(
         provider="openai",
-        model_name="gpt-5.4",
+        model_name="gpt-5.6-luna",
         api_key="openai-key",
         reasoning_effort="medium",
     )

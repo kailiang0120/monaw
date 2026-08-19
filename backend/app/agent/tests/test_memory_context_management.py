@@ -36,7 +36,7 @@ class RecordingLLM:
         self.reply = reply
         self.calls: list[dict] = []
         self.provider = "openai"
-        self.model_name = "gpt-5.4"
+        self.model_name = "gpt-5.6-luna"
 
     async def chat(self, messages, system_prompt: str = "", stream_callback=None):
         self.calls.append({
@@ -258,7 +258,7 @@ def test_context_usage_endpoint_returns_report(monkeypatch):
             return list(registry_tools)
 
     fake_runtime = SimpleNamespace(
-        llm_client=SimpleNamespace(provider="openai", model_name="gpt-5.4"),
+        llm_client=SimpleNamespace(provider="openai", model_name="gpt-5.6-luna"),
         memory=manager,
         tool_registry=FakeRegistry(),
         skills=[
@@ -421,7 +421,7 @@ def test_context_usage_report_counts_runtime_skills_and_tools():
 
     report = build_context_usage_report(
         memory=manager,
-        llm_client=SimpleNamespace(provider="openai", model_name="gpt-5.4"),
+        llm_client=SimpleNamespace(provider="openai", model_name="gpt-5.6-luna"),
         conversation_id="conv-breakdown",
         runtime_prompt_text="Runtime instructions go here.",
         skill_prompt_text="Skill guidance goes here.",
@@ -462,14 +462,14 @@ def test_context_usage_report_counts_runtime_skills_and_tools():
 
 
 def test_context_usage_uses_model_specific_window_and_tokenizer():
-    gpt_54 = SimpleNamespace(provider="openai", model_name="gpt-5.4")
-    gpt_54_mini = SimpleNamespace(provider="openai", model_name="gpt-5.4-mini-2026-03-17")
+    luna = SimpleNamespace(provider="openai", model_name="gpt-5.6-luna")
+    luna_snapshot = SimpleNamespace(provider="openai", model_name="gpt-5.6-luna-2026-03-17")
     gemini = SimpleNamespace(provider="gemini", model_name="gemini-3.1-pro-preview")
-    deepseek = SimpleNamespace(provider="deepseek", model_name="deepseek-v4-pro")
+    unknown = SimpleNamespace(provider="openai", model_name="gpt-unlisted")
 
-    assert model_context_token_limit(gpt_54) == 200_000
-    assert model_compaction_threshold(gpt_54) == 185_000
-    assert model_context_token_limit(gpt_54_mini) == 200_000
+    assert model_context_token_limit(luna) == 200_000
+    assert model_compaction_threshold(luna) == 185_000
+    assert model_context_token_limit(luna_snapshot) == 200_000
     assert model_context_token_limit(gemini) == 200_000
-    assert model_context_token_limit(deepseek) == 200_000
-    assert token_estimation_method(gpt_54) in {"chars/4 fallback", "tiktoken:o200k_base", "tiktoken:cl100k_base"}
+    assert model_context_token_limit(unknown) == 200_000
+    assert token_estimation_method(luna) in {"chars/4 fallback", "tiktoken:o200k_base", "tiktoken:cl100k_base"}

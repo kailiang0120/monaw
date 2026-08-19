@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.iteration_budget import IterationBudget
-from app.agent.llm_client import LLMClient, VisionDescriber, build_tool_result_message
+from app.agent.llm_client import LLMClient, build_tool_result_message
 from app.agent.memory_manager import MemoryManager
 from app.agent.observability.recorder import (
     UsageStats,
@@ -723,13 +723,11 @@ class TurnLoop:
         max_iterations: int | None = None,
         max_turn_seconds: float = 1800.0,
         max_llm_call_seconds: float = 300.0,
-        vision_describer: VisionDescriber | None = None,
         observability: ObservabilityPort | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.registry = registry
         self.memory = memory
-        self.vision_describer = vision_describer
         self._max_iterations = max_iterations if max_iterations is not None else self.MAX_ITERATIONS
         seed_budget = budget or IterationBudget(max_iterations=self._max_iterations)
         self._turn_budget_max_iterations = seed_budget.max_iterations
@@ -767,32 +765,6 @@ class TurnLoop:
     async def _execute_tool(self, budget: IterationBudget, tool_dict: dict, arguments: dict) -> str:
         result = await self._execute_tool_result(budget, tool_dict, arguments)
         return result.output
-
-    async def _maybe_add_vision_fallback_description(
-        self,
-        tool_name: str,
-        tool_output: str,
-        image_attachments: list[dict],
-    ) -> tuple[str, bool]:
-        if not image_attachments or self.vision_describer is None:
-            return tool_output, False
-        if bool(getattr(self.llm_client, "supports_vision", False)):
-            return tool_output, False
-
-        description = await self.vision_describer.describe_images(
-            image_attachments,
-            tool_name=tool_name,
-        )
-        if not description:
-            return tool_output, True
-
-        model_name = getattr(self.vision_describer, "model_name", "unknown")
-        augmented_output = (
-            f"{tool_output}\n\n"
-            f"[Vision fallback description (Gemini {model_name})]:\n"
-            f"{description}"
-        )
-        return augmented_output, True
 
     def _build_tool_result_message(
         self,
@@ -1122,21 +1094,8 @@ class TurnLoop:
             initial_message = {"role": "user", "content": message}
             initial_images = _attachment_image_payloads(attachments)
             if initial_images:
-                if bool(getattr(self.llm_client, "supports_vision", False)):
-                    initial_message["images"] = initial_images
-                    initial_message["ephemeral"] = True
-                elif self.vision_describer is not None:
-                    description = await self.vision_describer.describe_images(
-                        initial_images,
-                        tool_name="uploaded_attachment",
-                    )
-                    if description:
-                        model_name = getattr(self.vision_describer, "model_name", "unknown")
-                        initial_message["content"] = (
-                            f"{message}\n\n"
-                            f"[Vision fallback description for uploaded image(s) "
-                            f"(Gemini {model_name})]:\n{description}"
-                        )
+                initial_message["images"] = initial_images
+                initial_message["ephemeral"] = True
             messages.append(initial_message)
 
             budget_exhausted = False
@@ -2180,11 +2139,6 @@ class TurnLoop:
                             "status": "complete" if status == "ok" else status,
                         }
                         image_attachments = _extract_image_attachments(tool_name, raw_tool_output)
-                        message_tool_output, attempted_vision_fallback = await self._maybe_add_vision_fallback_description(
-                            tool_name,
-                            raw_tool_output,
-                            image_attachments,
-                        )
                         tool_result = ToolCallResult.from_output(
                             call_id=call_id,
                             name=tool_name,
@@ -2217,7 +2171,6 @@ class TurnLoop:
                             obs_tool_started_at,
                             risk=policy_decision.risk,
                             error_code=_tool_error_code(raw_tool_output) if status != "ok" else "",
-                            metadata={"vision_fallback": attempted_vision_fallback},
                         )
                         if plan_step is not None:
                             verified = status == "ok"
@@ -2252,20 +2205,11 @@ class TurnLoop:
                             }
                         )
                         active_tool_call = None
-                        message_tool_result = tool_result
-                        if message_tool_output != raw_tool_output:
-                            message_tool_result = ToolCallResult.from_output(
-                                call_id=call_id,
-                                name=tool_name,
-                                output=message_tool_output,
-                                fallback_status="ok" if status == "ok" else "error",
-                                metadata={"policy": policy_decision.metadata},
-                            )
                         message_entry = build_tool_result_message(
-                            message_tool_result,
+                            tool_result,
                             provider=str(getattr(self.llm_client, "provider", "") or ""),
                         )
-                        if image_attachments and not attempted_vision_fallback:
+                        if image_attachments:
                             message_entry["images"] = image_attachments
                             message_entry["ephemeral"] = True
                         messages.append(message_entry)

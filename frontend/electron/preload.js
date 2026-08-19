@@ -8,7 +8,7 @@ const backendBaseUrlCandidate = backendBaseUrlArgument
 const backendBaseUrl = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(backendBaseUrlCandidate)
   ? backendBaseUrlCandidate
   : ''
-const credentialIds = new Set(['openai', 'deepseek', 'google', 'tavily', 'telegramBot'])
+const credentialIds = new Set(['openai', 'google', 'tavily', 'telegramBot'])
 
 function credentialId(value) {
   if (typeof value !== 'string' || !credentialIds.has(value)) {
