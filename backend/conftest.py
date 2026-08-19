@@ -97,6 +97,24 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture(autouse=True)
+def isolate_approval_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Keep approval tickets out of the developer's real ~/.monaw runtime dir.
+
+    Tickets created by a test would otherwise persist as pending and be
+    replayed as live approval prompts the next time the app boots.
+    """
+    import app.agent.approval_broker as broker
+
+    monkeypatch.setattr(broker, "_TICKETS_FILE", tmp_path / "tickets.jsonl")
+    monkeypatch.setattr(broker, "_APPROVAL_LOG", tmp_path / "approval_log.md")
+    broker._all_tickets.clear()
+    broker._pending_index.clear()
+    broker._resume_events.clear()
+    broker._resume_decisions.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def authenticate_test_client_requests(monkeypatch: pytest.MonkeyPatch):
     from fastapi.testclient import TestClient
 

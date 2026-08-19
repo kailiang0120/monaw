@@ -57,6 +57,7 @@ class TicketStatus(str, Enum):
     APPLIED = "applied"
     FAILED = "failed"
     SUPERSEDED = "superseded"
+    EXPIRED = "expired"
 
 
 class ApprovalTicket(BaseModel):
@@ -103,25 +104,51 @@ _pending_index: dict[str, ApprovalTicket] = {}
 _all_tickets: dict[str, ApprovalTicket] = {}
 
 
+def _is_expired(ticket: ApprovalTicket) -> bool:
+    try:
+        return datetime.fromisoformat(ticket.expires_at) <= datetime.now(timezone.utc)
+    except ValueError:
+        return True
+
+
+def _expire_stale_pending() -> int:
+    """Retire pending tickets past their expiry so they stop resurfacing.
+
+    A ticket left pending when the process dies is still pending on the next
+    boot, and the UI would prompt for an action whose approval endpoint now
+    rejects it as expired. Caller must hold _state_lock.
+    """
+    expired = [t for t in _pending_index.values() if _is_expired(t)]
+    for ticket in expired:
+        ticket.status = TicketStatus.EXPIRED
+        ticket.resolved_at = datetime.now(timezone.utc).isoformat()
+        ticket.resolved_by = "system"
+        _pending_index.pop(ticket.id, None)
+    return len(expired)
+
+
 def _load_tickets_from_disk() -> None:
     """Reload all tickets from JSONL on startup."""
-    _pending_index.clear()
-    _all_tickets.clear()
-    if not _TICKETS_FILE.exists():
-        return
-    with open(_TICKETS_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                ticket = ApprovalTicket.model_validate(data)
-                _all_tickets[ticket.id] = ticket
-                if ticket.status == TicketStatus.PENDING:
-                    _pending_index[ticket.id] = ticket
-            except Exception:
-                continue
+    with _state_lock:
+        _pending_index.clear()
+        _all_tickets.clear()
+        if not _TICKETS_FILE.exists():
+            return
+        with open(_TICKETS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    ticket = ApprovalTicket.model_validate(data)
+                    _all_tickets[ticket.id] = ticket
+                    if ticket.status == TicketStatus.PENDING:
+                        _pending_index[ticket.id] = ticket
+                except Exception:
+                    continue
+        if _expire_stale_pending():
+            _rewrite_tickets()
 
 
 def _ensure_approvals_dir() -> None:
@@ -277,7 +304,10 @@ def get_ticket(ticket_id: str) -> ApprovalTicket | None:
 
 def get_pending_tickets(conversation_id: str = "") -> list[ApprovalTicket]:
     """Return all pending tickets, optionally filtered by conversation."""
-    tickets = list(_pending_index.values())
+    with _state_lock:
+        if _expire_stale_pending():
+            _rewrite_tickets()
+        tickets = list(_pending_index.values())
     if conversation_id:
         tickets = [t for t in tickets if t.conversation_id == conversation_id]
     return sorted(tickets, key=lambda t: t.created_at)

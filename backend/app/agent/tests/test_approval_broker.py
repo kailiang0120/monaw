@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from app.agent.approval_broker import (
     _pending_index,
     _resume_decisions,
     _resume_events,
+    _rewrite_tickets,
     _TICKETS_FILE,
     _APPROVAL_LOG,
 )
@@ -247,3 +249,44 @@ class TestPersistence:
         reload_from_disk()
         assert t.id in _all_tickets
         assert t.id not in _pending_index
+
+
+class TestExpiry:
+    def _expire(self, ticket_id: str) -> None:
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        _all_tickets[ticket_id].expires_at = stale
+        _rewrite_tickets()
+
+    def test_expired_ticket_not_returned_as_pending(self):
+        t = create_ticket(tool_name="ctrl_delete")
+        self._expire(t.id)
+        assert get_pending_tickets() == []
+        assert _all_tickets[t.id].status == TicketStatus.EXPIRED
+
+    def test_expired_ticket_not_resurrected_on_reload(self):
+        t = create_ticket(tool_name="mcp__filesystem__delete_file")
+        self._expire(t.id)
+        _all_tickets.clear()
+        _pending_index.clear()
+        reload_from_disk()
+        assert t.id not in _pending_index
+        assert get_pending_tickets() == []
+
+    def test_expiry_survives_a_second_reload(self):
+        t = create_ticket(tool_name="ctrl_delete")
+        self._expire(t.id)
+        reload_from_disk()
+        reload_from_disk()
+        assert _all_tickets[t.id].status == TicketStatus.EXPIRED
+        assert get_pending_tickets() == []
+
+    def test_unexpired_ticket_still_pending(self):
+        t = create_ticket(tool_name="ctrl_delete")
+        reload_from_disk()
+        assert [p.id for p in get_pending_tickets()] == [t.id]
+
+    def test_expired_ticket_cannot_be_approved(self):
+        t = create_ticket(tool_name="ctrl_delete")
+        self._expire(t.id)
+        get_pending_tickets()
+        assert approve_ticket(t.id) is None
