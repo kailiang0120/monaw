@@ -17,19 +17,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from app.agent.harness.tool_protocol import ToolCallResult
-from app.agent.llm_constants import (
-    DEFAULT_VISION_FALLBACK_MAX_OUTPUT_TOKENS,
-    DEFAULT_VISION_FALLBACK_MODEL,
-)
 from app.agent import llm_provider_requests as provider_requests
 from app.agent import llm_provider_responses as provider_responses
 from app.agent.llm_provider_adapters import create_llm_provider_adapter
 from app.agent.observability.recorder import UsageStats
 
 logger = logging.getLogger(__name__)
-
-VISION_FALLBACK_MAX_OUTPUT_TOKENS = DEFAULT_VISION_FALLBACK_MAX_OUTPUT_TOKENS
-VISION_FALLBACK_TIMEOUT_SECONDS = 60
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -203,13 +196,6 @@ def _tools_to_openai_responses(tools: list[dict]) -> list[dict]:
     ]
 
 
-def _deepseek_reasoning_effort(value: str) -> str:
-    effort = str(value or "").strip().lower()
-    if effort in {"max", "xhigh"}:
-        return "max"
-    return "high"
-
-
 def _openai_reasoning_effort(value: str) -> str:
     effort = str(value or "").strip().lower()
     if effort in {"none", "minimal"}:
@@ -284,11 +270,6 @@ def _gemini_thinking_config(model_name: str, reasoning_effort: str, types_mod):
     return None
 
 
-def _is_deepseek_tool_choice_error(exc: Exception) -> bool:
-    message = str(exc or "").lower()
-    return "does not support this tool_choice" in message
-
-
 def _tool_output_response_payload(output: str) -> dict:
     try:
         parsed = json.loads(output)
@@ -330,8 +311,6 @@ def _model_supports_vision(provider: str, model_name: str) -> bool:
         return model.startswith("gemini")
     if provider_name == "openai":
         return model.startswith(("gpt-4", "gpt-5", "o1", "o3", "o4"))
-    if provider_name == "deepseek":
-        return False
     return True
 
 
@@ -359,119 +338,6 @@ def _image_payloads_for_message(msg: dict, include_images: bool) -> list[dict]:
             mime_type = mimetypes.guess_type(path)[0] or "image/png"
         payloads.append({"path": path, "mime_type": mime_type, "data": data})
     return payloads
-
-
-class VisionDescriber:
-    """Gemini-backed screenshot describer for text-only primary models."""
-
-    def __init__(
-        self,
-        api_key: str,
-        model_name: str = DEFAULT_VISION_FALLBACK_MODEL,
-        *,
-        max_output_tokens: int = VISION_FALLBACK_MAX_OUTPUT_TOKENS,
-        timeout_seconds: float = VISION_FALLBACK_TIMEOUT_SECONDS,
-    ) -> None:
-        from google import genai
-
-        self.api_key = api_key
-        self.model_name = model_name or DEFAULT_VISION_FALLBACK_MODEL
-        self.max_output_tokens = max(1, int(max_output_tokens or VISION_FALLBACK_MAX_OUTPUT_TOKENS))
-        self.timeout_seconds = timeout_seconds
-        self._genai_client = genai.Client(api_key=self.api_key) if self.api_key else None
-
-    async def describe_images(self, images: list[dict], *, tool_name: str = "") -> str:
-        if not self._genai_client:
-            return ""
-        image_payloads = _image_payloads_for_message({"images": images}, include_images=True)
-        if not image_payloads:
-            return ""
-
-        from google.genai import types
-
-        prompt = (
-            "You are a vision assistant for a non-multimodal agent. Describe the following\n"
-            f"{len(image_payloads)} screenshot(s) so a downstream text-only model can decide the next action.\n"
-            f"Tool that produced them: {tool_name or 'unknown'}.\n\n"
-            "Use a concise bulleted layout, max about 12 bullets. Include visible UI: "
-            "page title, URL bar if visible, key headings,\n"
-            "form fields and current values, buttons (with labels and enabled/disabled state),\n"
-            "tables, error/notification banners, modals, currently focused element,\n"
-            "and any text content the agent might need to read or click.\n"
-            "Do not invent details that are not visible."
-        )
-        parts = [{"text": prompt}]
-        parts.extend(
-            types.Part.from_bytes(data=payload["data"], mime_type=payload["mime_type"])
-            for payload in image_payloads
-        )
-
-        try:
-            response = await asyncio.wait_for(
-                _with_retry(
-                    lambda: self._genai_client.aio.models.generate_content(
-                        model=self.model_name,
-                        contents=[{"role": "user", "parts": parts}],
-                        config=types.GenerateContentConfig(
-                            max_output_tokens=self.max_output_tokens,
-                            response_mime_type="text/plain",
-                        ),
-                    )
-                ),
-                timeout=self.timeout_seconds,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Vision fallback description failed model=%s tool=%s images=%s error=%s",
-                self.model_name,
-                tool_name,
-                len(image_payloads),
-                exc,
-            )
-            return ""
-
-        try:
-            return (response.text or "").strip()
-        except Exception as exc:
-            logger.warning(
-                "Vision fallback response had no readable text model=%s tool=%s error=%s",
-                self.model_name,
-                tool_name,
-                exc,
-            )
-            return ""
-
-
-def build_vision_describer(settings) -> VisionDescriber | None:
-    """Build the optional Gemini screenshot describer for text-only primary models."""
-
-    llm_cfg = getattr(settings, "llm", None)
-    enabled = bool(getattr(llm_cfg, "vision_fallback_enabled", True))
-    if not enabled:
-        return None
-
-    provider = str(getattr(settings, "model_provider", "") or getattr(llm_cfg, "provider", "") or "")
-    model_name = str(getattr(settings, "model_name", "") or getattr(llm_cfg, "model_name", "") or "")
-    if _model_supports_vision(provider, model_name):
-        return None
-
-    api_key = str(getattr(settings, "google_api_key", "") or "").strip()
-    if not api_key:
-        return None
-
-    fallback_model = str(
-        getattr(llm_cfg, "vision_fallback_model", "") or DEFAULT_VISION_FALLBACK_MODEL
-    ).strip()
-    max_output_tokens = int(
-        getattr(llm_cfg, "vision_fallback_max_output_tokens", 0)
-        or getattr(settings, "vision_fallback_max_output_tokens", 0)
-        or VISION_FALLBACK_MAX_OUTPUT_TOKENS
-    )
-    return VisionDescriber(
-        api_key=api_key,
-        model_name=fallback_model or DEFAULT_VISION_FALLBACK_MODEL,
-        max_output_tokens=max_output_tokens,
-    )
 
 
 def _normalise_messages_for_gemini(
@@ -694,14 +560,8 @@ class LLMClient:
         elif self.provider == "openai":
             from openai import AsyncOpenAI
             self._openai_client = AsyncOpenAI(api_key=api_key)
-        elif self.provider == "deepseek":
-            from openai import AsyncOpenAI
-            self._openai_client = AsyncOpenAI(
-                api_key=api_key,
-                base_url=self.base_url or "https://api.deepseek.com",
-            )
         else:
-            raise ValueError(f"Unsupported provider: {provider!r}. Use 'openai', 'deepseek', or 'gemini'.")
+            raise ValueError(f"Unsupported provider: {provider!r}. Use 'openai' or 'gemini'.")
         self.provider_adapter = create_llm_provider_adapter(self.provider, self)
 
     @staticmethod
@@ -888,30 +748,13 @@ class LLMClient:
         stream_callback: Callable[[str], Awaitable[None]] | None,
         tool_choice: str | dict | None = None,
     ) -> LLMResponse:
-        if self.provider == "openai":
-            return await self._openai_responses_chat(
-                messages,
-                tools,
-                system_prompt,
-                stream_callback,
-                tool_choice,
-            )
-
-        kwargs = provider_requests.openai_compatible_chat_kwargs(
-            provider=self.provider,
-            model_name=self.model_name,
-            messages=messages,
-            tools=tools,
-            system_prompt=system_prompt,
-            reasoning_effort=self.reasoning_effort,
-            include_images=self._supports_vision,
-            tool_choice=tool_choice,
+        return await self._openai_responses_chat(
+            messages,
+            tools,
+            system_prompt,
+            stream_callback,
+            tool_choice,
         )
-
-        if stream_callback is not None:
-            return await self._openai_stream(kwargs, stream_callback)
-        else:
-            return await self._openai_no_stream(kwargs)
 
     async def _openai_responses_chat(
         self,
@@ -1037,113 +880,6 @@ class LLMClient:
             reasoning_content=collected_reasoning_content,
         )
 
-    async def _openai_no_stream(self, kwargs: dict) -> LLMResponse:
-        try:
-            response = await self._openai_client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            if self.provider == "deepseek" and "tool_choice" in kwargs and _is_deepseek_tool_choice_error(exc):
-                retry_kwargs = dict(kwargs)
-                retry_kwargs.pop("tool_choice", None)
-                logger.warning(
-                    "DeepSeek model %s rejected tool_choice; retrying without tool_choice",
-                    self.model_name,
-                )
-                response = await self._openai_client.chat.completions.create(**retry_kwargs)
-            else:
-                raise
-        choice = response.choices[0]
-        msg = choice.message
-        content = msg.content or ""
-        reasoning_content = str(getattr(msg, "reasoning_content", "") or "")
-        finish_reason = _openai_finish_reason(choice.finish_reason)
-        tool_calls = _extract_openai_tool_calls(msg.tool_calls or [])
-        return LLMResponse(
-            content=content,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            reasoning_content=reasoning_content,
-            usage=_usage_from_openai(_obj_get(response, "usage", None)),
-        )
-
-    async def _openai_stream(
-        self,
-        kwargs: dict,
-        stream_callback: Callable[[str], Awaitable[None]],
-    ) -> LLMResponse:
-        kwargs = {**kwargs, "stream": True}
-        collected_content = ""
-        collected_reasoning_content = ""
-        finish_reason = "stop"
-        tool_call_buffers: dict[int, dict] = {}
-        usage = UsageStats()
-
-        try:
-            stream = await self._openai_client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            if self.provider == "deepseek" and "tool_choice" in kwargs and _is_deepseek_tool_choice_error(exc):
-                retry_kwargs = dict(kwargs)
-                retry_kwargs.pop("tool_choice", None)
-                logger.warning(
-                    "DeepSeek model %s rejected tool_choice; retrying stream without tool_choice",
-                    self.model_name,
-                )
-                stream = await self._openai_client.chat.completions.create(**retry_kwargs)
-            else:
-                raise
-        async for chunk in stream:
-            chunk_usage = _usage_from_openai(_obj_get(chunk, "usage", None))
-            if chunk_usage.total_tokens:
-                usage = chunk_usage
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            fr = chunk.choices[0].finish_reason
-            if fr:
-                finish_reason = _openai_finish_reason(fr)
-
-            if delta.content:
-                collected_content += delta.content
-                await stream_callback(delta.content)
-            reasoning_delta = getattr(delta, "reasoning_content", None)
-            if reasoning_delta:
-                collected_reasoning_content += reasoning_delta
-
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_call_buffers:
-                        tool_call_buffers[idx] = {"id": "", "name": "", "arguments_buf": ""}
-                    buf = tool_call_buffers[idx]
-                    if tc_delta.id:
-                        buf["id"] += tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            buf["name"] += tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            buf["arguments_buf"] += tc_delta.function.arguments
-
-        tool_calls: list[ToolCallRequest] = []
-        for idx in sorted(tool_call_buffers):
-            buf = tool_call_buffers[idx]
-            try:
-                args = json.loads(buf["arguments_buf"]) if buf["arguments_buf"] else {}
-            except json.JSONDecodeError:
-                args = {"_raw": buf["arguments_buf"]}
-            tool_calls.append(
-                ToolCallRequest(call_id=buf["id"], tool_name=buf["name"], arguments=args)
-            )
-
-        if tool_calls and finish_reason == "stop":
-            finish_reason = "tool_calls"
-
-        return LLMResponse(
-            content=collected_content,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            reasoning_content=collected_reasoning_content,
-            usage=usage,
-        )
-
 
 # ---------------------------------------------------------------------------
 # Helper extractors
@@ -1153,15 +889,3 @@ class LLMClient:
 def _extract_gemini_tool_calls(response) -> list[ToolCallRequest]:
     """Extract function calls from a google-genai GenerateContentResponse."""
     return provider_responses.extract_gemini_tool_calls(response, ToolCallRequest)
-
-
-def _extract_openai_tool_calls(raw_tool_calls) -> list[ToolCallRequest]:
-    return provider_responses.extract_openai_tool_calls(raw_tool_calls, ToolCallRequest)
-
-
-def _openai_finish_reason(raw: str | None) -> str:
-    if raw == "tool_calls":
-        return "tool_calls"
-    if raw == "length":
-        return "length"
-    return "stop"

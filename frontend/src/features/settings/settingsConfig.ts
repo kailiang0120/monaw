@@ -3,9 +3,7 @@ import { DEFAULT_AGENT_NAME, resolveAgentName } from '../../lib/identity'
 
 export type ModelOptionsCatalog = ModelOptions
 
-export const OPENAI_MODELS = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano']
-export const DEEPSEEK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro']
-export const VISION_FALLBACK_MODELS = ['gemini-3.1-flash-lite-preview', 'gemini-3.1-pro-preview']
+export const OPENAI_MODELS = ['gpt-5.6-luna']
 export const GEMINI_MODELS = [
   'gemini-3.1-pro-preview',
   'gemini-3.1-flash-lite',
@@ -15,10 +13,8 @@ export const GEMINI_MODELS = [
 export const FALLBACK_MODEL_OPTIONS: ModelOptionsCatalog = {
   providers: [
     { id: 'openai', label: 'OpenAI', models: OPENAI_MODELS },
-    { id: 'deepseek', label: 'DeepSeek', models: DEEPSEEK_MODELS },
     { id: 'gemini', label: 'Google', models: GEMINI_MODELS },
   ],
-  vision_fallback_models: VISION_FALLBACK_MODELS,
 }
 export const LLM_PROVIDERS: Array<AgentSettings['llm']['provider']> = FALLBACK_MODEL_OPTIONS.providers.map((provider) => provider.id)
 
@@ -28,10 +24,6 @@ export const OPENAI_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_eff
   'medium',
   'high',
   'xhigh',
-]
-export const DEEPSEEK_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_effort']> = [
-  'high',
-  'max',
 ]
 export const GEMINI_PRO_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_effort']> = [
   'low',
@@ -79,17 +71,10 @@ export function modelsForProvider(
     ?? OPENAI_MODELS
 }
 
-export function visionFallbackModels(catalog: ModelOptionsCatalog = FALLBACK_MODEL_OPTIONS): string[] {
-  return catalog.vision_fallback_models.length > 0
-    ? catalog.vision_fallback_models
-    : FALLBACK_MODEL_OPTIONS.vision_fallback_models
-}
-
 export function reasoningEffortsForProvider(
   provider: AgentSettings['llm']['provider'],
   modelName = '',
 ): Array<AgentSettings['llm']['reasoning_effort']> {
-  if (provider === 'deepseek') return DEEPSEEK_REASONING_EFFORTS
   if (provider === 'gemini') {
     if (modelName.startsWith('gemini-3') && modelName.includes('flash')) return GEMINI_FLASH_REASONING_EFFORTS
     if (modelName.startsWith('gemini-3') && modelName.includes('pro')) return GEMINI_PRO_REASONING_EFFORTS
@@ -370,10 +355,6 @@ export function normalizeDraft(
   const reasoningEffort = reasoningOptions.includes(settings.llm.reasoning_effort)
     ? settings.llm.reasoning_effort
     : reasoningOptions[0]
-  const visionOptions = visionFallbackModels(catalog)
-  const visionFallbackModel = visionOptions.includes(settings.llm.vision_fallback_model)
-    ? settings.llm.vision_fallback_model
-    : visionOptions[0]
   const customProfile = settings.permissions.custom_profile
     ? clonePermissionProfile(settings.permissions.custom_profile)
     : settings.permissions.mode === 'custom'
@@ -445,8 +426,6 @@ export function normalizeDraft(
       provider,
       model_name: modelName,
       reasoning_effort: reasoningEffort,
-      vision_fallback_enabled: settings.llm.vision_fallback_enabled ?? true,
-      vision_fallback_model: visionFallbackModel,
       max_iterations_per_turn: clampInteger(settings.llm.max_iterations_per_turn, 40, 1, 500),
       max_turn_seconds: clampInteger(settings.llm.max_turn_seconds, 1800, 30, 14400),
       max_llm_call_seconds: clampInteger(settings.llm.max_llm_call_seconds, 300, 30, 1800),

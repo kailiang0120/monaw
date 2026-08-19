@@ -242,10 +242,12 @@ def test_model_options_endpoint_returns_backend_model_catalog():
     assert response.status_code == 200
     payload = response.json()
     providers = {item["id"]: item for item in payload["providers"]}
-    assert providers["openai"]["models"][0] == "gpt-5.5"
+    assert providers["openai"]["label"] == "OpenAI"
+    assert providers["openai"]["models"] == ["gpt-5.6-luna"]
     assert providers["gemini"]["label"] == "Google"
     assert providers["gemini"]["models"][0].startswith("gemini-3")
-    assert "gemini-3.1-flash-lite-preview" in payload["vision_fallback_models"]
+    assert "deepseek" not in providers
+    assert "vision_fallback_models" not in payload
 
 
 def test_update_settings_key_change_does_not_reset_browser_runtime(monkeypatch):

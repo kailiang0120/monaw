@@ -19,12 +19,12 @@ export const PAGE_COPY = {
   model: {
     label: 'Model',
     blurb: 'Pick the AI model that powers the agent, and cap how long a single request may run.',
-    keywords: 'provider openai deepseek google gemini reasoning effort vision speech voice whisper timeout limits',
+    keywords: 'provider openai gpt google gemini reasoning effort vision images speech voice whisper timeout limits',
   },
   apiKeys: {
     label: 'Connections',
     blurb: 'Store the API keys and tokens the agent needs to reach outside services.',
-    keywords: 'api key token secret credential openai deepseek google tavily telegram search',
+    keywords: 'api key token secret credential openai google tavily telegram search',
   },
   identity: {
     label: 'Identity',
@@ -76,9 +76,7 @@ export const MODEL_COPY = {
   provider: 'The company whose models the agent uses. Each provider needs its own API key, set up under Connections.',
   model: 'Bigger models reason better and cost more per message. Smaller "mini"/"flash" models are faster and cheaper.',
   reasoningEffort: 'How long the model is allowed to think before it answers. Higher settings give better results on hard problems but are slower and cost more.',
-  visionFallback: 'When the main model cannot read an image, hand the screenshot to a model that can. Needed for most on-screen automation.',
-  visionModel: 'The model used only for reading images. Requires a saved Google API key.',
-  visionRequiresKey: 'Add a Google API key under Connections, or the agent will not be able to read screenshots.',
+  vision: 'Screenshots and image attachments go straight to the model you picked above, which reads them natively. No separate vision model is needed.',
   speechEngine: 'Local runs on this computer and works offline after a one-time download. Cloud sends your audio to Google and needs a Google API key.',
   speechLocalIntro: 'Voice input needs the Whisper model downloaded once (about 142 MB). It then runs entirely on this machine.',
   runtimeLimits: 'Safety brakes for a single request. If the agent gets stuck in a loop, these stop it instead of letting it run forever.',

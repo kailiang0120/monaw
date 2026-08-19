@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from app.agent.llm_constants import CHAT_MODELS_BY_PROVIDER
+from app.agent.llm_constants import CHAT_MODELS_BY_PROVIDER, DEFAULT_OPENAI_CHAT_MODEL
 from app.agent.database import get_db
 from app.agent.response_attachments import collect_response_attachments
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
@@ -262,7 +262,7 @@ class TelegramAgentBridge:
         model_name = str(getattr(runtime_settings, "model_name", "") or "").strip()
         provider_models = CHAT_MODELS_BY_PROVIDER.get(provider, ())
         if not model_name:
-            model_name = provider_models[0] if provider_models else "gpt-5.4"
+            model_name = provider_models[0] if provider_models else DEFAULT_OPENAI_CHAT_MODEL
         return TelegramModelSummary(provider=provider, model_name=model_name)
 
     def current_model_summary(

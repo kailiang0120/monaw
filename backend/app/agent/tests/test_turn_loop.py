@@ -224,8 +224,8 @@ class JsonTextFinalLLM:
         )
 
 
-class DeepSeekFinalAnswerLLM:
-    provider = "deepseek"
+class FinalAnswerToolLLM:
+    provider = "openai"
 
     def __init__(self) -> None:
         self.seen_tools: list[list[dict]] = []
@@ -273,7 +273,7 @@ class CompletionRepromptLLM:
 
 
 class PendingSummaryThenGenericFinalLLM:
-    provider = "deepseek"
+    provider = "openai"
 
     summary = (
         "## FIG summary\n\n"
@@ -307,8 +307,8 @@ class PendingSummaryThenGenericFinalLLM:
         return final_answer_response(self.generic_final)
 
 
-class DeepSeekTextWithoutToolLLM:
-    provider = "deepseek"
+class TextWithoutToolLLM:
+    provider = "openai"
 
     def __init__(self) -> None:
         self.calls = 0
@@ -662,17 +662,6 @@ class ScreenshotToolLLM:
         )
 
 
-class FakeVisionDescriber:
-    model_name = "gemini-test-vision"
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    async def describe_images(self, images: list[dict], *, tool_name: str = "") -> str:
-        self.calls.append({"images": images, "tool_name": tool_name})
-        return "- Page title: Example Domain\n- Main heading: Example Domain"
-
-
 class RepeatBrowserLLM:
     def __init__(self, tool_name: str = "browser_snapshot", arguments: dict | None = None) -> None:
         self.calls = 0
@@ -926,11 +915,11 @@ def test_turn_loop_still_accepts_final_answer_tool_when_model_emits_it():
         ]
     )
     memory = FakeMemory()
-    llm = DeepSeekFinalAnswerLLM()
+    llm = FinalAnswerToolLLM()
     loop = TurnLoop(llm_client=llm, registry=registry, memory=memory)
 
     async def collect():
-        return [event async for event in loop.run("finish task", "conv-deepseek-final", system_prompt="system")]
+        return [event async for event in loop.run("finish task", "conv-final-answer-tool", system_prompt="system")]
 
     events = asyncio.run(collect())
 
@@ -1104,7 +1093,7 @@ def test_turn_loop_continues_text_only_progress_until_iteration_budget():
         ]
     )
     memory = FakeMemory()
-    llm = DeepSeekTextWithoutToolLLM()
+    llm = TextWithoutToolLLM()
     loop = TurnLoop(
         llm_client=llm,
         registry=registry,
@@ -1114,7 +1103,7 @@ def test_turn_loop_continues_text_only_progress_until_iteration_budget():
     )
 
     async def collect():
-        return [event async for event in loop.run("continue browser task", "conv-deepseek-text", system_prompt="system")]
+        return [event async for event in loop.run("continue browser task", "conv-text-without-tool", system_prompt="system")]
 
     events = asyncio.run(collect())
     done_event = next(event for event in events if event["event"] == "done")
@@ -1862,8 +1851,8 @@ def test_turn_loop_includes_generated_screenshot_when_user_requests_image_delive
         update_permitted_roots(prior_roots)
 
 
-def test_turn_loop_appends_vision_fallback_for_text_only_model():
-    tmp_dir = Path.cwd() / ".tmp-turn-loop-vision-fallback"
+def test_turn_loop_attaches_tool_screenshots_for_the_model_to_read():
+    tmp_dir = Path.cwd() / ".tmp-turn-loop-native-vision"
     shutil.rmtree(tmp_dir, ignore_errors=True)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     screenshot_path = tmp_dir / "browser.png"
@@ -1882,37 +1871,24 @@ def test_turn_loop_appends_vision_fallback_for_text_only_model():
         ]
     )
     llm = ScreenshotToolLLM()
-    vision_describer = FakeVisionDescriber()
     memory = PersistingFakeMemory()
-    loop = TurnLoop(
-        llm_client=llm,
-        registry=registry,
-        memory=memory,
-        vision_describer=vision_describer,
-    )
+    loop = TurnLoop(llm_client=llm, registry=registry, memory=memory)
 
     async def collect():
-        return [event async for event in loop.run("inspect browser", "conv-vision-fallback", system_prompt="system")]
+        return [event async for event in loop.run("inspect browser", "conv-native-vision", system_prompt="system")]
 
     try:
         asyncio.run(collect())
 
-        assert vision_describer.calls == [
-            {
-                "images": [{"path": str(screenshot_path), "mime_type": "image/png"}],
-                "tool_name": "browser_screenshot",
-            }
-        ]
         second_call_messages = llm.seen_messages[1]
         tool_result_message = next(
-            message
-            for message in second_call_messages
-            if "Vision fallback description" in message.get("content", "")
+            message for message in second_call_messages if message.get("images")
         )
-        assert "Example Domain" in tool_result_message["content"]
-        assert "images" not in tool_result_message
+        assert tool_result_message["images"] == [
+            {"path": str(screenshot_path), "mime_type": "image/png"}
+        ]
+        assert tool_result_message["ephemeral"] is True
         persisted_output = memory.persisted_turns[0]["tool_calls"][0]["output"]
-        assert "[Vision fallback description (Gemini gemini-test-vision)]" not in persisted_output
         assert json.loads(persisted_output)["path"] == str(screenshot_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

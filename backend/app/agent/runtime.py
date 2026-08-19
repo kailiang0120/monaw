@@ -8,7 +8,7 @@ import logging
 import threading
 from typing import AsyncIterator
 
-from app.agent.llm_client import LLMClient, build_vision_describer
+from app.agent.llm_client import LLMClient
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
 from app.agent.long_term_memory import get_long_term_memory
 from app.agent.memory_manager import get_memory_manager
@@ -128,10 +128,8 @@ class AgentRuntime:
             provider=settings.model_provider,
             model_name=settings.model_name,
             api_key=api_key,
-            base_url=getattr(settings, "deepseek_base_url", ""),
             reasoning_effort=getattr(settings, "reasoning_effort", "medium"),
         )
-        self.vision_describer = build_vision_describer(settings)
         self.skills, self.tool_registry = load_tools(settings)
         self.memory = get_memory_manager(self.llm_client)
         self.long_term_memory = get_long_term_memory(self.llm_client, settings)
@@ -155,7 +153,6 @@ class AgentRuntime:
             max_iterations=max_iterations,
             max_turn_seconds=max_turn_seconds,
             max_llm_call_seconds=max_llm_call_seconds,
-            vision_describer=self.vision_describer,
         )
         visible_tool_names = {
             tool["name"] for tool in self.tool_registry.get_all_tools(visible_only=True)
@@ -319,7 +316,6 @@ def _settings_cache_key(settings) -> str:
         provider,
         settings.model_name,
         settings.reasoning_effort,
-        getattr(settings, "deepseek_base_url", ""),
         str(sorted(skill_map.items())),
         str(mcp_enabled),
         mcp_fingerprint,
@@ -329,8 +325,6 @@ def _settings_cache_key(settings) -> str:
         str(getattr(llm_settings, "max_iterations_per_turn", "")),
         str(getattr(llm_settings, "max_turn_seconds", "")),
         str(getattr(llm_settings, "max_llm_call_seconds", "")),
-        str(getattr(llm_settings, "vision_fallback_enabled", "")),
-        str(getattr(llm_settings, "vision_fallback_model", "")),
         _key_fingerprint(getattr(settings, "google_api_key", "") or ""),
         _key_fingerprint(provider_key or ""),
     ]
@@ -341,8 +335,6 @@ def _provider_api_key(settings) -> str:
     provider = str(getattr(settings, "model_provider", "openai") or "openai").lower()
     if provider == "gemini":
         return getattr(settings, "google_api_key", "")
-    if provider == "deepseek":
-        return getattr(settings, "deepseek_api_key", "")
     return getattr(settings, "openai_api_key", "")
 
 

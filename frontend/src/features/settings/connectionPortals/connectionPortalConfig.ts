@@ -2,7 +2,6 @@ export type ConnectionPortalId = 'modelProviders' | 'webSearch' | 'telegram'
 
 export type ConnectionSecretId =
   | 'openai'
-  | 'deepseek'
   | 'google'
   | 'tavily'
   | 'telegramBot'
@@ -22,11 +21,6 @@ export const CONNECTION_SECRET_FIELDS: Record<
     label: 'OpenAI API Key',
     statusLabel: 'OpenAI key saved',
     placeholder: 'OpenAI API Key',
-  },
-  deepseek: {
-    label: 'DeepSeek API Key',
-    statusLabel: 'DeepSeek key saved',
-    placeholder: 'DeepSeek API Key',
   },
   google: {
     label: 'Google API Key',
@@ -54,8 +48,8 @@ export const CONNECTION_PORTALS: Array<{
   {
     id: 'modelProviders',
     label: 'Model providers',
-    description: 'OpenAI, DeepSeek, and Google credentials for chat and vision model calls.',
-    secretIds: ['openai', 'deepseek', 'google'],
+    description: 'OpenAI and Google credentials for chat and image-reading model calls.',
+    secretIds: ['openai', 'google'],
   },
   {
     id: 'webSearch',

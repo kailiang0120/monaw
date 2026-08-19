@@ -152,10 +152,8 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
   return {
     llm: {
       provider: 'openai',
-      model_name: 'gpt-5.4',
+      model_name: 'gpt-5.6-luna',
       reasoning_effort: 'medium',
-      vision_fallback_enabled: true,
-      vision_fallback_model: 'gemini-3.1-flash-lite-preview',
       max_iterations_per_turn: 40,
       max_turn_seconds: 1800,
       max_llm_call_seconds: 300,
@@ -339,7 +337,6 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
     ],
     api_keys: {
       has_openai_key: true,
-      has_deepseek_key: true,
       has_google_key: true,
       has_tavily_key: true,
       has_telegram_bot_token: true,
@@ -356,15 +353,13 @@ describe('SettingsModal', () => {
     vi.mocked(fetchSettings).mockResolvedValue(buildSettings() as any)
     vi.mocked(fetchModelOptions).mockResolvedValue({
       providers: [
-        { id: 'openai', label: 'OpenAI', models: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano'] },
-        { id: 'deepseek', label: 'DeepSeek', models: ['deepseek-v4-flash', 'deepseek-v4-pro'] },
+        { id: 'openai', label: 'OpenAI', models: ['gpt-5.6-luna'] },
         {
           id: 'gemini',
           label: 'Google',
           models: ['gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3.1-flash-lite-preview', 'gemini-3-flash-preview'],
         },
       ],
-      vision_fallback_models: ['gemini-3.1-flash-lite-preview', 'gemini-3.1-pro-preview'],
     } as any)
     mocks.fetchSandboxStatus.mockResolvedValue({
       enabled: true,
@@ -542,7 +537,6 @@ describe('SettingsModal', () => {
     vi.mocked(fetchSettings).mockResolvedValue(buildSettings({
       api_keys: {
         has_openai_key: false,
-        has_deepseek_key: false,
         has_google_key: false,
         has_tavily_key: false,
         has_telegram_bot_token: false,
@@ -552,7 +546,6 @@ describe('SettingsModal', () => {
       isElectron: true,
       applyStoredCredentials: vi.fn().mockResolvedValue({
         openai: true,
-        deepseek: true,
         google: true,
         tavily: true,
         telegramBot: true,
@@ -580,7 +573,6 @@ describe('SettingsModal', () => {
       isElectron: true,
       applyStoredCredentials: vi.fn().mockResolvedValue({
         openai: false,
-        deepseek: false,
         google: false,
         tavily: false,
         telegramBot: false,
@@ -615,7 +607,6 @@ describe('SettingsModal', () => {
     vi.mocked(fetchSettings).mockResolvedValue(buildSettings({
       api_keys: {
         has_openai_key: true,
-        has_deepseek_key: true,
         has_google_key: true,
         has_tavily_key: true,
         has_telegram_bot_token: true,
@@ -626,7 +617,6 @@ describe('SettingsModal', () => {
       isElectron: true,
       applyStoredCredentials: vi.fn().mockResolvedValue({
         openai: true,
-        deepseek: true,
         google: true,
         tavily: true,
         telegramBot: true,
@@ -653,7 +643,6 @@ describe('SettingsModal', () => {
   it('deletes a cleared Telegram token from the Electron store', async () => {
     const deleteCredential = vi.fn().mockResolvedValue({
       openai: false,
-      deepseek: false,
       google: false,
       tavily: false,
       telegramBot: false,
@@ -662,7 +651,6 @@ describe('SettingsModal', () => {
       isElectron: true,
       applyStoredCredentials: vi.fn().mockResolvedValue({
         openai: false,
-        deepseek: false,
         google: false,
         tavily: false,
         telegramBot: true,
@@ -839,20 +827,13 @@ describe('SettingsModal', () => {
     })
   })
 
-  it('saves vision fallback settings from model settings', async () => {
+  it('reads images with the selected model instead of a separate vision model', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
-    fireEvent.click(await screen.findByLabelText('Vision fallback'))
-    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
-
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        llm: expect.objectContaining({
-          vision_fallback_enabled: false,
-          vision_fallback_model: 'gemini-3.1-flash-lite-preview',
-        }),
-      }))
-    })
+    expect(await screen.findByText(/Reading images and screenshots/i)).toBeInTheDocument()
+    expect(screen.getByText(/reads them natively/i)).toBeInTheDocument()
+    expect(screen.queryByLabelText('Vision fallback')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Vision model')).not.toBeInTheDocument()
   })
 
   it('switches preset permissions to custom when a preset toggle changes', async () => {

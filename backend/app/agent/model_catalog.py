@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.agent.llm_constants import CHAT_MODELS_BY_PROVIDER, VISION_FALLBACK_MODELS
+from app.agent.llm_constants import CHAT_MODELS_BY_PROVIDER
 
 
 @dataclass(frozen=True)
@@ -15,8 +15,6 @@ class ProviderModelOptions:
 
 
 def _provider_label(provider: str) -> str:
-    if provider == "deepseek":
-        return "DeepSeek"
     if provider == "gemini":
         return "Google"
     return "OpenAI"
@@ -31,7 +29,4 @@ def model_options_payload() -> dict:
         ).__dict__
         for provider, models in CHAT_MODELS_BY_PROVIDER.items()
     ]
-    return {
-        "providers": providers,
-        "vision_fallback_models": list(VISION_FALLBACK_MODELS),
-    }
+    return {"providers": providers}

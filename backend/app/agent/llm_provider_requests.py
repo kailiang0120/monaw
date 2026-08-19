@@ -100,20 +100,6 @@ def tools_to_gemini(tools: list[dict]):
     return types.Tool(function_declarations=declarations)
 
 
-def tools_to_openai(tools: list[dict]) -> list[dict]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "parameters": t.get("parameters", {"type": "object", "properties": {}}),
-            },
-        }
-        for t in tools
-    ]
-
-
 def tools_to_openai_responses(tools: list[dict]) -> list[dict]:
     return [
         {
@@ -126,12 +112,6 @@ def tools_to_openai_responses(tools: list[dict]) -> list[dict]:
         for t in tools
     ]
 
-
-def deepseek_reasoning_effort(value: str) -> str:
-    effort = str(value or "").strip().lower()
-    if effort in {"max", "xhigh"}:
-        return "max"
-    return "high"
 
 
 def openai_reasoning_effort(value: str) -> str:
@@ -296,38 +276,6 @@ def normalise_messages_for_gemini(
     return result
 
 
-def normalise_messages_for_openai(
-    messages: list[dict],
-    system_prompt: str,
-    include_images: bool = False,
-) -> list[dict]:
-    result: list[dict] = []
-    if system_prompt:
-        result.append({"role": "system", "content": system_prompt})
-    for msg in messages:
-        role = msg.get("role", "user")
-        if role == "model":
-            role = "assistant"
-        content = msg.get("content", "")
-        image_payloads = image_payloads_for_message(msg, include_images and role == "user")
-        if image_payloads:
-            content_parts: list[dict] = [{"type": "text", "text": str(content)}]
-            for payload in image_payloads:
-                encoded = base64.b64encode(payload["data"]).decode("ascii")
-                content_parts.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{payload['mime_type']};base64,{encoded}",
-                        },
-                    }
-                )
-            result.append({"role": role, "content": content_parts})
-        else:
-            result.append({"role": role, "content": content})
-    return result
-
-
 def normalise_messages_for_openai_responses(
     messages: list[dict],
     include_images: bool = False,
@@ -395,37 +343,6 @@ def gemini_request_payload(
 
     config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
     return contents, config
-
-
-def openai_compatible_chat_kwargs(
-    *,
-    provider: str,
-    model_name: str,
-    messages: list[dict],
-    tools: list[dict],
-    system_prompt: str,
-    reasoning_effort: str,
-    include_images: bool,
-    tool_choice: str | dict | None = None,
-) -> dict:
-    kwargs: dict = {
-        "model": model_name,
-        "messages": normalise_messages_for_openai(
-            messages,
-            system_prompt,
-            include_images=include_images,
-        ),
-    }
-    if provider == "deepseek":
-        kwargs["reasoning_effort"] = deepseek_reasoning_effort(reasoning_effort)
-        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-    if tools:
-        kwargs["tools"] = tools_to_openai(tools)
-        if tool_choice:
-            kwargs["tool_choice"] = tool_choice
-        elif provider != "deepseek":
-            kwargs["tool_choice"] = "auto"
-    return kwargs
 
 
 def openai_responses_kwargs(

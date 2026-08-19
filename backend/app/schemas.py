@@ -4,7 +4,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agent.identity import DEFAULT_AGENT_NAME
-from app.agent.llm_constants import DEFAULT_VISION_FALLBACK_MODEL
+from app.agent.llm_constants import DEFAULT_OPENAI_CHAT_MODEL
 
 # M3: Allowed conversation_id pattern — alphanumeric, hyphens, underscores, 1-64 chars.
 # Rejects path traversal characters and empty strings.
@@ -169,11 +169,9 @@ class PermissionProfilePayload(BaseModel):
 
 
 class LLMSettingsPayload(BaseModel):
-    provider: str = Field("openai", pattern="^(openai|deepseek|gemini)$")
-    model_name: str = "gpt-5.4"
+    provider: str = Field("openai", pattern="^(openai|gemini)$")
+    model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: str = Field("medium", pattern="^(none|minimal|low|medium|high|xhigh|max)$")
-    vision_fallback_enabled: bool = True
-    vision_fallback_model: str = DEFAULT_VISION_FALLBACK_MODEL
     max_iterations_per_turn: int = Field(40, ge=1, le=500)
     max_turn_seconds: int = Field(1800, ge=30, le=14400)
     max_llm_call_seconds: int = Field(300, ge=30, le=1800)
@@ -340,7 +338,6 @@ class IdentitySettingsPayload(BaseModel):
 
 class ApiKeyStatusPayload(BaseModel):
     has_openai_key: bool
-    has_deepseek_key: bool = False
     has_google_key: bool
     has_tavily_key: bool = False
     has_telegram_bot_token: bool = False
@@ -372,7 +369,6 @@ class ModelProviderOptionPayload(BaseModel):
 
 class ModelOptionsPayload(BaseModel):
     providers: list[ModelProviderOptionPayload] = Field(default_factory=list)
-    vision_fallback_models: list[str] = Field(default_factory=list)
 
 
 class WorkspaceInstructionsPayload(BaseModel):
@@ -414,10 +410,8 @@ class SettingsUpdate(BaseModel):
     permissions: Optional[PermissionSettingsPayload] = None
     sandbox: Optional[SandboxSettingsPayload] = None
     identity: Optional[IdentitySettingsPayload] = None
-    model_provider: Optional[str] = Field(None, pattern="^(openai|deepseek|gemini)$")
+    model_provider: Optional[str] = Field(None, pattern="^(openai|gemini)$")
     openai_api_key: Optional[str] = None
-    deepseek_api_key: Optional[str] = None
-    deepseek_base_url: Optional[str] = None
     google_api_key: Optional[str] = None
     tavily_api_key: Optional[str] = None
     telegram_bot_token: Optional[str] = None

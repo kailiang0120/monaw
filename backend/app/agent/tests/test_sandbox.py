@@ -18,17 +18,12 @@ from app.main import app
 def _base_settings() -> SimpleNamespace:
     return SimpleNamespace(
         model_provider="openai",
-        model_name="gpt-5.4",
+        model_name="gpt-5.6-luna",
         openai_api_key="",
-        deepseek_api_key="",
-        deepseek_base_url="https://api.deepseek.com",
         google_api_key="",
         tavily_api_key="",
         telegram_bot_token="",
         reasoning_effort="medium",
-        vision_fallback_enabled=True,
-        vision_fallback_model="gemini-2.5-flash",
-        vision_fallback_max_output_tokens=1000,
         allow_arbitrary_app_paths=False,
     )
 
@@ -97,7 +92,7 @@ def test_load_settings_adds_sandbox_defaults_to_legacy_payload(tmp_path):
             {
                 "llm": {
                     "provider": "openai",
-                    "model_name": "gpt-5.4",
+                    "model_name": "gpt-5.6-luna",
                     "reasoning_effort": "medium",
                 }
             }

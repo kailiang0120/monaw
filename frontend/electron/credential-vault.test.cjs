@@ -39,7 +39,6 @@ test('migrates plaintext credentials and never returns them in status', () => {
   assert.match(values.get('telegram_bot_token'), new RegExp(`^${ENCRYPTED_PREFIX}`))
   assert.deepEqual(vault.status(), {
     openai: true,
-    deepseek: false,
     google: false,
     tavily: false,
     telegramBot: true,

@@ -13,11 +13,11 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agent.llm_constants import (
+    CHAT_MODELS_BY_PROVIDER,
     DEFAULT_GEMINI_CHAT_MODEL,
-    DEFAULT_VISION_FALLBACK_MAX_OUTPUT_TOKENS,
-    DEFAULT_VISION_FALLBACK_MODEL,
+    DEFAULT_OPENAI_CHAT_MODEL,
     GEMINI_CHAT_MODELS,
-    VISION_FALLBACK_MODELS,
+    OPENAI_CHAT_MODELS,
 )
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
 from app.agent.output_workspace import default_downloads_dir, default_screenshots_dir
@@ -120,16 +120,9 @@ class PermissionProfileSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    provider: Literal["openai", "deepseek", "gemini"] = "openai"
-    model_name: str = "gpt-5.4"
+    provider: Literal["openai", "gemini"] = "openai"
+    model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] = "medium"
-    vision_fallback_enabled: bool = True
-    vision_fallback_model: str = DEFAULT_VISION_FALLBACK_MODEL
-    vision_fallback_max_output_tokens: int = Field(
-        DEFAULT_VISION_FALLBACK_MAX_OUTPUT_TOKENS,
-        ge=128,
-        le=4000,
-    )
     max_iterations_per_turn: int = Field(40, ge=1, le=500)
     max_turn_seconds: int = Field(1800, ge=30, le=14400)
     max_llm_call_seconds: int = Field(300, ge=30, le=1800)
@@ -138,8 +131,8 @@ class LLMSettings(BaseModel):
     def normalize_provider_models(self) -> "LLMSettings":
         if self.provider == "gemini" and self.model_name not in GEMINI_CHAT_MODELS:
             self.model_name = DEFAULT_GEMINI_CHAT_MODEL
-        if self.vision_fallback_model not in VISION_FALLBACK_MODELS:
-            self.vision_fallback_model = DEFAULT_VISION_FALLBACK_MODEL
+        if self.provider == "openai" and self.model_name not in OPENAI_CHAT_MODELS:
+            self.model_name = DEFAULT_OPENAI_CHAT_MODEL
         return self
 
 
@@ -496,7 +489,7 @@ def _normalize_browser_payload(browser: Any) -> dict[str, Any]:
 
 def build_default_agent_settings(base_settings) -> AgentSettings:
     mode = "default"
-    provider = base_settings.model_provider if base_settings.model_provider in {"openai", "deepseek", "gemini"} else "openai"
+    provider = base_settings.model_provider if base_settings.model_provider in {"openai", "gemini"} else "openai"
     model_name = str(getattr(base_settings, "model_name", "") or "").strip()
     if provider == "gemini" and model_name not in GEMINI_CHAT_MODELS:
         model_name = DEFAULT_GEMINI_CHAT_MODEL
@@ -508,19 +501,6 @@ def build_default_agent_settings(base_settings) -> AgentSettings:
                 base_settings.reasoning_effort
                 if base_settings.reasoning_effort in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
                 else "medium"
-            ),
-            vision_fallback_enabled=bool(getattr(base_settings, "vision_fallback_enabled", True)),
-            vision_fallback_model=str(
-                getattr(base_settings, "vision_fallback_model", DEFAULT_VISION_FALLBACK_MODEL)
-                or DEFAULT_VISION_FALLBACK_MODEL
-            ),
-            vision_fallback_max_output_tokens=int(
-                getattr(
-                    base_settings,
-                    "vision_fallback_max_output_tokens",
-                    DEFAULT_VISION_FALLBACK_MAX_OUTPUT_TOKENS,
-                )
-                or DEFAULT_VISION_FALLBACK_MAX_OUTPUT_TOKENS
             ),
         ),
         tools=ToolSettings(skills=dict(DEFAULT_SKILLS)),
@@ -567,8 +547,31 @@ def _legacy_policy_to_permissions(legacy: dict[str, Any]) -> PermissionSettings:
     return permissions
 
 
+def _normalize_llm_payload(raw_llm: Any) -> Any:
+    """Migrate settings written before the provider list narrowed to OpenAI and Google.
+
+    Retired providers (and the retired vision-fallback keys) would otherwise fail
+    validation and lock the user out of their own settings file.
+    """
+
+    if not isinstance(raw_llm, dict):
+        return raw_llm
+    llm = {
+        key: value
+        for key, value in raw_llm.items()
+        if not key.startswith("vision_fallback_")
+    }
+    provider = str(llm.get("provider") or "").strip().lower()
+    if provider not in CHAT_MODELS_BY_PROVIDER:
+        llm["provider"] = "openai"
+        llm["model_name"] = DEFAULT_OPENAI_CHAT_MODEL
+    return llm
+
+
 def _normalize_loaded_payload(data: dict[str, Any]) -> dict[str, Any]:
     payload = dict(data)
+    if "llm" in payload:
+        payload["llm"] = _normalize_llm_payload(payload.get("llm"))
     raw_mcp = payload.get("mcp")
     raw_mcp_bridge_enabled = None
     raw_tools_for_migration = payload.get("tools")
@@ -745,8 +748,6 @@ def build_runtime_namespace(base_settings, agent_settings: AgentSettings):
         model_provider=agent_settings.llm.provider,
         model_name=agent_settings.llm.model_name,
         openai_api_key=base_settings.openai_api_key,
-        deepseek_api_key=getattr(base_settings, "deepseek_api_key", ""),
-        deepseek_base_url=getattr(base_settings, "deepseek_base_url", "https://api.deepseek.com"),
         google_api_key=base_settings.google_api_key,
         tavily_api_key=base_settings.tavily_api_key,
         telegram_bot_token=getattr(base_settings, "telegram_bot_token", ""),
@@ -755,9 +756,6 @@ def build_runtime_namespace(base_settings, agent_settings: AgentSettings):
             provider=agent_settings.llm.provider,
             model_name=agent_settings.llm.model_name,
             reasoning_effort=agent_settings.llm.reasoning_effort,
-            vision_fallback_enabled=agent_settings.llm.vision_fallback_enabled,
-            vision_fallback_model=agent_settings.llm.vision_fallback_model,
-            vision_fallback_max_output_tokens=agent_settings.llm.vision_fallback_max_output_tokens,
             max_iterations_per_turn=agent_settings.llm.max_iterations_per_turn,
             max_turn_seconds=agent_settings.llm.max_turn_seconds,
             max_llm_call_seconds=agent_settings.llm.max_llm_call_seconds,
@@ -786,7 +784,6 @@ def api_settings_payload(base_settings, agent_settings: AgentSettings) -> dict[s
         "available_skills": available_skill_payload(runtime_settings),
         "api_keys": {
             "has_openai_key": bool(base_settings.openai_api_key),
-            "has_deepseek_key": bool(getattr(base_settings, "deepseek_api_key", "")),
             "has_google_key": bool(base_settings.google_api_key),
             "has_tavily_key": bool(base_settings.tavily_api_key),
             "has_telegram_bot_token": bool(getattr(base_settings, "telegram_bot_token", "")),

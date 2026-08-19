@@ -16,7 +16,7 @@ Monaw currently targets Windows. macOS has not been tested yet.
 
 - **Desktop-first workflow.** Work with files, browser pages, local commands, app windows, and scheduled follow-ups from one agent UI.
 - **Local control.** Runtime data, memory files, logs, browser artifacts, and the default workspace stay under your local Monaw folder.
-- **Bring your own models.** Use OpenAI, DeepSeek, or Google Gemini through your own API keys.
+- **Bring your own models.** Use OpenAI or Google Gemini through your own API keys.
 - **Context discipline.** Memory, context tracking, and compression help keep useful knowledge available without blindly stuffing every conversation.
 - **Tool permissions.** Choose sandbox, approval, and access settings before the agent performs higher-impact actions.
 - **Windows-friendly setup.** The one-click setup prepares Python, Node, backend packages, and frontend packages for normal Windows users.
@@ -30,7 +30,7 @@ Monaw currently targets Windows. macOS has not been tested yet.
       <br />
       <strong>Chat With Your Preferred Models</strong>
       <br />
-      Use OpenAI, DeepSeek, or Google Gemini through your own API keys, while keeping conversations in one local desktop workspace.
+      Use OpenAI or Google Gemini through your own API keys, while keeping conversations in one local desktop workspace.
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/desktop-automation.png" alt="Monaw mascot automating browser files and local commands" width="100%" />
@@ -148,9 +148,8 @@ Start Monaw:
 
 Open Settings in Monaw Agent and configure only the services you use:
 
-- DeepSeek API key. Recommended.
-- OpenAI API key.
-- Google API key, if using Gemini or vision fallback.
+- OpenAI API key. Recommended.
+- Google API key, if using Gemini.
 - Tavily API key, if using web search tools.
 - Telegram bot token and allowlist, if using Telegram.
 - Model provider, model, and reasoning effort.

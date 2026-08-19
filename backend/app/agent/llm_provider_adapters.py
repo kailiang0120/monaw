@@ -69,6 +69,6 @@ def create_llm_provider_adapter(provider: str, client: Any) -> LLMProviderAdapte
     provider_name = str(provider or "").lower()
     if provider_name == "gemini":
         return GeminiProviderAdapter(client)
-    if provider_name in {"openai", "deepseek"}:
+    if provider_name == "openai":
         return OpenAICompatibleProviderAdapter(client, provider=provider_name)
     raise ValueError(f"Unsupported provider adapter: {provider!r}")

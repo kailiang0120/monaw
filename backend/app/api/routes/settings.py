@@ -163,12 +163,6 @@ async def update_settings(body: SettingsUpdate):
     if assign_if_changed("openai_api_key", body.openai_api_key):
         changed = True
         runtime_changed = True
-    if assign_if_changed("deepseek_api_key", body.deepseek_api_key):
-        changed = True
-        runtime_changed = True
-    if assign_if_changed("deepseek_base_url", body.deepseek_base_url, default="https://api.deepseek.com"):
-        changed = True
-        runtime_changed = True
     if assign_if_changed("google_api_key", body.google_api_key):
         changed = True
         runtime_changed = True
