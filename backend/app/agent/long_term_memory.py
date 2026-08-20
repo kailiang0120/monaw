@@ -14,6 +14,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from app.agent.memory_documents import (
     write_markdown as _write_markdown,
 )
 from app.agent.memory_repository import MemorySectionRepository
+from app.agent.runtime_paths import MONAW_HOME_DIR, RUNTIME_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,9 @@ VALID_KINDS = ("fact", "reflection")
 HEURISTIC_MERGE_MIN_SIMILARITY = 0.8
 
 MAX_TRANSCRIPT_CHARS = 14000
+MEMORY_RETENTION_DAYS = 90
+MAX_AUDIT_COUNTER_ACTIONS = frozenset({"INJECT", "CANDIDATE", "REJECT_CANDIDATE"})
+MAX_TOKENIZED_RECORD_CACHE = 5000
 
 _SENSITIVE_PATTERNS = [
     re.compile(r"\b(api[_ -]?key|secret|password|passwd|token|bearer)\b", re.I),
@@ -150,12 +155,13 @@ class LongTermMemory:
         return memory if memory is not None else self.settings
 
     def _ensure_layout(self) -> None:
+        self._remove_legacy_audit_folder()
         for path in [
             self.root / "personalities",
             self.root / "long-term",
             self.root / "short-term",
+            self.root / "archive" / "short-term",
             self.root / "archive",
-            self.root / "audit",
             self.root / ".system",
             self.root / ".system" / "curated",
         ]:
@@ -173,6 +179,21 @@ class LongTermMemory:
         self._ensure_personality_file("monaw", {"display_name": DEFAULT_AGENT_NAME})
         self._ensure_personality_file("user", {"display_name": "User"})
         self._migrate_sectioned_storage_once()
+
+    def _remove_legacy_audit_folder(self) -> None:
+        """Remove the pre-SQLite audit files only from an approved memory root."""
+        audit_root = self.root / "audit"
+        try:
+            approved = self.root.resolve(strict=False).is_relative_to(RUNTIME_DIR.resolve(strict=False))
+            approved = approved or self.root.resolve(strict=False).is_relative_to(MONAW_HOME_DIR.resolve(strict=False))
+        except (OSError, RuntimeError):
+            approved = False
+        if not approved or audit_root.is_symlink() or not audit_root.exists():
+            return
+        try:
+            shutil.rmtree(audit_root)
+        except OSError:
+            logger.warning("Unable to remove legacy memory audit folder %s", audit_root)
 
     def _ensure_personality_file(self, name: str, extra: dict[str, Any]) -> None:
         path = self.root / "personalities" / f"{_safe_id(name)}.md"
@@ -277,6 +298,8 @@ class LongTermMemory:
         category = self._normalize_category(str(meta.get("category") or "fact"))
         status = str(meta.get("status") or "active")
         if status == "archived":
+            if str(meta.get("collection") or "") == "short-term":
+                return self.root / "archive" / "short-term" / f"{memory_id}.md"
             return self._archive_category_file(category)
         if str(meta.get("collection") or "") == "short-term":
             return self.root / "short-term" / f"{memory_id}.md"
@@ -408,9 +431,11 @@ class LongTermMemory:
         return {key: value for key, value in record.items() if not key.startswith("_") and key != "collection"}
 
     def _memory_files(self, *, include_archived: bool = True, include_short_term: bool = True) -> list[Path]:
-        roots = []
+        roots: list[Path] = []
         if include_short_term:
             roots.append(self.root / "short-term")
+            if include_archived:
+                roots.append(self.root / "archive" / "short-term")
         paths: list[Path] = []
         for root in roots:
             if root.exists():
@@ -497,7 +522,7 @@ class LongTermMemory:
             if include_short_term:
                 records.extend(
                     record
-                    for path in self._memory_files(include_archived=False, include_short_term=True)
+                    for path in self._memory_files(include_archived=True, include_short_term=True)
                     if (record := self._load_record(path)) is not None
                 )
             records = sorted(records, key=lambda item: (item["updated_at"], item["id"]), reverse=True)
@@ -534,7 +559,7 @@ class LongTermMemory:
             record["created_at"] = str(record.get("created_at") or _now())
             record["updated_at"] = str(record.get("updated_at") or _now())
             if str(record.get("collection") or "") == "short-term":
-                target = self.root / "short-term" / f"{record['id']}.md"
+                target = self._target_path(record)
                 _write_markdown(target, self._record_meta(record), str(record.get("content") or ""))
                 self._invalidate_records_cache()
                 record["_path"] = target
@@ -952,7 +977,7 @@ class LongTermMemory:
 
     def _record_haystack(self, record: dict[str, Any]) -> str:
         content = str(record.get("content") or "")
-        return f"{record.get('category', '')} {record.get('kind', '')} {content}".lower()
+        return content.lower()
 
     def _tokenized_record(self, record: dict[str, Any]) -> tuple[str, frozenset[str]]:
         key = (
@@ -966,6 +991,8 @@ class LongTermMemory:
             return cached
         haystack = self._record_haystack(record)
         tokenized = (haystack, frozenset(_tokens(haystack)))
+        if len(self._tokenized_record_cache) >= MAX_TOKENIZED_RECORD_CACHE:
+            self._tokenized_record_cache.pop(next(iter(self._tokenized_record_cache)))
         self._tokenized_record_cache[key] = tokenized
         return tokenized
 
@@ -1001,17 +1028,19 @@ class LongTermMemory:
             token_score = 0.0
         else:
             exact_score = 1.0 if query.lower() in document.haystack else 0.0
-            token_score = len(query_tokens & document.tokens) / max(1, len(query_tokens))
+            overlap = query_tokens & document.tokens
+            token_score = len(overlap) / max(1, len(document.tokens))
 
         category_score = 1.0 if document.category in query_tokens else 0.0
-        score = (
-            exact_score * 0.35
-            + token_score * 0.35
-            + category_score * 0.05
-            + document.recency_score * 0.10
-            + document.importance_score * 0.10
-            + document.use_score * 0.05
-        )
+        lexical_score = exact_score * 0.35 + token_score * 0.35 + category_score * 0.05
+        if exact_score > 0 or token_score > 0:
+            score = lexical_score + (
+                document.recency_score * 0.10
+                + document.importance_score * 0.10
+                + document.use_score * 0.05
+            )
+        else:
+            score = 0.0
         return score, {
             "exact": exact_score,
             "token": token_score,
@@ -1040,7 +1069,7 @@ class LongTermMemory:
         )
         return [item for item in results if float(item.get("score", 0)) >= self.min_relevance_score]
 
-    def build_prompt(self, query: str) -> str:
+    def build_prompt(self, query: str, *, mark_used: bool = True) -> str:
         if not self.enabled:
             return ""
 
@@ -1070,19 +1099,20 @@ class LongTermMemory:
 
         if len(lines) == 1:
             return ""
-        self.mark_used(injected_ids)
-        self._audit(
-            action="INJECT",
-            reason="prompt_context",
-            candidate_content=json.dumps(
-                {
-                    "identity_count": len(identity_memories),
-                    "contextual_count": len(contextual),
-                    "memory_ids": injected_ids,
-                },
-                ensure_ascii=False,
-            ),
-        )
+        if mark_used:
+            self.mark_used(injected_ids)
+            self._audit(
+                action="INJECT",
+                reason="prompt_context",
+                candidate_content=json.dumps(
+                    {
+                        "identity_count": len(identity_memories),
+                        "contextual_count": len(contextual),
+                        "memory_ids": injected_ids,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
         return "\n".join(lines)[: self.max_injected_chars].rstrip()
 
     def _append_prompt_section(self, lines: list[str], title: str, entries: list[str], used_chars: int) -> int:
@@ -1177,87 +1207,51 @@ class LongTermMemory:
                 path.unlink()
         else:
             self._remove_section_by_id(record["id"], include_archived=True)
-        self._audit(action="DELETE", reason="manual_delete", memory_id=record["id"], source_conversation_id=record.get("source_conversation_id", ""), candidate_content=record["content"][:1000])
+        with self._lock:
+            try:
+                self._db.execute("DELETE FROM memory_audit WHERE memory_id = ?", (record["id"],))
+                self._db.commit()
+            except sqlite3.Error:
+                logger.debug("Unable to remove memory audit rows for %s", record["id"])
+        self._audit(
+            action="DELETE",
+            reason="manual_delete",
+            memory_id=record["id"],
+            source_conversation_id=record.get("source_conversation_id", ""),
+        )
         return True
 
     def mark_used(self, memory_ids: list[str | int]) -> None:
         if not memory_ids:
             return
         wanted = {_safe_id(str(memory_id)) for memory_id in memory_ids}
-        for record in self._all_records(include_archived=False, include_short_term=True):
-            if record["id"] not in wanted:
-                continue
-            record["use_count"] = int(record.get("use_count") or 0) + 1
-            record["last_used_at"] = _now()
-            record["updated_at"] = _now()
-            self._write_record(record)
-
-    def profile_fields(self) -> list[dict[str, Any]]:
-        rows = self._db_rows(
-            """
-            SELECT field, value, privacy_level, confidence, review_state,
-                   source_conversation_id, source_message_id, updated_at
-            FROM memory_profile_fields
-            ORDER BY field
-            """
-        )
-        return rows
-
-    def update_profile_field(
-        self,
-        field: str,
-        value: str,
-        *,
-        privacy_level: str = "normal",
-        confidence: float = 1.0,
-        review_state: str = "reviewed",
-        source_conversation_id: str = "",
-        source_message_id: int | None = None,
-    ) -> dict[str, Any]:
-        field_id = _safe_id(field)
-        text = str(value or "").strip()
-        if not field_id or not text:
-            raise ValueError("Profile field and value are required")
-        if self._contains_sensitive(text) and privacy_level not in {"sensitive", "private"}:
-            raise ValueError("Sensitive profile values must be marked private or sensitive")
-        if review_state not in VALID_REVIEW_STATES:
-            review_state = "new"
-        privacy = str(privacy_level or "normal").lower()
-        if privacy not in {"normal", "private", "sensitive"}:
-            privacy = "normal"
         now = _now()
         with self._lock:
-            self._db.execute(
-                """
-                INSERT INTO memory_profile_fields (
-                    field, value, privacy_level, confidence, review_state,
-                    source_conversation_id, source_message_id, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(field) DO UPDATE SET
-                    value = excluded.value,
-                    privacy_level = excluded.privacy_level,
-                    confidence = excluded.confidence,
-                    review_state = excluded.review_state,
-                    source_conversation_id = excluded.source_conversation_id,
-                    source_message_id = excluded.source_message_id,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    field_id,
-                    text,
-                    privacy,
-                    max(0.0, min(1.0, float(confidence))),
-                    review_state,
-                    source_conversation_id,
-                    source_message_id,
-                    now,
-                ),
-            )
-            self._db.commit()
-        self._audit(action="PROFILE_UPDATE", reason=field_id, source_conversation_id=source_conversation_id, candidate_content=text[:1000])
-        row = self._db_one("SELECT * FROM memory_profile_fields WHERE field = ?", (field_id,))
-        return row or {}
+            changed = False
+            for category in VALID_CATEGORIES:
+                sections = self._load_sections(category)
+                category_changed = False
+                for section in sections:
+                    if section.id not in wanted:
+                        continue
+                    section.meta["use_count"] = _coerce_int(section.meta.get("use_count"), 0) + 1
+                    section.meta["last_used_at"] = now
+                    category_changed = True
+                    changed = True
+                if category_changed:
+                    self._save_sections(category, sections)
+
+            for path in self._memory_files(include_archived=False, include_short_term=True):
+                record = self._load_record(path)
+                if record is None or record["id"] not in wanted:
+                    continue
+                record["use_count"] = int(record.get("use_count") or 0) + 1
+                record["last_used_at"] = now
+                _write_markdown(path, self._record_meta(record), record["content"])
+                changed = True
+
+            if changed:
+                self._invalidate_records_cache()
 
     def _candidate_public(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -1472,19 +1466,9 @@ class LongTermMemory:
             "scope": str(fields.get("scope") or "conversation"),
             "status": str(fields.get("status") or "active"),
             "conversation_id": str(fields.get("conversation_id") or ""),
-            "project": str(fields.get("project") or ""),
-            "app_name": str(fields.get("app_name") or ""),
             "goal": str(fields.get("goal") or ""),
             "last_known_state": str(fields.get("last_known_state") or ""),
             "next_action": str(fields.get("next_action") or ""),
-            "blocker": str(fields.get("blocker") or ""),
-            "browser_url": str(fields.get("browser_url") or ""),
-            "browser_title": str(fields.get("browser_title") or ""),
-            "workspace_path": str(fields.get("workspace_path") or ""),
-            "files_touched_json": json.dumps(fields.get("files_touched") or [], ensure_ascii=False),
-            "commands_run_json": json.dumps(fields.get("commands_run") or [], ensure_ascii=False),
-            "expires_at": str(fields.get("expires_at") or ""),
-            "source_refs_json": json.dumps(fields.get("source_refs") or [], ensure_ascii=False),
             "created_at": now,
             "updated_at": now,
         }
@@ -1492,34 +1476,20 @@ class LongTermMemory:
             self._db.execute(
                 """
                 INSERT INTO memory_checkpoints (
-                    id, scope, status, conversation_id, project, app_name, goal,
-                    last_known_state, next_action, blocker, browser_url, browser_title,
-                    workspace_path, files_touched_json, commands_run_json, expires_at,
-                    source_refs_json, created_at, updated_at
+                    id, scope, status, conversation_id, goal, last_known_state,
+                    next_action, created_at, updated_at
                 )
                 VALUES (
-                    :id, :scope, :status, :conversation_id, :project, :app_name, :goal,
-                    :last_known_state, :next_action, :blocker, :browser_url, :browser_title,
-                    :workspace_path, :files_touched_json, :commands_run_json, :expires_at,
-                    :source_refs_json, :created_at, :updated_at
+                    :id, :scope, :status, :conversation_id, :goal, :last_known_state,
+                    :next_action, :created_at, :updated_at
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     scope = excluded.scope,
                     status = excluded.status,
                     conversation_id = excluded.conversation_id,
-                    project = excluded.project,
-                    app_name = excluded.app_name,
                     goal = excluded.goal,
                     last_known_state = excluded.last_known_state,
                     next_action = excluded.next_action,
-                    blocker = excluded.blocker,
-                    browser_url = excluded.browser_url,
-                    browser_title = excluded.browser_title,
-                    workspace_path = excluded.workspace_path,
-                    files_touched_json = excluded.files_touched_json,
-                    commands_run_json = excluded.commands_run_json,
-                    expires_at = excluded.expires_at,
-                    source_refs_json = excluded.source_refs_json,
                     updated_at = excluded.updated_at
                 """,
                 payload,
@@ -1551,19 +1521,9 @@ class LongTermMemory:
             "scope": str(row.get("scope") or "conversation"),
             "status": str(row.get("status") or "active"),
             "conversation_id": str(row.get("conversation_id") or ""),
-            "project": str(row.get("project") or ""),
-            "app_name": str(row.get("app_name") or ""),
             "goal": str(row.get("goal") or ""),
             "last_known_state": str(row.get("last_known_state") or ""),
             "next_action": str(row.get("next_action") or ""),
-            "blocker": str(row.get("blocker") or ""),
-            "browser_url": str(row.get("browser_url") or ""),
-            "browser_title": str(row.get("browser_title") or ""),
-            "workspace_path": str(row.get("workspace_path") or ""),
-            "files_touched": self._json_list(row.get("files_touched_json")),
-            "commands_run": self._json_list(row.get("commands_run_json")),
-            "expires_at": str(row.get("expires_at") or ""),
-            "source_refs": self._json_list(row.get("source_refs_json")),
             "created_at": str(row.get("created_at") or ""),
             "updated_at": str(row.get("updated_at") or ""),
         }
@@ -1590,15 +1550,9 @@ class LongTermMemory:
             "id": str(row.get("id") or ""),
             "conversation_id": str(row.get("conversation_id") or ""),
             "channel": str(row.get("channel") or "desktop"),
-            "project": str(row.get("project") or ""),
-            "task_type": str(row.get("task_type") or ""),
             "summary": str(row.get("summary") or ""),
-            "decisions": self._json_list(row.get("decisions_json")),
             "artifacts": self._json_list(row.get("artifacts_json")),
             "errors": self._json_list(row.get("errors_json")),
-            "fixes": self._json_list(row.get("fixes_json")),
-            "open_questions": self._json_list(row.get("open_questions_json")),
-            "follow_ups": self._json_list(row.get("follow_ups_json")),
             "source_message_start_id": row.get("source_message_start_id"),
             "source_message_end_id": row.get("source_message_end_id"),
             "tool_call_ids": self._json_list(row.get("tool_call_ids_json")),
@@ -1610,7 +1564,6 @@ class LongTermMemory:
         records = self._all_records(include_archived=True, include_short_term=True)
         active = [record for record in records if record["status"] == "active"]
         archived = [record for record in records if record["status"] == "archived"]
-        audits = self.audit_log(limit=500)
         short_term = list((self.root / "short-term").glob("*.md"))
         personalities = list((self.root / "personalities").glob("*.md"))
         curated_sessions = list((self.root / ".system" / "curated").glob("*.json"))
@@ -1623,7 +1576,11 @@ class LongTermMemory:
             for row in self._db_rows("SELECT status, COUNT(*) AS count FROM memory_checkpoints GROUP BY status")
         }
         episode_count = int((self._db_one("SELECT COUNT(*) AS count FROM memory_episodes") or {}).get("count") or 0)
-        profile_count = int((self._db_one("SELECT COUNT(*) AS count FROM memory_profile_fields") or {}).get("count") or 0)
+        audit_count = int((self._db_one("SELECT COUNT(*) AS count FROM memory_audit") or {}).get("count") or 0)
+        audit_counters = {
+            str(row.get("action") or ""): int(row.get("count") or 0)
+            for row in self._db_rows("SELECT action, count FROM memory_audit_counters")
+        }
         category_counts = {
             category: len([record for record in active if record["category"] == category])
             for category in VALID_CATEGORIES
@@ -1640,16 +1597,16 @@ class LongTermMemory:
             **category_counts,
             "fact": len([record for record in records if record["kind"] == "fact"]),
             "reflection": len([record for record in records if record["kind"] == "reflection"]),
-            "candidates": candidate_count or len([row for row in audits if row["action"] in {"SKIP", "CURATE", "MIGRATE_CANDIDATE"}]),
-            "unresolved_candidates": unresolved_count or len([row for row in audits if row["action"] == "SKIP"]),
+            "candidates": candidate_count,
+            "unresolved_candidates": unresolved_count,
             "short_term": len(short_term),
             "personalities": len(personalities),
             "curated_sessions": len(curated_sessions),
-            "audit_events": len(audits),
+            "audit_events": audit_count,
             "archived_messages": self._db.count_archived_messages(),
             "episodes": episode_count,
             "active_checkpoints": int(checkpoint_counts.get("active", 0)),
-            "profile_fields": profile_count,
+            "audit_counters": audit_counters,
             "memory_root": str(self.root),
         }
 
@@ -1836,12 +1793,11 @@ class LongTermMemory:
                 self._db.execute(
                     """
                     INSERT INTO memory_episodes (
-                        id, conversation_id, channel, project, task_type, summary,
-                        decisions_json, artifacts_json, errors_json, fixes_json,
-                        open_questions_json, follow_ups_json, source_message_start_id,
-                        source_message_end_id, tool_call_ids_json, created_at, updated_at
+                        id, conversation_id, channel, summary, artifacts_json, errors_json,
+                        source_message_start_id, source_message_end_id, tool_call_ids_json,
+                        created_at, updated_at
                     )
-                    VALUES (?, ?, 'desktop', '', '', ?, '[]', ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?)
+                    VALUES (?, ?, 'desktop', ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         summary = excluded.summary,
                         artifacts_json = excluded.artifacts_json,
@@ -1935,11 +1891,6 @@ class LongTermMemory:
                 if name:
                     personality_update(f"The user's preferred name is {name}.", importance=8, confidence=0.9)
 
-            if match := re.search(r"\b(?:i am|i'm)\s+(?:a|an)\s+(.+?)(?:[.!?]|$)", segment, re.I):
-                role = self._clean_signal_fragment(match.group(1))
-                if role and role.lower() not in {"okay", "ok", "ready"}:
-                    remember(f"The user is a {role}.", category="fact", importance=5, confidence=0.8)
-
             if match := re.search(r"\b(?:i work on|i'm working on|i am working on)\s+(.+?)(?:[.!?]|$)", segment, re.I):
                 project = self._clean_signal_fragment(match.group(1))
                 if project:
@@ -1965,7 +1916,7 @@ class LongTermMemory:
                 if preference:
                     remember(f"The user likes {preference}.", category="preference", importance=6, confidence=0.8)
 
-            if match := re.search(r"\b(?:please\s+)?always\s+(.+?)(?:[.!?]|$)", segment, re.I):
+            if match := re.search(r"\bplease\s+always\s+(.+?)(?:[.!?]|$)", segment, re.I):
                 behavior = self._clean_signal_fragment(match.group(1))
                 if behavior:
                     remember(f"The user wants the assistant to always {behavior}.", category="behavior", importance=8, confidence=0.9)
@@ -1975,20 +1926,10 @@ class LongTermMemory:
                 if behavior:
                     remember(f"The user wants the assistant to ask before {behavior}.", category="behavior", importance=8, confidence=0.9)
 
-            if match := re.search(r"\b(?:don't|do not|never|avoid)\s+(.+?)(?:[.!?]|$)", segment, re.I):
-                behavior = self._clean_signal_fragment(match.group(1))
-                if behavior:
-                    remember(f"The user wants the assistant to avoid {behavior}.", category="behavior", importance=7, confidence=0.86)
-
             if match := re.search(r"\bwhen i ask(?:ed)?(?:\s+for)?\s+(.+?)(?:[.!?]|$)", segment, re.I):
                 workflow = self._clean_signal_fragment(match.group(1))
                 if workflow:
                     remember(f"When the user asks for {workflow}, the assistant should follow that workflow consistently.", category="workflow", importance=7, confidence=0.84)
-
-            if match := re.match(r"\buse\s+(.+?)(?:[.!?]|$)", segment, re.I):
-                workflow = self._clean_signal_fragment(match.group(1))
-                if workflow:
-                    remember(f"The user wants the assistant to use {workflow}.", category="workflow", importance=6, confidence=0.8)
 
             if (
                 any(term in lowered for term in ("reply", "response", "responses", "update", "updates", "messages"))
@@ -2202,6 +2143,9 @@ class LongTermMemory:
     ) -> dict[str, int]:
         cooldown = self.maintenance_cooldown_hours if cooldown_hours is None else int(cooldown_hours)
         marker = self.root / ".system" / "maintenance.json"
+        # Retention is independent of the more expensive consolidation cooldown so
+        # session-close maintenance still prunes ephemeral and audit data every time.
+        self.enforce_retention()
         if cooldown > 0 and marker.exists():
             try:
                 payload = json.loads(marker.read_text(encoding="utf-8"))
@@ -2243,6 +2187,80 @@ class LongTermMemory:
         marker.write_text(json.dumps({"last_run_at": _now(), "result": result}, indent=2), encoding="utf-8")
         return result
 
+    def enforce_retention(self, *, max_age_days: int = MEMORY_RETENTION_DAYS) -> dict[str, int]:
+        """Prune ephemeral memory artifacts and operational rows by age."""
+        age_days = max(1, int(max_age_days))
+        cutoff_epoch = time.time() - age_days * 24 * 60 * 60
+        cutoff_iso = datetime.fromtimestamp(cutoff_epoch, timezone.utc).isoformat()
+        result = {
+            "short_term_deleted": 0,
+            "curated_sessions_deleted": 0,
+            "memory_candidates_deleted": 0,
+            "memory_episodes_deleted": 0,
+            "memory_checkpoints_deleted": 0,
+            "memory_audit_deleted": 0,
+        }
+
+        for key, root in (
+            ("short_term_deleted", self.root / "short-term"),
+            ("curated_sessions_deleted", self.root / ".system" / "curated"),
+        ):
+            if not root.exists() or root.is_symlink():
+                continue
+            for path in root.rglob("*"):
+                try:
+                    if not path.is_file() or path.is_symlink() or path.stat().st_mtime >= cutoff_epoch:
+                        continue
+                    path.unlink()
+                    result[key] += 1
+                except OSError:
+                    continue
+
+        table_filters = (
+            ("memory_candidates", "updated_at", "memory_candidates_deleted"),
+            ("memory_episodes", "updated_at", "memory_episodes_deleted"),
+            ("memory_checkpoints", "updated_at", "memory_checkpoints_deleted"),
+            ("memory_audit", "created_at", "memory_audit_deleted"),
+        )
+        with self._lock:
+            for table, column, result_key in table_filters:
+                try:
+                    cursor = self._db.execute(
+                        f"DELETE FROM {table} WHERE {column} < ?",
+                        (cutoff_iso,),
+                    )
+                    result[result_key] += max(0, int(cursor.rowcount))
+                except sqlite3.Error:
+                    continue
+            try:
+                self._db.commit()
+            except sqlite3.Error:
+                pass
+        return result
+
+    def clear_database_records(self) -> dict[str, int]:
+        """Remove SQLite-backed memory state as part of a complete data delete."""
+        deleted: dict[str, int] = {}
+        with self._lock:
+            for table in (
+                "memory_audit",
+                "memory_audit_counters",
+                "memory_candidates",
+                "memory_episodes",
+                "memory_checkpoints",
+                "memory_profile_fields",
+            ):
+                try:
+                    cursor = self._db.execute(f"DELETE FROM {table}")
+                    deleted[f"{table}_deleted"] = max(0, int(cursor.rowcount))
+                except sqlite3.Error:
+                    continue
+            try:
+                self._db.commit()
+            except sqlite3.Error:
+                pass
+        return deleted
+
     def _parse_dt(self, value: Any) -> datetime | None:
         try:
             return datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
@@ -2263,33 +2281,27 @@ class LongTermMemory:
         memory_id: str | int | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
         wanted_memory = _safe_id(str(memory_id)) if memory_id is not None else ""
-        for path in sorted((self.root / "audit").glob("*.md"), reverse=True):
-            try:
-                meta, content = _read_markdown(path)
-            except Exception:
-                continue
-            action = str(meta.get("action") or "")
-            if not action:
-                continue
-            row = {
-                "id": str(meta.get("id") or path.stem),
-                "memory_id": str(meta.get("memory_id") or "") or None,
-                "action": action,
-                "reason": str(meta.get("reason") or ""),
-                "source_conversation_id": str(meta.get("source_conversation_id") or ""),
-                "candidate_content": content,
-                "created_at": str(meta.get("created_at") or ""),
-            }
-            if conversation_id and row["source_conversation_id"] != conversation_id:
-                continue
-            if wanted_memory and row["memory_id"] != wanted_memory:
-                continue
-            rows.append(row)
-            if len(rows) >= max(1, min(500, int(limit))):
-                break
-        return rows
+        where: list[str] = []
+        params: list[Any] = []
+        if conversation_id:
+            where.append("source_conversation_id = ?")
+            params.append(conversation_id)
+        if wanted_memory:
+            where.append("memory_id = ?")
+            params.append(wanted_memory)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        return self._db_rows(
+            f"""
+            SELECT id, memory_id, action, reason, source_conversation_id,
+                   candidate_content, created_at
+            FROM memory_audit
+            {clause}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(params + [max(1, min(500, int(limit)))]),
+        )
 
     def _audit(
         self,
@@ -2310,7 +2322,40 @@ class LongTermMemory:
             "source_conversation_id": source_conversation_id,
             "created_at": now,
         }
-        _write_markdown(self.root / "audit" / f"{audit_id}.md", meta, str(candidate_content or ""))
+        normalized_action = str(action or "").upper()
+        try:
+            with self._lock:
+                if normalized_action in MAX_AUDIT_COUNTER_ACTIONS:
+                    self._db.execute(
+                        """
+                        INSERT INTO memory_audit_counters (action, count)
+                        VALUES (?, 1)
+                        ON CONFLICT(action) DO UPDATE SET count = count + 1
+                        """,
+                        (normalized_action,),
+                    )
+                else:
+                    self._db.execute(
+                        """
+                        INSERT INTO memory_audit (
+                            id, action, reason, memory_id, source_conversation_id,
+                            candidate_content, created_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            audit_id,
+                            normalized_action,
+                            reason,
+                            _safe_id(str(memory_id)) if memory_id is not None else None,
+                            source_conversation_id,
+                            str(candidate_content or ""),
+                            now,
+                        ),
+                    )
+                self._db.commit()
+        except sqlite3.Error:
+            logger.debug("Unable to write memory audit event %s", normalized_action)
         return audit_id
 
     def _should_skip_learning(self, text: str) -> bool:
@@ -2325,15 +2370,10 @@ class LongTermMemory:
             r"\bplease always\b",
             r"\bmy name is\b",
             r"\bcall me\b",
-            r"\bi'?m\b",
             r"\bi work\b",
             r"\bworking on\b",
-            r"\buse\b",
             r"\bremember\b",
             r"\bask before\b",
-            r"\bavoid\b",
-            r"\bdon't\b",
-            r"\bdo not\b",
             r"\bcurrent (?:repo|project|app)\b",
         ]
         if any(re.search(pattern, lowered) for pattern in high_signal_patterns):

@@ -25,6 +25,7 @@ from app.agent.settings_store import (
     save_agent_settings,
     settings_version,
 )
+from app.agent.skill_loader import default_skill_flags
 from app.agent.runtime_paths import MONAW_HOME_DIR
 
 
@@ -104,6 +105,8 @@ def test_round_trip_preserves_mcp_servers(tmp_path):
             startup_timeout_ms=9000,
             call_timeout_ms=45000,
             allow_list=["list_directory", "read_file"],
+            trusted_tools=["list_directory"],
+            tool_risk_overrides={"read_file": "low", "write_file": "high"},
             description="Filesystem access",
         )
     ]
@@ -114,6 +117,8 @@ def test_round_trip_preserves_mcp_servers(tmp_path):
     assert loaded.mcp.servers[0].name == "filesystem"
     assert loaded.mcp.servers[0].command == "npx"
     assert loaded.mcp.servers[0].allow_list == ["list_directory", "read_file"]
+    assert loaded.mcp.servers[0].trusted_tools == ["list_directory"]
+    assert loaded.mcp.servers[0].tool_risk_overrides == {"read_file": "low", "write_file": "high"}
 
 
 def test_round_trip_preserves_streamable_http_mcp_servers(tmp_path):
@@ -328,16 +333,7 @@ def test_default_skills_use_recommended_profile():
 
     assert settings_data.llm.provider == "openai"
     assert settings_data.llm.model_name == "gpt-5.6-luna"
-    assert settings_data.tools.skills == {
-        "core": True,
-        "exec": True,
-        "computer-use": True,
-        "filesystem": True,
-        "memory": True,
-        "skill-creator": False,
-        "background-check": False,
-        "browser-use": True,
-    }
+    assert settings_data.tools.skills == default_skill_flags()
     assert settings_data.mcp.enabled is True
 
 
@@ -386,16 +382,7 @@ def test_load_settings_preserves_legacy_skill_defaults_when_keys_are_missing(tmp
 
     loaded = load_agent_settings(settings_path=settings_path)
 
-    assert loaded.tools.skills == {
-        "core": True,
-        "exec": True,
-        "computer-use": True,
-        "filesystem": True,
-        "memory": True,
-        "skill-creator": False,
-        "background-check": False,
-        "browser-use": True,
-    }
+    assert loaded.tools.skills == default_skill_flags()
     assert loaded.mcp.enabled is True
 
 
@@ -443,7 +430,7 @@ def test_load_settings_migrates_legacy_mcp_skill_flag_to_feature_enabled(tmp_pat
 
     loaded = load_agent_settings(settings_path=settings_path)
 
-    assert "mcp-bridge" not in loaded.tools.skills
+    assert loaded.tools.skills["mcp-bridge"] is False
     assert loaded.mcp.enabled is False
 
 

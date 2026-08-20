@@ -190,6 +190,24 @@ class TestTicketResolution:
 
         asyncio.run(scenario())
 
+    def test_superseded_ticket_wakes_existing_waiter(self):
+        first = create_ticket(tool_name="same_tool", action_type="same_action")
+        event = register_pending_resume(first.id)
+
+        second = create_ticket(tool_name="same_tool", action_type="same_action")
+
+        assert first.status == TicketStatus.SUPERSEDED
+        assert first.superseded_by == second.id
+        assert event.is_set()
+        assert get_resume_decision(first.id) == "superseded"
+
+        _all_tickets.clear()
+        _pending_index.clear()
+        reload_from_disk()
+        assert _all_tickets[first.id].status == TicketStatus.SUPERSEDED
+        assert first.id not in _pending_index
+        assert second.id in _pending_index
+
 
 class TestAppliedAndFailed:
     def test_mark_applied(self):

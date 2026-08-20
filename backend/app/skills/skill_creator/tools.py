@@ -23,17 +23,6 @@ SKILL_ROLLBACK_DIR = RUNTIME_DIR / "skill_rollbacks"
 RESTART_EXIT_CODE = 78
 MAX_SKILL_FILES = 2
 MAX_SKILL_BYTES = 256 * 1024
-_PROTECTED_SKILL_NAMES = {
-    "core",
-    "exec",
-    "computer-use",
-    "filesystem",
-    "memory",
-    "skill-creator",
-    "browser-use",
-    "scheduling",
-    "mcp-bridge",
-}
 _RESERVED_WINDOWS_NAMES = {
     "con",
     "prn",
@@ -65,7 +54,9 @@ def _normalize_skill_name(value: str) -> tuple[str, str]:
         raise ValueError("Skill name must be 64 characters or less.")
     if raw in _RESERVED_WINDOWS_NAMES:
         raise ValueError(f"'{raw}' is a reserved Windows name.")
-    if raw in _PROTECTED_SKILL_NAMES:
+    from app.agent.skill_loader import discovered_skill_names
+
+    if raw in discovered_skill_names():
         raise ValueError(f"'{raw}' is a protected built-in skill name.")
     folder = raw.replace("-", "_")
     return raw, folder
@@ -101,10 +92,16 @@ def _skill_markdown(
     description: str,
     instructions: str,
     enabled_by_default: bool,
+    display_name: str = "",
+    summary: str = "",
 ) -> str:
+    display_name = " ".join(str(display_name or "").split()) or skill_name.replace("-", " ").title()
+    summary = " ".join(str(summary or "").split()) or description.strip()
     frontmatter = {
         "name": skill_name,
         "description": description.strip(),
+        "display_name": display_name,
+        "summary": summary,
         "version": "1.0.0",
         "enabled_by_default": bool(enabled_by_default),
         "tier": "optional",
@@ -164,6 +161,8 @@ def _raw_skill_create(
     enabled: bool = False,
     overwrite: bool = False,
     reload_runtime: bool = True,
+    display_name: str = "",
+    summary: str = "",
 ) -> str:
     try:
         skill_name, folder = _normalize_skill_name(name)
@@ -189,6 +188,8 @@ def _raw_skill_create(
     skill_md_source = _skill_markdown(
         skill_name=skill_name,
         description=description,
+        display_name=display_name,
+        summary=summary,
         instructions=str(instructions or ""),
         enabled_by_default=False,
     )
@@ -277,6 +278,8 @@ def skill_create(
     enabled: bool = False,
     overwrite: bool = False,
     reload_runtime: bool = True,
+    display_name: str = "",
+    summary: str = "",
 ) -> str:
     if not current_interactive():
         return _error(
@@ -286,6 +289,8 @@ def skill_create(
     args = {
         "name": name,
         "description": description,
+        "display_name": display_name,
+        "summary": summary,
         "instructions": instructions,
         "tools_py": tools_py,
         "enabled": False,
@@ -431,6 +436,8 @@ def register_tools(registry, settings) -> None:
                     "properties": {
                         "name": {"type": "string", "description": "Skill name, normalized to hyphen-case."},
                         "description": {"type": "string", "description": "Trigger description for the skill frontmatter."},
+                        "display_name": {"type": "string", "description": "Human-facing skill name for Settings."},
+                        "summary": {"type": "string", "description": "One-line human-facing summary for Settings."},
                         "instructions": {"type": "string", "description": "Markdown body for SKILL.md."},
                         "tools_py": {"type": "string", "default": "", "description": "Optional complete Python tools.py source."},
                         "enabled": {"type": "boolean", "default": False, "description": "Enable the new skill immediately."},

@@ -159,6 +159,7 @@ async def list_chat_jobs():
             "active_graph_node": j.active_graph_node,
             "checkpoint_status": j.checkpoint_status,
             "last_resume_reason": j.last_resume_reason,
+            "dropped_subscriber_events": j.dropped_subscriber_events,
         }
         for j in list_jobs()
     ]

@@ -17,8 +17,9 @@ from app.agent.controller_policy import (
     is_path_permitted,
     resolve_permission,
     save_policy,
+    update_permitted_roots,
 )
-from app.agent.settings_store import AgentSettings, AppRule, PathRule, save_agent_settings
+from app.agent.settings_store import AgentSettings, AppRule, PathRule, load_agent_settings, save_agent_settings
 
 
 @pytest.fixture
@@ -232,6 +233,43 @@ class TestUserConfig:
 
 
 class TestUnifiedSettingsPermissions:
+    def test_permitted_root_update_preserves_existing_rule_details(self, tmp_policy, tmp_path):
+        import app.agent.controller_policy as cp
+
+        existing = tmp_path / "existing"
+        added = tmp_path / "added"
+        existing.mkdir()
+        added.mkdir()
+        settings_path = cp._POLICY_DIR.parent / "settings.json"
+        settings_data = AgentSettings()
+        settings_data.permissions.mode = "custom"
+        settings_data.permissions.blocked_roots = []
+        settings_data.permissions.path_rules = [
+            PathRule(
+                path=str(existing),
+                read=True,
+                write=False,
+                delete=False,
+                launch=False,
+                require_confirmation=True,
+                enabled=True,
+            )
+        ]
+        save_agent_settings(settings_data, settings_path=settings_path)
+
+        update_permitted_roots(
+            [str(existing), str(added)],
+            new_rule=PathRule(path=str(added), read=True, write=True, delete=False, enabled=True),
+        )
+
+        loaded = load_agent_settings(settings_path=settings_path)
+        rules = {rule.path: rule for rule in loaded.permissions.path_rules}
+        assert rules[str(existing)].write is False
+        assert rules[str(existing)].delete is False
+        assert rules[str(existing)].require_confirmation is True
+        assert rules[str(added)].write is True
+        assert rules[str(added)].delete is False
+
     def test_settings_json_path_rule_blocks_write(self, tmp_policy, tmp_path):
         import app.agent.controller_policy as cp
 

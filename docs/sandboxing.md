@@ -1,35 +1,39 @@
 # Sandboxing
 
-Monaw evaluates shell commands before process creation and produces a policy decision containing the command trust class, required isolation strength, selected backend, effective network/filesystem policy, reason code, and approval requirement.
+Monaw classifies each shell command before starting a process. The decision records the trust class, selected backend, isolation strength, network and filesystem policy, reason code, and whether an approval is required.
 
 ## Modes
 
-- `off` / legacy `disabled`: shell execution is disabled.
-- `auto`: untrusted commands require Docker or another strong backend. Standard commands prefer strong isolation and may use a host runner only after explicit host-execution approval. Host-required commands always need that approval.
-- `enforce`: every command requires strong isolation; unavailable isolation returns `sandbox_backend_unavailable`.
-- `host`: explicit host execution. Every command requires approval and displays a no-isolation warning.
-- `docker`: explicitly require Docker.
-- `local_restricted`: explicit advisory host execution; it still requires host-execution approval.
+- `off` / `disabled`: shell execution is disabled.
+- `auto`: Docker is preferred for normal and untrusted commands. If Docker is unavailable, normal commands use the advisory host runner and untrusted commands use that runner only after an explicit approval.
+- `enforce`: every command requires Docker; an unavailable or unpinned image returns `sandbox_backend_unavailable` or `docker_image_not_pinned`.
+- `host`: use the host runner with an explicit approval and no-isolation warning.
+- `docker`: require Docker explicitly.
+- `local_restricted`: use the advisory host runner with process-group cleanup and an explicit approval.
+
+There is no WSL backend. Long-running sessions use the local host runners and are capped at a maximum lifetime; Docker sessions are not supported.
 
 ## Isolation guarantees
 
-- `strong`: Docker container process/filesystem isolation with enforced network denial when requested.
-- `advisory`: `local_restricted` host execution with process cleanup and resource controls, but no filesystem or network isolation.
-- `none`: `local_direct` host execution. It is never selected silently.
+- `strong`: Docker container isolation with `--network none` when network denial is requested, dropped capabilities, PID/memory/CPU limits, and a read-only root filesystem by default.
+- `advisory`: `local_restricted` host execution with process-tree cleanup and resource/output limits. It does not isolate the filesystem or network.
+- `none`: `local_direct` host execution. It is selected only as a compatibility fallback and requires approval.
 
-Docker images must be pinned as `name@sha256:<64-hex-digest>`. Unpinned images are reported unavailable and execution returns `docker_image_not_pinned`.
+The shipped Docker image is pinned as `python:3.12-slim@sha256:<64-hex-digest>`. Settings can pull a tag and resolve it to an immutable digest. If the image is unpinned, capability status reports `docker_image_not_pinned` and the Docker runner will not start.
 
-## Resource and environment controls
+## Workspace and writes
 
-All runners clamp execution time and captured output. Docker additionally applies memory, CPU, and PID limits. Subprocesses receive a minimal environment allowlist; secret-looking explicit variables are rejected with `secret_env_not_supported`.
+The agent workspace is an allowed bind root by default. `direct_rw` mounts the effective workdir read-write. `copy_out` executes in a temporary run workspace and safely copies files back after the command, subject to the configured bind-root and copy-size policy. `discard` does not expose a host workdir to the container.
 
-Docker network denial uses `--network none`, drops capabilities, enables no-new-privileges when configured, uses a read-only root filesystem by default, and mounts no arbitrary host paths. Local host runners never claim network or filesystem isolation.
+## Sessions
 
-Sandbox metadata and audit events record the selected backend, trust class, required isolation, effective restrictions, and reason code.
+`exec_start` starts a local long-running command, `exec_poll` reads output and artifact paths, `exec_write_stdin` re-applies command and permission policy to every input payload, and `exec_stop` terminates the process. A completed session remains readable until cleanup; stale sessions are killed and expired.
 
-## Troubleshooting
+## Environment and troubleshooting
 
-- `sandbox_backend_unavailable`: install/start Docker, configure a pinned image digest, or explicitly choose host mode and approve the host run.
-- `docker_image_not_pinned`: replace a tag such as `python:3.12-slim` with an immutable digest reference.
-- `shell_execution_disabled`: change mode from `off` only if shell execution is intended.
-- Docker commands currently require the `bash` shell.
+Subprocesses receive a minimal environment allowlist. Secret-looking explicit variables are rejected with `secret_env_not_supported`. All runners clamp execution time and captured output; Docker also applies container resource limits.
+
+- `sandbox_backend_unavailable`: install/start Docker, resolve a pinned image, or choose host mode and approve the run.
+- `docker_image_not_pinned`: use **Resolve & pull** in Settings or enter an immutable `name@sha256:<digest>` reference.
+- `shell_execution_disabled`: change the mode from `off` only if shell execution is intended.
+- `unsupported_shell_for_backend`: Docker currently supports `bash` commands only.

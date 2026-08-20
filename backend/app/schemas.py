@@ -1,5 +1,5 @@
 import re
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -124,6 +124,7 @@ class ChatJobOut(BaseModel):
     active_graph_node: str = ""
     checkpoint_status: str = ""
     last_resume_reason: str = ""
+    dropped_subscriber_events: int = 0
 
 
 VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
@@ -198,6 +199,8 @@ class MCPServerConfigPayload(BaseModel):
     call_timeout_ms: int = 30000
     reconnect_on_unhealthy: bool = True
     allow_list: list[str] = Field(default_factory=list)
+    trusted_tools: list[str] = Field(default_factory=list)
+    tool_risk_overrides: dict[str, Literal["low", "medium", "high"]] = Field(default_factory=dict)
     description: str = ""
 
 
@@ -252,6 +255,8 @@ class ToolSettingsPayload(BaseModel):
 class SkillDescriptorPayload(BaseModel):
     slug: str
     name: str
+    display_name: str
+    summary: str
     description: str
     version: str
     enabled_by_default: bool
@@ -259,7 +264,8 @@ class SkillDescriptorPayload(BaseModel):
     available: bool
     always: bool = False
     unavailable_reason: str = ""
-    tier: str = Field("recommended", pattern="^(recommended|optional)$")
+    load_error: str = ""
+    tier: str = Field("recommended", pattern="^(internal|recommended|optional)$")
     recommended: bool = True
 
 
@@ -281,18 +287,15 @@ class SandboxResourceLimitsPayload(BaseModel):
     cpus: float = Field(1.0, ge=0.1, le=16.0)
     pids: int = Field(128, ge=16, le=4096)
     max_output_bytes: int = Field(1048576, ge=4096, le=104857600)
-    max_workspace_mb: int = Field(1024, ge=16, le=102400)
 
 
 class SandboxNetworkSettingsPayload(BaseModel):
     default: str = Field("deny", pattern="^(deny|allow_with_approval|allow)$")
-    allow_domains: list[str] = Field(default_factory=list)
 
 
 class SandboxDockerSettingsPayload(BaseModel):
     enabled: bool = True
-    image: str = "python:3.12-slim"
-    extra_images: list[str] = Field(default_factory=list)
+    image: str = "python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a"
     pull_policy: str = Field("missing", pattern="^(never|missing|always)$")
     read_only_root: bool = True
     no_new_privileges: bool = True
@@ -300,22 +303,12 @@ class SandboxDockerSettingsPayload(BaseModel):
 
 class SandboxLocalRestrictedSettingsPayload(BaseModel):
     enabled: bool = True
-    use_job_object: bool = True
-    kill_process_tree_on_timeout: bool = True
-    strip_environment: bool = True
-
-
-class SandboxWslSettingsPayload(BaseModel):
-    enabled: bool = False
-    distro: str = ""
-    note_network_isolation_is_advisory: bool = True
 
 
 class SandboxSettingsPayload(BaseModel):
     enabled: bool = True
-    mode: str = Field("auto", pattern="^(off|disabled|auto|enforce|host|docker|local_restricted|wsl)$")
-    default_profile: str = Field("standard", pattern="^(standard|untrusted|project_write|host_required)$")
-    require_strong_for_untrusted: bool = True
+    mode: str = Field("auto", pattern="^(off|disabled|auto|enforce|host|docker|local_restricted)$")
+    default_profile: str = Field("standard", pattern="^(standard|untrusted|host_required)$")
     default_write_strategy: str = Field("copy_out", pattern="^(discard|copy_out|direct_rw)$")
     allowed_bind_roots: list[str] = Field(default_factory=list)
     blocked_bind_roots: list[str] = Field(default_factory=list)
@@ -326,7 +319,6 @@ class SandboxSettingsPayload(BaseModel):
     local_restricted: SandboxLocalRestrictedSettingsPayload = Field(
         default_factory=SandboxLocalRestrictedSettingsPayload
     )
-    wsl: SandboxWslSettingsPayload = Field(default_factory=SandboxWslSettingsPayload)
 
 
 class IdentitySettingsPayload(BaseModel):
@@ -493,6 +485,7 @@ class DiagnosticsMcpSummaryPayload(BaseModel):
     runtime_servers: int
     connected_servers: int
     unhealthy_servers: int
+    startup_error: str = ""
 
 
 class DiagnosticsBrowserSummaryPayload(BaseModel):
@@ -519,8 +512,20 @@ class SandboxStatusPayload(BaseModel):
     default_profile: str
     default_network: str
     default_write_strategy: str
-    require_strong_for_untrusted: bool
+    selected_backend: str = ""
+    isolation: str = "none"
+    reason_code: str = ""
     backends: dict[str, SandboxBackendCapabilityPayload]
+
+
+class SandboxResolveImagePayload(BaseModel):
+    image: str = Field(..., min_length=1, max_length=512)
+
+
+class SandboxResolveImageResponse(BaseModel):
+    image: str
+    detail: str = ""
+    sandbox: SandboxStatusPayload
 
 
 class DiagnosticsSummaryPayload(BaseModel):
@@ -558,10 +563,6 @@ class MCPServerDiagnosticsOut(BaseModel):
     failed_call_count: int = 0
     remote_tool_names: list[str] = Field(default_factory=list)
     reflected_tool_names: list[str] = Field(default_factory=list)
-    login_capable: bool = False
-    skill_enabled: bool = False
-    skill_available: bool = False
-    skill_unavailable_reason: str = ""
     feature_enabled: bool = False
     feature_available: bool = False
     feature_unavailable_reason: str = ""
@@ -1011,7 +1012,7 @@ class MemoryStatsOut(BaseModel):
     archived_messages: int = 0
     episodes: int = 0
     active_checkpoints: int = 0
-    profile_fields: int = 0
+    audit_counters: dict[str, int] = Field(default_factory=dict)
     memory_root: str = ""
     categories: dict[str, int] = Field(default_factory=dict)
 
@@ -1063,26 +1064,6 @@ class MemorySessionCloseOut(BaseModel):
     reflection_id: str | None = None
 
 
-class MemoryProfileFieldOut(BaseModel):
-    field: str
-    value: str
-    privacy_level: str = "normal"
-    confidence: float = 1.0
-    review_state: str = "new"
-    source_conversation_id: str = ""
-    source_message_id: int | None = None
-    updated_at: str
-
-
-class MemoryProfileFieldUpdate(BaseModel):
-    value: str = Field(..., min_length=1, max_length=2000)
-    privacy_level: str = Field("normal", pattern="^(normal|private|sensitive)$")
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
-    review_state: str = Field("reviewed", pattern="^(new|reviewed)$")
-    source_conversation_id: str = ""
-    source_message_id: int | None = None
-
-
 class MemoryCandidateOut(BaseModel):
     id: str
     kind: str = "fact"
@@ -1108,19 +1089,9 @@ class MemoryCheckpointOut(BaseModel):
     scope: str = "conversation"
     status: str = "active"
     conversation_id: str = ""
-    project: str = ""
-    app_name: str = ""
     goal: str = ""
     last_known_state: str = ""
     next_action: str = ""
-    blocker: str = ""
-    browser_url: str = ""
-    browser_title: str = ""
-    workspace_path: str = ""
-    files_touched: list[str] = Field(default_factory=list)
-    commands_run: list[str] = Field(default_factory=list)
-    expires_at: str = ""
-    source_refs: list[dict] = Field(default_factory=list)
     created_at: str
     updated_at: str
 
@@ -1129,15 +1100,9 @@ class MemoryEpisodeOut(BaseModel):
     id: str
     conversation_id: str
     channel: str = "desktop"
-    project: str = ""
-    task_type: str = ""
     summary: str
-    decisions: list = Field(default_factory=list)
     artifacts: list = Field(default_factory=list)
     errors: list = Field(default_factory=list)
-    fixes: list = Field(default_factory=list)
-    open_questions: list = Field(default_factory=list)
-    follow_ups: list = Field(default_factory=list)
     source_message_start_id: int | None = None
     source_message_end_id: int | None = None
     tool_call_ids: list[int] = Field(default_factory=list)

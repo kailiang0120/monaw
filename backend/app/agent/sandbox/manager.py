@@ -7,7 +7,8 @@ from app.agent.sandbox.backends.docker import DockerRunner
 from app.agent.sandbox.backends.local_direct import LocalDirectRunner
 from app.agent.sandbox.backends.local_restricted import LocalRestrictedRunner
 from app.agent.sandbox.models import SandboxCapabilities
-from app.agent.sandbox.models import SandboxExecutionRequest, SandboxExecutionResult
+from app.agent.sandbox.models import SandboxDecision, SandboxExecutionRequest, SandboxExecutionResult, SandboxRunRequest
+from app.agent.sandbox.policy import SandboxPolicy
 from app.agent.settings_store import SandboxSettings
 
 
@@ -41,8 +42,34 @@ class SandboxManager:
         self.local_direct = LocalDirectRunner()
         self.local_restricted = LocalRestrictedRunner()
 
-    def run(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
-        selected_backend = self._select_backend(request)
+    def run(
+        self,
+        request: SandboxExecutionRequest,
+        *,
+        decision: SandboxDecision | None = None,
+    ) -> SandboxExecutionResult:
+        if decision is None:
+            decision = SandboxPolicy(self.settings, capabilities=self.capabilities).decide(
+                SandboxRunRequest(
+                    command=request.command,
+                    shell=request.shell,
+                    workdir=request.workdir,
+                    env=request.env,
+                    timeout=request.timeout,
+                    profile=request.profile,
+                    requested_backend=None,
+                    network=request.network,
+                    write_strategy=str(request.copy_policy.get("write_strategy") or "") or None,
+                )
+            )
+        selected_backend = request.backend or (decision.backend if decision.allowed else "none")
+        if not decision.allowed:
+            return self._blocked_result(
+                request,
+                backend=selected_backend,
+                reason=decision.reason,
+                reason_code=decision.reason_code,
+            )
         if selected_backend == "local_direct":
             return self.local_direct.run(request)
         if selected_backend == "docker":
@@ -72,25 +99,6 @@ class SandboxManager:
             ),
             reason_code="sandbox_backend_unavailable",
         )
-
-    def _select_backend(self, request: SandboxExecutionRequest) -> str:
-        requested_backend = (request.backend or "").strip()
-        if requested_backend:
-            return requested_backend
-        if not self.settings.enabled:
-            return "unavailable"
-        mode = str(self.settings.mode or "auto")
-        if mode in {"off", "disabled"}:
-            return "unavailable"
-        if mode == "host":
-            if self.capabilities.local_restricted.available:
-                return "local_restricted"
-            return "local_direct"
-        if mode == "auto":
-            return "docker" if self.capabilities.docker.available else "unavailable"
-        if mode == "enforce":
-            return "docker" if self.capabilities.docker.available else "unavailable"
-        return mode
 
     def _blocked_result(
         self,

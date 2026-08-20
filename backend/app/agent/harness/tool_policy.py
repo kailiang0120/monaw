@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.agent.harness.tool_protocol import ToolCallRequest, ToolCallResult
+from app.agent.harness.tool_protocol import ToolCallRequest
 from app.agent.tool_registry import ToolRegistry
 
 
@@ -14,7 +14,6 @@ from app.agent.tool_registry import ToolRegistry
 class ToolPolicyDecision:
     allowed: bool
     reason: str = ""
-    requires_approval: bool = False
     risk: str = "low"
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -81,11 +80,9 @@ class ToolPolicy:
     def __init__(self, *, max_identical_calls: int = 2) -> None:
         self.max_identical_calls = max(1, max_identical_calls)
         self._call_counts: dict[str, int] = {}
-        self._last_results: dict[str, ToolCallResult] = {}
 
     def begin_turn(self) -> None:
         self._call_counts.clear()
-        self._last_results.clear()
 
     def decide(
         self,
@@ -124,13 +121,8 @@ class ToolPolicy:
         return ToolPolicyDecision(
             allowed=True,
             risk=risk,
-            requires_approval=self.requires_approval(request.name, tool),
             metadata={"signature": signature, "repeat_count": repeat_count + 1},
         )
-
-    def record_result(self, request: ToolCallRequest, result: ToolCallResult, arguments: dict | None = None) -> None:
-        signature = tool_call_signature(request.name, arguments if arguments is not None else request.arguments)
-        self._last_results[signature] = result
 
     def classify_risk(self, tool_name: str, tool: dict | None = None) -> str:
         if tool:
@@ -146,13 +138,6 @@ class ToolPolicy:
         if tool and str(tool.get("domain") or "") == "filesystem" and tool_name not in {"file_reader", "read_file"}:
             return "medium"
         return "low"
-
-    def requires_approval(self, tool_name: str, tool: dict | None = None) -> bool:
-        if tool_name in {"exec", "computer_functions_act", "computer_functions_kill_process"}:
-            return True
-        if tool and bool(tool.get("requires_approval", False)):
-            return True
-        return False
 
     @staticmethod
     def _is_repeat_safe(tool_name: str, arguments: dict, tool: dict | None = None) -> bool:

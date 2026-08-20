@@ -1,6 +1,8 @@
 ---
 name: skill-creator
 description: Create optional Monaw runtime skills from inside the agent. Use when the user asks the agent to add a new skill, scaffold SKILL.md instructions, add optional tools.py tool code, reload skills, or restart the backend after a skill update.
+display_name: Skill creator
+summary: Create, review, and reload optional runtime skills with administrator approval.
 version: 1.0.0
 enabled_by_default: false
 tier: optional
@@ -15,6 +17,7 @@ Default created skills to optional:
 
 - `enabled_by_default: false`
 - `tier: optional`
+- `display_name` and a one-line `summary` for the Settings catalog
 - concise `SKILL.md` instructions
 - optional `tools.py` only when deterministic tool code is actually useful
 

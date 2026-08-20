@@ -1,6 +1,6 @@
 # Memory
 
-Monaw memory stores durable user context outside normal chat history. Chat history stays in SQLite; long-term memories are human-readable markdown files.
+Monaw memory stores durable user context outside normal chat history. Chat history stays in SQLite; long-term memories are human-readable markdown files. The memory audit trail and operational candidates, episodes, and checkpoints are SQLite-backed.
 
 ## What Memory Is For
 
@@ -60,6 +60,8 @@ personalities\      Agent and user personality notes
 .system\            Schema markers, curation output, and audit support
 ```
 
+The legacy `audit\` folder is removed on first start when it is inside Monaw's approved data roots. New audit events are stored in the runtime database, indexed by time and source conversation. Per-turn injection and candidate telemetry is kept as counters; provenance events retain their metadata. Deleting a memory removes its content-bearing audit rows and keeps only a content-free deletion marker.
+
 Long-term memory uses one markdown file per category:
 
 ```text
@@ -102,7 +104,7 @@ updated_at: 2026-05-13T00:00:00+00:00
 The user prefers short, precise implementation updates.
 ```
 
-The parser expects level-2 section headings after the frontmatter. If a file is malformed, the backend logs a warning and returns an empty list for that file instead of crashing the whole memory panel.
+The parser expects level-2 section headings after the frontmatter. If one section's metadata is malformed, the backend logs a warning and skips that section while preserving other valid sections in the file.
 
 ## How Memory Is Used
 
@@ -117,6 +119,8 @@ The runtime can use memory in these ways:
 | Manual save | User explicitly asks Monaw to remember something. |
 | Manual forget | User asks Monaw to stop using a saved memory. |
 | Session curation | Session close flow extracts durable information when enabled. |
+
+Short-term summaries, curation markers, candidates, episodes, checkpoints, and audit rows are age-pruned by the runtime retention pass. Session-close maintenance also runs the memory retention pass. Session curation runs through the session-close API or startup catch-up; it is not inferred from an arbitrary renderer disconnect. Profile fields and the old Current Context settings panel were retired because they duplicated identity state or exposed data that was not used in prompts.
 
 ## Manual Editing
 
@@ -141,7 +145,7 @@ The backend exposes memory endpoints under `/api`:
 | `GET /api/memories` | List memories with optional query, category, status, review state, and limit. |
 | `POST /api/memories` | Create a manual memory. |
 | `GET /api/memories/search` | Score memory relevance without marking memories as used. |
-| `GET /api/memories/stats` | Return counters and memory root metadata. |
+| `GET /api/memories/stats` | Return counters, audit counters, and memory root metadata. |
 | `GET /api/memories/audit` | Read memory audit events. |
 | `POST /api/memories/session/close` | Run session-close curation. |
 | `GET /api/memories/files/{category}` | Read one category markdown file plus parsed sections. |

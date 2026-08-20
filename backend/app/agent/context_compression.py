@@ -1,11 +1,10 @@
 """Multi-phase context compression to keep conversations within context limits.
 
-5-phase algorithm:
+4-phase algorithm:
 1. Tool output pruning (no LLM call) — shrink large tool outputs to summaries
 2. Boundary protection — keep first N + recent ~20K tokens intact
 3. Middle summarization (LLM call) — structured template
 4. Iterative updates — update previous summary instead of regenerating
-5. Integrity repair — fix orphaned tool call/result pairs
 
 Guardrails:
 - Anti-thrashing: skip if <10% savings expected
@@ -135,26 +134,6 @@ def _split_boundaries(
     return head, middle, tail
 
 
-# ── Phase 5: Integrity repair ────────────────────────────────────────────────
-
-
-def _repair_integrity(messages: list[dict]) -> list[dict]:
-    """Remove orphaned tool call/result messages that lost their pair."""
-    result = []
-    for i, msg in enumerate(messages):
-        content = msg.get("content", "")
-
-        # Tool result without a preceding tool call
-        if content.startswith("Tool result for "):
-            if i > 0 and "tool call" not in messages[i - 1].get("content", "").lower():
-                # Keep it — the context is still useful even without the call
-                pass
-
-        result.append(msg)
-
-    return result
-
-
 # ── Main compression pipeline ────────────────────────────────────────────────
 
 
@@ -249,10 +228,6 @@ async def compress_context(
             "content": f"[Conversation Summary]\n{summary}",
         })
     compressed.extend(tail)
-
-    # Phase 5: Integrity repair
-    compressed = _repair_integrity(compressed)
-    phases.append("integrity_repair")
 
     return CompressionResult(
         messages=compressed,

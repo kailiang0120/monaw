@@ -1,4 +1,4 @@
-"""OpenClaw-style agent runtime."""
+"""Agent runtime and turn orchestration."""
 
 from __future__ import annotations
 
@@ -39,11 +39,6 @@ def _is_compact_command(message: str) -> bool:
     return str(message or "").strip().casefold() == "/compact"
 
 
-def _is_skill_creator_command(message: str) -> bool:
-    normalized = " ".join(str(message or "").strip().split()).casefold()
-    return normalized == "/skill creator" or normalized.startswith("/skill creator ")
-
-
 def _format_compact_reply(result: dict) -> str:
     status = str(result.get("status") or "")
     if status == "empty":
@@ -66,14 +61,6 @@ def _format_compact_reply(result: dict) -> str:
         f"Messages compacted: {message_count}\n"
         f"Context estimate: {tokens_before} -> {tokens_after} tokens"
         + (f" ({saved} saved)" if saved else "")
-    )
-
-
-def _format_skill_creator_reply() -> str:
-    return (
-        "Skill Creator mode is active. Tell me the skill name, what should trigger it, "
-        "and whether it needs tool code. I will create it as an optional skill under "
-        "`backend/app/skills`, reload skills, and only restart the backend if reload is not enough."
     )
 
 
@@ -134,12 +121,11 @@ class AgentRuntime:
         self.memory = get_memory_manager(self.llm_client)
         self.long_term_memory = get_long_term_memory(self.llm_client, settings)
         self.memory.set_long_term_memory(self.long_term_memory)
-        try:
-            caught_up = self.long_term_memory.catch_up_unprocessed_sessions(max_sessions=3)
-            if caught_up:
-                logger.info("Markdown memory startup catch-up curated %d sessions", caught_up)
-        except Exception as exc:
-            logger.debug("Markdown memory startup catch-up skipped: %s", exc)
+        threading.Thread(
+            target=self._catch_up_memory,
+            name="memory-catch-up",
+            daemon=True,
+        ).start()
 
         llm_cfg = getattr(settings, "llm", None)
         max_iterations = getattr(llm_cfg, "max_iterations_per_turn", None) or 40
@@ -168,6 +154,14 @@ class AgentRuntime:
             build_workspace_instruction_prompt(),
         ]
         return "\n\n".join(prompt for prompt in prompts if prompt)
+
+    def _catch_up_memory(self) -> None:
+        try:
+            caught_up = self.long_term_memory.catch_up_unprocessed_sessions(max_sessions=3)
+            if caught_up:
+                logger.info("Markdown memory catch-up curated %d sessions", caught_up)
+        except Exception as exc:
+            logger.debug("Markdown memory catch-up skipped: %s", exc)
 
     def current_system_prompt(self) -> str:
         revision = self.tool_registry.revision
@@ -202,35 +196,9 @@ class AgentRuntime:
                     tool_calls=[],
                 )
                 if result.get("status") in {"compacted", "unchanged"} and str(result.get("summary") or "").strip():
-                    source_message_id = self.memory._db.get_last_message_id(conversation_id)
-                    if source_message_id > int(result.get("source_message_id") or 0):
-                        self.memory._db.upsert_conversation_compaction(
-                            conv_id=conversation_id,
-                            summary=str(result.get("summary") or ""),
-                            source_message_id=source_message_id,
-                            message_count=int(result.get("message_count") or 0),
-                            tokens_before=int(result.get("tokens_before") or 0),
-                            tokens_after=int(result.get("tokens_after") or 0),
-                        )
-                yield {"event": "token", "data": {"content": reply}}
-                yield {
-                    "event": "done",
-                    "data": {
-                        "conversation_id": conversation_id,
-                        "summary": reply,
-                        "status": "complete",
-                        "attachments": [],
-                    },
-                }
-                return
-            if _is_skill_creator_command(message):
-                reply = _format_skill_creator_reply()
-                await self.memory.persist_turn(
-                    conversation_id,
-                    str(message or "").strip() or "/skill creator",
-                    reply,
-                    tool_calls=[],
-                )
+                    record_compaction = getattr(self.memory, "record_compaction", None)
+                    if callable(record_compaction):
+                        record_compaction(conversation_id, result)
                 yield {"event": "token", "data": {"content": reply}}
                 yield {
                     "event": "done",
@@ -266,6 +234,7 @@ class AgentRuntime:
             self.shutdown()
 
 
+MAX_RUNTIME_CACHE = 3
 _runtimes: dict[str, AgentRuntime] = {}
 _active_run_lock = threading.Lock()
 _active_run_count = 0
@@ -377,9 +346,17 @@ def active_runtime_run_count() -> int:
 
 def get_runtime(settings) -> AgentRuntime:
     key = _settings_cache_key(settings)
-    if key not in _runtimes:
-        _runtimes[key] = AgentRuntime(settings)
-    return _runtimes[key]
+    runtime = _runtimes.pop(key, None)
+    if runtime is not None:
+        _runtimes[key] = runtime
+        return runtime
+    if len(_runtimes) >= MAX_RUNTIME_CACHE:
+        oldest_key = next(iter(_runtimes))
+        oldest = _runtimes.pop(oldest_key)
+        oldest.retire()
+    runtime = AgentRuntime(settings)
+    _runtimes[key] = runtime
+    return runtime
 
 
 async def run_agent_stream(

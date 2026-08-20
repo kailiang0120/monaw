@@ -39,7 +39,7 @@ export const PAGE_COPY = {
   skills: {
     label: 'Skills',
     blurb: 'Turn the agent’s capabilities on or off. A skill it cannot use is a thing it cannot do.',
-    keywords: 'capabilities tools browser computer use memory scheduling background check',
+    keywords: 'capabilities tools browser computer use memory scheduling web search',
   },
   browser: {
     label: 'Browser',
@@ -64,7 +64,7 @@ export const PAGE_COPY = {
   sandbox: {
     label: 'Sandbox',
     blurb: 'Decide how isolated commands are when the agent runs them on this machine.',
-    keywords: 'isolation docker wsl container network cpu memory timeout shell exec',
+    keywords: 'isolation docker container network cpu memory timeout shell exec',
   },
 } as const satisfies Record<string, SettingsPageCopy>
 
@@ -140,6 +140,8 @@ export const MCP_COPY = {
   callTimeout: 'How long to wait for one tool call to finish.',
   reconnect: 'Automatically restart the connection if the server stops responding.',
   allowList: 'Only expose these tools to the agent. Leave empty to expose everything the server offers.',
+  trustedTools: 'Tools in this list bypass the reflected-tool approval prompt. Add only tools you fully trust.',
+  riskOverrides: 'Override the inferred risk for a remote tool. This changes its risk label, but does not bypass approval.',
   plaintextWarning: 'Environment variables and HTTP headers for MCP servers are stored as plain text in the settings file. Do not put high-value secrets here.',
 } as const
 

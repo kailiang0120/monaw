@@ -79,6 +79,7 @@ import {
   fetchWorkspaceInstructions,
   offloadSpeechToTextModel,
   resetWorkspaceInstructions,
+  resolveSandboxDockerImage,
   updateSettings,
   updateWorkspaceInstructions,
 } from '../../lib/api/settings'
@@ -95,7 +96,6 @@ import {
   MCP_SERVER_TEMPLATES,
   PERMISSION_PROFILES,
   SKILL_GROUP_COPY,
-  SKILL_GUIDANCE,
   applyPermissionProfile,
   duplicateMcpServerNames,
   emptyAppRule,
@@ -206,6 +206,8 @@ export function SettingsModal({
   const [browserDiagnostics, setBrowserDiagnostics] = useState<BrowserUseDiagnostics | null>(null)
   const [mcpDiagnostics, setMcpDiagnostics] = useState<Record<string, MCPServerDiagnostics>>({})
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
+  const [resolvingDockerImage, setResolvingDockerImage] = useState(false)
+  const [dockerResolveMessage, setDockerResolveMessage] = useState('')
   const [speechToTextStatus, setSpeechToTextStatus] = useState<SpeechToTextStatus | null>(null)
   const [customInstructions, setCustomInstructions] = useState('')
   const [customInstructionsPath, setCustomInstructionsPath] = useState('')
@@ -800,7 +802,9 @@ export function SettingsModal({
               : 'Download once before voice input.'
 
   const getSkillHealth = (skill: AgentSettings['available_skills'][number]) => {
-    if (!skill.available) return `Unavailable: ${formatUnavailableReason(skill.unavailable_reason)}`
+    if (!skill.available || skill.load_error) {
+      return `Unavailable: ${formatUnavailableReason(skill.unavailable_reason, skill.load_error)}`
+    }
     if (skill.name === 'browser-use') {
       if (!browserSkillEnabled) return draft.tools.skills['browser-use'] ? 'Unavailable' : 'Off'
       if (!browserDiagnostics) return 'Checking'
@@ -1332,7 +1336,7 @@ export function SettingsModal({
                                     onClick={() => setExpandedSkill(isExpanded ? null : skill.name)}
                                     className="flex min-w-0 flex-1 items-center gap-2 text-left"
                                   >
-                                    <span className="st-label truncate">{skill.name}</span>
+                                    <span className="st-label truncate">{skill.display_name}</span>
                                     <Badge tone={skillHealthTone(skill)}>{getSkillHealth(skill)}</Badge>
                                     <ChevronDown
                                       size={12}
@@ -1341,7 +1345,7 @@ export function SettingsModal({
                                     />
                                   </button>
                                   <Switch
-                                    label={skill.name}
+                                    label={skill.display_name}
                                     checked={effectiveEnabled}
                                     disabled={!skill.available || skill.always}
                                     onChange={(checked) => updateDraft((current) => ({
@@ -1354,16 +1358,15 @@ export function SettingsModal({
                                   />
                                 </div>
                                 <p className="st-desc mt-1.5">
-                                  {SKILL_GUIDANCE[skill.name] || skill.description || 'No description available.'}
+                                  {skill.summary || skill.description || 'No description available.'}
                                 </p>
                                 {isExpanded && (
                                   <div className="mt-2 space-y-2">
                                     {skill.description && <p className="st-hint">{skill.description}</p>}
-                                    {!skill.available && (
+                                    {(!skill.available || skill.load_error) && (
                                       <Note tone="warn">
                                         {SKILLS_COPY.unavailable}{' '}
-                                        {formatUnavailableReason(skill.unavailable_reason)}
-                                        {skill.load_error ? ` — ${skill.load_error}` : ''}
+                                        {formatUnavailableReason(skill.unavailable_reason, skill.load_error)}
                                       </Note>
                                     )}
                                   </div>
@@ -1733,7 +1736,9 @@ export function SettingsModal({
                           : diagnostic
                             ? diagnostic.connected
                               ? `Connected — ${diagnostic.tool_count} tools`
-                              : diagnostic.last_error || 'Not connected'
+                              : diagnostic.state === 'unhealthy'
+                                ? `Unhealthy — ${diagnostic.unhealthy_reason || diagnostic.last_error || 'liveness check failed'}`
+                                : diagnostic.last_error || 'Not connected'
                             : 'Save or reconnect to check'
 
                         return (
@@ -1954,8 +1959,25 @@ export function SettingsModal({
                       <Note tone="warn" icon={AlertCircle}>{SANDBOX_COPY.enforceNeedsDocker}</Note>
                     )}
 
+                    <SettingsCard title="Current status">
+                      <div className="st-row">
+                        <div className="min-w-0">
+                          <p className="st-label">Selected backend</p>
+                          <p className="st-desc mt-1">
+                            {sandboxStatus?.selected_backend || 'Checking…'} · {sandboxStatus?.isolation || 'unknown'} isolation
+                            {sandboxStatus?.reason_code ? ` · ${sandboxStatus.reason_code}` : ''}
+                          </p>
+                        </div>
+                        <div className="st-row-control-auto">
+                          <Badge tone={sandboxStatus?.isolation === 'strong' ? 'ok' : 'warn'}>
+                            {sandboxStatus?.isolation || 'Checking…'}
+                          </Badge>
+                        </div>
+                      </div>
+                    </SettingsCard>
+
                     <SettingsCard title="Available on this computer" description={SANDBOX_COPY.backends}>
-                      {['docker', 'local_restricted', 'host', 'wsl'].map((backend) => {
+                      {['docker', 'local_restricted', 'host'].map((backend) => {
                         const status = sandboxStatus?.backends?.[backend]
                         return (
                           <div key={backend} className="st-row">
@@ -1985,17 +2007,44 @@ export function SettingsModal({
                           sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, enabled: checked } },
                         }))}
                       />
-                      <SettingRow label="Container image" description={SANDBOX_COPY.dockerImage} wide>
-                        <input
-                          value={draft.sandbox.docker.image}
-                          aria-label="Container image"
-                          onChange={(e) => updateDraft((current) => ({
-                            ...current,
-                            sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, image: e.target.value } },
-                          }))}
-                          placeholder="python:3.12-slim@sha256:…"
-                          className="st-input font-mono text-xs"
-                        />
+                        <SettingRow label="Container image" description={SANDBOX_COPY.dockerImage} wide>
+                        <div className="flex w-full gap-2">
+                          <input
+                            value={draft.sandbox.docker.image}
+                            aria-label="Container image"
+                            onChange={(e) => updateDraft((current) => ({
+                              ...current,
+                              sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, image: e.target.value } },
+                            }))}
+                            placeholder="python:3.12-slim@sha256:…"
+                            className="st-input min-w-0 flex-1 font-mono text-xs"
+                          />
+                          <button
+                            type="button"
+                            className="st-button"
+                            disabled={resolvingDockerImage}
+                            onClick={async () => {
+                              setResolvingDockerImage(true)
+                              setDockerResolveMessage('')
+                              try {
+                                const result = await resolveSandboxDockerImage(draft.sandbox.docker.image)
+                                updateDraft((current) => ({
+                                  ...current,
+                                  sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, image: result.image } },
+                                }))
+                                setDockerResolveMessage(result.detail)
+                                setSandboxStatus(result.sandbox)
+                              } catch (error) {
+                                setDockerResolveMessage(error instanceof Error ? error.message : 'Docker image could not be resolved.')
+                              } finally {
+                                setResolvingDockerImage(false)
+                              }
+                            }}
+                          >
+                            {resolvingDockerImage ? 'Resolving…' : 'Resolve & pull'}
+                          </button>
+                        </div>
+                        {dockerResolveMessage && <p className="st-desc mt-2">{dockerResolveMessage}</p>}
                       </SettingRow>
                       <SwitchRow
                         label="Read-only container"
@@ -2247,7 +2296,11 @@ function McpServerCard({
   onRemove: () => void
   onUpdate: (updater: (server: AgentSettings['mcp']['servers'][number]) => AgentSettings['mcp']['servers'][number]) => void
 }) {
-  const dotClass = diagnostic?.connected ? 'st-dot st-dot-ok' : diagnostic?.last_error ? 'st-dot st-dot-warn' : 'st-dot'
+  const dotClass = diagnostic?.connected
+    ? 'st-dot st-dot-ok'
+    : diagnostic?.last_error || diagnostic?.unhealthy_reason || diagnostic?.state === 'unhealthy'
+      ? 'st-dot st-dot-warn'
+      : 'st-dot'
   const isHttp = server.transport === 'streamable_http'
 
   return (
@@ -2419,6 +2472,54 @@ function McpServerCard({
               onRemove={(toolIndex) => onUpdate((current) => ({
                 ...current,
                 allow_list: current.allow_list.filter((_, currentIndex) => currentIndex !== toolIndex),
+              }))}
+            />
+          </div>
+          <div className="st-row-stacked">
+            <EditableList
+              title="Trusted tools"
+              emptyText={MCP_COPY.trustedTools}
+              addLabel="Add trusted tool"
+              values={server.trusted_tools}
+              placeholder={() => 'Remote tool name'}
+              onAdd={() => onUpdate((current) => ({ ...current, trusted_tools: [...current.trusted_tools, ''] }))}
+              onChange={(toolIndex, value) => onUpdate((current) => ({
+                ...current,
+                trusted_tools: current.trusted_tools.map((item, currentIndex) => currentIndex === toolIndex ? value : item),
+              }))}
+              onRemove={(toolIndex) => onUpdate((current) => ({
+                ...current,
+                trusted_tools: current.trusted_tools.filter((_, currentIndex) => currentIndex !== toolIndex),
+              }))}
+            />
+          </div>
+          <div className="st-row-stacked">
+            <KeyValueEditor
+              title="Tool risk overrides"
+              addLabel="Add override"
+              emptyText={MCP_COPY.riskOverrides}
+              entries={server.tool_risk_overrides as Record<string, string>}
+              keyPlaceholder="Remote tool name"
+              valuePlaceholder="low, medium, or high"
+              onAdd={() => onUpdate((current) => ({
+                ...current,
+                tool_risk_overrides: { ...current.tool_risk_overrides, '': 'medium' },
+              }))}
+              onChange={(entryIndex, key, value) => onUpdate((current) => ({
+                ...current,
+                tool_risk_overrides: renameEntry(
+                  current.tool_risk_overrides as Record<string, string>,
+                  entryIndex,
+                  key,
+                  value,
+                ) as AgentSettings['mcp']['servers'][number]['tool_risk_overrides'],
+              }))}
+              onRemove={(entryIndex) => onUpdate((current) => ({
+                ...current,
+                tool_risk_overrides: removeEntry(
+                  current.tool_risk_overrides as Record<string, string>,
+                  entryIndex,
+                ) as AgentSettings['mcp']['servers'][number]['tool_risk_overrides'],
               }))}
             />
           </div>

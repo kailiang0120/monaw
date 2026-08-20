@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.agent.tool_registry import ToolRegistry
 from app.skills.core import system_controls
 from app.skills.core import tools as core_tools
+from app.skills.web_search import tools as web_search_tools
 
 
 def test_calculator_uses_ast_math_only():
@@ -20,7 +21,7 @@ def test_datetime_returns_structured_timezone_payload():
     assert "epoch_seconds" in result
 
 
-def test_core_web_search_registration_sets_tavily_env(monkeypatch):
+def test_web_search_registration_sets_tavily_env(monkeypatch):
     class FakeTavilySearch:
         def __init__(self, max_results=5):
             self.max_results = max_results
@@ -30,14 +31,15 @@ def test_core_web_search_registration_sets_tavily_env(monkeypatch):
 
     fake_module = SimpleNamespace(TavilySearch=FakeTavilySearch)
     monkeypatch.setitem(sys.modules, "langchain_tavily", fake_module)
+    monkeypatch.setenv("TAVILY_API_KEY", "")
 
     settings = SimpleNamespace(tavily_api_key="test-key")
     registry = ToolRegistry()
 
-    core_tools.register_tools(registry, settings)
+    web_search_tools.register_tools(registry, settings)
 
     assert registry.get_tool("web_search") is not None
-    assert core_tools.os.environ["TAVILY_API_KEY"] == "test-key"
+    assert web_search_tools.os.environ["TAVILY_API_KEY"] == "test-key"
 
 
 def test_core_does_not_register_filesystem_compat_aliases():

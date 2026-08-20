@@ -120,8 +120,8 @@ def _memory_curate_session(conversation_id: str) -> str:
 
 
 def register_tools(registry, _settings=None) -> None:
-    searchable_categories = ["", "preference", "behavior", "fact", "workflow", "project", "style"]
-    writable_categories = ["preference", "behavior", "fact", "workflow", "project", "style", "reflection"]
+    searchable_categories = ["", "preference", "behavior", "fact", "workflow", "project", "reflection"]
+    writable_categories = ["preference", "behavior", "fact", "workflow", "project", "reflection"]
     registry.extend(
         [
             {

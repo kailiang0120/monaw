@@ -4,6 +4,9 @@ import os
 import re
 import shutil
 import subprocess
+import json
+import threading
+import time
 from typing import Any
 
 from app.agent.sandbox.models import SandboxBackendCapability, SandboxCapabilities, SandboxStatus
@@ -74,39 +77,6 @@ def probe_docker(settings: SandboxSettings) -> SandboxBackendCapability:
     )
 
 
-def probe_wsl(settings: SandboxSettings) -> SandboxBackendCapability:
-    if not settings.wsl.enabled:
-        return SandboxBackendCapability(
-            backend="wsl",
-            enabled=False,
-            available=False,
-            security_label="medium",
-            network_enforcement="advisory",
-            reason="disabled",
-        )
-    if shutil.which("wsl.exe") is None and shutil.which("wsl") is None:
-        return SandboxBackendCapability(
-            backend="wsl",
-            enabled=True,
-            available=False,
-            security_label="medium",
-            network_enforcement="advisory",
-            reason="wsl_not_found",
-        )
-
-    command = ["wsl.exe", "--status"] if shutil.which("wsl.exe") else ["wsl", "--status"]
-    available, version, reason = _run_probe(command)
-    return SandboxBackendCapability(
-        backend="wsl",
-        enabled=True,
-        available=available,
-        security_label="medium",
-        network_enforcement="advisory",
-        version=version,
-        reason=reason,
-    )
-
-
 def probe_local_restricted(settings: SandboxSettings) -> SandboxBackendCapability:
     if not settings.local_restricted.enabled:
         return SandboxBackendCapability(
@@ -129,12 +99,35 @@ def probe_local_restricted(settings: SandboxSettings) -> SandboxBackendCapabilit
     )
 
 
+_CAPABILITY_CACHE_TTL_SECONDS = 30.0
+_capability_cache: dict[str, tuple[float, SandboxCapabilities]] = {}
+_capability_cache_lock = threading.RLock()
+
+
+def _cache_key(settings: SandboxSettings) -> str:
+    return json.dumps(settings.model_dump(), sort_keys=True, default=str)
+
+
+def invalidate_capability_cache() -> None:
+    with _capability_cache_lock:
+        _capability_cache.clear()
+
+
 def probe_capabilities(settings: SandboxSettings) -> SandboxCapabilities:
-    return SandboxCapabilities(
+    key = _cache_key(settings)
+    now = time.monotonic()
+    with _capability_cache_lock:
+        cached = _capability_cache.get(key)
+        if cached is not None and now - cached[0] < _CAPABILITY_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    probed = SandboxCapabilities(
         docker=probe_docker(settings),
         local_restricted=probe_local_restricted(settings),
-        wsl=probe_wsl(settings),
     )
+    with _capability_cache_lock:
+        _capability_cache[key] = (now, probed)
+    return probed
 
 
 def get_sandbox_status(
@@ -149,7 +142,21 @@ def get_sandbox_status(
         default_profile=settings.default_profile,
         default_network=settings.network.default,
         default_write_strategy=settings.default_write_strategy,
-        require_strong_for_untrusted=settings.require_strong_for_untrusted,
+        selected_backend=(
+            "docker" if probed.docker.available and settings.mode in {"auto", "enforce", "docker"}
+            else "local_restricted" if probed.local_restricted.available and settings.mode in {"auto", "host", "local_restricted"}
+            else "local_direct" if settings.mode == "host"
+            else "none"
+        ),
+        isolation=(
+            "strong" if probed.docker.available and settings.mode in {"auto", "enforce", "docker"}
+            else "advisory" if probed.local_restricted.available and settings.mode in {"auto", "host", "local_restricted"}
+            else "none"
+        ),
+        reason_code=(
+            probed.docker.reason if settings.mode in {"auto", "enforce", "docker"} and not probed.docker.available
+            else ""
+        ),
         backends={
             "docker": probed.docker.model_dump(),
             "local_restricted": probed.local_restricted.model_dump(),
@@ -162,7 +169,6 @@ def get_sandbox_status(
                 "version": "",
                 "reason": "explicit_approval_required",
             },
-            "wsl": probed.wsl.model_dump(),
         },
     )
     return status.model_dump()

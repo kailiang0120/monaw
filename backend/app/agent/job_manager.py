@@ -17,6 +17,7 @@ from typing import AsyncIterator
 
 MAX_LOG_EVENTS = 2000
 MAX_SUBSCRIBER_QUEUE_EVENTS = 512
+MAX_RETAINED_JOBS = 128
 
 
 class RunState(str, Enum):
@@ -27,7 +28,7 @@ class RunState(str, Enum):
     ERROR = "error"
 
 
-_TERMINAL_RUN_STATES = {RunState.DONE, RunState.PAUSED, RunState.CANCELLED, RunState.ERROR}
+_TERMINAL_RUN_STATES = {RunState.DONE, RunState.CANCELLED, RunState.ERROR}
 
 
 @dataclass
@@ -130,10 +131,26 @@ _jobs: dict[str, JobState] = {}
 
 
 def create_job(conversation_id: str) -> JobState:
+    _prune_jobs()
     job_id = str(uuid.uuid4())
     job = JobState(job_id=job_id, conversation_id=conversation_id)
     _jobs[job_id] = job
     return job
+
+
+def _prune_jobs() -> None:
+    if len(_jobs) < MAX_RETAINED_JOBS:
+        return
+    completed = sorted(
+        (
+            job
+            for job in _jobs.values()
+            if job.status in _TERMINAL_RUN_STATES or (job.status == RunState.PAUSED and job._task and job._task.done())
+        ),
+        key=lambda job: job.started_at,
+    )
+    while len(_jobs) >= MAX_RETAINED_JOBS and completed:
+        _jobs.pop(completed.pop(0).job_id, None)
 
 
 def get_job(job_id: str) -> JobState | None:
@@ -141,6 +158,7 @@ def get_job(job_id: str) -> JobState | None:
 
 
 def list_jobs() -> list[JobState]:
+    _prune_jobs()
     return list(_jobs.values())
 
 

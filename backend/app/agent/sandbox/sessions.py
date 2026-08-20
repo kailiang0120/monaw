@@ -9,13 +9,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.agent.sandbox.backends.local_direct import (
+from app.agent.sandbox.process import (
     _format_output,
     _stream_capture_limits,
-    _write_artifact,
     _write_script,
     shell_command,
 )
+from app.agent.sandbox.artifacts import write_artifact as _write_artifact
 from app.agent.sandbox.models import (
     SandboxRunMetadata,
     SandboxSessionHandle,
@@ -25,6 +25,8 @@ from app.agent.sandbox.models import (
 
 
 class SandboxSessionRegistry:
+    DEFAULT_MAX_AGE_SECONDS = 15 * 60
+
     def __init__(self) -> None:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
@@ -65,6 +67,14 @@ class SandboxSessionRegistry:
                 *list(request.env_metadata.get("warnings", [])),
                 *(["local_restricted_is_advisory"] if is_restricted else []),
             ],
+            enabled=bool(request.env_metadata.get("enabled", True)),
+            trust_class=str(request.env_metadata.get("trust_class", "trusted")),
+            required_isolation=str(request.env_metadata.get("required_isolation", "none")),
+            network_enforcement=str(request.env_metadata.get("network_enforcement", "advisory" if is_restricted else "none")),
+            filesystem_policy=str(request.env_metadata.get("filesystem_policy", "host")),
+            write_strategy=str(request.env_metadata.get("write_strategy", "discard")),
+            reason=str(request.env_metadata.get("reason", "")),
+            reason_code=str(request.env_metadata.get("reason_code", "allowed")),
         ).model_dump()
         stdout_limit, stderr_limit, _total_limit = _stream_capture_limits(request)
         popen_kwargs: dict[str, object] = {}
@@ -101,6 +111,7 @@ class SandboxSessionRegistry:
             "stdout_truncated": False,
             "stderr_truncated": False,
             "started_at": time.monotonic(),
+            "max_age_seconds": max(1, int((request.resources or {}).get("session_max_age_seconds") or self.DEFAULT_MAX_AGE_SECONDS)),
             "env_keys": list(request.env_metadata.get("explicit_env_keys", [])),
             "sandbox": metadata,
         }
@@ -127,15 +138,21 @@ class SandboxSessionRegistry:
                 reason_code="unknown_command",
                 error=f"Unknown command_id '{session_id}'",
             )
+        if self._is_expired(session):
+            self._expire_session(session_id, session)
+            return SandboxSessionStatus(
+                status="error",
+                command_id=session_id,
+                reason_code="session_expired",
+                error="The exec session exceeded its maximum lifetime.",
+                sandbox=session.get("sandbox", {}),
+            )
         payload = self._session_payload(
             session,
             max_output=max_output,
             tail_lines=tail_lines,
             return_mode=return_mode,
         )
-        if payload.exit_code is not None:
-            with self._lock:
-                self._sessions.pop(session_id, None)
         return payload
 
     def write_stdin(self, session_id: str, text: str) -> dict[str, Any]:
@@ -143,6 +160,14 @@ class SandboxSessionRegistry:
             session = self._sessions.get(session_id)
         if session is None:
             return {"status": "error", "error": f"Unknown command_id '{session_id}'", "reason_code": "unknown_command", "sandbox": {}}
+        if self._is_expired(session):
+            self._expire_session(session_id, session)
+            return {
+                "status": "error",
+                "error": "The exec session exceeded its maximum lifetime.",
+                "reason_code": "session_expired",
+                "sandbox": session.get("sandbox", {}),
+            }
         proc = session["process"]
         if proc.poll() is not None or proc.stdin is None:
             return {"status": "error", "error": "Process is not accepting stdin.", "sandbox": session.get("sandbox", {})}
@@ -154,6 +179,22 @@ class SandboxSessionRegistry:
             "bytes_written": len(text.encode("utf-8")),
             "sandbox": session.get("sandbox", {}),
         }
+
+    def describe(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            return {
+                "command_id": session_id,
+                "command": str(session.get("command", "")),
+                "shell": str(session.get("shell", "powershell")),
+                "workdir": str(session.get("workdir", "")),
+                "backend": str(session.get("backend", "")),
+                "sandbox": dict(session.get("sandbox", {})),
+                "env_keys": list(session.get("env_keys", [])),
+                "expired": self._is_expired(session),
+            }
 
     def stop(self, session_id: str, signal_name: str = "terminate") -> SandboxSessionStatus:
         with self._lock:
@@ -211,6 +252,19 @@ class SandboxSessionRegistry:
             self.stop(session_id, "kill")
             removed.append(session_id)
         return removed
+
+    @staticmethod
+    def _is_expired(session: dict[str, Any]) -> bool:
+        return time.monotonic() - float(session.get("started_at", 0)) >= float(
+            session.get("max_age_seconds", SandboxSessionRegistry.DEFAULT_MAX_AGE_SECONDS)
+        )
+
+    def _expire_session(self, session_id: str, session: dict[str, Any]) -> None:
+        proc = session.get("process")
+        if proc is not None and proc.poll() is None:
+            self._stop_process(session, "kill")
+        with self._lock:
+            self._sessions.pop(session_id, None)
 
     def _read_stream(self, stream, command_id: str, stream_name: str) -> None:
         if stream is None:

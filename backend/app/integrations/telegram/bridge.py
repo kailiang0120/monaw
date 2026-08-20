@@ -54,7 +54,6 @@ COMMANDS = [
     BotCommand("modeldefault", "Use the desktop default model"),
     BotCommand("effort", "List or switch reasoning effort"),
     BotCommand("compact", "Compact this chat context"),
-    BotCommand("skill", "Open skill creator mode"),
     BotCommand("new", "Start a fresh Telegram conversation session"),
 ]
 TELEGRAM_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -170,7 +169,7 @@ def _start_message() -> str:
     return (
         f"{_agent_display_name()} AI Agent is online and connected to your laptop.\n"
         "Send a message to use the same agent runtime as the desktop app.\n"
-        "Commands: /status, /whoami, /session, /resume, /models, /modeldefault, /effort, /compact, /skill creator, /new, /help."
+        "Commands: /status, /whoami, /session, /resume, /models, /modeldefault, /effort, /compact, /new, /help."
     )
 
 
@@ -196,7 +195,6 @@ def _help_message() -> str:
         "/effort medium - Switch by effort name.\n"
         "/effort default - Clear this Telegram chat's effort override and use the desktop default.\n"
         "/compact - Compact this chat so future replies use the summary instead of earlier raw history.\n"
-        "/skill creator - Open Skill Creator mode for creating optional runtime skills.\n"
         "/new - Start a fresh Telegram conversation session.\n\n"
         "Files and photos are sent to the agent as attachments. Voice and audio messages are transcribed first. "
         "Permission prompts can be approved or rejected from Telegram or the desktop app."
@@ -901,47 +899,6 @@ async def compact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
 
 
-async def skill_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat is None:
-        return
-    if not await _ensure_authorized(update, context):
-        return
-
-    args = [str(arg).strip() for arg in (context.args or []) if str(arg).strip()]
-    if not args or args[0].casefold() in {"help", "?"}:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Use /skill creator to open Skill Creator mode.",
-        )
-        return
-    if args[0].casefold() != "creator":
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Unknown skill command. Use /skill creator.",
-        )
-        return
-
-    prompt = "/skill creator" if len(args) == 1 else "/skill creator " + " ".join(args[1:])
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-    try:
-        result = await _agent_bridge(context).run_chat_message(
-            chat_id=update.effective_chat.id,
-            thread_id=_message_thread_id(update),
-            chat_title=_chat_title(update),
-            sender_name=_sender_name(update),
-            text=prompt,
-        )
-    except Exception as exc:
-        logger.exception("Telegram /skill creator failed.")
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"Could not open Skill Creator mode: {exc}",
-        )
-        return
-    for chunk in split_telegram_message(result.reply):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
-
-
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None:
         return
@@ -1154,7 +1111,6 @@ def build_application(token: str | None = None):
     application.add_handler(CommandHandler("modeldefault", modeldefault_command))
     application.add_handler(CommandHandler("effort", effort_command))
     application.add_handler(CommandHandler("compact", compact_command))
-    application.add_handler(CommandHandler("skill", skill_command))
     application.add_handler(CommandHandler("new", new_session))
     application.add_handler(CallbackQueryHandler(
         permission_callback,

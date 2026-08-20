@@ -13,12 +13,16 @@ from app.agent.access_grant_broker import (
     get_resume_decision as get_grant_resume_decision,
     grant_validation_error,
     register_pending_resume as register_grant_resume,
+    resolve_grant,
+    signal_resume as signal_grant_resume,
 )
 from app.agent.approval_broker import (
     cleanup_resume as cleanup_approval_resume,
     get_resume_decision as get_approval_resume_decision,
     get_ticket as get_approval_ticket,
     register_pending_resume as register_approval_resume,
+    reject_ticket,
+    signal_resume as signal_approval_resume,
 )
 from app.agent.execution_resume import resume_approved_ticket
 from app.agent.iteration_budget import IterationBudget
@@ -32,8 +36,21 @@ from app.agent.tool_registry import ToolRegistry
 ToolExecute = Callable[[IterationBudget, dict[str, Any], dict[str, Any]], Awaitable[str]]
 
 
+def _format_timeout(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return f"{minutes} minute" + ("s" if minutes != 1 else "")
+    if seconds.is_integer():
+        whole_seconds = int(seconds)
+        return f"{whole_seconds} second" + ("s" if whole_seconds != 1 else "")
+    return f"{seconds:g} seconds"
+
+
 class ExecutionGateService:
     """Owns interactive gate detection, waiting, and exact-context resume."""
+
+    MAX_GATE_HOPS = 3
 
     def __init__(self, *, default_timeout_seconds: float = 600.0) -> None:
         self.default_timeout_seconds = default_timeout_seconds
@@ -48,28 +65,33 @@ class ExecutionGateService:
         budget: IterationBudget,
         execute_tool: ToolExecute,
     ) -> tuple[str, list[dict[str, Any]]]:
-        pending_event = self.check_pending_status(tool_output)
-        if pending_event is None:
-            return tool_output, []
-
-        dispatched = registry.dispatch(tool_name, arguments)
-        if dispatched is None:
-            return tool_output, [pending_event]
-
         resolved_output = tool_output
-        emitted_events: list[dict[str, Any]] = [pending_event]
-        async for resolution_event in self.await_ticket_resolution(
-            budget=budget,
-            ticket_id=pending_event["data"]["ticket_id"],
-            event_kind=pending_event["event"],
-            tool_dict=dispatched["tool"],
-            arguments=dispatched["arguments"],
-            execute_tool=execute_tool,
-        ):
-            if "_result" in resolution_event:
-                resolved_output = resolution_event["_result"]
+        emitted_events: list[dict[str, Any]] = []
+        for hop in range(self.MAX_GATE_HOPS):
+            pending_event = self.check_pending_status(resolved_output)
+            if pending_event is None:
+                return resolved_output, emitted_events
+            if hop == 0:
+                emitted_events = [pending_event]
             else:
-                emitted_events.append(resolution_event)
+                emitted_events.append(pending_event)
+            dispatched = registry.dispatch(tool_name, arguments)
+            if dispatched is None:
+                return resolved_output, emitted_events
+            next_output = resolved_output
+            async for resolution_event in self.await_ticket_resolution(
+                budget=budget,
+                ticket_id=pending_event["data"]["ticket_id"],
+                event_kind=pending_event["event"],
+                tool_dict=dispatched["tool"],
+                arguments=dispatched["arguments"],
+                execute_tool=execute_tool,
+            ):
+                if "_result" in resolution_event:
+                    next_output = resolution_event["_result"]
+                else:
+                    emitted_events.append(resolution_event)
+            resolved_output = next_output
         return resolved_output, emitted_events
 
     @staticmethod
@@ -125,6 +147,21 @@ class ExecutionGateService:
             get_decision = lambda: get_approval_resume_decision(ticket_id)
             cleanup = lambda: cleanup_approval_resume(ticket_id)
 
+        # Scheduler, Telegram, and other non-interactive sources cannot show
+        # a user prompt. Resolve their tickets as a denial immediately so a
+        # run never burns the full approval timeout waiting for an impossible
+        # response.
+        if event_kind == "access_grant_required":
+            grant_ticket = get_grant_ticket(ticket_id)
+            if grant_ticket is not None and not grant_ticket.interactive and grant_ticket.status == "pending":
+                resolve_grant(ticket_id, "deny")
+                signal_grant_resume(ticket_id, "deny")
+        else:
+            approval_ticket = get_approval_ticket(ticket_id)
+            if approval_ticket is not None and not approval_ticket.interactive and approval_ticket.status.value == "pending":
+                reject_ticket(ticket_id, resolved_by="system")
+                signal_approval_resume(ticket_id, "rejected")
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + (self.default_timeout_seconds if timeout is None else timeout)
 
@@ -136,7 +173,10 @@ class ExecutionGateService:
                         "_result": json.dumps(
                             {
                                 "status": "error",
-                                "error": "Permission request timed out after 10 minutes.",
+                                "error": (
+                                    "Permission request timed out after "
+                                    f"{_format_timeout(self.default_timeout_seconds if timeout is None else timeout)}."
+                                ),
                             }
                         )
                     }
@@ -149,7 +189,7 @@ class ExecutionGateService:
                     yield {"event": "ping", "data": {}}
 
             decision = get_decision()
-            if decision in (None, "deny", "rejected"):
+            if decision in (None, "deny", "rejected", "superseded", "expired", "cancelled"):
                 yield {
                     "_result": json.dumps(
                         {

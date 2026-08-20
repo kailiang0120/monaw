@@ -84,6 +84,20 @@ export async function fetchSandboxStatus(signal?: AbortSignal): Promise<SandboxS
   return res.json()
 }
 
+export async function resolveSandboxDockerImage(image: string): Promise<{
+  image: string
+  detail: string
+  sandbox: SandboxStatus
+}> {
+  const res = await apiFetch(`${BASE}/api/sandbox/docker/resolve-image`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ image }),
+  })
+  if (!res.ok) await throwApiError(res, 'Failed to resolve Docker image')
+  return res.json()
+}
+
 export async function fetchControllerPolicy(): Promise<ControllerPolicy> {
   const res = await apiFetch(`${BASE}/api/settings/controller-policy`)
   if (!res.ok) await throwApiError(res, 'Failed to fetch controller policy')

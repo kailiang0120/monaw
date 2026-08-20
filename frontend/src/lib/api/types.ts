@@ -22,6 +22,7 @@ export interface ChatJob {
   active_graph_node: string
   checkpoint_status: string
   last_resume_reason: string
+  dropped_subscriber_events: number
 }
 
 export type ScheduleKind = 'cron' | 'interval' | 'once'
@@ -207,6 +208,8 @@ export interface PermissionProfile {
 export interface SkillDescriptor {
   slug: string
   name: string
+  display_name: string
+  summary: string
   description: string
   version: string
   enabled_by_default: boolean
@@ -214,8 +217,8 @@ export interface SkillDescriptor {
   available: boolean
   always: boolean
   unavailable_reason: string
-  load_error?: string
-  tier: 'recommended' | 'optional'
+  load_error: string
+  tier: 'internal' | 'recommended' | 'optional'
   recommended: boolean
 }
 
@@ -233,6 +236,8 @@ export interface MCPServerConfig {
   call_timeout_ms: number
   reconnect_on_unhealthy: boolean
   allow_list: string[]
+  trusted_tools: string[]
+  tool_risk_overrides: Record<string, 'low' | 'medium' | 'high'>
   description: string
 }
 
@@ -262,10 +267,6 @@ export interface MCPServerDiagnostics {
   failed_call_count: number
   remote_tool_names: string[]
   reflected_tool_names: string[]
-  login_capable: boolean
-  skill_enabled: boolean
-  skill_available: boolean
-  skill_unavailable_reason: string
   feature_enabled: boolean
   feature_available: boolean
   feature_unavailable_reason: string
@@ -338,6 +339,7 @@ export interface DiagnosticsSummary {
     runtime_servers: number
     connected_servers: number
     unhealthy_servers: number
+    startup_error?: string
   }
   browser: {
     available: boolean
@@ -578,21 +580,9 @@ export interface MemoryStats {
   audit_events: number
   archived_messages: number
   episodes: number
-  active_checkpoints: number
-  profile_fields: number
+  audit_counters: Record<string, number>
   memory_root: string
   categories: Partial<Record<MemoryCategory, number>>
-}
-
-export interface MemoryProfileField {
-  field: string
-  value: string
-  privacy_level: 'normal' | 'private' | 'sensitive'
-  confidence: number
-  review_state: MemoryReviewState
-  source_conversation_id: string
-  source_message_id: number | null
-  updated_at: string
 }
 
 export interface MemoryCandidate {
@@ -610,41 +600,13 @@ export interface MemoryCandidate {
   updated_at: string
 }
 
-export interface MemoryCheckpoint {
-  id: string
-  scope: string
-  status: string
-  conversation_id: string
-  project: string
-  app_name: string
-  goal: string
-  last_known_state: string
-  next_action: string
-  blocker: string
-  browser_url: string
-  browser_title: string
-  workspace_path: string
-  files_touched: string[]
-  commands_run: string[]
-  expires_at: string
-  source_refs: Record<string, unknown>[]
-  created_at: string
-  updated_at: string
-}
-
 export interface MemoryEpisode {
   id: string
   conversation_id: string
   channel: string
-  project: string
-  task_type: string
   summary: string
-  decisions: unknown[]
   artifacts: unknown[]
   errors: unknown[]
-  fixes: unknown[]
-  open_questions: unknown[]
-  follow_ups: unknown[]
   source_message_start_id: number | null
   source_message_end_id: number | null
   tool_call_ids: number[]
@@ -717,9 +679,8 @@ export interface AgentSettings {
   }
   sandbox: {
     enabled: boolean
-    mode: 'off' | 'disabled' | 'auto' | 'enforce' | 'host' | 'docker' | 'local_restricted' | 'wsl'
-    default_profile: 'standard' | 'untrusted' | 'project_write' | 'host_required'
-    require_strong_for_untrusted: boolean
+    mode: 'off' | 'disabled' | 'auto' | 'enforce' | 'host' | 'docker' | 'local_restricted'
+    default_profile: 'standard' | 'untrusted' | 'host_required'
     default_write_strategy: 'discard' | 'copy_out' | 'direct_rw'
     allowed_bind_roots: string[]
     blocked_bind_roots: string[]
@@ -730,30 +691,19 @@ export interface AgentSettings {
       cpus: number
       pids: number
       max_output_bytes: number
-      max_workspace_mb: number
     }
     network: {
       default: 'deny' | 'allow_with_approval' | 'allow'
-      allow_domains: string[]
     }
     docker: {
       enabled: boolean
       image: string
-      extra_images: string[]
       pull_policy: 'never' | 'missing' | 'always'
       read_only_root: boolean
       no_new_privileges: boolean
     }
     local_restricted: {
       enabled: boolean
-      use_job_object: boolean
-      kill_process_tree_on_timeout: boolean
-      strip_environment: boolean
-    }
-    wsl: {
-      enabled: boolean
-      distro: string
-      note_network_isolation_is_advisory: boolean
     }
   }
   identity: {
@@ -837,7 +787,9 @@ export interface SandboxStatus {
   default_profile: AgentSettings['sandbox']['default_profile']
   default_network: AgentSettings['sandbox']['network']['default']
   default_write_strategy: AgentSettings['sandbox']['default_write_strategy']
-  require_strong_for_untrusted: boolean
+  selected_backend: string
+  isolation: 'strong' | 'advisory' | 'none' | string
+  reason_code: string
   backends: Record<string, {
     backend: string
     enabled: boolean

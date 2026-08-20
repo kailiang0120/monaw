@@ -50,7 +50,13 @@ async def resolve_access_grant(ticket_id: str, body: AccessGrantDecisionIn, requ
     )
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found or not pending")
-    signal_grant_resume(ticket_id, body.decision)
+    # A non-interactive ticket may be denied by the broker even when the
+    # requested decision was ``session`` or ``always``. Wake the gate with the
+    # effective outcome, not the requested grant scope.
+    signal_grant_resume(
+        ticket_id,
+        "deny" if ticket.status == "denied" else (ticket.decision or body.decision),
+    )
     publish_ui_event(
         "access_grant.changed",
         {"ticket_id": ticket.id, "conversation_id": ticket.conversation_id, "status": ticket.status},

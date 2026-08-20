@@ -1,4 +1,4 @@
-"""Single-turn OpenClaw-style tool loop."""
+"""Single-turn agent tool loop."""
 
 from __future__ import annotations
 
@@ -712,7 +712,7 @@ async def _heartbeat_pump(
 
 
 class TurnLoop:
-    MAX_ITERATIONS = 15  # legacy fallback; runtime passes settings-driven value
+    MAX_ITERATIONS = 40
 
     def __init__(
         self,
@@ -913,6 +913,23 @@ class TurnLoop:
         def _put(event: dict) -> None:
             publisher.publish_nowait(event)
 
+        def _emit_run_transition(transition) -> None:
+            _put(
+                {
+                    "event": "run_state",
+                    "data": {
+                        "from_state": transition.from_state.value,
+                        "state": transition.to_state.value,
+                        "reason": transition.reason,
+                    },
+                }
+            )
+
+        def _transition(method, *args):
+            transition = method(*args)
+            _emit_run_transition(transition)
+            return transition
+
         final_text = ""
         final_attachment_paths: list[str] = []
         streamed_answer_text = ""
@@ -1031,7 +1048,7 @@ class TurnLoop:
             nonlocal turn_persisted
             if turn_persisted:
                 return
-            run_state.finalizing()
+            _transition(run_state.finalizing)
             response_duration_ms = _response_duration_ms()
             persist_turn = getattr(self.memory, "persist_turn", None)
             if callable(persist_turn):
@@ -1159,7 +1176,7 @@ class TurnLoop:
 
                 llm_call_started_at = time.perf_counter()
                 try:
-                    run_state.model_call()
+                    _transition(run_state.model_call)
                     visible_tools = self.registry.get_all_tools(visible_only=True)
                     model_tools = _tools_with_final_answer(
                         visible_tools,
@@ -1903,7 +1920,7 @@ class TurnLoop:
                             },
                         })
                         try:
-                            run_state.tool_execution()
+                            _transition(run_state.tool_execution)
                             tool_result = await self._execute_tool_result(
                                 budget,
                                 tool_dict,
@@ -1929,9 +1946,11 @@ class TurnLoop:
                                 fallback_status="error",
                             )
 
-                        pending_event = self._check_pending_status(tool_output)
-                        if pending_event:
-                            run_state.waiting_for(str(pending_event.get("event") or ""))
+                        for _gate_hop in range(self.execution_gate.MAX_GATE_HOPS):
+                            pending_event = self._check_pending_status(tool_output)
+                            if pending_event is None:
+                                break
+                            _transition(run_state.waiting_for, str(pending_event.get("event") or ""))
                             _put(pending_event)
                             ticket_id = pending_event["data"]["ticket_id"]
                             resolved_output: str | None = None
@@ -2146,7 +2165,6 @@ class TurnLoop:
                             fallback_status="ok" if status == "ok" else "error",
                             metadata={"policy": policy_decision.metadata},
                         )
-                        self.policy.record_result(request, tool_result, arguments)
                         result_signature = str(
                             policy_decision.metadata.get("signature")
                             or tool_call_signature(tool_name, arguments)
@@ -2336,11 +2354,11 @@ class TurnLoop:
                 if incomplete_reason_code:
                     done_data["reason_code"] = incomplete_reason_code
                 if stop_requested:
-                    run_state.cancel(incomplete_reason_code or "cancelled")
+                    _transition(run_state.cancel, incomplete_reason_code or "cancelled")
                 else:
-                    run_state.fail(incomplete_reason_code or "incomplete")
+                    _transition(run_state.fail, incomplete_reason_code or "incomplete")
             else:
-                run_state.complete()
+                _transition(run_state.complete)
             _put({
                 "event": "done",
                 "data": done_data,
@@ -2361,7 +2379,7 @@ class TurnLoop:
                 except Exception:
                     logger.exception("schedule_long_term_learning failed")
         except asyncio.CancelledError:
-            run_state.cancel("cancelled")
+            _transition(run_state.cancel, "cancelled")
             partial_text = _assistant_message_on_cancel()
             try:
                 await _persist_turn_once(partial_text, status="paused")
@@ -2392,7 +2410,7 @@ class TurnLoop:
                 )
             raise
         except Exception as exc:
-            run_state.fail("internal_error")
+            _transition(run_state.fail, "internal_error")
             logger.exception("react_worker error: %s", exc)
             _obs_error(
                 str(exc),

@@ -11,11 +11,9 @@ import {
 } from '../lib/api/settings'
 import {
   fetchMemoryCandidates,
-  fetchMemoryCheckpoints,
   fetchMemoryEpisodes,
   fetchMemories,
   fetchMemoryFile,
-  fetchMemoryProfile,
   fetchMemoryStats,
 } from '../lib/api/memories'
 import { SettingsModal } from '../features/settings/SettingsModal'
@@ -35,10 +33,8 @@ const mocks = vi.hoisted(() => ({
   fetchMemories: vi.fn(),
   fetchMemoryFile: vi.fn(),
   fetchMemoryStats: vi.fn(),
-  fetchMemoryProfile: vi.fn(),
   fetchMemoryCandidates: vi.fn(),
   fetchMemoryEpisodes: vi.fn(),
-  fetchMemoryCheckpoints: vi.fn(),
   searchMemories: vi.fn(),
   createMemory: vi.fn(),
   updateMemory: vi.fn(),
@@ -93,10 +89,8 @@ vi.mock('../lib/api/memories', () => ({
   fetchMemories: mocks.fetchMemories,
   fetchMemoryFile: mocks.fetchMemoryFile,
   fetchMemoryStats: mocks.fetchMemoryStats,
-  fetchMemoryProfile: mocks.fetchMemoryProfile,
   fetchMemoryCandidates: mocks.fetchMemoryCandidates,
   fetchMemoryEpisodes: mocks.fetchMemoryEpisodes,
-  fetchMemoryCheckpoints: mocks.fetchMemoryCheckpoints,
   searchMemories: mocks.searchMemories,
   createMemory: mocks.createMemory,
   updateMemory: mocks.updateMemory,
@@ -122,6 +116,8 @@ function buildMemoryStats(overrides: Record<string, unknown> = {}) {
     curated_sessions: 0,
     audit_events: 0,
     archived_messages: 0,
+    episodes: 0,
+    audit_counters: {},
     memory_root: 'C:/runtime/memory',
     ...overrides,
   }
@@ -246,6 +242,8 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
       {
         slug: 'browser_use',
         name: 'browser-use',
+        display_name: 'Browser automation',
+        summary: 'Browse and interact with websites.',
         description: 'Browser automation',
         version: '1.0.0',
         enabled_by_default: true,
@@ -253,38 +251,47 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
         available: true,
         always: false,
         unavailable_reason: '',
+        load_error: '',
         tier: 'recommended',
         recommended: true,
       },
       {
         slug: 'core',
         name: 'core',
+        display_name: 'Core utilities',
+        summary: 'Calculator and system controls.',
         description: 'Core tools',
         version: '1.0.0',
         enabled_by_default: true,
         enabled: true,
         available: true,
-        always: false,
+        always: true,
         unavailable_reason: '',
-        tier: 'recommended',
-        recommended: true,
+        load_error: '',
+        tier: 'internal',
+        recommended: false,
       },
       {
         slug: 'exec',
         name: 'exec',
+        display_name: 'Command execution',
+        summary: 'Run local commands.',
         description: 'Exec tools',
         version: '1.0.0',
         enabled_by_default: true,
         enabled: true,
         available: true,
-        always: false,
+        always: true,
         unavailable_reason: '',
-        tier: 'recommended',
-        recommended: true,
+        load_error: '',
+        tier: 'internal',
+        recommended: false,
       },
       {
         slug: 'computer_use',
         name: 'computer-use',
+        display_name: 'Windows computer use',
+        summary: 'Control native Windows applications.',
         description: 'Computer use',
         version: '1.0.0',
         enabled_by_default: true,
@@ -292,46 +299,56 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
         available: true,
         always: false,
         unavailable_reason: '',
+        load_error: '',
         tier: 'recommended',
         recommended: true,
       },
       {
         slug: 'filesystem',
         name: 'filesystem',
+        display_name: 'File management',
+        summary: 'Manage local files.',
         description: 'Filesystem tools',
         version: '1.0.0',
         enabled_by_default: true,
         enabled: true,
         available: true,
-        always: false,
+        always: true,
         unavailable_reason: '',
-        tier: 'recommended',
-        recommended: true,
+        load_error: '',
+        tier: 'internal',
+        recommended: false,
       },
       {
         slug: 'memory',
         name: 'memory',
+        display_name: 'Long-term memory',
+        summary: 'Preserve durable context.',
         description: 'Long-term memory',
         version: '1.0.0',
         enabled_by_default: true,
         enabled: true,
         available: true,
-        always: false,
+        always: true,
         unavailable_reason: '',
-        tier: 'recommended',
-        recommended: true,
+        load_error: '',
+        tier: 'internal',
+        recommended: false,
       },
       {
         slug: 'mcp_bridge',
         name: 'mcp-bridge',
+        display_name: 'MCP integrations',
+        summary: 'Connect MCP servers.',
         description: 'MCP bridge',
         version: '1.0.0',
         enabled_by_default: false,
         enabled: false,
         available: true,
-        always: false,
+        always: true,
         unavailable_reason: '',
-        tier: 'optional',
+        load_error: '',
+        tier: 'internal',
         recommended: false,
       },
     ],
@@ -367,7 +384,6 @@ describe('SettingsModal', () => {
       default_profile: 'standard',
       default_network: 'deny',
       default_write_strategy: 'copy_out',
-      require_strong_for_untrusted: true,
       backends: {},
     })
     mocks.fetchSpeechToTextStatus.mockResolvedValue({
@@ -446,10 +462,8 @@ describe('SettingsModal', () => {
     vi.mocked(fetchMemories).mockResolvedValue([])
     vi.mocked(fetchMemoryFile).mockResolvedValue(null as any)
     vi.mocked(fetchMemoryStats).mockResolvedValue(buildMemoryStats() as any)
-    vi.mocked(fetchMemoryProfile).mockResolvedValue([])
     vi.mocked(fetchMemoryCandidates).mockResolvedValue([])
     vi.mocked(fetchMemoryEpisodes).mockResolvedValue([])
-    vi.mocked(fetchMemoryCheckpoints).mockResolvedValue([])
     mocks.searchMemories.mockResolvedValue([])
     mocks.createMemory.mockResolvedValue(buildMemoryRecord())
     mocks.updateMemory.mockResolvedValue(buildMemoryRecord())
@@ -496,6 +510,17 @@ describe('SettingsModal', () => {
     expect(screen.getByRole('option', { name: 'Medium' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Connections/i }))
     expect(screen.getByText(/Google key saved: yes/i)).toBeInTheDocument()
+  })
+
+  it('renders skill display metadata and hides internal skills', async () => {
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Skills/i }))
+
+    expect(await screen.findByText('Browser automation')).toBeInTheDocument()
+    expect(screen.getByText('Browse and interact with websites.')).toBeInTheDocument()
+    expect(screen.queryByText('Core utilities')).not.toBeInTheDocument()
+    expect(screen.queryByText('MCP integrations')).not.toBeInTheDocument()
   })
 
   it('saves Google as a primary Gemini chat provider', async () => {
@@ -764,7 +789,6 @@ describe('SettingsModal', () => {
     expect((await screen.findAllByText('Memory one')).length).toBeGreaterThan(0)
     expect(screen.getByText('Candidates')).toBeInTheDocument()
     expect(screen.getByText('Episodes')).toBeInTheDocument()
-    expect(screen.getByText('Context')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
 

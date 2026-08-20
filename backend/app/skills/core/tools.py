@@ -4,7 +4,6 @@ import ast
 import json
 import math
 import operator
-import os
 from datetime import datetime, timezone
 
 from app.skills.core import system_controls
@@ -60,35 +59,6 @@ def _datetime_tool() -> str:
             "epoch_seconds": int(local_now.timestamp()),
         }
     )
-
-
-def _build_web_search_tool(settings) -> dict | None:
-    tavily_api_key = getattr(settings, "tavily_api_key", "")
-    if not tavily_api_key:
-        return None
-
-    os.environ["TAVILY_API_KEY"] = tavily_api_key
-    from langchain_tavily import TavilySearch
-
-    search = TavilySearch(max_results=5)
-
-    def _web_search(query: str) -> str:
-        return str(search.invoke(query))
-
-    return {
-        "name": "web_search",
-        "description": "Search the web for current information.",
-        "parameters": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "Search query."}},
-            "required": ["query"],
-        },
-        "callable": _web_search,
-        "domain": "general",
-        "execution_mode": "sync_stateless",
-        "affinity_group": None,
-    }
-
 
 def register_tools(registry, settings) -> None:
     registry.extend(
@@ -187,7 +157,3 @@ def register_tools(registry, settings) -> None:
             },
         ]
     )
-
-    web_search_tool = _build_web_search_tool(settings)
-    if web_search_tool is not None:
-        registry.register(web_search_tool)

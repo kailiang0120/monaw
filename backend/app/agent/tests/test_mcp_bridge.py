@@ -445,6 +445,37 @@ def test_call_timeout_marks_manager_unhealthy():
         loop.close()
 
 
+def test_liveness_probe_marks_dead_server_unhealthy_and_publishes_event(monkeypatch):
+    from app.skills.mcp_bridge import connection as connection_module
+
+    class DeadSession:
+        async def list_tools(self):
+            raise RuntimeError("child exited")
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        connection_module,
+        "publish_ui_event",
+        lambda event, data: events.append((event, data)),
+    )
+    manager = ServerManager(MCPServerConfig(name="dead", command="node"))
+    manager._stop = asyncio.Event()
+    manager.connected = True
+    manager.state = "connected"
+    manager.liveness_interval_seconds = 0.01
+
+    asyncio.run(manager._probe_liveness(DeadSession()))
+
+    assert manager.connected is False
+    assert manager.state == "unhealthy"
+    assert manager.unhealthy_reason == "MCP liveness check failed: child exited"
+    assert manager._stop.is_set()
+    assert any(
+        event == "mcp.changed" and data["state"] == "unhealthy"
+        for event, data in events
+    )
+
+
 def test_stop_current_runtime_preserves_stuck_thread_for_diagnostics():
     class StuckThread:
         joined_with: float | None = None

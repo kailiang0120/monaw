@@ -46,8 +46,6 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/memories/episodes` | `agent:run` | `list` |
 | `GET` | `/api/memories/files/{category}` | `agent:run` | `MemoryFileOut` |
 | `PUT` | `/api/memories/files/{category}` | `agent:run` | `MemoryFileOut` |
-| `GET` | `/api/memories/profile` | `agent:run` | `list` |
-| `PATCH` | `/api/memories/profile/{field}` | `agent:run` | `MemoryProfileFieldOut` |
 | `GET` | `/api/memories/search` | `agent:run` | `list` |
 | `PATCH` | `/api/memories/sections/{section_id}` | `agent:run` | `MemoryFileSectionOut` |
 | `POST` | `/api/memories/session/close` | `agent:run` | `MemorySessionCloseOut` |
@@ -67,6 +65,7 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/observability/support-mode` | `diagnostics:read` | `ObservabilitySupportModeOut` |
 | `POST` | `/api/observability/support-mode` | `diagnostics:control` | `ObservabilitySupportModeOut` |
 | `POST` | `/api/privacy/delete-data` | `agent:run` | `DataDeletionResult` |
+| `POST` | `/api/sandbox/docker/resolve-image` | `settings:read` | `SandboxResolveImageResponse` |
 | `GET` | `/api/sandbox/status` | `settings:read` | `SandboxStatusPayload` |
 | `GET` | `/api/scheduled-tasks` | `agent:run` | `list` |
 | `POST` | `/api/scheduled-tasks` | `agent:run` | `ScheduledTaskOut` |

@@ -1,10 +1,17 @@
+from pathlib import Path
+
 from app.agent.skill_loader import SkillSpec
 from app.agent.skill_prompt import build_skill_prompt
 
 
-def test_build_skill_prompt_prefers_chrome_mcp_snapshot_for_webpages():
+def _skill_body(folder: str) -> str:
+    raw = (Path(__file__).parents[2] / "skills" / folder / "SKILL.md").read_text(encoding="utf-8")
+    return raw.split("---", 2)[-1].strip()
+
+
+def test_build_skill_prompt_uses_browser_policy_from_skill_markdown():
     prompt = build_skill_prompt(
-        [SkillSpec(slug="core", name="core", description="Core tools", version="1.0.0", body="", path=None)],  # type: ignore[arg-type]
+        [SkillSpec(slug="browser-use", name="browser-use", description="Browser", version="1.0.0", body=_skill_body("browser_use"), path=None)],  # type: ignore[arg-type]
         {"mcp__Chrome-dev-tools__take_snapshot", "mcp__Chrome-dev-tools__evaluate_script", "screenshot"},
     )
 
@@ -15,7 +22,7 @@ def test_build_skill_prompt_prefers_chrome_mcp_snapshot_for_webpages():
 
 def test_build_skill_prompt_instructs_browser_resume_and_field_verification():
     prompt = build_skill_prompt(
-        [SkillSpec(slug="browser-use", name="browser-use", description="Browser", version="1.0.0", body="", path=None)],  # type: ignore[arg-type]
+        [SkillSpec(slug="browser-use", name="browser-use", description="Browser", version="1.0.0", body=_skill_body("browser_use"), path=None)],  # type: ignore[arg-type]
         {"browser_open", "browser_tabs", "browser_snapshot", "browser_type"},
     )
 
@@ -34,7 +41,7 @@ def test_build_skill_prompt_instructs_browser_resume_and_field_verification():
     assert "browser_full_page_screenshot" in prompt
 
 
-def test_build_skill_prompt_omits_browser_policy_without_chrome_snapshot():
+def test_build_skill_prompt_does_not_synthesize_browser_policy_for_unrelated_skill():
     prompt = build_skill_prompt(
         [SkillSpec(slug="core", name="core", description="Core tools", version="1.0.0", body="", path=None)],  # type: ignore[arg-type]
         {"screenshot"},
@@ -45,7 +52,7 @@ def test_build_skill_prompt_omits_browser_policy_without_chrome_snapshot():
 
 def test_build_skill_prompt_instructs_computer_functions_flow():
     prompt = build_skill_prompt(
-        [SkillSpec(slug="computer-use", name="computer-use", description="Desktop", version="1.0.0", body="", path=None)],  # type: ignore[arg-type]
+        [SkillSpec(slug="computer-use", name="computer-use", description="Desktop", version="1.0.0", body=_skill_body("computer_use"), path=None)],  # type: ignore[arg-type]
         {
             "computer_functions_list_apps",
             "computer_functions_get_window",

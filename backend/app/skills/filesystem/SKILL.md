@@ -1,9 +1,12 @@
 ---
 name: filesystem
 description: Windows filesystem operations with policy gating.
+display_name: File management
+summary: Read, write, search, and manage files through policy-gated tools.
 version: 1.0.0
 enabled_by_default: true
-tier: recommended
+always: true
+tier: internal
 os:
   - windows
 ---

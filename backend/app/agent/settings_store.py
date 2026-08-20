@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
-import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agent.llm_constants import (
@@ -21,7 +20,7 @@ from app.agent.llm_constants import (
 )
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
 from app.agent.output_workspace import default_downloads_dir, default_screenshots_dir
-from app.agent.runtime_paths import MONAW_HOME_DIR, RUNTIME_DIR
+from app.agent.runtime_paths import MONAW_HOME_DIR, RUNTIME_DIR, WORKSPACE_DIR
 
 _USER_HOME = Path(os.path.expanduser("~"))
 _RUNTIME_DIR = RUNTIME_DIR
@@ -39,21 +38,15 @@ DEFAULT_BLOCKED_ROOTS = [
 
 DEFAULT_FOLDER_RULES: list[str] = []
 
-DEFAULT_SKILLS = {
-    "core": True,
-    "exec": True,
-    "computer-use": True,
-    "filesystem": True,
-    "memory": True,
-    "skill-creator": False,
-    "background-check": False,
-    "browser-use": True,
-}
 LEGACY_SKILL_ALIASES = {
     "desktop-control-win": "computer-use",
 }
-REMOVED_SKILLS = frozenset({"mcp-bridge"})
-KNOWN_SKILLS = frozenset((*DEFAULT_SKILLS.keys(), *LEGACY_SKILL_ALIASES.keys(), "scheduling"))
+
+
+def _default_skill_flags() -> dict[str, bool]:
+    from app.agent.skill_loader import default_skill_flags
+
+    return default_skill_flags()
 
 _BROWSER_RUNTIME_DIR = MONAW_HOME_DIR / "browser"
 _BROWSER_MANAGED_PROFILE_DIR = _BROWSER_RUNTIME_DIR / "profiles" / "managed"
@@ -227,13 +220,13 @@ class MemorySettings(BaseModel):
 
 
 class ToolSettings(BaseModel):
-    skills: dict[str, bool] = Field(default_factory=lambda: dict(DEFAULT_SKILLS))
+    skills: dict[str, bool] = Field(default_factory=_default_skill_flags)
 
     @field_validator("skills", mode="before")
     @classmethod
     def normalize_legacy_skill_names(cls, value: Any) -> dict[str, bool]:
         if not isinstance(value, dict):
-            return dict(DEFAULT_SKILLS)
+            return _default_skill_flags()
         return _normalize_skill_flags(value, include_defaults=True)
 
 
@@ -255,18 +248,15 @@ class SandboxResourceLimits(BaseModel):
     cpus: float = Field(1.0, ge=0.1, le=16.0)
     pids: int = Field(128, ge=16, le=4096)
     max_output_bytes: int = Field(1048576, ge=4096, le=104857600)
-    max_workspace_mb: int = Field(1024, ge=16, le=102400)
 
 
 class SandboxNetworkSettings(BaseModel):
     default: Literal["deny", "allow_with_approval", "allow"] = "deny"
-    allow_domains: list[str] = Field(default_factory=list)
 
 
 class SandboxDockerSettings(BaseModel):
     enabled: bool = True
-    image: str = "python:3.12-slim"
-    extra_images: list[str] = Field(default_factory=list)
+    image: str = "python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a"
     pull_policy: Literal["never", "missing", "always"] = "missing"
     read_only_root: bool = True
     no_new_privileges: bool = True
@@ -274,31 +264,20 @@ class SandboxDockerSettings(BaseModel):
 
 class SandboxLocalRestrictedSettings(BaseModel):
     enabled: bool = True
-    use_job_object: bool = True
-    kill_process_tree_on_timeout: bool = True
-    strip_environment: bool = True
-
-
-class SandboxWslSettings(BaseModel):
-    enabled: bool = False
-    distro: str = ""
-    note_network_isolation_is_advisory: bool = True
 
 
 class SandboxSettings(BaseModel):
     enabled: bool = True
-    mode: Literal["off", "disabled", "auto", "enforce", "host", "docker", "local_restricted", "wsl"] = "auto"
-    default_profile: Literal["standard", "untrusted", "project_write", "host_required"] = "standard"
-    require_strong_for_untrusted: bool = True
+    mode: Literal["off", "disabled", "auto", "enforce", "host", "docker", "local_restricted"] = "auto"
+    default_profile: Literal["standard", "untrusted", "host_required"] = "standard"
     default_write_strategy: Literal["discard", "copy_out", "direct_rw"] = "copy_out"
-    allowed_bind_roots: list[str] = Field(default_factory=list)
+    allowed_bind_roots: list[str] = Field(default_factory=lambda: [str(WORKSPACE_DIR)])
     blocked_bind_roots: list[str] = Field(default_factory=lambda: list(DEFAULT_BLOCKED_ROOTS))
     preserve_artifacts_days: int = Field(14, ge=1, le=365)
     resources: SandboxResourceLimits = Field(default_factory=SandboxResourceLimits)
     network: SandboxNetworkSettings = Field(default_factory=SandboxNetworkSettings)
     docker: SandboxDockerSettings = Field(default_factory=SandboxDockerSettings)
     local_restricted: SandboxLocalRestrictedSettings = Field(default_factory=SandboxLocalRestrictedSettings)
-    wsl: SandboxWslSettings = Field(default_factory=SandboxWslSettings)
 
 
 class IdentitySettings(BaseModel):
@@ -369,51 +348,20 @@ def _legacy_tools_to_skills(payload: dict[str, Any]) -> dict[str, bool]:
     tools = payload.get("tools", {}) if isinstance(payload.get("tools"), dict) else {}
     windows_tools = bool(tools.get("windows_tools", True))
     windows_controller = bool(tools.get("windows_controller", True))
-    return {
-        "core": True,
-        "exec": True,
-        "computer-use": windows_tools or windows_controller,
-        "filesystem": windows_controller,
-        "memory": True,
-        "skill-creator": False,
-        "background-check": False,
-        "browser-use": True,
-    }
-
-
-def _split_skill_frontmatter(raw: str) -> dict[str, Any]:
-    if not raw.startswith("---"):
-        return {}
-    parts = raw.split("---", 2)
-    if len(parts) < 3:
-        return {}
-    loaded = yaml.safe_load(parts[1]) or {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _local_skill_names() -> set[str]:
-    skills_dir = Path(__file__).resolve().parents[1] / "skills"
-    names = set(DEFAULT_SKILLS) | {"scheduling"}
-    if not skills_dir.exists():
-        return names
-    for skill_md in skills_dir.glob("*/SKILL.md"):
-        try:
-            frontmatter = _split_skill_frontmatter(skill_md.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        name = str(frontmatter.get("name") or skill_md.parent.name.replace("_", "-")).strip()
-        if name:
-            names.add(name)
-    return names
+    defaults = _default_skill_flags()
+    defaults["computer-use"] = windows_tools or windows_controller
+    defaults["filesystem"] = windows_controller
+    return defaults
 
 
 def _normalize_skill_flags(skills: dict[str, Any], *, include_defaults: bool = False) -> dict[str, bool]:
-    normalized: dict[str, bool] = dict(DEFAULT_SKILLS) if include_defaults else {}
-    known_skills = _local_skill_names()
+    defaults = _default_skill_flags()
+    normalized: dict[str, bool] = dict(defaults) if include_defaults else {}
+    from app.agent.skill_loader import discovered_skill_names
+
+    known_skills = discovered_skill_names()
     for key, value in skills.items():
         canonical_key = LEGACY_SKILL_ALIASES.get(str(key), str(key))
-        if canonical_key in REMOVED_SKILLS:
-            continue
         if canonical_key in known_skills:
             normalized[canonical_key] = bool(value)
     return normalized
@@ -503,7 +451,7 @@ def build_default_agent_settings(base_settings) -> AgentSettings:
                 else "medium"
             ),
         ),
-        tools=ToolSettings(skills=dict(DEFAULT_SKILLS)),
+        tools=ToolSettings(),
         permissions=PermissionSettings(mode=mode, confirmations=confirmation_settings_for_mode(mode)),
     )
 
@@ -601,7 +549,7 @@ def _normalize_loaded_payload(data: dict[str, Any]) -> dict[str, Any]:
         payload["tools"] = {"skills": _legacy_tools_to_skills(payload)}
     else:
         raw_skills = _normalize_skill_flags(tools.get("skills", {}))
-        merged_skills = dict(DEFAULT_SKILLS)
+        merged_skills = _default_skill_flags()
         merged_skills.update(raw_skills)
         payload["tools"] = {"skills": merged_skills}
 
@@ -679,6 +627,12 @@ def save_agent_settings(settings_data: AgentSettings, *, settings_path: Path | N
         settings_data.permissions.allow_screen_fallback = False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(settings_data.model_dump_json(indent=2), encoding="utf-8")
+    try:
+        from app.agent.sandbox.capabilities import invalidate_capability_cache
+
+        invalidate_capability_cache()
+    except ImportError:
+        pass
     return settings_data
 
 

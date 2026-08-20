@@ -10,6 +10,11 @@ from functools import partial
 from typing import Any
 
 from app.agent.iteration_budget import IterationBudget
+from app.agent.tool_cancellation import (
+    cancel_call,
+    reset_current_call_id,
+    set_current_call_id,
+)
 from app.agent.harness.tool_protocol import ToolCallResult, ToolStatus
 
 _BROWSER_TOOL_TIMEOUTS: dict[str, float] = {
@@ -102,7 +107,7 @@ class ToolExecutor:
         tool_name = str(tool_dict.get("name") or "unknown")
         timeout_seconds = tool_timeout_seconds(tool_dict)
 
-        budget.set_current_tool(tool_name)
+        call_context = set_current_call_id(call_id)
         try:
             if execution_mode == "async":
                 output = await self._run_async(fn, arguments, timeout_seconds)
@@ -121,7 +126,11 @@ class ToolExecutor:
                 retryable=status in {"error", "failed", "pending_approval", "pending_access_grant"},
                 metadata={"execution_mode": execution_mode},
             )
+        except asyncio.CancelledError:
+            cancel_call(call_id)
+            raise
         except asyncio.TimeoutError:
+            cancel_call(call_id)
             output = json.dumps(
                 {
                     "status": "error",
@@ -162,7 +171,7 @@ class ToolExecutor:
                 metadata={"execution_mode": execution_mode},
             )
         finally:
-            budget.set_current_tool(None)
+            reset_current_call_id(call_context)
 
     async def _run_async(self, fn, arguments: dict, timeout_seconds: float | None):
         result = fn(**arguments)

@@ -25,7 +25,7 @@ from app.agent.settings_store import (
     load_agent_settings,
     save_agent_settings,
 )
-from app.agent.runtime_paths import RUNTIME_DIR
+from app.agent.runtime_paths import RUNTIME_DIR, WORKSPACE_DIR
 
 _USER_HOME = Path(os.path.expanduser("~"))
 _POLICY_DIR = RUNTIME_DIR / "policy"
@@ -97,8 +97,6 @@ class ActionType(str, Enum):
     CLICK = "click"
     TYPE = "type"
     EXEC = "exec"
-    POWERSHELL = "powershell"
-    REGISTRY = "registry"
     PROCESS_KILL = "process_kill"
 
 
@@ -136,10 +134,10 @@ def _requires_confirmation_for_high_risk_action(
     dangerous_actions_require_confirm: bool = True,
 ) -> bool:
     """Decide if a high-risk action needs confirmation by policy mode."""
-    if action in (ActionType.REGISTRY, ActionType.PROCESS_KILL):
+    if action == ActionType.PROCESS_KILL:
         return True
 
-    if action not in (ActionType.POWERSHELL, ActionType.EXEC):
+    if action != ActionType.EXEC:
         return False
 
     if mode is not None:
@@ -431,12 +429,40 @@ def remove_allowlisted_app(alias: str) -> ControllerPolicyState:
     return state
 
 
-def update_permitted_roots(roots: list[str]) -> ControllerPolicyState:
+def update_permitted_roots(
+    roots: list[str],
+    *,
+    new_rule: PathRule | None = None,
+) -> ControllerPolicyState:
+    """Replace the permitted-root view without destroying rule details.
+
+    The compatibility policy exposes roots, but settings store richer
+    ``PathRule`` entries. Keep the existing rule for every retained root and
+    only synthesize a rule for a genuinely new root.
+    """
+
     settings_data = _load_runtime_settings()
-    settings_data.permissions.path_rules = [
-        PathRule(path=root, read=True, write=True, delete=True, launch=False, enabled=True)
-        for root in roots
-    ]
+    existing = {
+        canonical(rule.path): rule
+        for rule in settings_data.permissions.path_rules
+        if rule.enabled
+    }
+    new_rule_path = canonical(new_rule.path) if new_rule is not None else ""
+    path_rules: list[PathRule] = []
+    seen: set[str] = set()
+    for root in roots:
+        root_key = canonical(root)
+        if root_key in seen:
+            continue
+        seen.add(root_key)
+        prior = existing.get(root_key)
+        if prior is not None:
+            path_rules.append(prior)
+        elif new_rule is not None and root_key == new_rule_path:
+            path_rules.append(new_rule.model_copy(update={"path": root}))
+        else:
+            path_rules.append(PathRule(path=root, read=True, write=True, delete=True, launch=False, enabled=True))
+    settings_data.permissions.path_rules = path_rules
     save_agent_settings(settings_data, settings_path=_settings_json_path())
     state = _permissions_to_state(settings_data)
     _write_policy_json(state)
@@ -474,7 +500,7 @@ def _path_rule_allows(rule: PathRule | None, action: ActionType) -> bool:
         return False
     if action == ActionType.READ:
         return rule.read
-    if action in (ActionType.MUTATE, ActionType.EXEC, ActionType.POWERSHELL):
+    if action in (ActionType.MUTATE, ActionType.EXEC):
         return rule.write
     if action == ActionType.DELETE:
         return rule.delete
@@ -567,7 +593,7 @@ def _is_user_private_grantable_root(canon_path: str, blocked_roots: list[str]) -
 
 
 def _browser_runtime_roots(settings_data: AgentSettings | None) -> list[str]:
-    roots = [str(RUNTIME_DIR)]
+    roots = [str(RUNTIME_DIR), str(WORKSPACE_DIR)]
     app_data = os.getenv("APPDATA")
     local_app_data = os.getenv("LOCALAPPDATA")
     roaming_base = Path(app_data) if app_data else _USER_HOME / "AppData" / "Roaming"
@@ -619,270 +645,6 @@ def _path_access_grant_decision(target_path: str, policy_source: str) -> Permiss
         reason_code="access_grant_required",
         policy_source=policy_source,
     )
-
-
-def _legacy_resolve_permission(
-    action: ActionType,
-    *,
-    target_path: str = "",
-    target_app: str = "",
-    state: ControllerPolicyState | None = None,
-) -> PermissionDecision:
-    if state is not None:
-        # 1. Blocked apps — always silent deny
-        if target_app and is_blocked_process_alias(target_app):
-            return PermissionDecision(
-                allowed=False,
-                blocked=True,
-                reason=f"App '{target_app}' is a blocked sensitive process.",
-                reason_code="blocked_process",
-                policy_source="compat_state",
-            )
-
-        # 2. Blocked paths — always silent deny
-        if target_path:
-            canon = canonical(target_path)
-            blocked_by_root = _is_path_in_blocked_roots(canon, state.blocked_roots)
-            if blocked_by_root and not _is_trusted_runtime_path(canon):
-                if _is_user_private_grantable_root(canon, state.blocked_roots):
-                    if not _is_state_permitted_root(canon, state.permitted_roots) and not _check_session_grant("path", target_path):
-                        return PermissionDecision(
-                            allowed=False,
-                            requires_access_grant=True,
-                            reason=f"Path '{target_path}' is inside a private blocked root. User decision required.",
-                            reason_code="access_grant_required",
-                            policy_source="compat_state",
-                        )
-                else:
-                    return PermissionDecision(
-                        allowed=False,
-                        blocked=True,
-                        reason=f"Path '{target_path}' is inside a blocked root.",
-                        reason_code="blocked_root",
-                        policy_source="compat_state",
-                    )
-
-        # 3. Whitelisted apps — silent allow (continue to confirmation checks)
-        app_whitelisted = not target_app or is_app_allowed(target_app, state)
-        path_whitelisted = not target_path or is_path_permitted(target_path, state)
-
-        # 4. Session grants — check before requiring access grant
-        if not app_whitelisted and target_app:
-            if _check_session_grant("app", target_app):
-                app_whitelisted = True
-
-        if not path_whitelisted and target_path:
-            if _check_session_grant("path", target_path):
-                path_whitelisted = True
-
-        # 5. Unknown app/path — requires interactive access grant
-        if target_app and not app_whitelisted:
-            return PermissionDecision(
-                allowed=False,
-                requires_access_grant=True,
-                reason=f"App '{target_app}' is not in any list. User decision required.",
-                reason_code="access_grant_required",
-                policy_source="compat_state",
-            )
-
-        if target_path and not path_whitelisted:
-            return PermissionDecision(
-                allowed=False,
-                requires_access_grant=True,
-                reason=f"Path '{target_path}' is outside permitted roots. User decision required.",
-                reason_code="access_grant_required",
-                policy_source="compat_state",
-            )
-
-        # 6. High-risk actions: PowerShell is allowed in full_access mode.
-        if _requires_confirmation_for_high_risk_action(
-            action,
-            mode=state.mode,
-            dangerous_actions_require_confirm=state.dangerous_actions_require_confirm,
-        ):
-            return PermissionDecision(
-                requires_confirmation=True,
-                reason=f"High-risk action '{action.value}' requires approval in current mode.",
-                reason_code="confirmation_required",
-                policy_source="compat_state",
-            )
-
-        if state.mode == PermissionMode.DEFAULT and action in (
-            ActionType.MUTATE,
-            ActionType.DELETE,
-            ActionType.CLICK,
-            ActionType.TYPE,
-            ActionType.LAUNCH_APP,
-        ):
-            return PermissionDecision(
-                requires_confirmation=True,
-                reason="Default mode: confirmation required for this action.",
-                reason_code="confirmation_required",
-                policy_source="compat_state",
-            )
-
-        if state.mode == PermissionMode.FULL_ACCESS and action == ActionType.DELETE:
-            return PermissionDecision(
-                requires_confirmation=True,
-                reason="Full-access mode: delete operations still require confirmation.",
-                reason_code="confirmation_required",
-                policy_source="compat_state",
-            )
-
-        if state.mode == PermissionMode.USER_CONFIG and state.dangerous_actions_require_confirm and action == ActionType.DELETE:
-            return PermissionDecision(
-                requires_confirmation=True,
-                reason="User config: dangerous actions require confirmation.",
-                reason_code="confirmation_required",
-                policy_source="compat_state",
-            )
-
-        return PermissionDecision(allowed=True, reason="Action permitted.", policy_source="compat_state")
-
-    # ── Settings-based path ───────────────────────────────────────────────
-    settings_data = _load_runtime_settings()
-    perms = settings_data.permissions
-    canon_path = canonical(target_path) if target_path else ""
-    normalized_target_app = normalize_app_alias(target_app)
-    matched_path_rule = _match_path_rule(canon_path, perms) if canon_path else None
-    trusted_runtime_path = bool(canon_path and _is_trusted_runtime_path(canon_path, settings_data))
-
-    # 1. Blocked processes — silent deny
-    if normalized_target_app and is_blocked_process_alias(normalized_target_app):
-        return PermissionDecision(
-            allowed=False,
-            blocked=True,
-            reason=f"App '{target_app}' is a blocked sensitive process.",
-            reason_code="blocked_process",
-        )
-
-    # 2. Blocked roots — silent deny
-    if canon_path and _is_path_in_blocked_roots(canon_path, perms.blocked_roots):
-        return PermissionDecision(
-            allowed=False,
-            blocked=True,
-            reason=f"Path '{target_path}' is inside a blocked root.",
-            reason_code="blocked_root",
-        )
-
-    # 3. Whitelisted checks — distinguish "has rule but denied" from "no rule at all"
-    matched_path_rule = _match_path_rule(canon_path, perms) if canon_path else None
-    app_rule = get_effective_app_rule(normalized_target_app, settings_data) if normalized_target_app else None
-
-    # Path: rule exists but action denied → blocked. No rule at all → unknown.
-    if canon_path and matched_path_rule is not None and not _path_rule_allows(matched_path_rule, action):
-        return PermissionDecision(
-            allowed=False,
-            blocked=True,
-            reason=f"Path '{target_path}' is not permitted for {action.value}.",
-            reason_code="path_not_permitted",
-        )
-
-    path_has_rule = not canon_path or matched_path_rule is not None
-    app_has_rule = not normalized_target_app or app_rule is not None
-
-    # 4. Session grants for unknowns
-    if not app_has_rule and normalized_target_app:
-        if _check_session_grant("app", normalized_target_app):
-            app_has_rule = True
-            app_rule = None
-
-    if not path_has_rule and canon_path:
-        if _check_session_grant("path", target_path):
-            path_has_rule = True
-
-    # 5. Unknown app/path — requires access grant
-    if normalized_target_app and not app_has_rule:
-        return PermissionDecision(
-            allowed=False,
-            requires_access_grant=True,
-            reason=f"App '{target_app}' is not in any list. User decision required.",
-            reason_code="access_grant_required",
-        )
-
-    if canon_path and not path_has_rule:
-        return PermissionDecision(
-            allowed=False,
-            requires_access_grant=True,
-            reason=f"Path '{target_path}' is not permitted. User decision required.",
-            reason_code="access_grant_required",
-        )
-
-    # 6. App-specific rule checks
-    if normalized_target_app and action == ActionType.LAUNCH_APP and app_rule and not app_rule.launch_allowed:
-        return PermissionDecision(
-            allowed=False,
-            blocked=True,
-            reason=f"Launching '{target_app}' is disabled in settings.",
-            reason_code="launch_not_allowed",
-        )
-
-    if normalized_target_app and action in (ActionType.CLICK, ActionType.TYPE) and app_rule and not app_rule.uia_allowed:
-        return PermissionDecision(
-            allowed=False,
-            blocked=True,
-            reason=f"UI automation for '{target_app}' is disabled in settings.",
-            reason_code="uia_not_allowed",
-        )
-
-    # 7. High-risk actions: PowerShell is allowed in full_access mode.
-    if _requires_confirmation_for_high_risk_action(
-        action,
-        mode_str=perms.mode,
-        dangerous_actions_require_confirm=perms.dangerous_actions_require_confirm,
-    ):
-        return PermissionDecision(
-            allowed=True,
-            requires_confirmation=True,
-            reason=f"High-risk action '{action.value}' requires approval in current mode.",
-            reason_code="confirmation_required",
-        )
-
-    # 8. Mode-based confirmation
-    confirmations = perms.confirmations
-    requires_confirmation = False
-    reason = "Action permitted."
-
-    if perms.mode == "default":
-        requires_confirmation = bool(
-            (action == ActionType.MUTATE and confirmations.mutate)
-            or (action == ActionType.DELETE and confirmations.delete)
-            or (action == ActionType.LAUNCH_APP and confirmations.launch_app)
-            or (action == ActionType.CLICK and confirmations.click)
-            or (action == ActionType.TYPE and confirmations.type)
-        )
-        if requires_confirmation:
-            reason = "Default mode: confirmation required for this action."
-    elif perms.mode == "full_access":
-        requires_confirmation = bool(action == ActionType.DELETE and confirmations.delete)
-        if requires_confirmation:
-            reason = "Full-access mode: delete operations still require confirmation."
-    else:
-        requires_confirmation = bool(
-            (action == ActionType.MUTATE and confirmations.mutate)
-            or (action == ActionType.DELETE and confirmations.delete)
-            or (action == ActionType.LAUNCH_APP and confirmations.launch_app)
-            or (action == ActionType.CLICK and confirmations.click)
-            or (action == ActionType.TYPE and confirmations.type)
-        )
-        if requires_confirmation:
-            reason = "Custom mode: confirmation required by settings."
-
-    if not requires_confirmation and matched_path_rule and matched_path_rule.require_confirmation:
-        requires_confirmation = True
-        reason = f"Path rule for '{matched_path_rule.path}' requires confirmation."
-    if not requires_confirmation and app_rule and app_rule.require_confirmation:
-        requires_confirmation = True
-        reason = f"App rule for '{app_rule.alias}' requires confirmation."
-
-    return PermissionDecision(
-        allowed=True,
-        requires_confirmation=requires_confirmation,
-        reason=reason,
-        reason_code="confirmation_required" if requires_confirmation else "allowed",
-    )
-
-
 def resolve_permission(
     action: ActionType,
     *,

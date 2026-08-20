@@ -67,8 +67,25 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
     try:
         result = executor(input_str)
         result_data = json.loads(result) if isinstance(result, str) else result
-        if isinstance(result_data, dict) and result_data.get("status") == "error":
-            mark_failed(ticket.id, error=result_data.get("error", "Unknown error"))
+        result_status = result_data.get("status") if isinstance(result_data, dict) else None
+        if result_status in {
+            "error",
+            "blocked",
+            "denied",
+            "failed",
+            "cancelled",
+            "pending_approval",
+            "pending_access_grant",
+        }:
+            detail = ""
+            if isinstance(result_data, dict):
+                detail = str(
+                    result_data.get("error")
+                    or result_data.get("reason")
+                    or result_data.get("reason_code")
+                    or ""
+                )
+            mark_failed(ticket.id, error=detail or f"Resumed action returned status '{result_status}'.")
         else:
             mark_applied(ticket.id, result=result if isinstance(result, str) else json.dumps(result))
     except Exception as e:

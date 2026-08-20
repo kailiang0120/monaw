@@ -51,6 +51,8 @@ Server names must be unique.
 | `call_timeout_ms` | Per-tool call timeout. Default is `30000`. |
 | `reconnect_on_unhealthy` | Restart unhealthy servers before tool calls. |
 | `allow_list` | Optional list of remote tool names to expose. Empty means expose all tools. |
+| `trusted_tools` | Explicit remote tool names allowed without the reflected-tool approval prompt. Use sparingly. |
+| `tool_risk_overrides` | Per-tool `low`, `medium`, or `high` risk label overrides. Overrides do not by themselves bypass approval. |
 | `description` | Human-readable purpose. |
 
 ## Example Configs
@@ -70,6 +72,8 @@ Example `stdio` server:
   "call_timeout_ms": 30000,
   "reconnect_on_unhealthy": true,
   "allow_list": [],
+  "trusted_tools": ["list_directory"],
+  "tool_risk_overrides": {},
   "description": "Filesystem MCP server"
 }
 ```
@@ -109,7 +113,9 @@ Runtime states:
 | `unhealthy` | Server was connected but a call, refresh, or stop failed. |
 | `failed` | Startup or initialization failed. |
 
-Diagnostics include startup phase, resolved executable, PID, stderr tail, tool counts, reflected names, last error, unhealthy reason, and recent call duration.
+Diagnostics in the authenticated local UI include the configured command/arguments or URL, working directory, resolved executable, PID when available, startup phase, stderr tail, tool counts, reflected names, last error, unhealthy reason, and recent call duration. Environment-variable and HTTP-header values remain redacted and are never returned as diagnostic secrets.
+
+Enabled servers are started during backend startup. A periodic MCP `list_tools` liveness probe detects a dead child or transport and changes the server to `unhealthy`; the UI receives an `mcp.changed` event and refreshes the card. Reconnect is explicit unless a subsequent tool call uses the configured recovery behavior.
 
 ## Reflected Tool Names
 
@@ -130,13 +136,13 @@ Names are sanitized and shortened deterministically when needed. Use `mcp_list_t
 | `mcp_refresh_tools` | Re-lists tools from one or all enabled servers. Requires approval. |
 | `mcp_reconnect_server` | Restarts one configured server and refreshes tools. Requires approval. |
 
-Read-only reflected tools can run directly. Mutating, destructive, open-world, or unknown-risk reflected tools require approval.
+Reflected tools require approval by default, including read-like tools. A tool can bypass that prompt only when its original remote tool name is explicitly listed in `trusted_tools`; that explicit exception also applies to a tool the user knowingly trusts despite its risk. Risk overrides alone never bypass approval.
 
 ## Approval Behavior
 
 MCP tool annotations are treated as hints, not proof.
 
-Monaw marks a reflected tool as read-only when it has a read-like name such as `get`, `list`, `read`, `search`, `query`, `find`, `inspect`, `status`, or `describe`, or when MCP annotations indicate read-only.
+Monaw labels a reflected tool as low risk when it has a read-like name such as `get`, `list`, `read`, `search`, `query`, `find`, `inspect`, `status`, or `describe`, or when MCP annotations indicate read-only.
 
 Monaw requires approval for tools that appear destructive, mutating, open-world, or unknown-risk. Keywords such as `delete`, `remove`, `edit`, `patch`, `upload`, `send`, `execute`, `run`, `browser`, `web`, `url`, `request`, and `email` raise the risk.
 

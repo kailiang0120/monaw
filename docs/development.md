@@ -184,15 +184,23 @@ docs/telegram.md                       Telegram bridge setup and operations
 Current built-in skills:
 
 ```text
-browser_use       Managed browser automation
+browser_use       Browser automation
 computer_use      Windows desktop observation and control helpers
-core              Basic runtime/system controls
-exec              Shell command execution through the sandbox layer
-filesystem        File read/write/search helpers
-mcp_bridge        MCP server tool bridge
-memory            Long-term memory tools
+core              Core utilities (internal)
+exec              Command execution (internal)
+filesystem        File management (internal)
+mcp_bridge        MCP integrations (internal)
+memory            Long-term memory tools (internal)
 scheduling        Scheduled task tools
+skill_creator     Skill creation and reload tools
+web_search        Web search (when Tavily is configured)
 ```
+
+Each `SKILL.md` is the source of truth for a skill's trigger description, `display_name`,
+one-line `summary`, tier, default, and prompt guidance. Internal skills use
+`tier: internal` and `always: true`; they stay registered for the runtime but are omitted
+from the Settings capability toggles. Optional and recommended skills are the user-facing
+catalog.
 
 ## Models
 

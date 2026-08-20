@@ -2,6 +2,8 @@ import json
 import os
 import shlex
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 from app.agent.sandbox.backends.local_direct import LocalDirectRunner
@@ -58,7 +60,7 @@ def _capability(
     )
 
 
-def _capabilities(*, docker: bool = False, local: bool = True, wsl: bool = False) -> SandboxCapabilities:
+def _capabilities(*, docker: bool = False, local: bool = True) -> SandboxCapabilities:
     return SandboxCapabilities(
         docker=_capability(
             "docker",
@@ -73,13 +75,6 @@ def _capabilities(*, docker: bool = False, local: bool = True, wsl: bool = False
             security_label="advisory",
             network_enforcement="advisory",
             reason="" if local else "disabled",
-        ),
-        wsl=_capability(
-            "wsl",
-            available=wsl,
-            security_label="medium",
-            network_enforcement="advisory",
-            reason="" if wsl else "disabled",
         ),
     )
 
@@ -124,7 +119,7 @@ def test_exec_routes_through_sandbox_manager(monkeypatch, tmp_path):
         def __init__(self, settings):
             captured["settings"] = settings
 
-        def run(self, request):
+        def run(self, request, *, decision=None):
             captured["request"] = request
             return SandboxExecutionResult(
                 status="ok",
@@ -175,18 +170,17 @@ def test_exec_tool_blocks_blocked_policy_before_runner(monkeypatch, tmp_path):
     assert result["sandbox"]["profile"] == "blocked"
 
 
-def test_exec_tool_blocks_untrusted_when_strong_backend_unavailable(monkeypatch, tmp_path):
+def test_exec_tool_offers_approval_for_untrusted_when_strong_backend_unavailable(monkeypatch, tmp_path):
     _allow_exec(monkeypatch)
     settings = AgentSettings()
     settings.sandbox.docker.enabled = False
     monkeypatch.setattr(exec_tools, "_ACTIVE_SETTINGS", SimpleNamespace(sandbox=settings.sandbox))
 
     result = json.loads(
-        exec_tools.exec_tool("npm install", shell="bash", workdir=str(tmp_path), _bypass_gate=True)
+        exec_tools.exec_tool("npm install", shell="bash", workdir=str(tmp_path))
     )
 
-    assert result["status"] == "blocked"
-    assert result["reason_code"] == "sandbox_backend_unavailable"
+    assert result["status"] == "pending_approval"
     assert result["sandbox"]["profile"] == "untrusted"
 
 
@@ -219,7 +213,7 @@ def test_approval_preview_matches_execution_decision(monkeypatch, tmp_path):
         def __init__(self, _settings):
             pass
 
-        def run(self, request):
+        def run(self, request, *, decision=None):
             captured_run["sandbox"] = dict(request.env_metadata)
             return SandboxExecutionResult(
                 status="ok",
@@ -251,14 +245,14 @@ def test_approval_preview_matches_execution_decision(monkeypatch, tmp_path):
         assert preview[key] == actual[key]
 
 
-def test_auto_mode_blocks_when_no_strong_backend_is_selected_directly():
+def test_auto_mode_falls_back_to_direct_host_when_no_advisory_backend_is_available():
     result = SandboxManager(
         AgentSettings().sandbox,
         capabilities=_capabilities(local=False),
     ).run(_request())
 
-    assert result.status == "blocked"
-    assert result.reason_code == "sandbox_backend_unavailable"
+    assert result.status == "ok"
+    assert result.sandbox["backend"] == "local_direct"
 
 
 def test_off_mode_disables_execution():
@@ -268,7 +262,7 @@ def test_off_mode_disables_execution():
     result = SandboxManager(settings.sandbox, capabilities=_capabilities()).run(_request())
 
     assert result.status == "blocked"
-    assert result.reason_code == "sandbox_backend_unavailable"
+    assert result.reason_code == "shell_execution_disabled"
 
 
 def test_enforce_mode_blocks_without_real_backend():
@@ -279,7 +273,7 @@ def test_enforce_mode_blocks_without_real_backend():
 
     assert result.status == "blocked"
     assert result.reason_code == "sandbox_backend_unavailable"
-    assert result.sandbox["selected_backend"] == "unavailable"
+    assert result.sandbox["selected_backend"] == "none"
 
 
 def test_requested_docker_backend_unavailable_before_implementation():
@@ -290,17 +284,17 @@ def test_requested_docker_backend_unavailable_before_implementation():
 
     assert result.status == "blocked"
     assert result.reason_code == "sandbox_backend_unavailable"
-    assert result.sandbox["selected_backend"] == "docker"
+    assert result.sandbox["selected_backend"] == "none"
 
 
-def test_auto_manager_does_not_implicitly_select_advisory_host_runner():
+def test_auto_manager_uses_the_policy_selected_advisory_runner():
     result = SandboxManager(
         AgentSettings().sandbox,
         capabilities=_capabilities(local=True),
     ).run(_request())
 
-    assert result.status == "blocked"
-    assert result.reason_code == "sandbox_backend_unavailable"
+    assert result.status == "ok"
+    assert result.sandbox["backend"] == "local_restricted"
 
 
 def test_enforce_strong_does_not_accept_advisory_backend():
@@ -311,7 +305,7 @@ def test_enforce_strong_does_not_accept_advisory_backend():
 
     assert result.status == "blocked"
     assert result.reason_code == "sandbox_backend_unavailable"
-    assert result.sandbox["selected_backend"] == "unavailable"
+    assert result.sandbox["selected_backend"] == "none"
 
 
 def test_exec_tool_enforce_mode_blocks_without_real_backend(monkeypatch, tmp_path):
@@ -405,6 +399,26 @@ def test_local_direct_clamps_timeout_to_resource_limit(tmp_path):
 
     assert result.status == "error"
     assert result.timed_out is True
+
+
+def test_local_direct_cancellation_kills_the_running_process_tree():
+    request = _request("Start-Sleep -Seconds 10" if os.name == "nt" else "sleep 10")
+    cancel_event = threading.Event()
+    request.cancel_event = cancel_event
+
+    def cancel_shortly_after_start() -> None:
+        time.sleep(0.2)
+        cancel_event.set()
+
+    trigger = threading.Thread(target=cancel_shortly_after_start, daemon=True)
+    trigger.start()
+    started = time.monotonic()
+    result = LocalDirectRunner().run(request)
+    trigger.join(timeout=1)
+
+    assert result.cancelled is True
+    assert result.error == "Command cancelled."
+    assert time.monotonic() - started < 5
 
 
 def test_local_direct_caps_captured_output(tmp_path):

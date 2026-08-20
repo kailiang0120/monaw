@@ -5,10 +5,20 @@ import shutil
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
-from app.agent.sandbox.backends.local_direct import _format_output, _run_command_capped, _write_artifact
+from app.agent.sandbox.process import _format_output, _run_command_capped
+from app.agent.sandbox.artifacts import write_artifact as _write_artifact
 from app.agent.sandbox.models import SandboxExecutionRequest, SandboxExecutionResult, SandboxRunMetadata
-from app.agent.sandbox.path_policy import write_artifact_manifest
+from app.agent.sandbox.path_policy import (
+    SandboxPathPolicy,
+    canonical_path,
+    collect_copy_out,
+    create_run_workspace,
+    ensure_allowed_path,
+    write_artifact_manifest,
+)
+from app.agent.runtime_paths import WORKSPACE_DIR
 from app.agent.settings_store import SandboxSettings
 
 
@@ -30,7 +40,55 @@ class DockerRunner:
     def is_available(self) -> bool:
         return shutil.which("docker") is not None
 
-    def docker_command(self, request: SandboxExecutionRequest, *, container_name: str = "") -> list[str]:
+    def _workspace_mount(
+        self,
+        request: SandboxExecutionRequest,
+        *,
+        command_id: str,
+    ) -> tuple[Path | None, SandboxPathPolicy | None, bool]:
+        strategy = str(
+            request.copy_policy.get("write_strategy")
+            or request.env_metadata.get("write_strategy")
+            or self.settings.default_write_strategy
+        )
+        workdir = canonical_path(request.workdir or WORKSPACE_DIR)
+        allowed_roots = self.settings.allowed_bind_roots or [str(WORKSPACE_DIR)]
+        blocked_roots = self.settings.blocked_bind_roots
+        allowed = [canonical_path(root) for root in allowed_roots]
+        if any(workdir == root or workdir.is_relative_to(root) for root in [canonical_path(root) for root in blocked_roots]):
+            raise PermissionError(f"Sandbox bind path is blocked: {workdir}")
+        ensure_allowed_path(workdir, allowed, purpose="bind")
+        if strategy == "discard":
+            return None, None, False
+        if strategy == "direct_rw":
+            return workdir, None, False
+
+        run_workspace = create_run_workspace(command_id)
+        for source in workdir.rglob("*"):
+            relative = source.relative_to(workdir)
+            target = run_workspace / relative
+            if source.is_symlink():
+                raise PermissionError(f"Symlink copy-in is not allowed: {source}")
+            if source.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+        policy = SandboxPathPolicy.from_strings(
+            allowed_input_roots=[str(workdir)],
+            allowed_output_roots=[str(workdir)],
+            max_copy_out_bytes=int((request.resources or {}).get("max_output_bytes") or 104857600),
+        )
+        return run_workspace, policy, True
+
+    def docker_command(
+        self,
+        request: SandboxExecutionRequest,
+        *,
+        container_name: str = "",
+        mount_source: Path | None = None,
+        mount_read_only: bool = False,
+    ) -> list[str]:
         resources = {**self.settings.resources.model_dump(), **(request.resources or {})}
         image = self.settings.docker.image
         network = "none" if request.network == "deny" else "bridge"
@@ -61,6 +119,11 @@ class DockerRunner:
             command.append("--read-only")
         if container_name:
             command.extend(["--name", container_name])
+        if mount_source is not None:
+            mount = f"type=bind,source={mount_source},target=/workspace"
+            if mount_read_only:
+                mount += ",readonly"
+            command.extend(["--mount", mount])
         for key in sorted(request.env.keys(), key=str.upper):
             command.extend(["--env", f"{key}={request.env[key]}"])
         command.extend([image, "bash", "-lc", request.command])
@@ -109,6 +172,14 @@ class DockerRunner:
             blocked_env_keys=list(request.env_metadata.get("blocked_env_keys", [])),
             env_keys=list(request.env_metadata.get("env_keys", [])),
             warnings=list(request.env_metadata.get("warnings", [])),
+            enabled=bool(request.env_metadata.get("enabled", True)),
+            trust_class=str(request.env_metadata.get("trust_class", "trusted")),
+            required_isolation=str(request.env_metadata.get("required_isolation", "strong")),
+            network_enforcement=str(request.env_metadata.get("network_enforcement", "enforced")),
+            filesystem_policy=str(request.env_metadata.get("filesystem_policy", "container")),
+            write_strategy=str(request.env_metadata.get("write_strategy", "discard")),
+            reason=str(request.env_metadata.get("reason", "")),
+            reason_code=str(request.env_metadata.get("reason_code", "allowed")),
         ).model_dump()
         if request.shell.lower() not in self.supported_shells:
             return SandboxExecutionResult(
@@ -138,12 +209,21 @@ class DockerRunner:
 
         command_id = uuid.uuid4().hex[:12]
         container_name = f"monaw-sandbox-{command_id}"
-        command = self.docker_command(request, container_name=container_name)
+        mount_source: Path | None = None
+        copy_policy: SandboxPathPolicy | None = None
+        copied_workspace = False
         try:
+            mount_source, copy_policy, copied_workspace = self._workspace_mount(request, command_id=command_id)
+            command = self.docker_command(
+                request,
+                container_name=container_name,
+                mount_source=mount_source,
+            )
             completed = _run_command_capped(
                 command,
                 request,
                 on_timeout=lambda _proc: self._remove_container(container_name),
+                on_cancel=lambda _proc: self._remove_container(container_name),
                 use_request_cwd=False,
                 use_request_env=False,
             )
@@ -177,11 +257,18 @@ class DockerRunner:
                 "manifest_path": manifest_path,
                 "copy_out": [],
             }
+            if copied_workspace and mount_source is not None and copy_policy is not None:
+                metadata["artifacts"]["copy_out"] = collect_copy_out(
+                    mount_source,
+                    request.workdir or str(WORKSPACE_DIR),
+                    copy_policy,
+                )
             return SandboxExecutionResult(
                 status="error" if completed.timed_out or completed.returncode != 0 else "ok",
                 exit_code=completed.returncode,
                 duration_ms=duration_ms,
                 timed_out=completed.timed_out,
+                cancelled=bool(getattr(completed, "cancelled", False)),
                 command_id=command_id,
                 stdout=stdout,
                 stderr=stderr,
@@ -192,7 +279,11 @@ class DockerRunner:
                 workdir=request.workdir,
                 env_keys=list(request.env_metadata.get("explicit_env_keys", [])),
                 sandbox=metadata,
-                error="Command timed out." if completed.timed_out else "",
+                error=(
+                    "Command cancelled."
+                    if bool(getattr(completed, "cancelled", False))
+                    else "Command timed out." if completed.timed_out else ""
+                ),
             )
         except Exception as exc:
             return SandboxExecutionResult(
@@ -204,3 +295,6 @@ class DockerRunner:
                 env_keys=list(request.env_metadata.get("explicit_env_keys", [])),
                 sandbox=metadata,
             )
+        finally:
+            if copied_workspace and mount_source is not None:
+                shutil.rmtree(mount_source, ignore_errors=True)

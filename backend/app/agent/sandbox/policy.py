@@ -43,7 +43,7 @@ _HOST_REQUIRED_PATTERNS = [
 ]
 
 _BLOCKED_PATTERNS = [
-    r"\bformat\b",
+    r"(?:\bformat\.com\b|\bformat\s+[A-Za-z]:|\bFormat-Volume\b|\bdiskpart\b)",
     r"\bdiskpart\b",
     r"\bbcdedit\b",
     r"\btakeown\b",
@@ -105,6 +105,25 @@ class SandboxPolicy:
             if profile == "host_required":
                 reason = "Host-required commands need explicit host mode"
             return self._blocked(profile, network, write_strategy, reason, "sandbox_backend_unavailable")
+
+        # The pinned Python image exposes a bash entrypoint only. Keep
+        # Windows' default PowerShell path usable in auto/host modes while
+        # explicit strong-sandbox modes fail closed instead of weakening
+        # isolation silently.
+        if backend == "docker" and request.shell.lower() != "bash":
+            if backend_mode in {"docker", "enforce"}:
+                return self._blocked(
+                    profile,
+                    network,
+                    write_strategy,
+                    "The Docker sandbox currently supports bash commands only",
+                    "unsupported_shell_for_backend",
+                )
+            backend = (
+                "local_restricted"
+                if self.capabilities.local_restricted.available
+                else "local_direct"
+            )
 
         if backend == "local_direct":
             return SandboxDecision(
@@ -193,13 +212,17 @@ class SandboxPolicy:
             return "local_restricted" if self.capabilities.local_restricted.available else "local_direct"
         if mode == "local_restricted":
             return "local_restricted" if self.capabilities.local_restricted.available else None
-        if mode in {"docker", "wsl"}:
+        if mode == "docker":
             capability = self.capabilities.for_backend(mode)
             return mode if capability and capability.available else None
         if mode == "enforce":
             return "docker" if self.capabilities.docker.available else None
         if profile == "untrusted":
-            return "docker" if self.capabilities.docker.available else None
+            if self.capabilities.docker.available:
+                return "docker"
+            if mode in {"docker", "enforce"}:
+                return None
+            return "local_restricted" if self.capabilities.local_restricted.available else "local_direct"
         if profile == "host_required":
             return "local_restricted" if self.capabilities.local_restricted.available else "local_direct"
         if self.capabilities.docker.available:

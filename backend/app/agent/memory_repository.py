@@ -91,11 +91,13 @@ class MemorySectionRepository:
                 if meta_match is not None:
                     try:
                         loaded = json.loads(meta_match.group(1))
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(f"Invalid section metadata for {section_id}") from exc
-                    if not isinstance(loaded, dict):
-                        raise ValueError(f"Invalid section metadata for {section_id}")
-                    meta.update(loaded)
+                    except json.JSONDecodeError:
+                        logger.warning("Skipping malformed metadata for memory section %s", section_id)
+                    else:
+                        if isinstance(loaded, dict):
+                            meta.update(loaded)
+                        else:
+                            logger.warning("Skipping non-object metadata for memory section %s", section_id)
                     index += 1
             meta["id"] = safe_id(str(meta.get("id") or section_id))
             section_id = meta["id"]

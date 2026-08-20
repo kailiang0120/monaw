@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from app.schemas import SkillDescriptorPayload
 from app.agent.settings_store import AgentSettings, build_runtime_namespace
 from app.agent.skill_loader import available_skill_payload, discover_skills, load_tools
 
@@ -26,7 +27,7 @@ def test_load_tools_returns_enabled_skills_only():
 
     assert "core" in names
     assert "exec" in names
-    assert "mcp-bridge" not in names
+    assert "mcp-bridge" in names
     assert "skill-creator" not in names
     assert "exec" in tool_names
     assert "memory" in names
@@ -65,6 +66,10 @@ def test_available_skill_payload_omits_removed_email_skill():
 
     assert "email-windows" not in names
     assert "mcp-bridge" not in names
+    browser = next(item for item in payload if item["name"] == "browser-use")
+    assert browser["display_name"] == "Browser automation"
+    assert browser["summary"] == "Browse, inspect, and interact with websites using managed or system Chrome."
+    assert browser["load_error"] == ""
 
 
 def test_available_skill_payload_keeps_recommended_skills():
@@ -76,13 +81,37 @@ def test_available_skill_payload_keeps_recommended_skills():
 
     assert recommended == {
         "browser-use",
-        "core",
         "computer-use",
-        "exec",
-        "filesystem",
-        "memory",
+        "web-search",
     }
-    assert "background-check" not in {item["name"] for item in payload}
+    assert not {item["tier"] for item in payload} & {"internal"}
+    assert {item["name"] for item in payload} == {
+        "browser-use",
+        "computer-use",
+        "scheduling",
+        "skill-creator",
+        "web-search",
+    }
+
+
+def test_internal_skills_are_always_enabled_but_hidden_from_settings_payload():
+    settings_data = AgentSettings()
+    settings_data.tools.skills.update({
+        "core": False,
+        "exec": False,
+        "filesystem": False,
+        "memory": False,
+        "mcp-bridge": False,
+    })
+    runtime_settings = build_runtime_namespace(_base_settings(), settings_data)
+
+    skills, registry = load_tools(runtime_settings)
+    internal = {skill.name: skill for skill in skills if skill.tier == "internal"}
+
+    assert set(internal) == {"core", "exec", "filesystem", "memory", "mcp-bridge"}
+    assert all(skill.always and skill.enabled for skill in internal.values())
+    assert registry.get_tool("exec") is not None
+    assert registry.get_tool("mcp_status") is not None
 
 
 def test_discover_skills_marks_python_module_requirement_as_missing_env(tmp_path, monkeypatch):
@@ -114,7 +143,7 @@ External lookup skill
     assert skills[0].unavailable_reason == "missing_env"
 
 
-def test_load_tools_isolates_broken_skill(tmp_path):
+def test_load_tools_isolates_broken_skill(tmp_path, monkeypatch):
     good_dir = tmp_path / "good_skill"
     good_dir.mkdir()
     (good_dir / "SKILL.md").write_text(
@@ -151,6 +180,14 @@ Bad skill
     bad_skill = next(skill for skill in skills if skill.name == "bad-skill")
     assert bad_skill.available is False
     assert bad_skill.unavailable_reason == "load_error"
+
+    monkeypatch.setattr("app.agent.skill_loader.SKILLS_DIR", tmp_path)
+    bad_payload = next(
+        item for item in available_skill_payload(runtime_settings) if item["name"] == "bad-skill"
+    )
+    descriptor = SkillDescriptorPayload.model_validate(bad_payload)
+    assert descriptor.load_error == "broken import"
+    assert descriptor.unavailable_reason == "load_error"
 
 
 def test_load_tools_does_not_leak_partially_registered_tools(tmp_path):
@@ -201,9 +238,16 @@ Core
 
     mcp_dir = tmp_path / "mcp_bridge"
     mcp_dir.mkdir()
+    (mcp_dir / "SKILL.md").write_text(
+        "---\nname: mcp-bridge\ntier: internal\nalways: true\n---\nMCP\n",
+        encoding="utf-8",
+    )
     (mcp_dir / "tools.py").write_text("raise RuntimeError('mcp broken')\n", encoding="utf-8")
 
     runtime_settings = build_runtime_namespace(_base_settings(), AgentSettings())
-    _skills, registry = load_tools(runtime_settings, skills_dir=tmp_path)
+    skills, registry = load_tools(runtime_settings, skills_dir=tmp_path)
 
     assert registry.get_tool("ok_tool") is not None
+    mcp_skill = next(skill for skill in skills if skill.name == "mcp-bridge")
+    assert mcp_skill.unavailable_reason == "load_error"
+    assert mcp_skill.load_error == "mcp broken"

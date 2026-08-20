@@ -1,5 +1,6 @@
 import subprocess
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -80,6 +81,53 @@ def test_docker_command_honors_configured_pull_and_hardening_flags():
     assert "no-new-privileges" not in command
 
 
+def test_docker_command_mounts_allowed_workspace_for_direct_rw(tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.default_write_strategy = "direct_rw"
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "direct_rw"}
+    runner = DockerRunner(settings.sandbox)
+    mount_source, policy, copied = runner._workspace_mount(request, command_id="mount-test")
+
+    command = runner.docker_command(request, mount_source=mount_source)
+
+    assert mount_source == tmp_path.resolve()
+    assert policy is None
+    assert copied is False
+    assert "--mount" in command
+    assert f"source={tmp_path.resolve()}" in command[command.index("--mount") + 1]
+    assert ",target=/workspace" in command[command.index("--mount") + 1]
+
+
+def test_docker_copy_out_uses_a_run_workspace(tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.default_write_strategy = "copy_out"
+    (tmp_path / "input.txt").write_text("input", encoding="utf-8")
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    runner = DockerRunner(settings.sandbox)
+
+    mount_source, policy, copied = runner._workspace_mount(request, command_id="copy-test")
+    try:
+        assert mount_source is not None
+        assert policy is not None
+        assert copied is True
+        assert (mount_source / "input.txt").read_text(encoding="utf-8") == "input"
+    finally:
+        if mount_source is not None:
+            import shutil
+
+            shutil.rmtree(mount_source, ignore_errors=True)
+
+
 def test_auto_mode_selects_docker_when_strong_backend_is_available(monkeypatch):
     settings = AgentSettings()
     settings.sandbox.docker.image = "python@sha256:" + "a" * 64
@@ -93,7 +141,9 @@ def test_auto_mode_selects_docker_when_strong_backend_is_available(monkeypatch):
         reason_code="fake_selected",
     ))
 
-    result = manager.run(_request("echo ok"))
+    request = _request("echo ok")
+    request.shell = "bash"
+    result = manager.run(request)
 
     assert result.status == "blocked"
     assert result.reason_code == "fake_selected"
@@ -114,7 +164,9 @@ def test_enforce_mode_allows_docker_when_available(monkeypatch):
         reason_code="fake_selected",
     ))
 
-    result = manager.run(_request("echo ok"))
+    request = _request("echo ok")
+    request.shell = "bash"
+    result = manager.run(request)
 
     assert result.status == "blocked"
     assert result.reason_code == "fake_selected"
@@ -168,15 +220,21 @@ def test_docker_timeout_removes_named_container(monkeypatch):
     not _docker_image_available(AgentSettings().sandbox.docker.image),
     reason="Docker daemon or configured sandbox image is unavailable",
 )
-def test_docker_integration_executes_simple_command_when_available():
+def test_docker_integration_executes_simple_command_when_available(tmp_path):
     settings = AgentSettings()
-    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
+    workdir = Path(tmp_path)
+    settings.sandbox.allowed_bind_roots = [str(workdir)]
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "input.txt").write_text("mounted", encoding="utf-8")
     runner = DockerRunner(settings.sandbox)
-    request = _request("python -c \"print('ok')\"")
+    request = _request("python -c \"from pathlib import Path; print(Path('/workspace/input.txt').read_text()); Path('/workspace/output.txt').write_text('ok')\"")
     request.shell = "bash"
+    request.workdir = str(workdir)
+    request.copy_policy = {"write_strategy": "direct_rw"}
     result = runner.run(request)
 
     assert result.status == "ok"
-    assert result.stdout.strip() == "ok"
+    assert result.stdout.strip() == "mounted"
+    assert (workdir / "output.txt").read_text(encoding="utf-8") == "ok"
     assert result.sandbox["backend"] == "docker"
     assert result.sandbox["security_label"] == "strong"

@@ -23,7 +23,7 @@ from app.agent.approval_broker import (
     create_ticket,
     signal_resume as signal_approval_resume,
 )
-from app.agent.execution_gate import ExecutionGateService
+from app.agent.execution_gate import ExecutionGateService, _format_timeout
 from app.agent.execution_resume import _EXECUTORS, register_executor
 from app.agent.iteration_budget import IterationBudget
 from app.agent.tool_registry import ToolRegistry
@@ -134,6 +134,52 @@ def test_await_ticket_resolution_returns_denied_when_user_rejects():
     assert result["status"] == "denied"
 
 
+def test_noninteractive_approval_is_auto_denied_without_waiting():
+    service = ExecutionGateService(default_timeout_seconds=600)
+    ticket = create_ticket(tool_name="danger_tool", interactive=False, payload={"input_str": "{}"})
+
+    events = asyncio.run(
+        _collect_events(
+            service.await_ticket_resolution(
+                budget=IterationBudget(max_iterations=1),
+                ticket_id=ticket.id,
+                event_kind="approval_required",
+                tool_dict={"name": "danger_tool"},
+                arguments={},
+                execute_tool=_fake_execute_tool,
+            )
+        )
+    )
+
+    assert json.loads(events[-1]["_result"])["status"] == "denied"
+    assert ticket.status == TicketStatus.REJECTED
+
+
+def test_noninteractive_access_grant_is_auto_denied_without_waiting():
+    service = ExecutionGateService(default_timeout_seconds=600)
+    ticket = create_grant_ticket(
+        target_type="path",
+        target_identifier="C:/private",
+        interactive=False,
+    )
+
+    events = asyncio.run(
+        _collect_events(
+            service.await_ticket_resolution(
+                budget=IterationBudget(max_iterations=1),
+                ticket_id=ticket.id,
+                event_kind="access_grant_required",
+                tool_dict={"name": "read_tool"},
+                arguments={"path": "C:/private/file.txt"},
+                execute_tool=_fake_execute_tool,
+            )
+        )
+    )
+
+    assert json.loads(events[-1]["_result"])["status"] == "denied"
+    assert ticket.status == "denied"
+
+
 def test_await_ticket_resolution_times_out_safely():
     service = ExecutionGateService(default_timeout_seconds=0)
 
@@ -153,6 +199,11 @@ def test_await_ticket_resolution_times_out_safely():
     result = json.loads(events[-1]["_result"])
     assert result["status"] == "error"
     assert "timed out" in result["error"]
+
+
+def test_timeout_text_uses_the_configured_duration():
+    assert _format_timeout(90) == "90 seconds"
+    assert _format_timeout(60) == "1 minute"
 
 
 def test_await_ticket_resolution_replays_approved_ticket_payload():

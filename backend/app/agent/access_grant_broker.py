@@ -130,6 +130,7 @@ def create_grant_ticket(
         action_context=action_context,
     )
     ticket.payload_hash = ticket.compute_hash()
+    superseded_ids: list[str] = []
     with _state_lock:
         for existing in list(_pending.values()):
             if (
@@ -145,6 +146,7 @@ def create_grant_ticket(
                 existing.superseded_by = ticket.id
                 existing.resolved_at = datetime.now(timezone.utc).isoformat()
                 _pending.pop(existing.id, None)
+                superseded_ids.append(existing.id)
         _pending[ticket.id] = ticket
         _all[ticket.id] = ticket
     publish_ui_event(
@@ -158,6 +160,12 @@ def create_grant_ticket(
             "action_context": ticket.action_context,
         },
     )
+    for superseded_id in superseded_ids:
+        signal_resume(superseded_id, "superseded")
+        publish_ui_event(
+            "access_grant.changed",
+            {"ticket_id": superseded_id, "conversation_id": ticket.conversation_id, "status": "superseded"},
+        )
     return ticket
 
 
@@ -545,4 +553,40 @@ def _persist_permanent_grant(ticket: AccessGrantTicket) -> None:
         roots = list(state.permitted_roots)
         if ticket.target_identifier not in roots:
             roots.append(ticket.target_identifier)
-            update_permitted_roots(roots)
+            update_permitted_roots(roots, new_rule=_path_rule_for_grant(ticket))
+
+
+def _path_rule_for_grant(ticket: AccessGrantTicket) -> PathRule:
+    """Translate the requested path action into the narrowest permanent rule."""
+
+    context = (ticket.action_context or "").lower()
+    is_delete = any(word in context for word in ("delete", "remove", "trash"))
+    is_write = any(
+        word in context
+        for word in (
+            "write",
+            "mutate",
+            "create",
+            "append",
+            "edit",
+            "copy",
+            "move",
+            "rename",
+            "exec",
+        )
+    ) and not ("source" in context and "copy" in context)
+    is_launch = any(word in context for word in ("launch", "start application"))
+
+    # A source path is read-only; destinations and command workdirs need write
+    # but do not implicitly receive delete permission.
+    if "source" in context and any(word in context for word in ("copy", "move", "rename")):
+        is_write = False
+    read = not is_delete or is_write
+    return PathRule(
+        path=ticket.target_identifier,
+        read=read,
+        write=is_write,
+        delete=is_delete,
+        launch=is_launch,
+        enabled=True,
+    )

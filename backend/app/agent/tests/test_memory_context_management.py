@@ -124,8 +124,8 @@ def test_memory_manager_builds_structured_context_and_history(monkeypatch, tmp_p
     assert "Download Node.js and organize Downloads" in context
     assert "## Remaining Steps" in context
     assert "Move PDFs to Documents/PDFs" in context
-    assert "## What Happened So Far (Summary)" in context
-    assert "## Recent Messages" in context
+    assert "## What Happened So Far (Summary)" not in context
+    assert "## Recent Messages" not in context
     assert "## Recent Tool Results" in context
     assert history[0]["role"] == "assistant"
     assert "Earlier conversation summary" in history[0]["content"]
@@ -218,15 +218,34 @@ def test_memory_manager_compaction_prompt_preserves_task_critical_facts(monkeypa
         {"role": "user", "content": "Keep going"},
         {"role": "assistant", "content": "I still need to organize the files."},
     ]
+    db = manager._db
+    db.create_conversation("conv-compact", "Compact")
+    for message in state.recent_messages:
+        db.add_message("conv-compact", message["role"], message["content"])
 
     compacted = asyncio.run(manager._compact("conv-compact"))
     assert compacted is True
 
-    # The new multi-phase compression pipeline calls llm.chat via compress_context.
-    # If boundaries allow summarization, the LLM is called and the summary is updated.
-    # With 6 short messages, compression may produce savings through pruning alone
-    # or summarize the middle segment. Either way, state.summary should be set.
-    assert state.summary  # summary was produced or preserved
+    assert db.get_conversation_compaction("conv-compact") is not None
+    assert state.summary == ""
+
+
+def test_auto_compaction_stops_when_measured_usage_does_not_improve(monkeypatch):
+    manager = MemoryManager(RecordingLLM())
+    manager.get_or_create("conv-no-progress")
+    monkeypatch.setattr(memory_manager_mod, "model_compaction_threshold", lambda _llm: 10)
+    monkeypatch.setattr(manager, "estimate_context_tokens", lambda *args, **kwargs: 100)
+    calls = 0
+
+    async def compact_without_progress(_conversation_id):
+        nonlocal calls
+        calls += 1
+        return True
+
+    monkeypatch.setattr(manager, "_compact", compact_without_progress)
+    asyncio.run(manager.ensure_context_fits("conv-no-progress"))
+
+    assert calls == 1
 
 
 def test_context_usage_endpoint_returns_report(monkeypatch):

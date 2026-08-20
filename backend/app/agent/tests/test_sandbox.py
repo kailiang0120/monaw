@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.agent.sandbox.capabilities import get_sandbox_status
@@ -12,6 +13,8 @@ from app.agent.settings_store import (
     load_agent_settings,
     merge_agent_settings,
 )
+from app.agent.controller_policy import ActionType, resolve_permission
+from app.agent.runtime_paths import WORKSPACE_DIR
 from app.main import app
 
 
@@ -46,7 +49,7 @@ def _capability(
     )
 
 
-def _capabilities(*, docker: bool, local: bool = True, wsl: bool = False) -> SandboxCapabilities:
+def _capabilities(*, docker: bool, local: bool = True) -> SandboxCapabilities:
     return SandboxCapabilities(
         docker=_capability(
             "docker",
@@ -62,13 +65,6 @@ def _capabilities(*, docker: bool, local: bool = True, wsl: bool = False) -> San
             network_enforcement="advisory",
             reason="" if local else "disabled",
         ),
-        wsl=_capability(
-            "wsl",
-            available=wsl,
-            security_label="medium",
-            network_enforcement="advisory",
-            reason="" if wsl else "disabled",
-        ),
     )
 
 
@@ -78,7 +74,8 @@ def test_sandbox_settings_defaults_and_runtime_namespace():
 
     assert settings_data.sandbox.enabled is True
     assert settings_data.sandbox.mode == "auto"
-    assert settings_data.sandbox.require_strong_for_untrusted is True
+    assert settings_data.sandbox.docker.image.startswith("python:3.12-slim@sha256:")
+    assert settings_data.sandbox.allowed_bind_roots
     assert settings_data.sandbox.network.default == "deny"
     assert settings_data.sandbox.default_write_strategy == "copy_out"
     assert runtime.sandbox.mode == "auto"
@@ -133,11 +130,38 @@ def test_classify_command_marks_untrusted_and_blocked_patterns():
     assert classify_command(r"Remove-Item C:\ -Recurse -Force") == "blocked"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Process | Format-Table Name, Id",
+        "git log --format=%H",
+        "docker ps --format json",
+        "Get-Date -Format o",
+    ],
+)
+def test_format_options_are_not_disk_format_commands(command):
+    assert classify_command(command) != "blocked"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["format.com E:", "format E:", "Format-Volume -DriveLetter E", "diskpart"],
+)
+def test_disk_format_commands_remain_blocked(command):
+    assert classify_command(command) == "blocked"
+
+
+def test_default_workspace_is_trusted_by_real_permission_policy():
+    decision = resolve_permission(ActionType.EXEC, target_path=str(WORKSPACE_DIR))
+    assert decision.requires_access_grant is False
+    assert decision.blocked is False
+
+
 def test_policy_uses_docker_for_untrusted_when_strong_backend_available():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
         capabilities=_capabilities(docker=True),
-    ).decide(SandboxRunRequest(command="npm install"))
+    ).decide(SandboxRunRequest(command="npm install", shell="bash"))
 
     assert decision.allowed is True
     assert decision.profile == "untrusted"
@@ -147,16 +171,16 @@ def test_policy_uses_docker_for_untrusted_when_strong_backend_available():
     assert decision.network_enforcement == "enforced"
 
 
-def test_policy_blocks_untrusted_when_strong_backend_is_required_but_unavailable():
+def test_policy_approves_untrusted_with_advisory_fallback_when_docker_is_unavailable():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
         capabilities=_capabilities(docker=False, local=True),
     ).decide(SandboxRunRequest(command="npm install"))
 
-    assert decision.allowed is False
+    assert decision.allowed is True
     assert decision.profile == "untrusted"
-    assert decision.reason_code == "sandbox_backend_unavailable"
-    assert "strong sandbox backend" in decision.reason.lower()
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
 
 
 def test_policy_falls_back_to_local_restricted_for_standard_commands():
@@ -175,7 +199,7 @@ def test_policy_falls_back_to_local_restricted_for_standard_commands():
 def test_policy_falls_back_to_local_direct_when_no_backend_available():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
-        capabilities=_capabilities(docker=False, local=False, wsl=False),
+        capabilities=_capabilities(docker=False, local=False),
     ).decide(SandboxRunRequest(command="Write-Host ok"))
 
     assert decision.allowed is True
@@ -188,12 +212,23 @@ def test_policy_routes_standard_commands_to_docker_when_available():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
         capabilities=_capabilities(docker=True, local=True),
-    ).decide(SandboxRunRequest(command="pytest"))
+    ).decide(SandboxRunRequest(command="pytest", shell="bash"))
 
     assert decision.allowed is True
     assert decision.profile == "standard"
     assert decision.backend == "docker"
     assert decision.security_label == "strong"
+
+
+def test_policy_falls_back_from_docker_for_default_powershell_shell():
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command="Get-ChildItem"))
+
+    assert decision.allowed is True
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
 
 
 def test_policy_uses_local_restricted_for_host_required_commands():
@@ -216,6 +251,8 @@ def test_sandbox_status_reports_backend_capabilities():
     assert status["default_network"] == "deny"
     assert status["backends"]["docker"]["available"] is True
     assert status["backends"]["docker"]["security_label"] == "strong"
+    assert status["selected_backend"] == "docker"
+    assert status["isolation"] == "strong"
 
 
 def test_sandbox_status_endpoint_returns_settings_status(monkeypatch):

@@ -1,9 +1,12 @@
 ---
 name: memory
 description: Search, retrieve, save, and forget durable user memories across conversations.
+display_name: Long-term memory
+summary: Preserve and retrieve durable preferences, project context, and workflow rules.
 version: 1.0.0
 enabled_by_default: true
-tier: recommended
+always: true
+tier: internal
 ---
 
 # Memory

@@ -205,7 +205,26 @@ async def update_settings(body: SettingsUpdate):
         if runtime_changed or mcp_changed or browser_changed:
             reset_runtime_cache(reset_mcp=mcp_changed, reset_browser=browser_changed)
         if mcp_changed:
-            restart_enabled_mcp_servers(updated)
+            mcp_statuses = restart_enabled_mcp_servers(updated) or []
+            publish_ui_event(
+                "mcp.changed",
+                {
+                    "reason": "settings_updated",
+                    "servers": [
+                        {
+                            "name": item.get("name", ""),
+                            "connected": bool(item.get("connected", False)),
+                            "state": item.get("state", ""),
+                            "tool_count": int(item.get("tool_count", 0) or 0),
+                            "last_error": item.get("last_error"),
+                            "unhealthy_reason": item.get("unhealthy_reason"),
+                            "startup_phase": item.get("startup_phase", ""),
+                        }
+                        for item in mcp_statuses
+                        if isinstance(item, dict)
+                    ],
+                },
+            )
         if telegram_changed:
             try:
                 from app.integrations.telegram.service import restart_telegram_bot

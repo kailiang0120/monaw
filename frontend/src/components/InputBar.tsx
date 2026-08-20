@@ -28,11 +28,6 @@ const SLASH_COMMANDS = [
     label: 'Compact context',
     description: 'Summarize this chat and use it as future context.',
   },
-  {
-    command: '/skill creator',
-    label: 'Skill creator',
-    description: 'Create optional Monaw runtime skills from this chat.',
-  },
 ]
 
 interface Props {

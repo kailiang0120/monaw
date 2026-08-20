@@ -40,6 +40,8 @@ def test_settings_patch_from_body_includes_mcp_servers():
                         "call_timeout_ms": 45000,
                         "reconnect_on_unhealthy": True,
                         "allow_list": ["list_directory"],
+                        "trusted_tools": ["read_file"],
+                        "tool_risk_overrides": {"write_file": "high"},
                         "description": "Filesystem server",
                     }
                 ]
@@ -52,6 +54,8 @@ def test_settings_patch_from_body_includes_mcp_servers():
     assert patch["mcp"]["servers"][0]["name"] == "filesystem"
     assert patch["mcp"]["servers"][0]["command"] == "npx"
     assert patch["mcp"]["servers"][0]["allow_list"] == ["list_directory"]
+    assert patch["mcp"]["servers"][0]["trusted_tools"] == ["read_file"]
+    assert patch["mcp"]["servers"][0]["tool_risk_overrides"] == {"write_file": "high"}
     assert patch["mcp"]["enabled"] is True
 
 

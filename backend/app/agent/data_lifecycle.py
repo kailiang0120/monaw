@@ -72,7 +72,7 @@ def _prune_files(
     max_age_days: int = RETENTION_DAYS,
     max_total_bytes: int = MAX_DIAGNOSTIC_BYTES,
 ) -> dict[str, int]:
-    cutoff = time.time() - max(1, int(max_age_days)) * 24 * 60 * 60
+    cutoff = 0.0 if int(max_age_days) <= 0 else time.time() - int(max_age_days) * 24 * 60 * 60
     files: list[tuple[Path, float, int]] = []
     for root in roots:
         if root.is_symlink() or not _approved_root(root) or not root.exists():
@@ -135,7 +135,11 @@ def _rotate_backend_log() -> dict[str, int]:
 def _delete_memory_root() -> dict[str, int]:
     memory = get_long_term_memory()
     root = Path(memory.root)
-    deleted = _delete_tree_contents(root)
+    deleted: dict[str, int] = {}
+    clear_records = getattr(memory, "clear_database_records", None)
+    if callable(clear_records):
+        deleted.update(clear_records())
+    deleted["memory_files_deleted"] = _delete_tree_contents(root)
     try:
         if _approved_root(root):
             shutil.rmtree(root, ignore_errors=True)
@@ -154,19 +158,46 @@ def _diagnostic_roots() -> list[Path]:
         RUNTIME_DIR / "harness_logs",
         RUNTIME_DIR / "mcp",
         RUNTIME_DIR / "mcp_bridge",
+        RUNTIME_DIR / "exec",
+        RUNTIME_DIR / "sandbox",
+        RUNTIME_DIR / "policy",
     ]
+
+
+def _artifact_retention_days() -> int:
+    try:
+        from app.agent.settings_store import load_agent_settings
+        from app.config import settings
+
+        return max(1, int(load_agent_settings(settings).sandbox.preserve_artifacts_days))
+    except Exception:
+        return RETENTION_DAYS
+
+
+def _delete_stale_database_backups() -> dict[str, int]:
+    deleted = 0
+    for path in RUNTIME_DIR.glob("agent.before-test-history-cleanup.*.db"):
+        deleted += _delete_file(path)
+    return {"stale_database_backups_deleted": deleted}
 
 
 def enforce_runtime_retention() -> dict[str, int]:
     """Apply age/size retention across runtime diagnostics and operational stores."""
+    artifact_days = _artifact_retention_days()
     counts: dict[str, int] = {
         "retention_days": RETENTION_DAYS,
+        "artifact_retention_days": artifact_days,
         "observability_max_storage_bytes": MAX_STORAGE_BYTES,
         **attachment_registry_stats(),
     }
     get_observability_recorder().enforce_retention()
     counts.update(_rotate_backend_log())
-    counts.update(_prune_files(_diagnostic_roots(), max_age_days=RETENTION_DAYS))
+    counts.update(_prune_files(_diagnostic_roots(), max_age_days=artifact_days))
+    counts.update(_delete_stale_database_backups())
+    memory = get_long_term_memory()
+    memory_retention = getattr(memory, "enforce_retention", None)
+    if callable(memory_retention):
+        counts.update(memory_retention())
     counts.update(approval_broker.enforce_retention(max_age_days=RETENTION_DAYS))
     counts.update(access_grant_broker.enforce_retention(max_age_days=RETENTION_DAYS))
     counts.update(get_db().enforce_scheduled_task_run_retention(max_age_days=RETENTION_DAYS))
@@ -182,6 +213,7 @@ def delete_runtime_data() -> dict[str, object]:
     deleted.update(clear_attachment_registry(delete_registered_files=True))
     deleted.update(get_db().clear_scheduled_task_outputs())
     deleted.update(_delete_memory_root())
+    deleted.update(_delete_stale_database_backups())
     deleted.update({"backend_logs_deleted": 0})
     for path in RUNTIME_DIR.glob("backend.log*"):
         deleted["backend_logs_deleted"] += _delete_file(path)

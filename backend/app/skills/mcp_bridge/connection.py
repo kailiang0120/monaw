@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.agent.settings_store import MCPServerConfig
+from app.agent.ui_events import publish_ui_event
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,15 @@ def _resolve_command(command: str) -> str:
     return resolved or command
 
 
+def _child_process_ids() -> set[int]:
+    try:
+        import psutil
+
+        return {process.pid for process in psutil.Process(os.getpid()).children(recursive=True)}
+    except Exception:
+        return set()
+
+
 class _TailBuffer:
     def __init__(self, limit: int = 8192) -> None:
         self.limit = limit
@@ -119,7 +129,11 @@ class ServerManager:
         self._session: Any | None = None
         self._stop: asyncio.Event | None = None
         self._serve_task: asyncio.Task | None = None
+        self._liveness_task: asyncio.Task | None = None
         self._lifecycle_lock = threading.RLock()
+        self._last_event_signature: tuple[Any, ...] | None = None
+        self.liveness_interval_seconds = 5.0
+        self._child_pids_before_start: set[int] = set()
 
     def start(self) -> bool:
         self._register_active()
@@ -138,6 +152,7 @@ class ServerManager:
                 self.startup_phase = "startup_timeout"
                 self.connected = False
                 self._stop_current_runtime_locked(join_timeout=5)
+                self._publish_changed()
             return False
         return self.connected
 
@@ -300,11 +315,13 @@ class ServerManager:
         self.started_at = _utcnow()
         self.disconnected_at = None
         self.resolved_executable = _resolve_command(self.cfg.command)
+        self._child_pids_before_start = _child_process_ids()
         self._thread = threading.Thread(
             target=self._thread_main,
             name=f"mcp-{self.cfg.name}",
             daemon=True,
         )
+        self._publish_changed()
         self._thread.start()
 
     def _stop_current_runtime_locked(self, join_timeout: float) -> bool:
@@ -349,6 +366,7 @@ class ServerManager:
         self.disconnected_at = _utcnow()
         if failed_call:
             self.failed_call_count += 1
+        self._publish_changed()
 
     def _register_active(self) -> None:
         with _ACTIVE_LOCK:
@@ -376,15 +394,18 @@ class ServerManager:
             self.state = "failed"
             logger.exception("Failed to start MCP server '%s'", self.cfg.name)
             self._ready.set()
+            self._publish_changed()
         finally:
             self.connected = False
             self._session = None
             self._stop = None
             self._serve_task = None
+            self._liveness_task = None
             self._loop = None
             self.pid = None
             if self.state == "connected":
                 self.state = "stopped"
+            self._publish_changed()
             pending = asyncio.all_tasks(loop)
             for task in pending:
                 task.cancel()
@@ -436,11 +457,117 @@ class ServerManager:
             self.state = "connected"
             self.startup_phase = "ready"
             self.connected_at = _utcnow()
+            self.pid = self._find_child_pid()
             self.last_error = ""
             self.unhealthy_reason = ""
             self._ready.set()
+            self._publish_changed()
             assert self._stop is not None
-            await self._stop.wait()
+            self._liveness_task = asyncio.create_task(
+                self._probe_liveness(session),
+                name=f"mcp-liveness-{self.cfg.name}",
+            )
+            try:
+                await self._stop.wait()
+            finally:
+                self._liveness_task.cancel()
+                await asyncio.gather(self._liveness_task, return_exceptions=True)
+                self._liveness_task = None
+
+    def _find_child_pid(self) -> int | None:
+        """Best-effort PID capture for stdio transports.
+
+        The MCP SDK exposes streams, not its subprocess handle. Use the new
+        child-process set captured immediately before startup and match the
+        configured command when psutil is available. HTTP transports correctly
+        remain PID-less.
+        """
+
+        if self.cfg.transport != "stdio":
+            return None
+        try:
+            import psutil
+
+            command = Path(self.resolved_executable or self.cfg.command).name.lower()
+            candidates = []
+            for process in psutil.Process(os.getpid()).children(recursive=True):
+                if process.pid in self._child_pids_before_start:
+                    continue
+                try:
+                    cmdline = [str(part).lower() for part in (process.cmdline() or [])]
+                    name = str(process.name() or "").lower()
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    continue
+                haystack = " ".join([name, *cmdline])
+                if command and (command in haystack or Path(command).stem in haystack):
+                    candidates.append(process.pid)
+            return candidates[0] if candidates else None
+        except Exception:
+            return None
+
+    async def _probe_liveness(self, session: Any) -> None:
+        """Detect a child or transport that died without a tool call.
+
+        ``list_tools`` is the MCP-level health check and is safe for both
+        stdio and streamable HTTP transports. The probe owns no reconnect
+        policy: it records an unhealthy transition and lets the next call or
+        explicit UI reconnect decide whether to restart the server.
+        """
+
+        assert self._stop is not None
+        interval = max(0.01, float(self.liveness_interval_seconds))
+        timeout = max(1.0, self.cfg.call_timeout_ms / 1000)
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            if not self.connected:
+                return
+            try:
+                response = await asyncio.wait_for(session.list_tools(), timeout=timeout)
+                tools = list(getattr(response, "tools", []) or [])
+                if len(tools) != self.tool_count:
+                    self.tools = tools
+                    self.tool_count = len(tools)
+                    self._publish_changed()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._mark_unhealthy(f"MCP liveness check failed: {exc}")
+                self._stop.set()
+                return
+
+    def _publish_changed(self) -> None:
+        status = self.status()
+        signature = (
+            status["name"],
+            status["connected"],
+            status["state"],
+            status["tool_count"],
+            status["last_error"],
+            status["unhealthy_reason"],
+            status["startup_phase"],
+            status["pid"],
+        )
+        if signature == self._last_event_signature:
+            return
+        self._last_event_signature = signature
+        publish_ui_event(
+            "mcp.changed",
+            {
+                "name": status["name"],
+                "connected": status["connected"],
+                "state": status["state"],
+                "tool_count": status["tool_count"],
+                "last_error": status["last_error"],
+                "unhealthy_reason": status["unhealthy_reason"],
+                "startup_phase": status["startup_phase"],
+                "pid": status["pid"],
+            },
+        )
 
 
 def get_active_mcp_manager(name: str) -> ServerManager | None:

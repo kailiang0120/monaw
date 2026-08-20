@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 
 import pytest
 
@@ -227,7 +229,26 @@ def test_memory_prompt_includes_personality_and_relevant_markdown(tmp_path):
     assert "tax spreadsheet" in prompt
     assert any(memory["use_count"] > 0 for memory in store.list_memories(status="active"))
     audit = store.audit_log(limit=5)
-    assert any(item["action"] == "INJECT" for item in audit)
+    assert not any(item["action"] == "INJECT" for item in audit)
+    assert store.stats()["audit_counters"]["INJECT"] >= 1
+
+
+def test_non_mutating_prompt_does_not_mark_usage_or_audit(tmp_path):
+    store = _store(tmp_path)
+    saved = store.remember("The user prefers non-mutating retrieval checks.", category="preference", importance=8)
+    assert saved is not None
+    before = store.get(saved["id"])
+    before_audit = store.audit_log(limit=100)
+    before_counters = dict(store.stats()["audit_counters"])
+
+    prompt = store.build_prompt("non-mutating retrieval", mark_used=False)
+
+    after = store.get(saved["id"])
+    assert "non-mutating retrieval" in prompt
+    assert after["use_count"] == before["use_count"]
+    assert after["last_used_at"] == before["last_used_at"]
+    assert store.audit_log(limit=100) == before_audit
+    assert store.stats()["audit_counters"] == before_counters
 
 
 def test_memory_threshold_settings_allow_explicit_zero(tmp_path):
@@ -341,18 +362,13 @@ def test_prompt_retrieval_skips_short_term_session_summaries(tmp_path):
     assert "Session conv-short-term had 22 messages" not in prompt
 
 
-def test_short_high_signal_turns_bypass_length_floor(tmp_path):
+def test_auto_learning_bypasses_only_safe_short_signals(tmp_path):
     store = _store(tmp_path)
 
-    for text in (
-        "I'm a developer",
-        "I work in finance",
-        "I'm Kai",
-        "my name is Kai",
-        "use Python",
-        "use tabs not spaces",
-    ):
+    for text in ("my name is Kai", "call me Kai", "I prefer Python"):
         assert store._should_skip_learning(text) is False
+    for text in ("I'm Kai", "use Python", "use tabs not spaces"):
+        assert store._should_skip_learning(text) is True
 
 
 def test_recall_memory_writes_explicit_telemetry(tmp_path, monkeypatch):
@@ -371,36 +387,98 @@ def test_recall_memory_writes_explicit_telemetry(tmp_path, monkeypatch):
     assert telemetry["category"] == "preference"
 
 
-def test_profile_candidates_and_checkpoints_are_persistent(tmp_path):
+def test_candidates_and_checkpoints_are_persistent_without_profile_layer(tmp_path):
     store = _store(tmp_path)
 
-    profile = store.update_profile_field(
-        "github_username",
-        "kai-liang",
-        privacy_level="normal",
-        review_state="reviewed",
-    )
     captured = store.capture_turn_candidates(
-        conversation_id="conv-profile",
+        conversation_id="conv-operational",
         user_message="I prefer Python for automation.",
         assistant_message="Noted.",
     )
     checkpoint = store.upsert_checkpoint(
-        "conversation-conv-profile",
+        "conversation-conv-operational",
         scope="conversation",
         status="active",
-        conversation_id="conv-profile",
+        conversation_id="conv-operational",
         goal="Build memory system",
         last_known_state="Implementation started.",
         next_action="Run tests.",
     )
 
-    assert profile["field"] == "github_username"
-    assert store.profile_fields()[0]["value"] == "kai-liang"
     assert len(captured) == 1
     assert store.list_candidates()[0]["category"] == "preference"
     assert checkpoint["status"] == "active"
     assert store.list_checkpoints()[0]["next_action"] == "Run tests."
+    assert store._db.fetchone("SELECT name FROM sqlite_master WHERE name = 'memory_profile_fields'") is None
+
+
+def test_zero_overlap_memory_is_excluded_by_default_threshold(tmp_path):
+    store = _store(tmp_path)
+    saved = store.remember(
+        "The user prefers concise engineering summaries.",
+        category="preference",
+        importance=10,
+    )
+
+    assert saved is not None
+    assert store.search("unrelated astronomy topic", limit=10) == []
+
+
+def test_negative_turns_and_one_off_use_instructions_are_not_learned(tmp_path):
+    store = _store(tmp_path)
+
+    captured = store.capture_turn_candidates(
+        conversation_id="conv-negative",
+        user_message="Don't forget to check the log file. Use the venv Python for this one script.",
+        assistant_message="Understood.",
+    )
+
+    assert captured == []
+    assert store.list_memories(status="active") == []
+
+
+def test_memory_delete_removes_content_bearing_audit_rows(tmp_path):
+    store = _store(tmp_path)
+    saved = store.remember("The user prefers a private deletion test value.", category="preference")
+    assert saved is not None
+    assert any(item["candidate_content"] for item in store.audit_log(memory_id=saved["id"]))
+
+    assert store.delete(saved["id"]) is True
+    audit = store.audit_log(memory_id=saved["id"])
+    assert audit
+    assert all(not item["candidate_content"] for item in audit)
+
+
+def test_memory_retention_prunes_ephemeral_files_and_sqlite_rows(tmp_path):
+    store = _store(tmp_path)
+    store._write_session_summary("conv-retention", "Old short-term summary.", source="test")
+    old_epoch = time.time() - (2 * 24 * 60 * 60)
+    os.utime(tmp_path / "memory" / "short-term" / "session-conv-retention.md", (old_epoch, old_epoch))
+
+    store._db.execute(
+        "INSERT INTO memory_candidates (id, content, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("old-candidate", "old candidate content", "2000-01-01", "2000-01-01"),
+    )
+    store._db.create_conversation("conv-retention", "Retention")
+    store._db.execute(
+        "INSERT INTO memory_episodes (id, conversation_id, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        ("old-episode", "conv-retention", "old episode", "2000-01-01", "2000-01-01"),
+    )
+    store._db.execute(
+        "INSERT INTO memory_checkpoints (id, goal, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("old-checkpoint", "old checkpoint", "2000-01-01", "2000-01-01"),
+    )
+    store._audit(action="CURATE", reason="old", candidate_content="old audit")
+    store._db.execute("UPDATE memory_audit SET created_at = '2000-01-01'")
+    store._db.commit()
+
+    result = store.enforce_retention(max_age_days=1)
+
+    assert result["short_term_deleted"] == 1
+    assert result["memory_candidates_deleted"] == 1
+    assert result["memory_episodes_deleted"] == 1
+    assert result["memory_checkpoints_deleted"] == 1
+    assert result["memory_audit_deleted"] == 1
 
 
 def test_approving_candidate_promotes_to_reviewed_memory(tmp_path):

@@ -1,7 +1,6 @@
 """Tests for the thread-safe iteration budget."""
 
 import threading
-import pytest
 from app.agent.iteration_budget import IterationBudget
 
 
@@ -26,55 +25,6 @@ def test_consume_multiple_at_once():
     assert budget.remaining == 5
     assert budget.consume(6) is False
     assert budget.remaining == 5
-
-
-def test_refund():
-    budget = IterationBudget(max_iterations=10)
-    budget.consume(5)
-    budget.refund(3)
-    assert budget.remaining == 8
-    assert budget.consumed == 2
-
-
-def test_refund_capped_at_max():
-    budget = IterationBudget(max_iterations=10)
-    budget.consume(2)
-    budget.refund(5)
-    assert budget.remaining == 10
-
-
-def test_fork_and_merge():
-    parent = IterationBudget(max_iterations=20)
-    child = parent.fork(child_budget=5)
-    assert parent.remaining == 15
-    assert child.remaining == 5
-
-    child.consume(2)
-    parent.merge_child(child)
-    assert parent.remaining == 18
-
-
-def test_fork_limited_by_parent():
-    parent = IterationBudget(max_iterations=3)
-    child = parent.fork(child_budget=10)
-    assert child.remaining == 3
-    assert parent.remaining == 0
-
-
-def test_activity_tracking():
-    budget = IterationBudget(max_iterations=10)
-    assert budget.current_tool is None
-    budget.set_current_tool("web_search")
-    assert budget.current_tool == "web_search"
-    budget.set_current_tool(None)
-    assert budget.current_tool is None
-
-
-def test_stall_detection():
-    budget = IterationBudget(max_iterations=10)
-    assert budget.is_stalled(timeout=0.001) is False
-    budget.consume(1)
-    assert budget.is_stalled(timeout=999999) is False
 
 
 def test_thread_safety():

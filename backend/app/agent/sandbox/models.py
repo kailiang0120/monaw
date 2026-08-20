@@ -1,33 +1,18 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-SandboxBackend = Literal["none", "local_direct", "docker", "local_restricted", "wsl"]
-SandboxMode = Literal["off", "disabled", "auto", "enforce", "host", "docker", "local_restricted", "wsl"]
-SandboxProfile = Literal["standard", "untrusted", "project_write", "host_required", "blocked"]
+SandboxBackend = Literal["none", "local_direct", "docker", "local_restricted"]
+SandboxMode = Literal["off", "disabled", "auto", "enforce", "host", "docker", "local_restricted"]
+SandboxProfile = Literal["standard", "untrusted", "host_required", "blocked"]
 SandboxTrustClass = Literal["trusted", "untrusted", "blocked"]
 SandboxIsolationStrength = Literal["none", "strong"]
 SandboxSecurityLabel = Literal["none", "compat", "advisory", "medium", "strong"]
 SandboxNetworkMode = Literal["deny", "allow"]
 SandboxNetworkEnforcement = Literal["none", "advisory", "enforced"]
 SandboxWriteStrategy = Literal["discard", "copy_out", "direct_rw"]
-
-
-class SandboxMount(BaseModel):
-    source: str
-    target: str
-    read_only: bool = True
-
-
-class SandboxLimits(BaseModel):
-    timeout_seconds: int = 120
-    memory_mb: int = 1024
-    cpus: float = 1.0
-    pids: int = 128
-    max_output_bytes: int = 1048576
-    max_workspace_mb: int = 1024
 
 
 class SandboxRunRequest(BaseModel):
@@ -40,7 +25,6 @@ class SandboxRunRequest(BaseModel):
     requested_backend: SandboxMode | None = None
     network: SandboxNetworkMode | None = None
     write_strategy: SandboxWriteStrategy | None = None
-    mounts: list[SandboxMount] = Field(default_factory=list)
     elevated: bool = False
     approval_id: str = ""
     conversation_id: str = ""
@@ -66,6 +50,14 @@ class SandboxRunMetadata(BaseModel):
     env_keys: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     artifacts: dict = Field(default_factory=dict)
+    enabled: bool = True
+    trust_class: str = "trusted"
+    required_isolation: str = "none"
+    network_enforcement: str = "none"
+    filesystem_policy: str = "none"
+    write_strategy: str = "discard"
+    reason: str = ""
+    reason_code: str = "allowed"
 
 
 class SandboxExecutionRequest(BaseModel):
@@ -88,6 +80,7 @@ class SandboxExecutionRequest(BaseModel):
     env_metadata: dict = Field(default_factory=dict)
     resources: dict = Field(default_factory=dict)
     copy_policy: dict = Field(default_factory=dict)
+    cancel_event: Any | None = Field(default=None, exclude=True, repr=False)
 
 
 class SandboxExecutionResult(BaseModel):
@@ -95,6 +88,7 @@ class SandboxExecutionResult(BaseModel):
     exit_code: int | None = None
     duration_ms: int = 0
     timed_out: bool = False
+    cancelled: bool = False
     command_id: str = ""
     stdout: str = ""
     stderr: str = ""
@@ -139,16 +133,6 @@ class SandboxSessionStatus(BaseModel):
     error: str = ""
 
 
-class SandboxSessionWriteRequest(BaseModel):
-    session_id: str
-    text: str
-
-
-class SandboxSessionStopRequest(BaseModel):
-    session_id: str
-    signal: Literal["terminate", "kill"] = "terminate"
-
-
 class SandboxBackendCapability(BaseModel):
     backend: SandboxBackend
     enabled: bool
@@ -162,7 +146,6 @@ class SandboxBackendCapability(BaseModel):
 class SandboxCapabilities(BaseModel):
     docker: SandboxBackendCapability
     local_restricted: SandboxBackendCapability
-    wsl: SandboxBackendCapability
 
     def for_backend(self, backend: SandboxBackend) -> SandboxBackendCapability | None:
         if backend in {"none", "local_direct"}:
@@ -194,5 +177,7 @@ class SandboxStatus(BaseModel):
     default_profile: SandboxProfile
     default_network: Literal["deny", "allow_with_approval", "allow"]
     default_write_strategy: SandboxWriteStrategy
-    require_strong_for_untrusted: bool
+    selected_backend: str = ""
+    isolation: str = "none"
+    reason_code: str = ""
     backends: dict[str, dict]

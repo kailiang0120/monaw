@@ -23,6 +23,8 @@ def test_skill_create_requires_approval_before_writing(monkeypatch, tmp_path):
         tool["callable"](
             name="demo-skill",
             description="Demo skill",
+            display_name="Demo workflow",
+            summary="Run the demo workflow.",
             instructions="Use for demo workflows.",
             tools_py="def register_tools(registry, settings=None):\n    pass\n",
             enabled=True,
@@ -48,13 +50,18 @@ def test_skill_create_requires_approval_before_writing(monkeypatch, tmp_path):
     assert result["enabled"] is False
     assert result["runtime_reloaded"] is False
     assert result["content_hash"]
-    assert (tmp_path / "skills" / "demo_skill" / "SKILL.md").exists()
+    skill_md = tmp_path / "skills" / "demo_skill" / "SKILL.md"
+    assert skill_md.exists()
+    content = skill_md.read_text(encoding="utf-8")
+    assert "display_name: Demo workflow" in content
+    assert "summary: Run the demo workflow." in content
     assert (tmp_path / "skills" / "demo_skill" / "tools.py").exists()
 
 
 def test_skill_create_rejects_reserved_and_ads_names():
     assert json.loads(skill_creator_tools._raw_skill_create("con", "Desc", "Body"))["reason_code"] == "invalid_skill_name"
     assert json.loads(skill_creator_tools._raw_skill_create("demo:ads", "Desc", "Body"))["reason_code"] == "invalid_skill_name"
+    assert json.loads(skill_creator_tools._raw_skill_create("web-search", "Desc", "Body"))["reason_code"] == "invalid_skill_name"
 
 
 def test_skill_create_rejects_non_interactive_source():

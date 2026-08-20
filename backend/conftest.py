@@ -61,6 +61,7 @@ TEST_GROUPS = {
         "test_memory_archive.py",
         "test_memory_consolidation.py",
         "test_memory_context_management.py",
+        "test_context_compression.py",
         "test_memory_hybrid_search.py",
         "test_memory_migrations.py",
         "test_data_lifecycle.py",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,7 +10,8 @@ from app.agent.approval_broker import create_ticket
 from app.agent.audit import AuditLogger
 from app.agent.controller_policy import ActionType, resolve_permission
 from app.agent.execution_resume import register_executor
-from app.agent.runtime_paths import RUNTIME_DIR, WORKSPACE_DIR
+from app.agent.runtime_paths import WORKSPACE_DIR
+from app.agent.sandbox.artifacts import write_artifact as _write_artifact
 from app.agent.sandbox.environment import SanitizedEnvironment, build_exec_environment
 from app.agent.sandbox.manager import SandboxManager, coerce_sandbox_settings
 from app.agent.sandbox.models import (
@@ -18,22 +20,18 @@ from app.agent.sandbox.models import (
     SandboxRunRequest,
     SandboxSessionStartRequest,
 )
-from app.agent.sandbox.policy import SandboxPolicy
+from app.agent.sandbox.policy import SandboxPolicy, classify_command
 from app.agent.sandbox.sessions import SandboxSessionRegistry
-
+from app.agent.tool_cancellation import (
+    current_call_id,
+    register_cancellation,
+    unregister_cancellation,
+)
 _audit = AuditLogger()
 _MAX_STDOUT = 8 * 1024
 _MAX_STDERR = 4 * 1024
-_EXEC_ARTIFACT_DIR = RUNTIME_DIR / "exec"
-_EXEC_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 _ACTIVE_SETTINGS: Any | None = None
 _SESSION_REGISTRY = SandboxSessionRegistry()
-
-
-def _write_artifact(command_id: str, stream_name: str, content: str) -> str:
-    path = _EXEC_ARTIFACT_DIR / f"{command_id}.{stream_name}.txt"
-    path.write_text(content, encoding="utf-8", newline="")
-    return str(path)
 
 
 def _safe_env_keys(env: dict[str, str] | None) -> list[str]:
@@ -215,6 +213,7 @@ def _permission_check(
     elevated: bool = False,
     tool_name: str = "exec",
     bypass_confirmation: bool = False,
+    extra_payload: dict[str, Any] | None = None,
 ) -> str | None:
     if host != "local":
         return json.dumps({"status": "error", "error": f"Unsupported host '{host}'"})
@@ -255,6 +254,7 @@ def _permission_check(
                 "timeout": timeout,
                 "host": host,
                 "elevated": elevated,
+                **(extra_payload or {}),
             },
             sandbox,
         )
@@ -347,8 +347,16 @@ def exec_tool(
         tool_name="exec",
         env_metadata=sandbox_meta,
         resources=_sandbox_resources(),
+        copy_policy={"write_strategy": decision.write_strategy},
     )
-    result = SandboxManager(getattr(_ACTIVE_SETTINGS, "sandbox", None)).run(request)
+    call_id = current_call_id()
+    cancel_event = threading.Event()
+    request.cancel_event = cancel_event
+    register_cancellation(call_id, cancel_event.set)
+    try:
+        result = SandboxManager(getattr(_ACTIVE_SETTINGS, "sandbox", None)).run(request, decision=decision)
+    finally:
+        unregister_cancellation(call_id)
     _audit.log(
         "exec",
         data={
@@ -431,6 +439,9 @@ def exec_start(
         return pending
 
     try:
+        _SESSION_REGISTRY.cleanup_stale(
+            max_age_seconds=SandboxSessionRegistry.DEFAULT_MAX_AGE_SECONDS
+        )
         request = SandboxSessionStartRequest(
             command=command,
             shell=shell,  # type: ignore[arg-type]
@@ -507,7 +518,63 @@ def exec_poll(command_id: str, max_output: int = _MAX_STDOUT, tail_lines: int = 
     return json.dumps(payload.model_dump(), ensure_ascii=False)
 
 
-def exec_write_stdin(command_id: str, text: str) -> str:
+def exec_write_stdin(command_id: str, text: str, _bypass_gate: bool = False) -> str:
+    session = _SESSION_REGISTRY.describe(command_id)
+    if session is None:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": f"Unknown command_id '{command_id}'",
+                "reason_code": "unknown_command",
+            },
+            ensure_ascii=False,
+        )
+    if session.get("expired"):
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "The exec session exceeded its maximum lifetime.",
+                "reason_code": "session_expired",
+                "sandbox": session.get("sandbox", {}),
+            },
+            ensure_ascii=False,
+        )
+
+    profile = classify_command(text)
+    decision = SandboxPolicy(
+        coerce_sandbox_settings(getattr(_ACTIVE_SETTINGS, "sandbox", None))
+    ).decide(
+        SandboxRunRequest(
+            command=text,
+            shell=session["shell"],  # type: ignore[arg-type]
+            workdir=session["workdir"],
+            profile=profile,
+            timeout=1,
+        )
+    )
+    sandbox = {
+        **session.get("sandbox", {}),
+        "stdin_command_profile": profile,
+        "stdin_policy_reason": decision.reason,
+        "stdin_policy_reason_code": decision.reason_code,
+    }
+    if not decision.allowed:
+        return _blocked_sandbox_result(decision, sandbox)
+    pending = _permission_check(
+        command=text,
+        shell=session["shell"],
+        workdir=session["workdir"],
+        env={},
+        sandbox=sandbox,
+        host_approval_required=decision.explicit_approval_required,
+        timeout=1,
+        host="local",
+        tool_name="exec_write_stdin",
+        bypass_confirmation=_bypass_gate,
+        extra_payload={"command_id": command_id, "text": text},
+    )
+    if pending:
+        return pending
     return json.dumps(_SESSION_REGISTRY.write_stdin(command_id, text), ensure_ascii=False)
 
 
@@ -557,6 +624,18 @@ def _resume_exec_start(input_str: str) -> str:
 register_executor("exec_start", _resume_exec_start)
 
 
+def _resume_exec_write_stdin(input_str: str) -> str:
+    args = _parse_json_object(input_str)
+    return exec_write_stdin(
+        command_id=str(args.get("command_id", "")),
+        text=str(args.get("text", "")),
+        _bypass_gate=True,
+    )
+
+
+register_executor("exec_write_stdin", _resume_exec_write_stdin)
+
+
 def register_tools(registry, _settings=None) -> None:
     global _ACTIVE_SETTINGS
     _ACTIVE_SETTINGS = _settings
@@ -578,11 +657,9 @@ def register_tools(registry, _settings=None) -> None:
                     "env": {"type": "object", "default": {}},
                     "timeout": {"type": "integer", "default": 60},
                     "host": {"type": "string", "enum": ["local"], "default": "local"},
-                    "elevated": {"type": "boolean", "default": False},
                     "max_stdout": {"type": "integer", "default": _MAX_STDOUT},
                     "max_stderr": {"type": "integer", "default": _MAX_STDERR},
                     "tail_lines": {"type": "integer", "default": 0},
-                    "save_output_to": {"type": "string", "default": ""},
                     "return_mode": {
                         "type": "string",
                         "enum": ["full", "head_tail", "tail", "summary"],
@@ -608,7 +685,6 @@ def register_tools(registry, _settings=None) -> None:
                     "workdir": {"type": "string", "default": ""},
                     "env": {"type": "object", "default": {}},
                     "host": {"type": "string", "enum": ["local"], "default": "local"},
-                    "elevated": {"type": "boolean", "default": False},
                 },
                 "required": ["command"],
             },

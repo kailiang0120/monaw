@@ -59,7 +59,7 @@ def test_exec_write_stdin_works_for_local_session(monkeypatch, tmp_path):
 
     started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
     command_id = started["command_id"]
-    written = json.loads(exec_tools.exec_write_stdin(command_id, "hello\n"))
+    written = json.loads(exec_tools.exec_write_stdin(command_id, "hello\n", _bypass_gate=True))
 
     for _ in range(30):
         polled = json.loads(exec_tools.exec_poll(command_id, return_mode="full"))
@@ -81,6 +81,34 @@ def test_exec_stop_cleans_backend_session(monkeypatch, tmp_path):
 
     assert stopped["status"] in {"ok", "error"}
     assert polled["reason_code"] == "unknown_command"
+
+
+def test_completed_session_output_remains_readable(monkeypatch, tmp_path):
+    _allow_exec(monkeypatch)
+    shell, command = _python_command("print('read-twice')")
+    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
+
+    for _ in range(30):
+        first = json.loads(exec_tools.exec_poll(started["command_id"], return_mode="full"))
+        if first.get("exit_code") is not None:
+            break
+        time.sleep(0.05)
+    second = json.loads(exec_tools.exec_poll(started["command_id"], return_mode="full"))
+
+    assert first["stdout"].strip() == "read-twice"
+    assert second["stdout"].strip() == "read-twice"
+
+
+def test_exec_write_stdin_rechecks_command_policy(monkeypatch, tmp_path):
+    _allow_exec(monkeypatch)
+    shell, command = _python_command("import time; time.sleep(5)")
+    started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
+
+    blocked = json.loads(exec_tools.exec_write_stdin(started["command_id"], "format.com E:\n"))
+    exec_tools.exec_stop(started["command_id"], signal="kill")
+
+    assert blocked["status"] == "blocked"
+    assert blocked["reason_code"] == "command_blocked"
 
 
 def test_exec_start_blocks_enforce_mode_sessions(monkeypatch, tmp_path):
@@ -138,3 +166,16 @@ def test_stale_session_cleanup():
 
     assert handle.session_id in removed
     assert registry.poll(handle.session_id).reason_code == "unknown_command"
+
+
+def test_session_lifetime_expires():
+    registry = SandboxSessionRegistry()
+    shell, command = _python_command("import time; time.sleep(5)")
+    request = _session_request(command, shell)
+    request.resources = {"session_max_age_seconds": 1}
+    handle = registry.start_local_direct(request)
+    registry._sessions[handle.session_id]["started_at"] -= 2
+
+    expired = registry.poll(handle.session_id)
+
+    assert expired.reason_code == "session_expired"

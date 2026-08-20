@@ -6,9 +6,6 @@ import json
 import re
 import threading
 
-DOMAINS = {"general", "desktop", "filesystem", "interaction", "browser"}
-EXECUTION_MODES = {"async", "sync_stateless", "sync_thread_affine"}
-
 _NEVER_PARALLEL = {
     "exec",
     "computer_functions_act",
@@ -59,7 +56,6 @@ _NEVER_PARALLEL = {
     "browser_screenshot",
     "browser_full_page_screenshot",
     "browser_evaluate",
-    "sanction_background_check",
 }
 _PARALLEL_SAFE = {
     "web_search",
@@ -268,25 +264,6 @@ class ToolRegistry:
             if names:
                 self._revision += 1
             return len(names)
-
-    def replace_where(self, predicate, tools: list[dict]) -> None:
-        with self._lock:
-            names = [name for name, tool in self._tools.items() if predicate(tool)]
-            for name in names:
-                self._tools.pop(name, None)
-            for tool in tools:
-                normalized = dict(tool)
-                normalized.setdefault("visible_to_model", True)
-                metadata = dict(normalized.get("metadata", {}) or {})
-                name = str(normalized.get("name", ""))
-                if "parallel_safe" not in metadata:
-                    metadata["parallel_safe"] = name in _PARALLEL_SAFE
-                if "resource_locks" not in metadata:
-                    metadata["resource_locks"] = [name] if name in _NEVER_PARALLEL else []
-                normalized["metadata"] = metadata
-                self._tools[normalized["name"]] = normalized
-            if names or tools:
-                self._revision += 1
 
     def set_visibility(self, names: list[str], visible: bool = True) -> list[str]:
         changed: list[str] = []

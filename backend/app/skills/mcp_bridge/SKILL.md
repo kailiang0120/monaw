@@ -1,7 +1,10 @@
 ---
 name: mcp-bridge
 description: Built-in MCP bridge feature that connects configured servers and exposes local MCP control tools plus reflected remote tools.
+display_name: MCP integrations
+summary: Connect configured MCP servers and expose their local control and reflected tools.
 enabled_by_default: true
+always: true
 tier: internal
 ---
 

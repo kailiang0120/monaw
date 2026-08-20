@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 import uuid
@@ -17,16 +18,30 @@ from app.config import settings
 from app.agent.data_lifecycle import enforce_runtime_retention
 from app.agent.observability.recorder import get_observability_recorder, install_logging_handler
 from app.agent.workspace_instructions import ensure_workspace_instruction_file
+from app.agent.settings_store import load_agent_settings
 from app.skills.browser_use.manager import ensure_browser_use_runtime_dirs
 from app.security.request_limits import RequestSizeLimitMiddleware
 from app.startup_security import validate_startup_security
 
 logger = logging.getLogger(__name__)
 install_logging_handler()
+RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
 
 
 def _split_csv_setting(value: str) -> list[str]:
     return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+async def _retention_loop(app: FastAPI, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=RETENTION_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            try:
+                app.state.retention_status = await asyncio.to_thread(enforce_runtime_retention)
+            except Exception:
+                logger.exception("periodic runtime retention failed")
+                app.state.retention_status = {"error": "runtime retention failed"}
 
 
 @asynccontextmanager
@@ -39,9 +54,29 @@ async def lifespan(app: FastAPI):
     except Exception:
         app.state.retention_status = {"error": "runtime retention failed"}
         logger.exception("runtime retention failed")
+    retention_stop = asyncio.Event()
+    retention_task = asyncio.create_task(_retention_loop(app, retention_stop), name="runtime-retention")
     scheduler_service = None
     app.state.scheduler_status = {"running": False, "startup_error": ""}
     app.state.telegram_status = {"configured": bool(settings.telegram_bot_token), "running": False, "startup_error": ""}
+    app.state.mcp_status = {"running": False, "startup_error": "", "servers": []}
+    try:
+        from app.skills.mcp_bridge.connection import restart_enabled_mcp_servers
+
+        agent_settings = load_agent_settings(settings)
+        statuses = await asyncio.to_thread(restart_enabled_mcp_servers, agent_settings)
+        app.state.mcp_status = {
+            "running": True,
+            "startup_error": "",
+            "servers": statuses,
+        }
+    except Exception:
+        app.state.mcp_status = {
+            "running": False,
+            "startup_error": "MCP startup failed",
+            "servers": [],
+        }
+        logger.exception("mcp: failed to start enabled servers")
     try:
         from app.agent.scheduler import ScheduledTaskService
         from app.integrations.telegram.agent_bridge import build_runtime_settings
@@ -80,6 +115,15 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        retention_stop.set()
+        retention_task.cancel()
+        await asyncio.gather(retention_task, return_exceptions=True)
+        try:
+            from app.skills.mcp_bridge.connection import reset_mcp_runtime
+
+            await asyncio.to_thread(reset_mcp_runtime)
+        except Exception:
+            logger.exception("mcp: failed to stop runtime")
         if scheduler_service is not None:
             await scheduler_service.stop()
         if telegram_started:

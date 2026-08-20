@@ -202,6 +202,8 @@ const emptyMCPServer = (): AgentSettings['mcp']['servers'][number] => ({
   call_timeout_ms: 30000,
   reconnect_on_unhealthy: true,
   allow_list: [],
+  trusted_tools: [],
+  tool_risk_overrides: {},
   description: '',
 })
 
@@ -235,7 +237,6 @@ const emptySandbox = (): AgentSettings['sandbox'] => ({
   enabled: true,
   mode: 'auto',
   default_profile: 'standard',
-  require_strong_for_untrusted: true,
   default_write_strategy: 'copy_out',
   allowed_bind_roots: [],
   blocked_bind_roots: [],
@@ -246,30 +247,19 @@ const emptySandbox = (): AgentSettings['sandbox'] => ({
     cpus: 1,
     pids: 128,
     max_output_bytes: 1048576,
-    max_workspace_mb: 1024,
   },
   network: {
     default: 'deny',
-    allow_domains: [],
   },
   docker: {
     enabled: true,
-    image: 'python:3.12-slim',
-    extra_images: [],
+    image: 'python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a',
     pull_policy: 'missing',
     read_only_root: true,
     no_new_privileges: true,
   },
   local_restricted: {
     enabled: true,
-    use_job_object: true,
-    kill_process_tree_on_timeout: true,
-    strip_environment: true,
-  },
-  wsl: {
-    enabled: false,
-    distro: '',
-    note_network_isolation_is_advisory: true,
   },
 })
 
@@ -335,14 +325,6 @@ export const SKILL_GROUP_COPY = {
   },
 } as const
 
-export const SKILL_GUIDANCE: Record<string, string> = {
-  'browser-use': 'Managed browser automation first, with system Chrome fallback for logged-in workflows.',
-  'computer-use': 'Computer-use automation primitives for native Windows applications.',
-  memory: 'Durable user preferences and workflow context with review before trust.',
-  scheduling: 'Create cron, interval, and one-time agent tasks from chat or the scheduled tasks panel.',
-  'background-check': 'Sanction and adverse-list screening with evidence capture. Enable only when needed.',
-}
-
 export function normalizeDraft(
   settings: AgentSettings,
   catalog: ModelOptionsCatalog = FALLBACK_MODEL_OPTIONS,
@@ -376,7 +358,16 @@ export function normalizeDraft(
     },
     mcp: {
       enabled: settings.mcp.enabled ?? true,
-      servers: settings.mcp.servers,
+      servers: (settings.mcp.servers ?? []).map((server) => ({
+        ...emptyMCPServer(),
+        ...server,
+        args: server.args ?? [],
+        env: server.env ?? {},
+        headers: server.headers ?? {},
+        allow_list: server.allow_list ?? [],
+        trusted_tools: server.trusted_tools ?? [],
+        tool_risk_overrides: server.tool_risk_overrides ?? {},
+      })),
     },
     memory: {
       ...emptyMemory(),
@@ -416,10 +407,6 @@ export function normalizeDraft(
         ...emptySandbox().local_restricted,
         ...(settings.sandbox?.local_restricted ?? {}),
       },
-      wsl: {
-        ...emptySandbox().wsl,
-        ...(settings.sandbox?.wsl ?? {}),
-      },
     },
     llm: {
       ...settings.llm,
@@ -442,9 +429,11 @@ export function normalizeDraft(
   }
 }
 
-export function formatUnavailableReason(reason: string): string {
+export function formatUnavailableReason(reason: string, loadError = ''): string {
   if (reason === 'missing_env') return 'Missing backend dependency or required environment.'
   if (reason === 'unsupported_os') return 'Not supported on this operating system.'
+  if (reason === 'load_error') return loadError ? `Skill failed to load: ${loadError}` : 'Skill failed to load.'
+  if (loadError) return `Skill failed to load: ${loadError}`
   return reason || 'Unavailable.'
 }
 

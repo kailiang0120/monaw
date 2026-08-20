@@ -1,4 +1,4 @@
-"""Discovery and loading for OpenClaw-style skills."""
+"""Discovery and loading for Monaw skills."""
 
 from __future__ import annotations
 
@@ -21,8 +21,16 @@ logger = logging.getLogger(__name__)
 
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 CURRENT_OS = "windows" if os.name == "nt" else "posix"
-BUILT_IN_FEATURE_SLUGS = {"mcp_bridge"}
 _LAST_LOAD_ERRORS: dict[str, str] = {}
+
+
+@dataclass(slots=True, frozen=True)
+class SkillCatalogEntry:
+    slug: str
+    name: str
+    path: Path
+    frontmatter: dict[str, Any]
+    body: str
 
 
 @dataclass(slots=True)
@@ -33,6 +41,8 @@ class SkillSpec:
     version: str
     body: str
     path: Path
+    display_name: str = ""
+    summary: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     enabled_by_default: bool = True
     always: bool = False
@@ -59,6 +69,49 @@ def _split_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
 
 def _normalize_skill_name(folder_name: str, frontmatter: dict[str, Any]) -> str:
     return str(frontmatter.get("name") or folder_name.replace("_", "-")).strip()
+
+
+def _skill_catalog(*, skills_dir: Path | None = None) -> list[SkillCatalogEntry]:
+    base_dir = skills_dir or SKILLS_DIR
+    if not base_dir.exists():
+        return []
+
+    catalog: list[SkillCatalogEntry] = []
+    for skill_dir in sorted(path for path in base_dir.iterdir() if path.is_dir()):
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            continue
+        try:
+            frontmatter, body = _split_frontmatter(skill_md.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("skill=%s metadata read failed: %s", skill_dir.name, exc)
+            continue
+        catalog.append(
+            SkillCatalogEntry(
+                slug=skill_dir.name,
+                name=_normalize_skill_name(skill_dir.name, frontmatter),
+                path=skill_dir,
+                frontmatter=frontmatter,
+                body=body,
+            )
+        )
+    return catalog
+
+
+def discovered_skill_names(*, skills_dir: Path | None = None) -> set[str]:
+    """Return canonical names for all local skills with valid SKILL.md files."""
+
+    return {entry.name for entry in _skill_catalog(skills_dir=skills_dir)}
+
+
+def default_skill_flags(*, skills_dir: Path | None = None) -> dict[str, bool]:
+    """Return the persisted defaults derived from each skill's frontmatter."""
+
+    return {
+        entry.name: bool(entry.frontmatter.get("always", False))
+        or bool(entry.frontmatter.get("enabled_by_default", True))
+        for entry in _skill_catalog(skills_dir=skills_dir)
+    }
 
 
 def _os_allowed(frontmatter: dict[str, Any]) -> bool:
@@ -102,6 +155,10 @@ def _env_allowed(frontmatter: dict[str, Any], settings) -> tuple[bool, str]:
 
 
 def _skill_toggle_enabled(frontmatter: dict[str, Any], settings, skill_name: str) -> bool:
+    if skill_name == "mcp-bridge" and not bool(
+        getattr(getattr(settings, "mcp", object()), "enabled", True)
+    ):
+        return False
     if frontmatter.get("always") is True:
         return True
 
@@ -112,7 +169,7 @@ def _skill_toggle_enabled(frontmatter: dict[str, Any], settings, skill_name: str
 
 def _skill_tier(frontmatter: dict[str, Any]) -> str:
     value = str(frontmatter.get("tier", "recommended")).strip().lower()
-    if value not in {"recommended", "optional"}:
+    if value not in {"internal", "recommended", "optional"}:
         return "recommended"
     return value
 
@@ -149,20 +206,11 @@ def discover_skills(
     skills_dir: Path | None = None,
     include_disabled: bool = True,
 ) -> list[SkillSpec]:
-    base_dir = skills_dir or SKILLS_DIR
-    if not base_dir.exists():
-        return []
-
     discovered: list[SkillSpec] = []
-    for skill_dir in sorted(path for path in base_dir.iterdir() if path.is_dir()):
-        if skill_dir.name in BUILT_IN_FEATURE_SLUGS:
-            continue
-        skill_md = skill_dir / "SKILL.md"
-        if not skill_md.exists():
-            continue
-
-        frontmatter, body = _split_frontmatter(skill_md.read_text(encoding="utf-8"))
-        name = _normalize_skill_name(skill_dir.name, frontmatter)
+    for entry in _skill_catalog(skills_dir=skills_dir):
+        frontmatter = entry.frontmatter
+        body = entry.body
+        name = entry.name
 
         env_ok, env_reason = _env_allowed(frontmatter, settings)
         os_ok = _os_allowed(frontmatter)
@@ -179,12 +227,14 @@ def discover_skills(
             logger.info("skill=%s disabled: %s", name, env_reason)
 
         spec = SkillSpec(
-            slug=skill_dir.name,
+            slug=entry.slug,
             name=name,
             description=str(frontmatter.get("description", "")).strip(),
+            display_name=str(frontmatter.get("display_name") or name).strip(),
+            summary=str(frontmatter.get("summary") or frontmatter.get("description", "")).strip(),
             version=str(frontmatter.get("version", "1.0.0")).strip(),
             body=body,
-            path=skill_dir,
+            path=entry.path,
             metadata=frontmatter.get("metadata", {}) or {},
             enabled_by_default=bool(frontmatter.get("enabled_by_default", True)),
             always=bool(frontmatter.get("always", False)),
@@ -198,24 +248,6 @@ def discover_skills(
         if include_disabled or spec.enabled:
             discovered.append(spec)
     return discovered
-
-
-def _register_builtin_features(registry: ToolRegistry, settings, *, skills_dir: Path | None = None) -> None:
-    base_dir = skills_dir or SKILLS_DIR
-    mcp_settings = getattr(settings, "mcp", None)
-    if mcp_settings is not None and not bool(getattr(mcp_settings, "enabled", True)):
-        return
-
-    mcp_dir = base_dir / "mcp_bridge"
-    if not mcp_dir.exists():
-        return
-    module = _load_skill_module(mcp_dir)
-    if module is None:
-        return
-    register_tools = getattr(module, "register_tools", None)
-    if register_tools is None:
-        return
-    register_tools(registry, settings)
 
 
 def _register_tool_search(registry: ToolRegistry) -> None:
@@ -321,34 +353,32 @@ def load_tools(settings, *, skills_dir: Path | None = None) -> tuple[list[SkillS
             skill.load_error = message
             logger.exception("skill=%s load failed: %s", skill.name, exc)
 
-    try:
-        staged_builtin_registry = ToolRegistry()
-        _register_builtin_features(staged_builtin_registry, settings, skills_dir=skills_dir)
-        registry.extend(staged_builtin_registry.get_all_tools())
-        _LAST_LOAD_ERRORS.pop("mcp-bridge", None)
-    except Exception as exc:
-        message = str(exc)
-        _LAST_LOAD_ERRORS["mcp-bridge"] = message
-        logger.exception("built-in feature=mcp-bridge load failed: %s", exc)
     _register_tool_search(registry)
     return skill_specs, registry
 
 
 def available_skill_payload(settings) -> list[dict[str, Any]]:
-    return [
-        {
-            "slug": skill.slug,
-            "name": skill.name,
-            "description": skill.description,
-            "version": skill.version,
-            "enabled_by_default": skill.enabled_by_default,
-            "enabled": skill.enabled,
-            "available": skill.available,
-            "always": skill.always,
-            "unavailable_reason": skill.unavailable_reason,
-            "load_error": skill.load_error or _LAST_LOAD_ERRORS.get(skill.name, ""),
-            "tier": skill.tier,
-            "recommended": skill.recommended,
-        }
-        for skill in discover_skills(settings, include_disabled=True)
-    ]
+    payload: list[dict[str, Any]] = []
+    for skill in discover_skills(settings, include_disabled=True):
+        if skill.tier == "internal":
+            continue
+        load_error = skill.load_error or _LAST_LOAD_ERRORS.get(skill.name, "")
+        payload.append(
+            {
+                "slug": skill.slug,
+                "name": skill.name,
+                "display_name": skill.display_name,
+                "summary": skill.summary,
+                "description": skill.description,
+                "version": skill.version,
+                "enabled_by_default": skill.enabled_by_default,
+                "enabled": skill.enabled and not load_error,
+                "available": skill.available and not load_error,
+                "always": skill.always,
+                "unavailable_reason": "load_error" if load_error else skill.unavailable_reason,
+                "load_error": load_error,
+                "tier": skill.tier,
+                "recommended": skill.recommended,
+            }
+        )
+    return payload

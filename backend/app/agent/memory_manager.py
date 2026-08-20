@@ -26,7 +26,6 @@ from app.agent.context_usage import (
 )
 from app.agent.state import ConversationState, TaskState
 from app.agent.llm_client import LLMClient
-from app.agent.context_compression import compress_context
 from app.agent.database import get_db
 from app.agent.runtime_paths import RUNTIME_DIR
 
@@ -39,6 +38,7 @@ CONTEXT_TOKEN_LIMIT = DEFAULT_CONTEXT_TOKEN_LIMIT
 COMPACTION_THRESHOLD = int(DEFAULT_CONTEXT_TOKEN_LIMIT * 0.9)
 CHARS_PER_TOKEN = 4
 MANUAL_COMPACT_MESSAGE_LIMIT = 1000
+MAX_CONVERSATION_SUMMARY_CHARS = 12000
 
 MANUAL_COMPACT_SYSTEM_PROMPT = (
     "You are a separate summarizer for a /compact command. "
@@ -138,7 +138,7 @@ class MemoryManager:
                 {"role": m["role"], "content": m["content"], "timestamp": m["created_at"]}
                 for m in all_msgs
             ],
-            summary=conv.get("summary", "") if conv else "",
+            summary=self._cap_summary(conv.get("summary", "")) if conv else "",
             tool_outcomes=tool_outcomes,
             task_goal=conv.get("task_goal", "") if conv else "",
             pending_steps=[
@@ -158,55 +158,28 @@ class MemoryManager:
         self._active_states[conversation_id] = state
         return state
 
-    def _build_context_sections(self, state: ConversationState) -> list[str]:
+    def _build_context_sections(self, state: ConversationState, *, current_turn: str = "") -> list[str]:
         pending_steps = state.pending_steps or []
-        recent_messages = (state.all_messages or state.recent_messages)[
-            -self.RECENT_MESSAGES_IN_CONTEXT:
-        ]
-
-        parts = [
-            "## Active Goal",
-            state.task_goal.strip() or "None.",
-            "",
-            "## Remaining Steps",
-        ]
-
+        parts: list[str] = []
+        if state.task_goal.strip() and state.task_goal.strip() != current_turn.strip():
+            parts.extend(["## Active Goal", state.task_goal.strip(), ""])
         if pending_steps:
+            parts.append("## Remaining Steps")
             for step in pending_steps:
                 step_id = step.get("step_id", "step")
                 description = step.get("description", "Unnamed step")
                 status = step.get("status", "pending")
                 parts.append(f"- {step_id}: {description} ({status})")
-        else:
-            parts.append("None.")
-
-        parts.extend(["", "## What Happened So Far (Summary)"])
-        if state.summary.strip():
-            parts.append(state.summary.strip())
-        elif state.completed_steps:
-            parts.append("\n".join(f"- {step}" for step in state.completed_steps[-5:]))
-        else:
-            parts.append("No summary yet.")
-
-        parts.extend(["", f"## Recent Messages (last {self.RECENT_MESSAGES_IN_CONTEXT})"])
-        if recent_messages:
-            for msg in recent_messages:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                parts.append(f"- {role}: {content}")
-        else:
-            parts.append("None.")
-
-        parts.extend(["", "## Recent Tool Results"])
         if state.tool_outcomes:
+            if parts:
+                parts.append("")
+            parts.append("## Recent Tool Results")
             for outcome in state.tool_outcomes[-self.MAX_TOOL_OUTCOMES:]:
                 tool_name = outcome.get("tool", "unknown")
                 result = outcome.get("result", "")
                 if len(result) > 200:
                     result = result[:200] + "..."
                 parts.append(f"- {tool_name}: {result}")
-        else:
-            parts.append("None.")
 
         return parts
 
@@ -216,19 +189,50 @@ class MemoryManager:
         """Get existing conversation state or create a new one."""
         return self._ensure_state(conversation_id, title)
 
-    def get_context(self, conversation_id: str) -> str:
+    def get_context(self, conversation_id: str, *, current_turn: str = "") -> str:
         """Build memory context string to inject into prompts."""
         state = self.get_or_create(conversation_id)
-        return "\n".join(self._build_context_sections(state)).strip()
+        return "\n".join(self._build_context_sections(state, current_turn=current_turn)).strip()
+
+    @staticmethod
+    def _cap_summary(value: str) -> str:
+        text = str(value or "").strip()
+        if len(text) <= MAX_CONVERSATION_SUMMARY_CHARS:
+            return text
+        return text[:MAX_CONVERSATION_SUMMARY_CHARS].rstrip() + "\n[summary truncated]"
+
+    @classmethod
+    def _merge_summaries(cls, newest: str, older: str) -> str:
+        parts = [str(value or "").strip() for value in (newest, older) if str(value or "").strip()]
+        return cls._cap_summary("\n\n".join(parts))
 
     def set_long_term_memory(self, memory: LongTermMemory | None) -> None:
         self.long_term_memory = memory
 
-    def build_long_term_memory_context(self, query: str) -> str:
+    def record_compaction(self, conversation_id: str, result: dict) -> None:
+        """Persist the compaction checkpoint without exposing the database layer."""
+        if result.get("status") not in {"compacted", "unchanged"}:
+            return
+        summary = str(result.get("summary") or "").strip()
+        if not summary:
+            return
+        source_message_id = self._db.get_last_message_id(conversation_id)
+        if source_message_id <= int(result.get("source_message_id") or 0):
+            return
+        self._db.upsert_conversation_compaction(
+            conv_id=conversation_id,
+            summary=summary,
+            source_message_id=source_message_id,
+            message_count=int(result.get("message_count") or 0),
+            tokens_before=int(result.get("tokens_before") or 0),
+            tokens_after=int(result.get("tokens_after") or 0),
+        )
+
+    def build_long_term_memory_context(self, query: str, *, mark_used: bool = True) -> str:
         if self.long_term_memory is None:
             return ""
         try:
-            return self.long_term_memory.build_prompt(query)
+            return self.long_term_memory.build_prompt(query, mark_used=mark_used)
         except Exception as exc:
             logger.warning("Long-term memory prompt unavailable: %s", exc)
             return ""
@@ -312,11 +316,9 @@ class MemoryManager:
                 "content": f"Earlier conversation summary:\n{state.summary.strip()}",
             })
 
-        if state.task_goal or state.pending_steps:
-            messages.append({
-                "role": "assistant",
-                "content": self.get_context(conversation_id),
-            })
+        context = self.get_context(conversation_id, current_turn=state.task_goal)
+        if context:
+            messages.append({"role": "assistant", "content": context})
 
         for msg in history:
             content = (msg.get("content") or "").strip()
@@ -371,7 +373,11 @@ class MemoryManager:
         self.get_or_create(conversation_id)
         existing = self._db.get_conversation_compaction(conversation_id)
         previous_source_id = int((existing or {}).get("source_message_id") or 0)
-        existing_summary = str((existing or {}).get("summary") or "").strip()
+        state = self.get_or_create(conversation_id)
+        existing_summary = self._merge_summaries(
+            str((existing or {}).get("summary") or "").strip(),
+            state.summary.strip(),
+        )
         messages = self._messages_for_manual_compaction(
             conversation_id,
             after_id=previous_source_id,
@@ -420,7 +426,7 @@ class MemoryManager:
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=MANUAL_COMPACT_SYSTEM_PROMPT,
             )
-            summary = str(summary or "").strip()
+            summary = self._cap_summary(str(summary or ""))
         except Exception as exc:
             logger.warning("/compact summarization failed; leaving history unchanged: %s", exc)
             summary = ""
@@ -446,12 +452,13 @@ class MemoryManager:
             tokens_after=tokens_after,
         )
 
-        state = self.get_or_create(conversation_id)
         state.all_messages = []
         state.recent_messages = []
+        state.summary = ""
         state.context_tokens_estimate = self.estimate_context_tokens(conversation_id, "")
         self._db.update_conversation(
             conversation_id,
+            summary="",
             context_tokens_estimate=state.context_tokens_estimate,
         )
         return {
@@ -762,48 +769,35 @@ class MemoryManager:
         tools: list[dict] | None = None,
         current_user_message: str = "",
     ) -> None:
-        while (
-            self.estimate_context_tokens(
+        while True:
+            before = self.estimate_context_tokens(
                 conversation_id,
                 system_prompt,
                 tools=tools,
                 current_user_message=current_user_message,
             )
-            > model_compaction_threshold(self.llm_client)
-        ):
+            if before <= model_compaction_threshold(self.llm_client):
+                break
             compacted = await self._compact(conversation_id)
             if not compacted:
                 break
+            after = self.estimate_context_tokens(
+                conversation_id,
+                system_prompt,
+                tools=tools,
+                current_user_message=current_user_message,
+            )
+            if after >= before:
+                break
 
     async def _compact(self, conversation_id: str) -> bool:
-        state = self._active_states.get(conversation_id)
-        if state is None or not state.recent_messages:
+        state = self.get_or_create(conversation_id)
+        before = self.estimate_context_tokens(conversation_id, "")
+        result = await self.compact_conversation(conversation_id)
+        if result.get("status") != "compacted":
             return False
-
-        focus_topics: list[str] = []
-        if state.task_goal.strip():
-            focus_topics.append(state.task_goal.strip())
-
-        async def _llm_summarize(msgs, sys_prompt):
-            return await self.llm_client.chat(messages=msgs, system_prompt=sys_prompt)
-
-        result = await compress_context(
-            messages=state.recent_messages,
-            existing_summary=state.summary,
-            focus_topics=focus_topics or None,
-            llm_chat_fn=_llm_summarize,
-        )
-
-        state.summary = result.summary
-        state.recent_messages = result.messages
         state.context_tokens_estimate = self.estimate_context_tokens(conversation_id, "")
-        state.updated_at = datetime.now(timezone.utc)
-        self._db.update_conversation(
-            conversation_id,
-            summary=state.summary,
-            context_tokens_estimate=state.context_tokens_estimate,
-        )
-        return len(result.phases_applied) > 0
+        return state.context_tokens_estimate < before
 
     async def _summarize(self, conversation_id: str) -> None:
         """Summarize older messages into the summary field."""
@@ -825,10 +819,7 @@ class MemoryManager:
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt="You are a helpful assistant that summarizes conversations.",
             )
-            if state.summary.strip():
-                state.summary = f"{new_summary}\n\n{state.summary}"
-            else:
-                state.summary = new_summary
+            state.summary = self._merge_summaries(str(new_summary), state.summary)
         except Exception:
             pass
 

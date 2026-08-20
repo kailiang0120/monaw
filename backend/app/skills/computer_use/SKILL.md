@@ -1,6 +1,8 @@
 ---
 name: computer-use
 description: "Windows computer use through computer_functions tools: app/window discovery, state capture, batched input, clipboard, processes, and diagnostics."
+display_name: Windows computer use
+summary: Inspect and control native Windows applications with focused, verified actions.
 version: 2.0.0
 enabled_by_default: true
 tier: recommended
@@ -9,6 +11,8 @@ os:
 ---
 
 Use these tools for Windows computer-use tasks.
+
+## Computer Use Policy
 
 Preferred flow:
 - Call `computer_functions_list_apps` to inspect configured/running apps.

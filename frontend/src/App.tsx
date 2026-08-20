@@ -242,6 +242,10 @@ export default function App() {
       if (event.event === 'settings.changed') {
         void loadVisibleSettings()
         setDiagnosticsRefreshKey((value) => value + 1)
+        return
+      }
+      if (event.event === 'mcp.changed') {
+        setDiagnosticsRefreshKey((value) => value + 1)
       }
     }
 

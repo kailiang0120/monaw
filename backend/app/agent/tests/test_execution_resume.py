@@ -88,6 +88,22 @@ class TestResumeApprovedTicket:
         resume_approved_ticket(t)
         assert t.status == TicketStatus.FAILED
 
+    @pytest.mark.parametrize("status", [
+        "blocked",
+        "denied",
+        "pending_approval",
+        "pending_access_grant",
+    ])
+    def test_resumed_non_success_status_is_not_marked_applied(self, status):
+        register_executor("ctrl_guarded", lambda _s: json.dumps({"status": status, "reason": status}))
+        t = create_ticket(tool_name="ctrl_guarded", payload={"input_str": "{}"})
+        approve_ticket(t.id)
+
+        resume_approved_ticket(t)
+
+        assert t.status == TicketStatus.FAILED
+        assert status in t.execution_result
+
     def test_skips_non_approved(self):
         t = create_ticket(tool_name="ctrl_delete")
         result = resume_approved_ticket(t)

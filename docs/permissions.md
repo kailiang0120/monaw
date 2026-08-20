@@ -36,7 +36,7 @@ Confirmations can apply to:
 | `click` | UI clicks. |
 | `type` | UI typing. |
 
-High-risk shell actions such as PowerShell and generic exec can require confirmation depending on mode. Registry and process-kill actions always require confirmation.
+High-risk shell execution and process-kill actions can require confirmation depending on mode. Process-kill actions always require confirmation.
 
 ## Blocked Roots
 
@@ -69,6 +69,13 @@ gpedit.msc
 regedit.exe
 taskmgr.exe
 procexp.exe
+cmd.exe
+powershell.exe
+pwsh.exe
+windowsterminal.exe
+wt.exe
+codex.exe
+monaw.exe
 ```
 
 Aliases and executable paths are normalized before checking blocked process names.
@@ -121,7 +128,9 @@ Decision options:
 
 Access grant tickets are transient in memory. Session and once grants are stored in SQLite so the running app can consume them correctly.
 
-Permanent app grants are written into settings as app rules. Permanent path grants update permitted roots.
+Permanent app grants are written into settings as app rules. Permanent path grants add a narrowly scoped `PathRule` for the requested action and preserve all existing rule fields, including read/write/delete permissions and confirmation requirements. An `always` grant for a read action does not silently become a writable or deletable root.
+
+Scheduled, Telegram, and other non-interactive runs cannot display an approval prompt. Their pending approval or access-grant request is automatically denied by the execution gate rather than waiting for the ten-minute interactive timeout.
 
 ## Approval Tickets
 
@@ -153,6 +162,8 @@ Ticket statuses:
 | `cancelled` | Ticket was cancelled. |
 | `applied` | Approved action finished. |
 | `failed` | Approved action failed during execution. |
+| `superseded` | A newer matching ticket replaced this ticket; the original waiter is woken and no action runs. |
+| `expired` | The ticket passed its expiry time. |
 
 Approval tickets are persisted as JSONL so pending and historical approvals survive restarts.
 
@@ -221,7 +232,7 @@ See `docs\sandboxing.md` for sandbox modes and backend behavior.
 | Symptom | Check |
 | --- | --- |
 | Action keeps asking for access. | Use `session` or `always` instead of `once`, or confirm the exact app/path matches. |
-| Approval does not resume. | Check the ticket is still pending and that the desktop app is connected to the same conversation. |
+| Approval does not resume. | Check the ticket is still pending, has not been superseded or expired, and that the desktop app is connected to the same conversation. |
 | App cannot be allowlisted. | It may match a blocked process name. |
 | Delete is blocked. | `allow_delete` is false or delete confirmation was rejected. |
 | Path is blocked even in full access. | Blocked roots still apply. |

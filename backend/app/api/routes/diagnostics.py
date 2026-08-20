@@ -31,18 +31,12 @@ def _runtime_file_status(path: Path) -> dict:
 
 
 def _safe_mcp_entry(entry: dict) -> dict:
-    safe = redact(entry)
-    for key in (
-        "command",
-        "cwd",
-        "url",
-        "resolved_executable",
-        "stderr_tail",
-    ):
-        safe[key] = ""
-    safe["args"] = []
-    safe["pid"] = None
-    safe["remote_tool_names"] = []
+    # This route is authenticated and loopback-only. The local UI needs the
+    # process and transport details to explain why a server is unhealthy, but
+    # environment variables and HTTP headers may contain credentials.
+    safe = dict(entry)
+    safe["env"] = redact(entry.get("env", {}))
+    safe["headers"] = redact(entry.get("headers", {}))
     return safe
 
 
@@ -88,6 +82,7 @@ async def get_diagnostics_summary(request: Request):
     telegram_state.setdefault("startup_error", "")
 
     mcp_diagnostics = get_mcp_runtime_diagnostics()
+    mcp_startup = dict(getattr(request.app.state, "mcp_status", {}) or {})
     browser_diagnostics = await get_browser_use_diagnostics(runtime_namespace)
     sandbox_status = get_sandbox_status(runtime_settings.sandbox)
     db_path = RUNTIME_DIR / "agent.db"
@@ -108,6 +103,7 @@ async def get_diagnostics_summary(request: Request):
             "runtime_servers": len(mcp_diagnostics),
             "connected_servers": sum(1 for item in mcp_diagnostics if item.get("connected")),
             "unhealthy_servers": sum(1 for item in mcp_diagnostics if item.get("unhealthy_reason")),
+            "startup_error": str(mcp_startup.get("startup_error", "") or ""),
         },
         "browser": {
             "available": bool(browser_diagnostics.get("available")),
@@ -190,10 +186,6 @@ async def get_mcp_diagnostics():
         entry["feature_enabled"] = feature_enabled
         entry["feature_available"] = feature_available
         entry["feature_unavailable_reason"] = feature_unavailable_reason
-        entry["skill_enabled"] = feature_enabled
-        entry["skill_available"] = feature_available
-        entry["skill_unavailable_reason"] = feature_unavailable_reason
-        entry["login_capable"] = "chrome" in name.lower() or "devtools" in description.lower()
         payload.append(_safe_mcp_entry(entry))
         seen.add(name)
 
@@ -204,11 +196,6 @@ async def get_mcp_diagnostics():
         entry["feature_enabled"] = feature_enabled
         entry["feature_available"] = feature_available
         entry["feature_unavailable_reason"] = feature_unavailable_reason
-        entry["skill_enabled"] = feature_enabled
-        entry["skill_available"] = feature_available
-        entry["skill_unavailable_reason"] = feature_unavailable_reason
-        description = str(entry.get("description", "") or "")
-        entry["login_capable"] = "chrome" in name.lower() or "devtools" in description.lower()
         payload.append(_safe_mcp_entry(entry))
 
     return payload

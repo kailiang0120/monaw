@@ -1,6 +1,8 @@
 ---
 name: browser-use
 description: Managed browser automation with snapshot, tabs, navigation, clicking, typing, screenshots, and system-profile fallback.
+display_name: Browser automation
+summary: Browse, inspect, and interact with websites using managed or system Chrome.
 version: 1.0.0
 enabled_by_default: true
 tier: recommended
@@ -17,7 +19,7 @@ Preferred workflow:
 - For read-only URL retrieval, extraction, or summarization, use `browser_fetch` before opening a browser tab. It uses local HTTP plus Scrapling parsing first, with optional rendering through Monaw's browser session.
 - Start with `browser_open` to create or reuse the browser session.
 - Always use `observe -> decide -> act -> verify`: inspect state, choose one safe next action, execute it, then verify before continuing.
-- When the user asks to resume, continue, or return to a browser task, inspect `browser_tabs` or `browser_snapshot` first. Switch to a relevant existing tab instead of opening or navigating away from a page that may contain in-progress work.
+- When resuming browser work, call `browser_tabs` or `browser_snapshot` first and switch to a relevant existing tab before opening or navigating a URL.
 - If the previous turn stopped with `stalled_repeat_detected`, treat that as a planning checkpoint, not a lost browser session. Resume with `browser_tabs` or `browser_snapshot`; do not use `browser_session(action="use_system")`, reset, or reopen unless status proves the session is gone.
 - Use `browser_snapshot` before interacting so you get stable `ref` values for visible elements.
 - Prefer `ref` from `browser_snapshot` over raw CSS selectors when possible.
@@ -52,3 +54,16 @@ Rules:
 - Do not guess selectors if `browser_snapshot` can give you a `ref`.
 - Use `browser_evaluate` only when the structured snapshot is not enough.
 - If multiple visible fields could match, do not type yet. Take another snapshot, use `browser_evaluate` to inspect labels/attributes, or click only after the correct field is clear.
+
+## Browser Tool Policy
+- For built-in browser automation, start with `browser_open` or `browser_snapshot`.
+- Use `observe -> decide -> act -> verify`: inspect the page, choose one reversible next action, execute it, then verify before continuing.
+- Before clicking or typing, identify the target from `ref` plus label, role, placeholder, name, nearby text, or `field_candidates`; do not act from position alone unless no DOM target is available.
+- For forms, match fields using `target_hint`, `field_candidates`, labels, role, placeholder, name, and current value. After typing into any field, inspect returned `target_after` metadata or take a fresh snapshot before continuing.
+- In email compose UIs, confirm recipient, subject, and message body refs separately before typing. Commit autocomplete recipients with Enter or the exact suggestion, then verify a recipient chip/token before filling subject or body.
+- The browser `mode` is configured by the user in Settings. Call tools with `mode="auto"` by default so the saved preference is honored; only pass `managed` or `system` for a requested one-off override.
+- If a browser tool returns `status: error`, call `browser_session(action="doctor")` before retrying. For `managed_cdp_timeout` or `managed_chrome_exited`, call `browser_session(action="reset")` once, then retry the intent once. Stop for `chrome_executable_missing` or `system_launch_disabled`; user action is required.
+- For `tool_timeout`, narrow the action rather than retrying identically. The first `browser_open` of a session can take up to 60 seconds on a cold Windows machine.
+- When the Chrome DevTools MCP tools are available, use `mcp__Chrome-dev-tools__take_snapshot` for webpage inspection.
+- Use `mcp__Chrome-dev-tools__evaluate_script` only for DOM details the accessibility snapshot cannot provide.
+- Do not use generic screenshot-style tools to read webpage content when `mcp__Chrome-dev-tools__take_snapshot` is available.

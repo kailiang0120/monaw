@@ -68,6 +68,8 @@ def test_get_mcp_diagnostics_endpoint_returns_status(monkeypatch):
                 "failed_call_count": 0,
                 "remote_tool_names": ["list_directory"],
                 "reflected_tool_names": ["mcp__filesystem__list_directory"],
+                "env": {"MCP_TOKEN": "secret"},
+                "headers": {"Authorization": "Bearer secret"},
             }
         ],
     )
@@ -87,11 +89,14 @@ def test_get_mcp_diagnostics_endpoint_returns_status(monkeypatch):
     assert payload[0]["state"] == "connected"
     assert payload[0]["startup_phase"] == "ready"
     assert payload[0]["reflected_tool_names"] == ["mcp__filesystem__list_directory"]
-    assert payload[0]["command"] == ""
-    assert payload[0]["args"] == []
-    assert payload[0]["cwd"] == ""
-    assert payload[0]["resolved_executable"] == ""
-    assert payload[0]["pid"] is None
+    assert payload[0]["command"] == "npx"
+    assert payload[0]["args"] == ["-y", "server"]
+    assert payload[0]["cwd"] == r"C:\Repo"
+    assert payload[0]["resolved_executable"] == r"C:\nodejs\npx.cmd"
+    assert payload[0]["pid"] == 123
+    assert payload[0]["stderr_tail"] == ""
+    assert "env" not in payload[0]
+    assert "headers" not in payload[0]
     assert payload[0]["feature_enabled"] is True
     assert payload[0]["feature_available"] is False
     assert payload[0]["feature_unavailable_reason"] == "missing_backend_dependency"

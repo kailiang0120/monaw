@@ -62,7 +62,7 @@ def test_memory_search_tool_schema_is_valid_for_gemini_enum_rules():
     category_schema = gemini_tool.function_declarations[0].parameters.properties["category"]
 
     assert "" not in category_schema.enum
-    assert category_schema.enum == ["preference", "behavior", "fact", "workflow", "project", "style"]
+    assert category_schema.enum == ["preference", "behavior", "fact", "workflow", "project", "reflection"]
 
 
 def test_openai_message_normalization_attaches_image_parts():

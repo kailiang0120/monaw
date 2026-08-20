@@ -273,6 +273,7 @@ def create_ticket(
         payload=payload or {},
     )
     ticket.payload_hash = ticket.compute_hash()
+    superseded_ids: list[str] = []
     with _state_lock:
         for existing in list(_pending_index.values()):
             if (
@@ -287,14 +288,24 @@ def create_ticket(
                 existing.superseded_by = ticket.id
                 existing.resolved_at = datetime.now(timezone.utc).isoformat()
                 _pending_index.pop(existing.id, None)
+                superseded_ids.append(existing.id)
         _all_tickets[ticket.id] = ticket
         _pending_index[ticket.id] = ticket
-        _append_ticket(ticket)
+        if superseded_ids:
+            _rewrite_tickets()
+        else:
+            _append_ticket(ticket)
     _log_approval_md("CREATED", ticket)
     publish_ui_event(
         "approval_ticket.created",
         {"ticket_id": ticket.id, "conversation_id": ticket.conversation_id, "status": ticket.status.value},
     )
+    for superseded_id in superseded_ids:
+        signal_resume(superseded_id, "superseded")
+        publish_ui_event(
+            "approval_ticket.changed",
+            {"ticket_id": superseded_id, "conversation_id": ticket.conversation_id, "status": TicketStatus.SUPERSEDED.value},
+        )
     return ticket
 
 

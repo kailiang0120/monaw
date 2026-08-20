@@ -5,10 +5,8 @@ import {
   deleteMemory,
   fetchMemories,
   fetchMemoryCandidates,
-  fetchMemoryCheckpoints,
   fetchMemoryEpisodes,
   fetchMemoryFile,
-  fetchMemoryProfile,
   fetchMemoryStats,
   saveMemoryFile,
   updateMemoryCandidate,
@@ -20,10 +18,8 @@ import type {
   AgentSettings,
   MemoryCandidate,
   MemoryCategory,
-  MemoryCheckpoint,
   MemoryEpisode,
   MemoryFileRecord,
-  MemoryProfileField,
   MemoryRecord,
   MemoryReviewState,
   MemorySectionRecord,
@@ -58,8 +54,6 @@ const EMPTY_STATS = {
   audit_events: 0,
   archived_messages: 0,
   episodes: 0,
-  active_checkpoints: 0,
-  profile_fields: 0,
   memory_root: '',
   categories: {} as Partial<Record<MemoryCategory, number>>,
 }
@@ -77,10 +71,8 @@ export function MemorySettingsPanel({ draft, refreshKey = 0, updateDraft }: Prop
   const [reviewFilter, setReviewFilter] = useState<'' | MemoryReviewState>('')
   const [memories, setMemories] = useState<MemoryRecord[]>([])
   const [memoryFile, setMemoryFile] = useState<MemoryFileRecord | null>(null)
-  const [profileFields, setProfileFields] = useState<MemoryProfileField[]>([])
   const [candidates, setCandidates] = useState<MemoryCandidate[]>([])
   const [episodes, setEpisodes] = useState<MemoryEpisode[]>([])
-  const [checkpoints, setCheckpoints] = useState<MemoryCheckpoint[]>([])
   const [rawMarkdown, setRawMarkdown] = useState('')
   const [stats, setStats] = useState(EMPTY_STATS)
   const [loading, setLoading] = useState(false)
@@ -139,21 +131,17 @@ export function MemorySettingsPanel({ draft, refreshKey = 0, updateDraft }: Prop
         memoryFilePromise,
         fetchMemoryStats(),
       ])
-      const [nextProfile, nextCandidates, nextEpisodes, nextCheckpoints] = await Promise.all([
-        fetchMemoryProfile().catch(() => []),
+      const [nextCandidates, nextEpisodes] = await Promise.all([
         fetchMemoryCandidates({ status: 'new', limit: 5 }).catch(() => []),
         fetchMemoryEpisodes({ limit: 5 }).catch(() => []),
-        fetchMemoryCheckpoints({ status: 'active', limit: 5 }).catch(() => []),
       ])
       if (requestId !== requestSeq.current) return
       setMemories(items)
       setMemoryFile(file)
       setRawMarkdown(file?.raw_markdown ?? '')
       setStats(nextStats)
-      setProfileFields(nextProfile)
       setCandidates(nextCandidates)
       setEpisodes(nextEpisodes)
-      setCheckpoints(nextCheckpoints)
       setLoadError('')
     } catch {
       if (requestId !== requestSeq.current) return
@@ -161,10 +149,8 @@ export function MemorySettingsPanel({ draft, refreshKey = 0, updateDraft }: Prop
       if (clearOnError) {
         setMemories([])
         setMemoryFile(null)
-        setProfileFields([])
         setCandidates([])
         setEpisodes([])
-        setCheckpoints([])
         setStats(EMPTY_STATS)
       }
     } finally {
@@ -418,7 +404,6 @@ export function MemorySettingsPanel({ draft, refreshKey = 0, updateDraft }: Prop
           <MemoryStat label="Archived" value={stats.archived} />
           <MemoryStat label="Candidates" value={stats.unresolved_candidates} />
           <MemoryStat label="Episodes" value={stats.episodes} />
-          <MemoryStat label="Context" value={stats.active_checkpoints} />
         </div>
       )}
 
@@ -480,7 +465,7 @@ export function MemorySettingsPanel({ draft, refreshKey = 0, updateDraft }: Prop
         <div className="space-y-1.5">
           {showSectionSkeleton ? (
             <div className="space-y-1.5" role="status" aria-label="Loading memory" data-testid="memory-loading-skeleton">
-              {Array.from({ length: 4 }).map((_, index) => (
+              {Array.from({ length: 2 }).map((_, index) => (
                 <MemorySectionSkeleton key={index} />
               ))}
             </div>
@@ -600,21 +585,13 @@ export function MemorySettingsPanel({ draft, refreshKey = 0, updateDraft }: Prop
           )}
           <MemoryRetrievalDebugger initialQuery={query} />
           {showInitialSkeleton ? (
-            <div className="grid gap-2 border-t border-white/[0.06] pt-2 lg:grid-cols-2" aria-hidden="true">
-              {Array.from({ length: 4 }).map((_, index) => (
+            <div className="grid gap-2 border-t border-white/[0.06] pt-2 lg:grid-cols-2" aria-hidden="true" data-testid="memory-loading-skeleton">
+              {Array.from({ length: 2 }).map((_, index) => (
                 <MemoryOpsPanelSkeleton key={index} />
               ))}
             </div>
           ) : (
             <div className="grid gap-2 border-t border-white/[0.06] pt-2 lg:grid-cols-2">
-              <MemoryOpsPanel title="Profile" empty="No profile fields.">
-                {profileFields.slice(0, 5).map((field) => (
-                  <MemoryOpsItem key={field.field} title={field.field} meta={field.review_state}>
-                    {field.privacy_level === 'normal' ? field.value : `${field.privacy_level} value`}
-                  </MemoryOpsItem>
-                ))}
-              </MemoryOpsPanel>
-
               <MemoryOpsPanel title="Candidates" empty="No candidates waiting.">
                 {candidates.map((candidate) => (
                   <MemoryOpsItem
@@ -645,13 +622,6 @@ export function MemorySettingsPanel({ draft, refreshKey = 0, updateDraft }: Prop
                 ))}
               </MemoryOpsPanel>
 
-              <MemoryOpsPanel title="Current Context" empty="No active checkpoints.">
-                {checkpoints.map((checkpoint) => (
-                  <MemoryOpsItem key={checkpoint.id} title={checkpoint.scope} meta={checkpoint.status}>
-                    {checkpoint.goal || checkpoint.next_action || checkpoint.last_known_state}
-                  </MemoryOpsItem>
-                ))}
-              </MemoryOpsPanel>
             </div>
           )}
         </div>

@@ -7,13 +7,13 @@ import time
 import uuid
 from pathlib import Path
 
-from app.agent.sandbox.backends.local_direct import (
+from app.agent.sandbox.process import (
     _format_output,
     _run_command_capped,
-    _write_artifact,
     _write_script,
     shell_command,
 )
+from app.agent.sandbox.artifacts import write_artifact as _write_artifact
 from app.agent.sandbox.models import SandboxExecutionRequest, SandboxExecutionResult, SandboxRunMetadata
 from app.agent.sandbox.path_policy import write_artifact_manifest
 
@@ -47,6 +47,14 @@ class LocalRestrictedRunner:
             blocked_env_keys=list(request.env_metadata.get("blocked_env_keys", [])),
             env_keys=list(request.env_metadata.get("env_keys", [])),
             warnings=[*list(request.env_metadata.get("warnings", [])), "local_restricted_is_advisory"],
+            enabled=bool(request.env_metadata.get("enabled", True)),
+            trust_class=str(request.env_metadata.get("trust_class", "trusted")),
+            required_isolation=str(request.env_metadata.get("required_isolation", "none")),
+            network_enforcement=str(request.env_metadata.get("network_enforcement", "advisory")),
+            filesystem_policy=str(request.env_metadata.get("filesystem_policy", "host")),
+            write_strategy=str(request.env_metadata.get("write_strategy", "discard")),
+            reason=str(request.env_metadata.get("reason", "")),
+            reason_code=str(request.env_metadata.get("reason_code", "allowed")),
         ).model_dump()
 
         try:
@@ -62,6 +70,7 @@ class LocalRestrictedRunner:
                 request,
                 popen_kwargs=popen_kwargs,
                 on_timeout=self._kill_process_tree,
+                on_cancel=self._kill_process_tree,
             )
 
             duration_ms = int((time.monotonic() - started_at) * 1000)
@@ -99,6 +108,7 @@ class LocalRestrictedRunner:
                 exit_code=completed.returncode,
                 duration_ms=duration_ms,
                 timed_out=completed.timed_out,
+                cancelled=bool(getattr(completed, "cancelled", False)),
                 command_id=command_id,
                 stdout=stdout,
                 stderr=stderr,
@@ -109,7 +119,11 @@ class LocalRestrictedRunner:
                 workdir=request.workdir,
                 env_keys=list(request.env_metadata.get("explicit_env_keys", [])),
                 sandbox=metadata,
-                error="Command timed out." if completed.timed_out else "",
+                error=(
+                    "Command cancelled."
+                    if bool(getattr(completed, "cancelled", False))
+                    else "Command timed out." if completed.timed_out else ""
+                ),
             )
         except Exception as exc:
             return SandboxExecutionResult(

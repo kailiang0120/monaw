@@ -58,7 +58,7 @@ def _server_entry_predicate(server_name: str):
 def _refresh_server_tools(registry, cfg: MCPServerConfig) -> dict[str, Any]:
     if not _mcp_available():
         clear_reflected_tools_for_server(cfg.name)
-        registry.replace_where(_server_entry_predicate(cfg.name), [])
+        registry.remove_where(_server_entry_predicate(cfg.name))
         return {
             "name": cfg.name,
             "ok": False,
@@ -76,7 +76,8 @@ def _refresh_server_tools(registry, cfg: MCPServerConfig) -> dict[str, Any]:
     if not refreshed:
         clear_reflected_tools_for_server(cfg.name)
         manager.reflected_tool_names = []
-    registry.replace_where(_server_entry_predicate(cfg.name), entries)
+    registry.remove_where(_server_entry_predicate(cfg.name))
+    registry.extend(entries)
     return {
         "name": cfg.name,
         "ok": bool(refreshed),

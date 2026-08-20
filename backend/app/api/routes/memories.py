@@ -14,8 +14,6 @@ from app.schemas import (
     MemoryFileSectionOut,
     MemoryFileUpdate,
     MemoryOut,
-    MemoryProfileFieldOut,
-    MemoryProfileFieldUpdate,
     MemorySearchOut,
     MemorySectionUpdate,
     MemorySessionCloseIn,
@@ -107,29 +105,6 @@ async def close_memory_session(body: MemorySessionCloseIn):
     return result
 
 
-@router.get("/memories/profile", response_model=list[MemoryProfileFieldOut])
-async def memory_profile():
-    return get_long_term_memory().profile_fields()
-
-
-@router.patch("/memories/profile/{field}", response_model=MemoryProfileFieldOut)
-async def update_memory_profile(field: str, body: MemoryProfileFieldUpdate):
-    try:
-        field_record = get_long_term_memory().update_profile_field(
-            field,
-            body.value,
-            privacy_level=body.privacy_level,
-            confidence=body.confidence,
-            review_state=body.review_state,
-            source_conversation_id=body.source_conversation_id,
-            source_message_id=body.source_message_id,
-        )
-        publish_ui_event("memory.changed", {"field": field, "action": "profile_updated"})
-        return field_record
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @router.get("/memories/candidates", response_model=list[MemoryCandidateOut])
 async def list_memory_candidates(
     status: str = Query("new", pattern="^(new|approved|rejected|)$"),
@@ -213,7 +188,6 @@ async def get_memory(memory_id: str):
     memory = get_long_term_memory().get(memory_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    publish_ui_event("memory.changed", {"memory_id": memory_id, "action": "updated"})
     return memory
 
 

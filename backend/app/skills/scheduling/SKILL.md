@@ -1,6 +1,8 @@
 ---
 name: scheduling
 description: Create and manage local scheduled agent tasks, including cron schedules, from chat.
+display_name: Scheduled tasks
+summary: Create and manage one-time, interval, and cron-based agent tasks.
 version: 1.0.0
 enabled_by_default: false
 tier: optional
