@@ -44,7 +44,7 @@ export function AccessGrantDialog({ ticket, onResolved }: Props) {
           <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-4 py-3">
             <p className="mb-1 text-xs text-neutral-500">Requested access</p>
             <p className="break-all text-sm font-medium text-neutral-100">
-              {ticket.display_name}
+              {ticket.requested_access ? `${ticket.requested_access} · ` : ''}{ticket.display_name}
             </p>
             {ticket.target_identifier !== ticket.display_name && (
               <p className="mt-1 break-all text-xs text-neutral-500">

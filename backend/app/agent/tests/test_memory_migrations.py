@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+
 from app.agent.database import Database
+from app.agent.migrations.runner import apply_migrations
 
 
 def test_fresh_database_does_not_create_sqlite_memory_schema(tmp_path):
@@ -76,3 +79,38 @@ def test_memory_migration_adds_deletion_cascade_and_trims_operational_layers(tmp
     db.commit()
     assert db.delete_conversation("conv-cascade") is True
     assert db.fetchone("SELECT id FROM messages_archive WHERE id = 1") is None
+
+
+def test_failed_migration_rolls_back_schema_rebuild_and_can_be_retried(tmp_path):
+    conn = sqlite3.connect(tmp_path / "migration.db")
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    conn.execute("CREATE TABLE original (id INTEGER PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO original (value) VALUES ('kept')")
+    (migrations / "0001_rebuild.sql").write_text(
+        """
+        DROP TABLE original;
+        CREATE TABLE rebuilt (id INTEGER PRIMARY KEY);
+        INSERT INTO missing_table VALUES (1);
+        """,
+        encoding="utf-8",
+    )
+
+    try:
+        try:
+            apply_migrations(conn, migrations_dir=migrations)
+        except sqlite3.OperationalError as exc:
+            assert "missing_table" in str(exc)
+
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='original'").fetchone()
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rebuilt'").fetchone() is None
+        assert conn.execute("SELECT version FROM schema_migrations").fetchall() == []
+
+        (migrations / "0001_rebuild.sql").write_text(
+            "CREATE TABLE rebuilt (id INTEGER PRIMARY KEY);\n",
+            encoding="utf-8",
+        )
+        assert apply_migrations(conn, migrations_dir=migrations) == [1]
+        assert conn.execute("SELECT value FROM original").fetchone()[0] == "kept"
+    finally:
+        conn.close()

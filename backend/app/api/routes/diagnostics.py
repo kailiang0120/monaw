@@ -1,5 +1,7 @@
 import importlib.util
+import re
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -37,7 +39,61 @@ def _safe_mcp_entry(entry: dict) -> dict:
     safe = dict(entry)
     safe["env"] = redact(entry.get("env", {}))
     safe["headers"] = redact(entry.get("headers", {}))
+    safe["command"] = _redact_mcp_text(entry.get("command", ""))
+    safe["args"] = _redact_mcp_args(entry.get("args", []))
+    safe["url"] = _redact_mcp_url(entry.get("url", ""))
     return safe
+
+
+_SECRET_NAME_RE = re.compile(r"(?:api[-_]?key|token|secret|password|authorization|bearer|credential)", re.I)
+_SECRET_ARG_RE = re.compile(r"^((?:--?|/)[^=:\s]*(?:api[-_]?key|token|secret|password|authorization|auth|credential)[^=:\s]*)(?:=|:)(.*)$", re.I)
+
+
+def _redact_mcp_url(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+        query = [
+            (key, "<redacted>" if _SECRET_NAME_RE.search(key) else item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+    except ValueError:
+        return "<redacted>" if _SECRET_NAME_RE.search(text) else text
+
+
+def _redact_mcp_text(value: object) -> str:
+    text = _redact_mcp_url(value)
+    return re.sub(
+        r"(?i)((?:--?|/)[^=\s]*(?:api[-_]?key|token|secret|password|authorization|auth|credential)[^=\s]*(?:=|\s+))[^\s]+",
+        r"\1<redacted>",
+        text,
+    )
+
+
+def _redact_mcp_args(values: object) -> list[str]:
+    if not isinstance(values, (list, tuple)):
+        return []
+    output: list[str] = []
+    redact_next = False
+    for value in values:
+        text = str(value)
+        if redact_next:
+            output.append("<redacted>")
+            redact_next = False
+            continue
+        match = _SECRET_ARG_RE.match(text)
+        if match:
+            output.append(f"{match.group(1)}=<redacted>")
+            continue
+        if text.startswith("--") and _SECRET_NAME_RE.search(text.lstrip("-")):
+            output.append(text)
+            redact_next = True
+            continue
+        output.append(_redact_mcp_text(text))
+    return output
 
 
 def _safe_browser_diagnostics(diagnostics: dict) -> dict:
@@ -103,6 +159,7 @@ async def get_diagnostics_summary(request: Request):
             "runtime_servers": len(mcp_diagnostics),
             "connected_servers": sum(1 for item in mcp_diagnostics if item.get("connected")),
             "unhealthy_servers": sum(1 for item in mcp_diagnostics if item.get("unhealthy_reason")),
+            "state": str(mcp_startup.get("state", "") or ""),
             "startup_error": str(mcp_startup.get("startup_error", "") or ""),
         },
         "browser": {

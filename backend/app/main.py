@@ -44,6 +44,29 @@ async def _retention_loop(app: FastAPI, stop_event: asyncio.Event) -> None:
                 app.state.retention_status = {"error": "runtime retention failed"}
 
 
+async def _start_mcp_runtime(app: FastAPI) -> None:
+    try:
+        from app.skills.mcp_bridge.connection import restart_enabled_mcp_servers
+
+        agent_settings = load_agent_settings(settings)
+        statuses = await asyncio.to_thread(restart_enabled_mcp_servers, agent_settings)
+        app.state.mcp_status = {
+            "running": True,
+            "state": "ready",
+            "startup_error": "",
+            "servers": statuses,
+        }
+    except Exception as exc:
+        error = str(exc) or exc.__class__.__name__
+        app.state.mcp_status = {
+            "running": False,
+            "state": "failed",
+            "startup_error": error,
+            "servers": [],
+        }
+        logger.exception("mcp: failed to start enabled servers")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_startup_security()
@@ -59,24 +82,8 @@ async def lifespan(app: FastAPI):
     scheduler_service = None
     app.state.scheduler_status = {"running": False, "startup_error": ""}
     app.state.telegram_status = {"configured": bool(settings.telegram_bot_token), "running": False, "startup_error": ""}
-    app.state.mcp_status = {"running": False, "startup_error": "", "servers": []}
-    try:
-        from app.skills.mcp_bridge.connection import restart_enabled_mcp_servers
-
-        agent_settings = load_agent_settings(settings)
-        statuses = await asyncio.to_thread(restart_enabled_mcp_servers, agent_settings)
-        app.state.mcp_status = {
-            "running": True,
-            "startup_error": "",
-            "servers": statuses,
-        }
-    except Exception:
-        app.state.mcp_status = {
-            "running": False,
-            "startup_error": "MCP startup failed",
-            "servers": [],
-        }
-        logger.exception("mcp: failed to start enabled servers")
+    app.state.mcp_status = {"running": False, "state": "starting", "startup_error": "", "servers": []}
+    mcp_startup_task = asyncio.create_task(_start_mcp_runtime(app), name="mcp-runtime-startup")
     try:
         from app.agent.scheduler import ScheduledTaskService
         from app.integrations.telegram.agent_bridge import build_runtime_settings
@@ -118,6 +125,7 @@ async def lifespan(app: FastAPI):
         retention_stop.set()
         retention_task.cancel()
         await asyncio.gather(retention_task, return_exceptions=True)
+        await asyncio.gather(mcp_startup_task, return_exceptions=True)
         try:
             from app.skills.mcp_bridge.connection import reset_mcp_runtime
 

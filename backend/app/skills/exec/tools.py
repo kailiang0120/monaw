@@ -82,6 +82,8 @@ def _sandbox_metadata(decision: SandboxDecision, workdir: str) -> dict[str, Any]
         "network": decision.network,
         "network_enforcement": decision.network_enforcement,
         "write_strategy": decision.write_strategy,
+        "requested_shell": decision.requested_shell,
+        "effective_shell": decision.effective_shell,
         "filesystem_policy": decision.filesystem_policy,
         "explicit_approval_required": decision.explicit_approval_required,
         "reason": decision.reason,
@@ -183,6 +185,7 @@ def _pending_access_grant(workdir: str) -> str:
         target_identifier=workdir,
         display_name=workdir,
         action_context=f"Exec in workdir: {workdir}",
+        requested_access="write",
     )
     return json.dumps(
         {
@@ -279,7 +282,7 @@ def _session_unsupported_result(decision: SandboxDecision, sandbox: dict[str, An
 
 def exec_tool(
     command: str,
-    shell: str = "powershell",
+    shell: str = "auto",
     workdir: str = "",
     env: dict[str, str] | None = None,
     timeout: int = 60,
@@ -305,8 +308,9 @@ def exec_tool(
     if not decision.allowed:
         return _blocked_sandbox_result(decision, sandbox_meta)
 
+    effective_shell = decision.effective_shell
     sanitized_env, sandbox_meta = _build_sanitized_env(
-        shell=shell,
+        shell=effective_shell,
         env=env,
         decision=decision,
         sandbox_meta=sandbox_meta,
@@ -316,7 +320,7 @@ def exec_tool(
 
     pending = _permission_check(
         command=command,
-        shell=shell,
+        shell=effective_shell,
         workdir=effective_workdir,
         env=env,
         sandbox=sandbox_meta,
@@ -332,7 +336,7 @@ def exec_tool(
 
     request = SandboxExecutionRequest(
         command=command,
-        shell=shell,  # type: ignore[arg-type]
+        shell=effective_shell,  # type: ignore[arg-type]
         workdir=effective_workdir,
         env=sanitized_env.env,
         timeout=timeout,
@@ -361,7 +365,8 @@ def exec_tool(
         "exec",
         data={
             "command": command,
-            "shell": shell,
+            "shell": effective_shell,
+            "requested_shell": shell,
             "workdir": effective_workdir,
             "timeout": timeout,
             "exit_code": result.exit_code,
@@ -389,7 +394,7 @@ def exec_tool(
 
 def exec_start(
     command: str,
-    shell: str = "powershell",
+    shell: str = "auto",
     workdir: str = "",
     env: dict[str, str] | None = None,
     host: str = "local",
@@ -413,8 +418,9 @@ def exec_start(
     if not decision.allowed:
         return _blocked_sandbox_result(decision, sandbox_meta)
 
+    effective_shell = decision.effective_shell
     sanitized_env, sandbox_meta = _build_sanitized_env(
-        shell=shell,
+        shell=effective_shell,
         env=env,
         decision=decision,
         sandbox_meta=sandbox_meta,
@@ -424,7 +430,7 @@ def exec_start(
 
     pending = _permission_check(
         command=command,
-        shell=shell,
+        shell=effective_shell,
         workdir=effective_workdir,
         env=env,
         sandbox=sandbox_meta,
@@ -444,7 +450,7 @@ def exec_start(
         )
         request = SandboxSessionStartRequest(
             command=command,
-            shell=shell,  # type: ignore[arg-type]
+            shell=effective_shell,  # type: ignore[arg-type]
             workdir=effective_workdir,
             env=sanitized_env.env,
             profile=decision.profile,
@@ -462,7 +468,8 @@ def exec_start(
             "exec_start",
             data={
                 "command": command,
-                "shell": shell,
+                "shell": effective_shell,
+                "requested_shell": shell,
                 "workdir": effective_workdir,
                 "pid": handle.pid,
                 "sandbox_backend": handle.sandbox.get("backend"),
@@ -479,7 +486,8 @@ def exec_start(
                 "status": "running",
                 "command_id": handle.session_id,
                 "pid": handle.pid,
-                "shell": shell,
+                "shell": effective_shell,
+                "requested_shell": shell,
                 "workdir": effective_workdir,
                 "stdout_path": _write_artifact(handle.session_id, "stdout", ""),
                 "stderr_path": _write_artifact(handle.session_id, "stderr", ""),
@@ -493,7 +501,7 @@ def exec_start(
             "exec_start",
             data={
                 "command": command,
-                "shell": shell,
+                "shell": effective_shell,
                 "workdir": effective_workdir,
                 "sandbox_backend": sandbox_meta["backend"],
                 "sandbox_profile": sandbox_meta["profile"],
@@ -560,6 +568,25 @@ def exec_write_stdin(command_id: str, text: str, _bypass_gate: bool = False) -> 
     }
     if not decision.allowed:
         return _blocked_sandbox_result(decision, sandbox)
+    session_backend = str(session.get("backend") or session.get("sandbox", {}).get("backend") or "")
+    if decision.backend != session_backend:
+        return json.dumps(
+            {
+                "status": "blocked",
+                "reason": (
+                    f"The stdin policy selected '{decision.backend}', but the existing session "
+                    f"runs under '{session_backend}'."
+                ),
+                "reason_code": "session_backend_mismatch",
+                "sandbox": {
+                    **sandbox,
+                    "session_backend": session_backend,
+                    "selected_backend": decision.backend,
+                    "reason_code": "session_backend_mismatch",
+                },
+            },
+            ensure_ascii=False,
+        )
     pending = _permission_check(
         command=text,
         shell=session["shell"],
@@ -595,7 +622,7 @@ def _resume_exec(input_str: str) -> str:
     args = _parse_json_object(input_str)
     return exec_tool(
         command=str(args.get("command", "")),
-        shell=str(args.get("shell", "powershell")),
+        shell=str(args.get("shell", "auto")),
         workdir=str(args.get("workdir", "")),
         env=args.get("env") if isinstance(args.get("env"), dict) else {},
         timeout=int(args.get("timeout", 60) or 60),
@@ -612,7 +639,7 @@ def _resume_exec_start(input_str: str) -> str:
     args = _parse_json_object(input_str)
     return exec_start(
         command=str(args.get("command", "")),
-        shell=str(args.get("shell", "powershell")),
+        shell=str(args.get("shell", "auto")),
         workdir=str(args.get("workdir", "")),
         env=args.get("env") if isinstance(args.get("env"), dict) else {},
         host=str(args.get("host", "local")),
@@ -650,8 +677,8 @@ def register_tools(registry, _settings=None) -> None:
                     "command": {"type": "string", "description": "Command to execute."},
                     "shell": {
                         "type": "string",
-                        "enum": ["powershell", "pwsh", "cmd", "bash"],
-                        "default": "powershell",
+                        "enum": ["auto", "powershell", "pwsh", "cmd", "bash"],
+                        "default": "auto",
                     },
                     "workdir": {"type": "string", "default": ""},
                     "env": {"type": "object", "default": {}},
@@ -681,7 +708,7 @@ def register_tools(registry, _settings=None) -> None:
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
-                    "shell": {"type": "string", "enum": ["powershell", "pwsh", "cmd", "bash"], "default": "powershell"},
+                    "shell": {"type": "string", "enum": ["auto", "powershell", "pwsh", "cmd", "bash"], "default": "auto"},
                     "workdir": {"type": "string", "default": ""},
                     "env": {"type": "object", "default": {}},
                     "host": {"type": "string", "enum": ["local"], "default": "local"},

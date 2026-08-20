@@ -7,9 +7,15 @@ import subprocess
 import json
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
-from app.agent.sandbox.models import SandboxBackendCapability, SandboxCapabilities, SandboxStatus
+from app.agent.sandbox.models import (
+    SandboxBackendCapability,
+    SandboxCapabilities,
+    SandboxRunRequest,
+    SandboxStatus,
+)
 from app.agent.settings_store import SandboxSettings
 
 
@@ -100,7 +106,8 @@ def probe_local_restricted(settings: SandboxSettings) -> SandboxBackendCapabilit
 
 
 _CAPABILITY_CACHE_TTL_SECONDS = 30.0
-_capability_cache: dict[str, tuple[float, SandboxCapabilities]] = {}
+_CAPABILITY_CACHE_MAX_ENTRIES = 8
+_capability_cache: OrderedDict[str, tuple[float, SandboxCapabilities]] = OrderedDict()
 _capability_cache_lock = threading.RLock()
 
 
@@ -119,7 +126,10 @@ def probe_capabilities(settings: SandboxSettings) -> SandboxCapabilities:
     with _capability_cache_lock:
         cached = _capability_cache.get(key)
         if cached is not None and now - cached[0] < _CAPABILITY_CACHE_TTL_SECONDS:
+            _capability_cache.move_to_end(key)
             return cached[1]
+        if cached is not None:
+            _capability_cache.pop(key, None)
 
     probed = SandboxCapabilities(
         docker=probe_docker(settings),
@@ -127,6 +137,9 @@ def probe_capabilities(settings: SandboxSettings) -> SandboxCapabilities:
     )
     with _capability_cache_lock:
         _capability_cache[key] = (now, probed)
+        _capability_cache.move_to_end(key)
+        while len(_capability_cache) > _CAPABILITY_CACHE_MAX_ENTRIES:
+            _capability_cache.popitem(last=False)
     return probed
 
 
@@ -136,27 +149,50 @@ def get_sandbox_status(
     capabilities: SandboxCapabilities | None = None,
 ) -> dict[str, Any]:
     probed = capabilities or probe_capabilities(settings)
+    from app.agent.sandbox.policy import SandboxPolicy
+
+    policy = SandboxPolicy(settings, capabilities=probed)
+    probe_workdir = (settings.allowed_bind_roots or [""])[0]
+    representative = policy.decide(
+        SandboxRunRequest(
+            command="printf 'monaw sandbox status probe'",
+            shell="auto",
+            workdir=probe_workdir,
+            profile=settings.default_profile,
+            network=None,
+            write_strategy=settings.default_write_strategy,
+        )
+    )
+    powershell_fallback = policy.decide(
+        SandboxRunRequest(
+            command="Write-Output 'monaw PowerShell fallback probe'",
+            shell="powershell",
+            workdir=probe_workdir,
+            profile="standard",
+            network=None,
+            write_strategy=settings.default_write_strategy,
+        )
+    )
+
+    def _status_backend(decision) -> str:
+        return decision.backend if decision.allowed else "none"
+
     status = SandboxStatus(
         enabled=settings.enabled,
         mode=settings.mode,
         default_profile=settings.default_profile,
         default_network=settings.network.default,
         default_write_strategy=settings.default_write_strategy,
-        selected_backend=(
-            "docker" if probed.docker.available and settings.mode in {"auto", "enforce", "docker"}
-            else "local_restricted" if probed.local_restricted.available and settings.mode in {"auto", "host", "local_restricted"}
-            else "local_direct" if settings.mode == "host"
-            else "none"
-        ),
-        isolation=(
-            "strong" if probed.docker.available and settings.mode in {"auto", "enforce", "docker"}
-            else "advisory" if probed.local_restricted.available and settings.mode in {"auto", "host", "local_restricted"}
-            else "none"
-        ),
-        reason_code=(
-            probed.docker.reason if settings.mode in {"auto", "enforce", "docker"} and not probed.docker.available
-            else ""
-        ),
+        selected_backend=_status_backend(representative),
+        isolation=representative.security_label,
+        reason_code=representative.reason_code,
+        reason=representative.reason,
+        representative_shell=representative.effective_shell,
+        representative_profile=representative.profile,
+        fallback_backend=_status_backend(powershell_fallback),
+        fallback_isolation=powershell_fallback.security_label,
+        fallback_reason_code=powershell_fallback.reason_code,
+        fallback_reason=powershell_fallback.reason,
         backends={
             "docker": probed.docker.model_dump(),
             "local_restricted": probed.local_restricted.model_dump(),

@@ -700,8 +700,10 @@ async def _heartbeat_pump(
     # H4: Use asyncio.wait_for instead of sleep(1) polling so teardown is immediate.
     loop = asyncio.get_running_loop()
     while not stop_event.is_set():
+        deadline = publisher.last_flush[0] + HEARTBEAT_INTERVAL_S
+        timeout = max(0.01, deadline - loop.time())
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=HEARTBEAT_INTERVAL_S)
+            await asyncio.wait_for(stop_event.wait(), timeout=timeout)
             break  # stop_event was set
         except asyncio.TimeoutError:
             pass

@@ -458,11 +458,14 @@ def test_liveness_probe_marks_dead_server_unhealthy_and_publishes_event(monkeypa
         "publish_ui_event",
         lambda event, data: events.append((event, data)),
     )
-    manager = ServerManager(MCPServerConfig(name="dead", command="node"))
+    manager = ServerManager(
+        MCPServerConfig(name="dead", transport="streamable_http", url="http://127.0.0.1:1")
+    )
     manager._stop = asyncio.Event()
     manager.connected = True
     manager.state = "connected"
     manager.liveness_interval_seconds = 0.01
+    manager.liveness_failure_threshold = 3
 
     asyncio.run(manager._probe_liveness(DeadSession()))
 
@@ -474,6 +477,26 @@ def test_liveness_probe_marks_dead_server_unhealthy_and_publishes_event(monkeypa
         event == "mcp.changed" and data["state"] == "unhealthy"
         for event, data in events
     )
+
+
+def test_stdio_liveness_uses_process_check_without_list_tools(monkeypatch):
+    class ExplodingSession:
+        async def list_tools(self):
+            raise AssertionError("stdio liveness must not issue a full tool listing")
+
+    manager = ServerManager(MCPServerConfig(name="stdio-dead", command="node"))
+    manager._stop = asyncio.Event()
+    manager.connected = True
+    manager.state = "connected"
+    manager.liveness_interval_seconds = 0.01
+    manager.liveness_failure_threshold = 1
+    monkeypatch.setattr(manager, "_stdio_process_alive", lambda: False)
+
+    asyncio.run(manager._probe_liveness(ExplodingSession()))
+
+    assert manager.state == "unhealthy"
+    assert manager.unhealthy_reason == "MCP stdio child process is no longer running"
+    assert manager._stop.is_set()
 
 
 def test_stop_current_runtime_preserves_stuck_thread_for_diagnostics():

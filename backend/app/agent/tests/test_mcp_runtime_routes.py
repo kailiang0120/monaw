@@ -53,9 +53,9 @@ def test_get_mcp_diagnostics_endpoint_returns_status(monkeypatch):
                 "unhealthy_reason": None,
                 "description": "Files",
                 "command": "npx",
-                "args": ["-y", "server"],
+                "args": ["-y", "server", "--api-key", "secret"],
                 "cwd": r"C:\Repo",
-                "url": "",
+                "url": "https://example.test/mcp?token=secret&safe=1",
                 "resolved_executable": r"C:\nodejs\npx.cmd",
                 "startup_phase": "ready",
                 "pid": 123,
@@ -90,9 +90,11 @@ def test_get_mcp_diagnostics_endpoint_returns_status(monkeypatch):
     assert payload[0]["startup_phase"] == "ready"
     assert payload[0]["reflected_tool_names"] == ["mcp__filesystem__list_directory"]
     assert payload[0]["command"] == "npx"
-    assert payload[0]["args"] == ["-y", "server"]
+    assert payload[0]["args"] == ["-y", "server", "--api-key", "<redacted>"]
     assert payload[0]["cwd"] == r"C:\Repo"
     assert payload[0]["resolved_executable"] == r"C:\nodejs\npx.cmd"
+    assert "secret" not in str(payload[0]["url"])
+    assert "secret" not in str(payload[0]["args"])
     assert payload[0]["pid"] == 123
     assert payload[0]["stderr_tail"] == ""
     assert "env" not in payload[0]

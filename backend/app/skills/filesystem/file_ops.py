@@ -89,12 +89,19 @@ def _blocked_result(decision) -> str:
     )
 
 
-def _pending_access_grant_result(decision, *, path: str, action_context: str) -> str:
+def _pending_access_grant_result(
+    decision,
+    *,
+    path: str,
+    action_context: str,
+    requested_access: str = "read",
+) -> str:
     ticket = create_grant_ticket(
         target_type="path",
         target_identifier=path,
         display_name=path,
         action_context=action_context or decision.reason,
+        requested_access=requested_access,
     )
     return _json(
         {
@@ -104,6 +111,7 @@ def _pending_access_grant_result(decision, *, path: str, action_context: str) ->
             "target_identifier": ticket.target_identifier,
             "display_name": ticket.display_name,
             "action_context": ticket.action_context,
+            "requested_access": ticket.requested_access,
             "reason": decision.reason,
             "reason_code": decision.reason_code,
             "policy_source": decision.policy_source,
@@ -155,7 +163,18 @@ def _gate_path(
     if decision.blocked:
         return _blocked_result(decision)
     if decision.requires_access_grant:
-        return _pending_access_grant_result(decision, path=target_path, action_context=action_description)
+        requested_access = (
+            "delete" if action == ActionType.DELETE
+            else "write" if action in {ActionType.MUTATE, ActionType.EXEC}
+            else "launch" if action == ActionType.LAUNCH_APP
+            else "read"
+        )
+        return _pending_access_grant_result(
+            decision,
+            path=target_path,
+            action_context=action_description,
+            requested_access=requested_access,
+        )
     if decision.requires_confirmation:
         return _pending_approval_result(
             decision,
@@ -275,6 +294,7 @@ def _revalidate_mutation_target(path: str) -> str | None:
             decision,
             path=str(target.resolved),
             action_context="Revalidate filesystem mutation target",
+            requested_access="write",
         )
     if target.is_symlink:
         return _error("symlink_target_rejected", f"Refusing to mutate a symlink or junction: {target.resolved}")

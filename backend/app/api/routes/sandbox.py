@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 import re
 import shutil
 import subprocess
@@ -21,12 +21,8 @@ async def sandbox_status():
 async def resolve_docker_image(body: SandboxResolveImagePayload):
     image = body.image.strip()
     if any(char.isspace() for char in image) or any(char in image for char in ";&|<>`$\\"):
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=400, detail="Docker image reference contains invalid characters.")
     if shutil.which("docker") is None:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=503, detail="Docker is not installed or not available on PATH.")
 
     try:
@@ -38,12 +34,8 @@ async def resolve_docker_image(body: SandboxResolveImagePayload):
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=504, detail="Docker image pull timed out.") from exc
     if pull.returncode != 0:
-        from fastapi import HTTPException
-
         detail = (pull.stderr or pull.stdout or "Docker image pull failed.").strip().splitlines()[-1]
         raise HTTPException(status_code=502, detail=detail[:500])
 
@@ -56,8 +48,6 @@ async def resolve_docker_image(body: SandboxResolveImagePayload):
     )
     resolved = (inspected.stdout or "").strip().splitlines()[0] if inspected.returncode == 0 else ""
     if not re.fullmatch(r"[^@\s]+@sha256:[0-9a-fA-F]{64}", resolved):
-        from fastapi import HTTPException
-
         detail = (inspected.stderr or "Docker did not return a pinned repository digest.").strip()
         raise HTTPException(status_code=502, detail=detail[:500])
 

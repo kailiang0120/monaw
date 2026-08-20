@@ -145,7 +145,7 @@ def test_format_options_are_not_disk_format_commands(command):
 
 @pytest.mark.parametrize(
     "command",
-    ["format.com E:", "format E:", "Format-Volume -DriveLetter E", "diskpart"],
+    ["format.com E:", "format E:", "format /fs:ntfs D:", "Format-Volume -DriveLetter E", "diskpart"],
 )
 def test_disk_format_commands_remain_blocked(command):
     assert classify_command(command) == "blocked"
@@ -220,6 +220,33 @@ def test_policy_routes_standard_commands_to_docker_when_available():
     assert decision.security_label == "strong"
 
 
+def test_auto_shell_prefers_bash_for_docker_on_windows_or_posix():
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command="echo hello"))
+
+    assert decision.allowed is True
+    assert decision.backend == "docker"
+    assert decision.requested_shell == "auto"
+    assert decision.effective_shell == "bash"
+
+
+def test_explicit_powershell_has_visible_approval_required_fallback_even_in_enforce_mode():
+    settings = AgentSettings()
+    settings.sandbox.mode = "enforce"
+    decision = SandboxPolicy(
+        settings.sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command="Write-Output ok", shell="powershell"))
+
+    assert decision.allowed is True
+    assert decision.backend == "local_restricted"
+    assert decision.effective_shell == "powershell"
+    assert decision.explicit_approval_required is True
+    assert decision.reason_code == "docker_shell_fallback_requires_approval"
+
+
 def test_policy_falls_back_from_docker_for_default_powershell_shell():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
@@ -253,6 +280,9 @@ def test_sandbox_status_reports_backend_capabilities():
     assert status["backends"]["docker"]["security_label"] == "strong"
     assert status["selected_backend"] == "docker"
     assert status["isolation"] == "strong"
+    assert status["representative_shell"] == "bash"
+    assert status["fallback_backend"] == "local_restricted"
+    assert status["fallback_reason_code"] == "docker_shell_fallback_requires_approval"
 
 
 def test_sandbox_status_endpoint_returns_settings_status(monkeypatch):

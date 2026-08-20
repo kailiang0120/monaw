@@ -3,6 +3,7 @@ import os
 import shlex
 import sys
 import time
+from types import SimpleNamespace
 
 from app.agent.sandbox.environment import build_exec_environment
 from app.agent.sandbox.models import SandboxDecision, SandboxSessionStartRequest
@@ -109,6 +110,42 @@ def test_exec_write_stdin_rechecks_command_policy(monkeypatch, tmp_path):
 
     assert blocked["status"] == "blocked"
     assert blocked["reason_code"] == "command_blocked"
+
+
+def test_exec_write_stdin_blocks_policy_backend_mismatch(monkeypatch, tmp_path):
+    class FakeRegistry:
+        def describe(self, _command_id):
+            return {
+                "command_id": "session-1",
+                "shell": "bash",
+                "workdir": str(tmp_path),
+                "backend": "local_restricted",
+                "sandbox": {"backend": "local_restricted"},
+                "expired": False,
+            }
+
+        def write_stdin(self, *_args):
+            raise AssertionError("stdin must not be written after a backend mismatch")
+
+    monkeypatch.setattr(exec_tools, "_SESSION_REGISTRY", FakeRegistry())
+    monkeypatch.setattr(
+        exec_tools,
+        "SandboxPolicy",
+        lambda _settings: SimpleNamespace(
+            decide=lambda _request: SimpleNamespace(
+                allowed=True,
+                backend="docker",
+                reason="docker selected",
+                reason_code="allowed",
+                explicit_approval_required=False,
+            )
+        ),
+    )
+
+    result = json.loads(exec_tools.exec_write_stdin("session-1", "echo unsafe\n"))
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "session_backend_mismatch"
 
 
 def test_exec_start_blocks_enforce_mode_sessions(monkeypatch, tmp_path):

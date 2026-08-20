@@ -24,6 +24,27 @@ def _iter_migrations(migrations_dir: Path) -> list[tuple[int, str, Path]]:
     return sorted(migrations, key=lambda item: item[0])
 
 
+def _iter_sql_statements(script: str):
+    """Yield complete SQLite statements without using executescript.
+
+    ``Connection.executescript`` commits implicitly, which makes a table
+    rebuild impossible to roll back as one migration. SQLite's statement
+    completeness checker handles quoted semicolons while preserving the
+    migration text for ``Connection.execute`` inside our savepoint.
+    """
+    buffer = ""
+    for line in str(script or "").splitlines(keepends=True):
+        buffer += line
+        if not sqlite3.complete_statement(buffer):
+            continue
+        statement = buffer.strip()
+        buffer = ""
+        if statement:
+            yield statement
+    if buffer.strip():
+        yield buffer.strip()
+
+
 def apply_migrations(
     conn: sqlite3.Connection,
     *,
@@ -49,13 +70,22 @@ def apply_migrations(
         if version in applied:
             continue
         sql = path.read_text(encoding="utf-8")
-        conn.executescript(sql)
-        conn.execute(
-            """
-            INSERT INTO schema_migrations (version, name, applied_at)
-            VALUES (?, ?, ?)
-            """,
-            (version, name, datetime.now(timezone.utc).isoformat()),
-        )
+        savepoint = f"migration_{version:04d}"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            for statement in _iter_sql_statements(sql):
+                conn.execute(statement)
+            conn.execute(
+                """
+                INSERT INTO schema_migrations (version, name, applied_at)
+                VALUES (?, ?, ?)
+                """,
+                (version, name, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except Exception:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
         applied_now.append(version)
     return applied_now

@@ -159,6 +159,7 @@ export interface AccessGrantTicket {
   target_identifier: string
   display_name: string
   action_context: string
+  requested_access: 'read' | 'write' | 'delete' | 'launch' | string
   status: string
   created_at: string
   resolved_at: string
@@ -220,6 +221,7 @@ export interface SkillDescriptor {
   load_error: string
   tier: 'internal' | 'recommended' | 'optional'
   recommended: boolean
+  hidden: boolean
 }
 
 export interface MCPServerConfig {
@@ -339,6 +341,7 @@ export interface DiagnosticsSummary {
     runtime_servers: number
     connected_servers: number
     unhealthy_servers: number
+    state?: string
     startup_error?: string
   }
   browser: {
@@ -691,6 +694,7 @@ export interface AgentSettings {
       cpus: number
       pids: number
       max_output_bytes: number
+      max_copy_in_bytes: number
     }
     network: {
       default: 'deny' | 'allow_with_approval' | 'allow'
@@ -790,6 +794,13 @@ export interface SandboxStatus {
   selected_backend: string
   isolation: 'strong' | 'advisory' | 'none' | string
   reason_code: string
+  reason: string
+  representative_shell: string
+  representative_profile: string
+  fallback_backend: string
+  fallback_isolation: string
+  fallback_reason_code: string
+  fallback_reason: string
   backends: Record<string, {
     backend: string
     enabled: boolean
@@ -885,4 +896,5 @@ export interface AccessGrantRequiredEvent {
   target_identifier: string
   display_name: string
   action_context: string
+  requested_access?: 'read' | 'write' | 'delete' | 'launch' | string
 }

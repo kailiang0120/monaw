@@ -1,4 +1,5 @@
 import subprocess
+import json
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -6,6 +7,7 @@ import pytest
 
 from app.agent.sandbox.backends import docker as docker_backend
 from app.agent.sandbox.backends.docker import DockerRunner
+from app.agent.sandbox.path_policy import collect_copy_out
 from app.agent.sandbox.manager import SandboxManager
 from app.agent.settings_store import AgentSettings
 
@@ -128,6 +130,49 @@ def test_docker_copy_out_uses_a_run_workspace(tmp_path):
             shutil.rmtree(mount_source, ignore_errors=True)
 
 
+def test_docker_copy_in_is_bounded_and_skips_symlink_entries(tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.default_write_strategy = "copy_out"
+    (tmp_path / "large.bin").write_bytes(b"12345")
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    request.resources = {"max_copy_in_bytes": 4}
+
+    with pytest.raises(PermissionError, match="copy-in size limit"):
+        DockerRunner(settings.sandbox)._workspace_mount(request, command_id="copy-limit")
+
+
+def test_docker_copy_out_copies_only_changed_or_new_files(tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.default_write_strategy = "copy_out"
+    existing = tmp_path / "existing.txt"
+    existing.write_text("before", encoding="utf-8")
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    runner = DockerRunner(settings.sandbox)
+
+    mount_source, policy, copied = runner._workspace_mount(request, command_id="copy-diff")
+    assert mount_source is not None and policy is not None and copied is True
+    try:
+        (mount_source / "existing.txt").write_text("after", encoding="utf-8")
+        (mount_source / "new.txt").write_text("new", encoding="utf-8")
+        artifacts = collect_copy_out(mount_source, tmp_path, policy)
+        assert {Path(item["destination"]).name for item in artifacts} == {"existing.txt", "new.txt"}
+        assert existing.read_text(encoding="utf-8") == "after"
+    finally:
+        import shutil
+
+        shutil.rmtree(mount_source, ignore_errors=True)
+
+
 def test_auto_mode_selects_docker_when_strong_backend_is_available(monkeypatch):
     settings = AgentSettings()
     settings.sandbox.docker.image = "python@sha256:" + "a" * 64
@@ -204,7 +249,7 @@ def test_docker_timeout_removes_named_container(monkeypatch):
         nonlocal captured_name
         captured_name = command[command.index("--name") + 1]
         kwargs["on_timeout"](SimpleNamespace())
-        return SimpleNamespace(returncode=-9, stdout="", stderr="", timed_out=True)
+        return SimpleNamespace(returncode=-9, stdout="", stderr="", timed_out=True, cancelled=False)
 
     monkeypatch.setattr(docker_backend, "_run_command_capped", fake_run_command)
 

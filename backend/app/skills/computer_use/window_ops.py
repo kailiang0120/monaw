@@ -238,6 +238,7 @@ def _pending_access_grant_result(
     target_identifier: str,
     display_name: str,
     action_context: str,
+    requested_access: str = "read",
 ) -> str:
     """Create an access-grant ticket and return pending_access_grant JSON.
 
@@ -248,6 +249,7 @@ def _pending_access_grant_result(
         target_identifier=target_identifier,
         display_name=display_name or target_identifier,
         action_context=action_context or decision.reason,
+        requested_access=requested_access,
     )
     return json.dumps({
         "status": "pending_access_grant",
@@ -256,6 +258,7 @@ def _pending_access_grant_result(
         "target_identifier": ticket.target_identifier,
         "display_name": ticket.display_name,
         "action_context": ticket.action_context,
+        "requested_access": ticket.requested_access,
     })
 
 
@@ -280,6 +283,7 @@ def _permission_result(
             target_identifier=target_app,
             display_name=target_app,
             action_context=action_desc,
+            requested_access="launch" if action == ActionType.LAUNCH_APP else "read",
         )
     if decision.requires_access_grant and target_path:
         return _pending_access_grant_result(
@@ -288,6 +292,11 @@ def _permission_result(
             target_identifier=target_path,
             display_name=target_path,
             action_context=action_desc,
+            requested_access=(
+                "delete" if action == ActionType.DELETE
+                else "write" if action in {ActionType.MUTATE, ActionType.EXEC, ActionType.CLICK, ActionType.TYPE}
+                else "read"
+            ),
         )
     if decision.requires_confirmation:
         return _pending_approval_result(
@@ -318,6 +327,7 @@ def _cmd_open_folder(folder: str) -> str:
             target_identifier=folder,
             display_name=folder,
             action_context=f"Open folder: {folder}",
+            requested_access="read",
         )
     if dec.requires_confirmation:
         return _pending_approval_result(
@@ -354,6 +364,7 @@ def _cmd_create_folder(folder: str, *, _bypass_gate: bool = False) -> str:
                 target_identifier=folder,
                 display_name=folder,
                 action_context=f"Create folder: {folder}",
+                requested_access="write",
             )
         if dec.requires_confirmation:
             return _pending_approval_result(
@@ -389,6 +400,7 @@ def _cmd_move_item(source: str, destination: str, *, _bypass_gate: bool = False)
                 target_identifier=source,
                 display_name=source,
                 action_context=f"Move (source): {source} → {destination}",
+                requested_access="read",
             )
         if dec2.requires_access_grant:
             return _pending_access_grant_result(
@@ -397,6 +409,7 @@ def _cmd_move_item(source: str, destination: str, *, _bypass_gate: bool = False)
                 target_identifier=destination,
                 display_name=destination,
                 action_context=f"Move (destination): {source} → {destination}",
+                requested_access="write",
             )
         if dec.requires_confirmation or dec2.requires_confirmation:
             return _pending_approval_result(
@@ -434,6 +447,7 @@ def _cmd_copy_item(source: str, destination: str, *, _bypass_gate: bool = False)
                 target_identifier=source,
                 display_name=source,
                 action_context=f"Copy (source): {source} → {destination}",
+                requested_access="read",
             )
         if dec2.requires_access_grant:
             return _pending_access_grant_result(
@@ -442,6 +456,7 @@ def _cmd_copy_item(source: str, destination: str, *, _bypass_gate: bool = False)
                 target_identifier=destination,
                 display_name=destination,
                 action_context=f"Copy (destination): {source} → {destination}",
+                requested_access="write",
             )
         if dec2.requires_confirmation:
             return _pending_approval_result(
@@ -477,6 +492,7 @@ def _cmd_rename_item(source: str, new_name: str, *, _bypass_gate: bool = False) 
                 target_identifier=source,
                 display_name=source,
                 action_context=f"Rename: {source} → {new_name}",
+                requested_access="write",
             )
         if dec.requires_confirmation:
             return _pending_approval_result(
@@ -501,6 +517,7 @@ def _cmd_rename_item(source: str, new_name: str, *, _bypass_gate: bool = False) 
             target_identifier=dest,
             display_name=dest,
             action_context=f"Rename (target path): {source} → {new_name}",
+            requested_access="write",
         )
 
     os.rename(source, dest)
@@ -521,6 +538,7 @@ def _cmd_delete_item(target: str, *, _bypass_gate: bool = False) -> str:
                 target_identifier=target,
                 display_name=target,
                 action_context=f"Delete: {target}",
+                requested_access="delete",
             )
         if dec.requires_confirmation:
             return _pending_approval_result(
@@ -637,6 +655,7 @@ def _uia_open_and_select(folder: str, filename: str) -> str:
             target_identifier=full_sel,
             display_name=full_sel,
             action_context=f"Select in Explorer: {full_sel}",
+            requested_access="read",
         )
 
     if not _uia_available():
@@ -670,6 +689,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
                 target_identifier=alias,
                 display_name=alias,
                 action_context=f"UIA interact with {alias}: {action}",
+                requested_access="read",
             )
         if dec.requires_confirmation:
             return _pending_approval_result(

@@ -65,7 +65,7 @@ def test_available_skill_payload_omits_removed_email_skill():
     names = {item["name"] for item in payload}
 
     assert "email-windows" not in names
-    assert "mcp-bridge" not in names
+    assert next(item for item in payload if item["name"] == "mcp-bridge")["hidden"] is True
     browser = next(item for item in payload if item["name"] == "browser-use")
     assert browser["display_name"] == "Browser automation"
     assert browser["summary"] == "Browse, inspect, and interact with websites using managed or system Chrome."
@@ -84,13 +84,19 @@ def test_available_skill_payload_keeps_recommended_skills():
         "computer-use",
         "web-search",
     }
-    assert not {item["tier"] for item in payload} & {"internal"}
-    assert {item["name"] for item in payload} == {
+    assert {item["name"] for item in payload if not item["hidden"]} == {
         "browser-use",
         "computer-use",
         "scheduling",
         "skill-creator",
         "web-search",
+    }
+    assert {item["name"] for item in payload if item["hidden"]} >= {
+        "core",
+        "exec",
+        "filesystem",
+        "memory",
+        "mcp-bridge",
     }
 
 
@@ -141,6 +147,22 @@ External lookup skill
     assert len(skills) == 1
     assert skills[0].available is False
     assert skills[0].unavailable_reason == "missing_env"
+
+
+def test_malformed_skill_metadata_remains_visible_with_load_error(tmp_path, monkeypatch):
+    skill_dir = tmp_path / "malformed_skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: [unterminated\n", encoding="utf-8")
+    monkeypatch.setattr("app.agent.skill_loader.SKILLS_DIR", tmp_path)
+
+    runtime_settings = build_runtime_namespace(_base_settings(), AgentSettings())
+    payload = available_skill_payload(runtime_settings)
+    malformed = next(item for item in payload if item["name"] == "malformed-skill")
+
+    assert malformed["available"] is False
+    assert malformed["unavailable_reason"] == "load_error"
+    assert malformed["load_error"]
+    assert malformed["hidden"] is False
 
 
 def test_load_tools_isolates_broken_skill(tmp_path, monkeypatch):

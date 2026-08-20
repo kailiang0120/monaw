@@ -71,10 +71,7 @@ class ExecutionGateService:
             pending_event = self.check_pending_status(resolved_output)
             if pending_event is None:
                 return resolved_output, emitted_events
-            if hop == 0:
-                emitted_events = [pending_event]
-            else:
-                emitted_events.append(pending_event)
+            emitted_events.append(pending_event)
             dispatched = registry.dispatch(tool_name, arguments)
             if dispatched is None:
                 return resolved_output, emitted_events
@@ -92,6 +89,17 @@ class ExecutionGateService:
                 else:
                     emitted_events.append(resolution_event)
             resolved_output = next_output
+        if self.check_pending_status(resolved_output) is not None:
+            return (
+                json.dumps(
+                    {
+                        "status": "error",
+                        "reason_code": "gate_hop_limit_exceeded",
+                        "error": "Permission resolution exceeded the maximum gate hop limit.",
+                    }
+                ),
+                emitted_events,
+            )
         return resolved_output, emitted_events
 
     @staticmethod

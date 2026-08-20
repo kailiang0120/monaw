@@ -31,6 +31,7 @@ class SkillCatalogEntry:
     path: Path
     frontmatter: dict[str, Any]
     body: str
+    load_error: str = ""
 
 
 @dataclass(slots=True)
@@ -60,9 +61,11 @@ def _split_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
 
     parts = raw.split("---", 2)
     if len(parts) < 3:
-        return {}, raw.strip()
+        raise ValueError("SKILL.md frontmatter is not closed")
 
     frontmatter = yaml.safe_load(parts[1]) or {}
+    if not isinstance(frontmatter, dict):
+        raise ValueError("SKILL.md frontmatter must be a mapping")
     body = parts[2].strip()
     return frontmatter, body
 
@@ -85,6 +88,16 @@ def _skill_catalog(*, skills_dir: Path | None = None) -> list[SkillCatalogEntry]
             frontmatter, body = _split_frontmatter(skill_md.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("skill=%s metadata read failed: %s", skill_dir.name, exc)
+            catalog.append(
+                SkillCatalogEntry(
+                    slug=skill_dir.name,
+                    name=skill_dir.name.replace("_", "-"),
+                    path=skill_dir,
+                    frontmatter={},
+                    body="",
+                    load_error=str(exc),
+                )
+            )
             continue
         catalog.append(
             SkillCatalogEntry(
@@ -93,6 +106,7 @@ def _skill_catalog(*, skills_dir: Path | None = None) -> list[SkillCatalogEntry]
                 path=skill_dir,
                 frontmatter=frontmatter,
                 body=body,
+                load_error="",
             )
         )
     return catalog
@@ -214,12 +228,16 @@ def discover_skills(
 
         env_ok, env_reason = _env_allowed(frontmatter, settings)
         os_ok = _os_allowed(frontmatter)
-        available = os_ok and env_ok
+        load_error = entry.load_error or _LAST_LOAD_ERRORS.get(name, "")
+        available = os_ok and env_ok and not load_error
         enabled = available and _skill_toggle_enabled(frontmatter, settings, name)
 
         # L2: Log why a skill is unavailable so operators don't have to guess.
         unavailable_reason = ""
-        if not os_ok:
+        if load_error:
+            unavailable_reason = "load_error"
+            logger.info("skill=%s disabled: %s", name, load_error)
+        elif not os_ok:
             unavailable_reason = "unsupported_os"
             logger.info("skill=%s disabled: unsupported OS (%s)", name, CURRENT_OS)
         elif not env_ok:
@@ -241,7 +259,7 @@ def discover_skills(
             enabled=enabled,
             available=available,
             unavailable_reason=unavailable_reason,
-            load_error=_LAST_LOAD_ERRORS.get(name, ""),
+            load_error=load_error,
             tier=_skill_tier(frontmatter),
             recommended=_skill_tier(frontmatter) == "recommended",
         )
@@ -360,8 +378,6 @@ def load_tools(settings, *, skills_dir: Path | None = None) -> tuple[list[SkillS
 def available_skill_payload(settings) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for skill in discover_skills(settings, include_disabled=True):
-        if skill.tier == "internal":
-            continue
         load_error = skill.load_error or _LAST_LOAD_ERRORS.get(skill.name, "")
         payload.append(
             {
@@ -379,6 +395,7 @@ def available_skill_payload(settings) -> list[dict[str, Any]]:
                 "load_error": load_error,
                 "tier": skill.tier,
                 "recommended": skill.recommended,
+                "hidden": skill.tier == "internal",
             }
         )
     return payload

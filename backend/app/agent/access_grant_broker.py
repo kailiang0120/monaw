@@ -24,6 +24,7 @@ import json
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -62,6 +63,7 @@ class AccessGrantTicket(BaseModel):
     target_identifier: str = ""
     display_name: str = ""
     action_context: str = ""
+    requested_access: Literal["read", "write", "delete", "launch"] = "read"
     status: str = "pending"  # pending | granted | denied
     decision: str = ""  # once | session | always | deny
     created_at: str = Field(
@@ -84,6 +86,7 @@ class AccessGrantTicket(BaseModel):
             "target_type": self.target_type,
             "target_identifier": self.target_identifier,
             "action_context": self.action_context,
+            "requested_access": self.requested_access,
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -115,6 +118,7 @@ def create_grant_ticket(
     target_identifier: str = "",
     display_name: str = "",
     action_context: str = "",
+    requested_access: str = "read",
 ) -> AccessGrantTicket:
     """Create a pending access grant ticket."""
     ticket = AccessGrantTicket(
@@ -128,6 +132,7 @@ def create_grant_ticket(
         target_identifier=target_identifier,
         display_name=display_name or target_identifier,
         action_context=action_context,
+        requested_access=(requested_access if requested_access in {"read", "write", "delete", "launch"} else "read"),
     )
     ticket.payload_hash = ticket.compute_hash()
     superseded_ids: list[str] = []
@@ -158,6 +163,7 @@ def create_grant_ticket(
             "target_identifier": ticket.target_identifier,
             "display_name": ticket.display_name,
             "action_context": ticket.action_context,
+            "requested_access": ticket.requested_access,
         },
     )
     for superseded_id in superseded_ids:
@@ -553,35 +559,20 @@ def _persist_permanent_grant(ticket: AccessGrantTicket) -> None:
         roots = list(state.permitted_roots)
         if ticket.target_identifier not in roots:
             roots.append(ticket.target_identifier)
-            update_permitted_roots(roots, new_rule=_path_rule_for_grant(ticket))
+        update_permitted_roots(
+            roots,
+            new_rule=_path_rule_for_grant(ticket),
+            merge_existing_rule=True,
+        )
 
 
 def _path_rule_for_grant(ticket: AccessGrantTicket) -> PathRule:
     """Translate the requested path action into the narrowest permanent rule."""
-
-    context = (ticket.action_context or "").lower()
-    is_delete = any(word in context for word in ("delete", "remove", "trash"))
-    is_write = any(
-        word in context
-        for word in (
-            "write",
-            "mutate",
-            "create",
-            "append",
-            "edit",
-            "copy",
-            "move",
-            "rename",
-            "exec",
-        )
-    ) and not ("source" in context and "copy" in context)
-    is_launch = any(word in context for word in ("launch", "start application"))
-
-    # A source path is read-only; destinations and command workdirs need write
-    # but do not implicitly receive delete permission.
-    if "source" in context and any(word in context for word in ("copy", "move", "rename")):
-        is_write = False
-    read = not is_delete or is_write
+    requested_access = ticket.requested_access
+    is_delete = requested_access == "delete"
+    is_write = requested_access in {"write", "delete"}
+    is_launch = requested_access == "launch"
+    read = requested_access in {"read", "write", "delete"}
     return PathRule(
         path=ticket.target_identifier,
         read=read,

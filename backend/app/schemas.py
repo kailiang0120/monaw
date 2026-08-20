@@ -267,6 +267,7 @@ class SkillDescriptorPayload(BaseModel):
     load_error: str = ""
     tier: str = Field("recommended", pattern="^(internal|recommended|optional)$")
     recommended: bool = True
+    hidden: bool = False
 
 
 class PermissionSettingsPayload(BaseModel):
@@ -287,6 +288,7 @@ class SandboxResourceLimitsPayload(BaseModel):
     cpus: float = Field(1.0, ge=0.1, le=16.0)
     pids: int = Field(128, ge=16, le=4096)
     max_output_bytes: int = Field(1048576, ge=4096, le=104857600)
+    max_copy_in_bytes: int = Field(104857600, ge=1048576, le=1073741824)
 
 
 class SandboxNetworkSettingsPayload(BaseModel):
@@ -485,6 +487,7 @@ class DiagnosticsMcpSummaryPayload(BaseModel):
     runtime_servers: int
     connected_servers: int
     unhealthy_servers: int
+    state: str = ""
     startup_error: str = ""
 
 
@@ -515,6 +518,13 @@ class SandboxStatusPayload(BaseModel):
     selected_backend: str = ""
     isolation: str = "none"
     reason_code: str = ""
+    reason: str = ""
+    representative_shell: str = ""
+    representative_profile: str = "standard"
+    fallback_backend: str = ""
+    fallback_isolation: str = "none"
+    fallback_reason_code: str = ""
+    fallback_reason: str = ""
     backends: dict[str, SandboxBackendCapabilityPayload]
 
 
@@ -651,6 +661,7 @@ class AccessGrantTicketOut(BaseModel):
     target_identifier: str
     display_name: str
     action_context: str
+    requested_access: str = "read"
     status: str
     created_at: str
     expires_at: str = ""
@@ -669,6 +680,7 @@ class AccessGrantEvent(BaseModel):
     target_identifier: str
     display_name: str
     action_context: str
+    requested_access: str = "read"
 
 
 # ── New orchestration event schemas ──────────────────────────────────────────

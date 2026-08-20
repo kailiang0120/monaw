@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import time
 import uuid
@@ -9,6 +8,7 @@ from pathlib import Path
 
 from app.agent.sandbox.process import (
     _format_output,
+    _kill_process_tree,
     _run_command_capped,
     _write_script,
     shell_command,
@@ -69,9 +69,10 @@ class LocalRestrictedRunner:
                 command,
                 request,
                 popen_kwargs=popen_kwargs,
-                on_timeout=self._kill_process_tree,
-                on_cancel=self._kill_process_tree,
+                on_timeout=_kill_process_tree,
+                on_cancel=_kill_process_tree,
             )
+            cancelled = bool(completed.cancelled)
 
             duration_ms = int((time.monotonic() - started_at) * 1000)
             raw_stdout = completed.stdout or ""
@@ -108,7 +109,7 @@ class LocalRestrictedRunner:
                 exit_code=completed.returncode,
                 duration_ms=duration_ms,
                 timed_out=completed.timed_out,
-                cancelled=bool(getattr(completed, "cancelled", False)),
+                cancelled=cancelled,
                 command_id=command_id,
                 stdout=stdout,
                 stderr=stderr,
@@ -121,7 +122,7 @@ class LocalRestrictedRunner:
                 sandbox=metadata,
                 error=(
                     "Command cancelled."
-                    if bool(getattr(completed, "cancelled", False))
+                    if cancelled
                     else "Command timed out." if completed.timed_out else ""
                 ),
             )
@@ -140,21 +141,3 @@ class LocalRestrictedRunner:
                     Path(script_path).unlink(missing_ok=True)
                 except Exception:
                     pass
-
-    def _kill_process_tree(self, proc: subprocess.Popen[str]) -> None:
-        if proc.poll() is not None:
-            return
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            return
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
-        except Exception:
-            proc.kill()

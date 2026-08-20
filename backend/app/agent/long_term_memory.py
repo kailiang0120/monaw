@@ -1029,7 +1029,7 @@ class LongTermMemory:
         else:
             exact_score = 1.0 if query.lower() in document.haystack else 0.0
             overlap = query_tokens & document.tokens
-            token_score = len(overlap) / max(1, len(document.tokens))
+            token_score = (2.0 * len(overlap)) / max(1, len(query_tokens) + len(document.tokens))
 
         category_score = 1.0 if document.category in query_tokens else 0.0
         lexical_score = exact_score * 0.35 + token_score * 0.35 + category_score * 0.05
@@ -2314,14 +2314,6 @@ class LongTermMemory:
     ) -> str:
         now = _now()
         audit_id = f"audit-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{_slug(action, 'event')}"
-        meta = {
-            "id": audit_id,
-            "action": str(action or "").upper(),
-            "reason": reason,
-            "memory_id": _safe_id(str(memory_id)) if memory_id is not None else "",
-            "source_conversation_id": source_conversation_id,
-            "created_at": now,
-        }
         normalized_action = str(action or "").upper()
         try:
             with self._lock:

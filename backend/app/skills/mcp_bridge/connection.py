@@ -132,7 +132,9 @@ class ServerManager:
         self._liveness_task: asyncio.Task | None = None
         self._lifecycle_lock = threading.RLock()
         self._last_event_signature: tuple[Any, ...] | None = None
-        self.liveness_interval_seconds = 5.0
+        self.liveness_interval_seconds = 30.0
+        self.liveness_failure_threshold = 3
+        self._liveness_failures = 0
         self._child_pids_before_start: set[int] = set()
 
     def start(self) -> bool:
@@ -460,6 +462,7 @@ class ServerManager:
             self.pid = self._find_child_pid()
             self.last_error = ""
             self.unhealthy_reason = ""
+            self._liveness_failures = 0
             self._ready.set()
             self._publish_changed()
             assert self._stop is not None
@@ -508,10 +511,9 @@ class ServerManager:
     async def _probe_liveness(self, session: Any) -> None:
         """Detect a child or transport that died without a tool call.
 
-        ``list_tools`` is the MCP-level health check and is safe for both
-        stdio and streamable HTTP transports. The probe owns no reconnect
-        policy: it records an unhealthy transition and lets the next call or
-        explicit UI reconnect decide whether to restart the server.
+        Stdio servers use a cheap child-process check; remote transports use
+        ``list_tools``. Transient failures must recur before the manager is
+        torn down so a brief network hiccup does not flap the runtime.
         """
 
         assert self._stop is not None
@@ -526,9 +528,21 @@ class ServerManager:
 
             if not self.connected:
                 return
+            if self.cfg.transport == "stdio":
+                if self._stdio_process_alive():
+                    self._liveness_failures = 0
+                    self.last_error = ""
+                    self.unhealthy_reason = ""
+                    continue
+                if self._record_liveness_failure("MCP stdio child process is no longer running"):
+                    return
+                continue
             try:
                 response = await asyncio.wait_for(session.list_tools(), timeout=timeout)
                 tools = list(getattr(response, "tools", []) or [])
+                self._liveness_failures = 0
+                self.last_error = ""
+                self.unhealthy_reason = ""
                 if len(tools) != self.tool_count:
                     self.tools = tools
                     self.tool_count = len(tools)
@@ -536,9 +550,35 @@ class ServerManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._mark_unhealthy(f"MCP liveness check failed: {exc}")
-                self._stop.set()
-                return
+                if self._record_liveness_failure(f"MCP liveness check failed: {exc}"):
+                    return
+
+    def _stdio_process_alive(self) -> bool:
+        """Return a best-effort process liveness result for stdio MCP."""
+        if self.pid is None:
+            # The SDK does not expose its child PID on every platform. In
+            # that case avoid turning a missing diagnostic handle into a
+            # false unhealthy transition.
+            return True
+        try:
+            import psutil
+
+            process = psutil.Process(self.pid)
+            return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+        except Exception:
+            return False
+
+    def _record_liveness_failure(self, reason: str) -> bool:
+        self._liveness_failures += 1
+        self.last_error = reason
+        self.unhealthy_reason = ""
+        self._publish_changed()
+        if self._liveness_failures < self.liveness_failure_threshold:
+            return False
+        self._mark_unhealthy(reason)
+        assert self._stop is not None
+        self._stop.set()
+        return True
 
     def _publish_changed(self) -> None:
         status = self.status()

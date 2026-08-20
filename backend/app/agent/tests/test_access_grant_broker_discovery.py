@@ -15,6 +15,7 @@ from app.agent.access_grant_broker import (
     _resume_events,
     cleanup_resume,
     create_grant_ticket,
+    _path_rule_for_grant,
     get_resume_decision,
     register_pending_resume,
     resolve_grant,
@@ -70,6 +71,29 @@ def test_create_grant_ticket_inherits_current_conversation_context():
         reset_current_conversation_id(token)
 
     assert ticket.conversation_id == "conv-grant"
+
+
+def test_permanent_path_rule_uses_structured_access_not_action_prose():
+    patch_ticket = create_grant_ticket(
+        target_type="path",
+        target_identifier="C:/workspace/patch-write.txt",
+        action_context="Patch file: C:/workspace/patch-write.txt",
+        requested_access="write",
+    )
+    delete_ticket = create_grant_ticket(
+        target_type="path",
+        target_identifier="C:/workspace/write-target.txt",
+        action_context="Read a file whose name contains write",
+        requested_access="delete",
+    )
+
+    patch_rule = _path_rule_for_grant(patch_ticket)
+    delete_rule = _path_rule_for_grant(delete_ticket)
+
+    assert patch_ticket.requested_access == "write"
+    assert patch_rule.write is True
+    assert patch_rule.delete is False
+    assert delete_rule.delete is True
 
 
 def test_non_interactive_grant_ticket_cannot_create_persistent_grant():

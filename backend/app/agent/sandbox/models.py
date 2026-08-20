@@ -13,11 +13,12 @@ SandboxSecurityLabel = Literal["none", "compat", "advisory", "medium", "strong"]
 SandboxNetworkMode = Literal["deny", "allow"]
 SandboxNetworkEnforcement = Literal["none", "advisory", "enforced"]
 SandboxWriteStrategy = Literal["discard", "copy_out", "direct_rw"]
+SandboxShell = Literal["auto", "powershell", "pwsh", "cmd", "bash"]
 
 
 class SandboxRunRequest(BaseModel):
     command: str
-    shell: Literal["powershell", "pwsh", "cmd", "bash"] = "powershell"
+    shell: SandboxShell = "auto"
     workdir: str = ""
     env: dict[str, str] = Field(default_factory=dict)
     timeout: int = 60
@@ -165,6 +166,8 @@ class SandboxDecision(BaseModel):
     network: SandboxNetworkMode
     network_enforcement: SandboxNetworkEnforcement
     write_strategy: SandboxWriteStrategy
+    requested_shell: str = "auto"
+    effective_shell: str = "powershell"
     filesystem_policy: str = "none"
     explicit_approval_required: bool = False
     reason: str = ""
@@ -180,4 +183,11 @@ class SandboxStatus(BaseModel):
     selected_backend: str = ""
     isolation: str = "none"
     reason_code: str = ""
+    reason: str = ""
+    representative_shell: str = ""
+    representative_profile: str = "standard"
+    fallback_backend: str = ""
+    fallback_isolation: str = "none"
+    fallback_reason_code: str = ""
+    fallback_reason: str = ""
     backends: dict[str, dict]

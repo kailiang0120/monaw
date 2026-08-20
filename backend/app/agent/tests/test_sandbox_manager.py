@@ -297,6 +297,19 @@ def test_auto_manager_uses_the_policy_selected_advisory_runner():
     assert result.sandbox["backend"] == "local_restricted"
 
 
+def test_manager_rejects_request_backend_that_disagrees_with_policy():
+    request = _request()
+    request.backend = "docker"
+    result = SandboxManager(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=False, local=True),
+    ).run(request)
+
+    assert result.status == "blocked"
+    assert result.reason_code == "sandbox_backend_mismatch"
+    assert result.sandbox["selected_backend"] == "local_restricted"
+
+
 def test_enforce_strong_does_not_accept_advisory_backend():
     settings = AgentSettings()
     settings.sandbox.mode = "enforce"

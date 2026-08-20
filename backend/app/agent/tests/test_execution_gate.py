@@ -113,6 +113,32 @@ def test_handle_pending_tool_output_returns_pending_event_for_unknown_tool():
     assert events == [{"event": "approval_required", "data": {"ticket_id": "missing", "action": "", "reason": ""}}]
 
 
+def test_handle_pending_tool_output_errors_when_gate_hops_are_exhausted():
+    service = ExecutionGateService()
+    registry = ToolRegistry()
+    registry.register({"name": "looping_tool", "callable": lambda **_kwargs: json.dumps({"status": "pending_approval", "ticket_id": "loop"})})
+
+    async def always_pending(**_kwargs):
+        yield {"_result": json.dumps({"status": "pending_approval", "ticket_id": "loop"})}
+
+    service.await_ticket_resolution = always_pending  # type: ignore[method-assign]
+
+    resolved_output, _events = asyncio.run(
+        service.handle_pending_tool_output(
+            tool_output=json.dumps({"status": "pending_approval", "ticket_id": "loop"}),
+            tool_name="looping_tool",
+            arguments={},
+            registry=registry,
+            budget=IterationBudget(max_iterations=1),
+            execute_tool=_fake_execute_tool,
+        )
+    )
+
+    result = json.loads(resolved_output)
+    assert result["status"] == "error"
+    assert result["reason_code"] == "gate_hop_limit_exceeded"
+
+
 def test_await_ticket_resolution_returns_denied_when_user_rejects():
     service = ExecutionGateService()
     signal_approval_resume("ticket-denied", "rejected")

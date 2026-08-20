@@ -761,8 +761,8 @@ export function SettingsModal({
         ...PERMISSION_PROFILES[draft.permissions.mode],
       }
   const skillGroups = {
-    recommended: draft.available_skills.filter((skill) => skill.tier === 'recommended'),
-    optional: draft.available_skills.filter((skill) => skill.tier === 'optional'),
+    recommended: draft.available_skills.filter((skill) => !skill.hidden && skill.tier === 'recommended'),
+    optional: draft.available_skills.filter((skill) => !skill.hidden && skill.tier === 'optional'),
   }
   const browserSkillEnabled = !!draft.tools.skills['browser-use'] && (browserSkill?.available ?? true)
   const mcpFeatureEnabled = !!draft.mcp.enabled
@@ -1967,6 +1967,15 @@ export function SettingsModal({
                             {sandboxStatus?.selected_backend || 'Checking…'} · {sandboxStatus?.isolation || 'unknown'} isolation
                             {sandboxStatus?.reason_code ? ` · ${sandboxStatus.reason_code}` : ''}
                           </p>
+                          {sandboxStatus?.reason && (
+                            <p className="st-desc mt-1">{sandboxStatus.reason}</p>
+                          )}
+                          {sandboxStatus?.fallback_backend && sandboxStatus.fallback_backend !== sandboxStatus.selected_backend && (
+                            <p className="st-desc mt-1">
+                              PowerShell fallback: {sandboxStatus.fallback_backend} · {sandboxStatus.fallback_isolation}
+                              {sandboxStatus.fallback_reason_code ? ` · ${sandboxStatus.fallback_reason_code}` : ''}
+                            </p>
+                          )}
                         </div>
                         <div className="st-row-control-auto">
                           <Badge tone={sandboxStatus?.isolation === 'strong' ? 'ok' : 'warn'}>

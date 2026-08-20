@@ -57,6 +57,7 @@ export interface AccessGrantNotice {
   target_identifier: string
   display_name: string
   action_context: string
+  requested_access?: string
 }
 
 export interface Message {
@@ -486,6 +487,7 @@ export function useChat(conversationId: string | null) {
           target_identifier: data.target_identifier,
           display_name: data.display_name,
           action_context: data.action_context,
+          requested_access: data.requested_access,
         })
       }
 

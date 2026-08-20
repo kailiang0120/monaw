@@ -5,8 +5,8 @@ Monaw classifies each shell command before starting a process. The decision reco
 ## Modes
 
 - `off` / `disabled`: shell execution is disabled.
-- `auto`: Docker is preferred for normal and untrusted commands. If Docker is unavailable, normal commands use the advisory host runner and untrusted commands use that runner only after an explicit approval.
-- `enforce`: every command requires Docker; an unavailable or unpinned image returns `sandbox_backend_unavailable` or `docker_image_not_pinned`.
+- `auto`: Docker is preferred for normal and untrusted commands. `shell=auto` chooses bash for Docker-compatible commands; PowerShell/cmd syntax uses the advisory host runner only after an explicit approval.
+- `enforce`: Docker is required for Docker-compatible commands; an unavailable or unpinned image returns `sandbox_backend_unavailable` or `docker_image_not_pinned`. An explicitly requested non-bash shell is surfaced as an approval-required host fallback.
 - `host`: use the host runner with an explicit approval and no-isolation warning.
 - `docker`: require Docker explicitly.
 - `local_restricted`: use the advisory host runner with process-group cleanup and an explicit approval.
@@ -23,7 +23,7 @@ The shipped Docker image is pinned as `python:3.12-slim@sha256:<64-hex-digest>`.
 
 ## Workspace and writes
 
-The agent workspace is an allowed bind root by default. `direct_rw` mounts the effective workdir read-write. `copy_out` executes in a temporary run workspace and safely copies files back after the command, subject to the configured bind-root and copy-size policy. `discard` does not expose a host workdir to the container.
+The agent workspace is an allowed bind root by default. `direct_rw` mounts the effective workdir read-write. `copy_out` executes in a temporary run workspace and safely copies only changed/new files back after the command, subject to configured bind-root, copy-in, and copy-out size limits. `discard` does not expose a host workdir to the container.
 
 ## Sessions
 
@@ -36,4 +36,4 @@ Subprocesses receive a minimal environment allowlist. Secret-looking explicit va
 - `sandbox_backend_unavailable`: install/start Docker, resolve a pinned image, or choose host mode and approve the run.
 - `docker_image_not_pinned`: use **Resolve & pull** in Settings or enter an immutable `name@sha256:<digest>` reference.
 - `shell_execution_disabled`: change the mode from `off` only if shell execution is intended.
-- `unsupported_shell_for_backend`: Docker currently supports `bash` commands only.
+- `unsupported_shell_for_backend`: a defensive runner error; normal `shell=auto` policy resolves Docker commands to bash or reports an approval-required host fallback.

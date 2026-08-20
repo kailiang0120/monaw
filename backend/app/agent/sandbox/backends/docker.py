@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import time
 import uuid
+import os
 from pathlib import Path
 
 from app.agent.sandbox.process import _format_output, _run_command_capped
@@ -64,22 +65,53 @@ class DockerRunner:
             return workdir, None, False
 
         run_workspace = create_run_workspace(command_id)
-        for source in workdir.rglob("*"):
-            relative = source.relative_to(workdir)
-            target = run_workspace / relative
-            if source.is_symlink():
-                raise PermissionError(f"Symlink copy-in is not allowed: {source}")
-            if source.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif source.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-        policy = SandboxPathPolicy.from_strings(
-            allowed_input_roots=[str(workdir)],
-            allowed_output_roots=[str(workdir)],
-            max_copy_out_bytes=int((request.resources or {}).get("max_output_bytes") or 104857600),
+        initial_files: dict[str, tuple[int, int]] = {}
+        total_bytes = 0
+        max_copy_in_bytes = int(
+            (request.resources or {}).get("max_copy_in_bytes")
+            or self.settings.resources.max_copy_in_bytes
+            or 104857600
         )
-        return run_workspace, policy, True
+        try:
+            for root, directories, filenames in os.walk(workdir, followlinks=False):
+                root_path = Path(root)
+                directories[:] = [
+                    name for name in directories if not (root_path / name).is_symlink()
+                ]
+                for filename in filenames:
+                    source = root_path / filename
+                    if source.is_symlink() or not source.is_file():
+                        continue
+                    stat = source.stat()
+                    total_bytes += stat.st_size
+                    if total_bytes > max_copy_in_bytes:
+                        raise PermissionError(
+                            f"Sandbox copy-in size limit exceeded ({max_copy_in_bytes} bytes)"
+                        )
+                    relative = source.relative_to(workdir)
+                    target = run_workspace / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                    initial_files[str(relative).replace(os.sep, "/")] = (
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                    )
+            policy = SandboxPathPolicy.from_strings(
+                allowed_input_roots=[str(workdir)],
+                allowed_output_roots=[str(workdir)],
+                max_copy_out_bytes=int((request.resources or {}).get("max_output_bytes") or 104857600),
+                max_copy_in_bytes=max_copy_in_bytes,
+                initial_files=initial_files,
+            )
+            # The staging workspace is the command's writable copy. The
+            # input/output marker directories are implementation details and
+            # must not be copied back to the user's workdir.
+            shutil.rmtree(run_workspace / "input", ignore_errors=True)
+            shutil.rmtree(run_workspace / "output", ignore_errors=True)
+            return run_workspace, policy, True
+        except Exception:
+            shutil.rmtree(run_workspace, ignore_errors=True)
+            raise
 
     def docker_command(
         self,
@@ -218,6 +250,7 @@ class DockerRunner:
                 request,
                 container_name=container_name,
                 mount_source=mount_source,
+                mount_read_only=bool(request.copy_policy.get("mount_read_only", False)),
             )
             completed = _run_command_capped(
                 command,
@@ -227,6 +260,7 @@ class DockerRunner:
                 use_request_cwd=False,
                 use_request_env=False,
             )
+            cancelled = bool(completed.cancelled)
             duration_ms = int((time.monotonic() - started_at) * 1000)
             raw_stdout = completed.stdout or ""
             raw_stderr = completed.stderr or ""
@@ -268,7 +302,7 @@ class DockerRunner:
                 exit_code=completed.returncode,
                 duration_ms=duration_ms,
                 timed_out=completed.timed_out,
-                cancelled=bool(getattr(completed, "cancelled", False)),
+                cancelled=cancelled,
                 command_id=command_id,
                 stdout=stdout,
                 stderr=stderr,
@@ -281,7 +315,7 @@ class DockerRunner:
                 sandbox=metadata,
                 error=(
                     "Command cancelled."
-                    if bool(getattr(completed, "cancelled", False))
+                    if cancelled
                     else "Command timed out." if completed.timed_out else ""
                 ),
             )

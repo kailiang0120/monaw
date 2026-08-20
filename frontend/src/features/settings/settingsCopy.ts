@@ -228,12 +228,12 @@ export const OVERRIDE_COPY = {
 
 export const SANDBOX_COPY = {
   intro: 'When the agent runs a shell command, the sandbox decides how much of your machine that command can see and touch.',
-  enabled: 'Master switch. When off, commands run directly on your machine with no isolation.',
+  enabled: 'Master switch. When off, shell commands are blocked.',
   mode: 'How strictly commands are isolated.',
   modeHelp: {
     off: 'The agent cannot run shell commands at all.',
     auto: 'Use the strongest isolation available, and fall back if it is not installed.',
-    enforce: 'Refuse to run anything unless strong isolation (Docker) is available.',
+    enforce: 'Require Docker for Docker-compatible commands; incompatible shell requests show an approval-required host fallback.',
     host: 'Run directly on your machine, asking for approval first.',
     docker: 'Always run inside a Docker container.',
     local_restricted: 'Run on your machine with limits that are best-effort only.',

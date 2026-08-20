@@ -72,6 +72,7 @@ class LocalDirectRunner:
                 on_timeout=_kill_process_tree,
                 on_cancel=_kill_process_tree,
             )
+            cancelled = bool(completed.cancelled)
             duration_ms = int((time.monotonic() - started_at) * 1000)
             raw_stdout = completed.stdout or ""
             raw_stderr = completed.stderr or ""
@@ -107,7 +108,7 @@ class LocalDirectRunner:
                 exit_code=completed.returncode,
                 duration_ms=duration_ms,
                 timed_out=completed.timed_out,
-                cancelled=bool(getattr(completed, "cancelled", False)),
+                cancelled=cancelled,
                 command_id=command_id,
                 stdout=stdout,
                 stderr=stderr,
@@ -120,7 +121,7 @@ class LocalDirectRunner:
                 sandbox=metadata,
                 error=(
                     "Command cancelled."
-                    if bool(getattr(completed, "cancelled", False))
+                    if cancelled
                     else "Command timed out." if completed.timed_out else ""
                 ),
             )

@@ -71,6 +71,7 @@ def _prune_files(
     *,
     max_age_days: int = RETENTION_DAYS,
     max_total_bytes: int = MAX_DIAGNOSTIC_BYTES,
+    count_key: str = "diagnostic_files_deleted",
 ) -> dict[str, int]:
     cutoff = 0.0 if int(max_age_days) <= 0 else time.time() - int(max_age_days) * 24 * 60 * 60
     files: list[tuple[Path, float, int]] = []
@@ -100,7 +101,7 @@ def _prune_files(
                 break
             deleted += _delete_file(path)
             total -= size
-    return {"diagnostic_files_deleted": deleted}
+    return {count_key: deleted}
 
 
 def _rotate_backend_log() -> dict[str, int]:
@@ -158,10 +159,12 @@ def _diagnostic_roots() -> list[Path]:
         RUNTIME_DIR / "harness_logs",
         RUNTIME_DIR / "mcp",
         RUNTIME_DIR / "mcp_bridge",
-        RUNTIME_DIR / "exec",
-        RUNTIME_DIR / "sandbox",
         RUNTIME_DIR / "policy",
     ]
+
+
+def _artifact_roots() -> list[Path]:
+    return [RUNTIME_DIR / "exec", RUNTIME_DIR / "sandbox"]
 
 
 def _artifact_retention_days() -> int:
@@ -192,7 +195,14 @@ def enforce_runtime_retention() -> dict[str, int]:
     }
     get_observability_recorder().enforce_retention()
     counts.update(_rotate_backend_log())
-    counts.update(_prune_files(_diagnostic_roots(), max_age_days=artifact_days))
+    counts.update(_prune_files(_diagnostic_roots(), max_age_days=RETENTION_DAYS))
+    counts.update(
+        _prune_files(
+            _artifact_roots(),
+            max_age_days=artifact_days,
+            count_key="artifact_files_deleted",
+        )
+    )
     counts.update(_delete_stale_database_backups())
     memory = get_long_term_memory()
     memory_retention = getattr(memory, "enforce_retention", None)
@@ -218,6 +228,14 @@ def delete_runtime_data() -> dict[str, object]:
     for path in RUNTIME_DIR.glob("backend.log*"):
         deleted["backend_logs_deleted"] += _delete_file(path)
     deleted.update(_prune_files(_diagnostic_roots(), max_age_days=0, max_total_bytes=0))
+    deleted.update(
+        _prune_files(
+            _artifact_roots(),
+            max_age_days=0,
+            max_total_bytes=0,
+            count_key="artifact_files_deleted",
+        )
+    )
     publish_ui_event("privacy.data_deleted", {"deleted": deleted})
     publish_ui_event("observability.changed", {"reason": "data_deleted"})
     publish_ui_event("memory.changed", {"reason": "data_deleted"})

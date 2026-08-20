@@ -157,6 +157,7 @@ export default function App() {
         target_identifier: ticket.target_identifier,
         display_name: ticket.display_name,
         action_context: ticket.action_context,
+        requested_access: ticket.requested_access,
       })
     } catch {
       // Event-driven refresh should never interrupt the chat UI.

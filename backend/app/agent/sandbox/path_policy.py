@@ -22,6 +22,8 @@ class SandboxPathPolicy:
     allowed_input_roots: list[Path] = field(default_factory=list)
     allowed_output_roots: list[Path] = field(default_factory=list)
     max_copy_out_bytes: int = 1048576
+    max_copy_in_bytes: int = 104857600
+    initial_files: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @classmethod
     def from_strings(
@@ -30,11 +32,15 @@ class SandboxPathPolicy:
         allowed_input_roots: Iterable[str] = (),
         allowed_output_roots: Iterable[str] = (),
         max_copy_out_bytes: int = 1048576,
+        max_copy_in_bytes: int = 104857600,
+        initial_files: dict[str, tuple[int, int]] | None = None,
     ) -> "SandboxPathPolicy":
         return cls(
             allowed_input_roots=[canonical_path(root) for root in allowed_input_roots],
             allowed_output_roots=[canonical_path(root) for root in allowed_output_roots],
             max_copy_out_bytes=max_copy_out_bytes,
+            max_copy_in_bytes=max_copy_in_bytes,
+            initial_files=dict(initial_files or {}),
         )
 
 
@@ -80,6 +86,8 @@ def copy_in_file(source: str | Path, workspace: str | Path, policy: SandboxPathP
         ensure_allowed_path(resolved, policy.allowed_input_roots, purpose="input")
     if not source_path.is_file():
         raise FileNotFoundError(str(source_path))
+    if source_path.stat().st_size > policy.max_copy_in_bytes:
+        raise PermissionError("Sandbox copy-in size limit exceeded")
     target = canonical_path(workspace) / "input" / source_path.name
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, target)
@@ -97,10 +105,14 @@ def collect_copy_out(output_dir: str | Path, destination: str | Path, policy: Sa
         if not path.is_file():
             continue
         size = path.stat().st_size
+        relative = path.relative_to(source_root)
+        baseline = policy.initial_files.get(str(relative).replace("\\", "/"))
+        stat = path.stat()
+        if baseline == (stat.st_size, stat.st_mtime_ns):
+            continue
         total_bytes += size
         if total_bytes > policy.max_copy_out_bytes:
             raise PermissionError("Sandbox copy-out size limit exceeded")
-        relative = path.relative_to(source_root)
         target = destination_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)

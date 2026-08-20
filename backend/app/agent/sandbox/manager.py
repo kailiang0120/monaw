@@ -62,7 +62,17 @@ class SandboxManager:
                     write_strategy=str(request.copy_policy.get("write_strategy") or "") or None,
                 )
             )
-        selected_backend = request.backend or (decision.backend if decision.allowed else "none")
+        selected_backend = decision.backend if decision.allowed else "none"
+        if request.backend and request.backend != selected_backend:
+            return self._blocked_result(
+                request,
+                backend=selected_backend,
+                reason=(
+                    f"Requested backend '{request.backend}' does not match the sandbox policy "
+                    f"decision '{selected_backend}'."
+                ),
+                reason_code="sandbox_backend_mismatch",
+            )
         if not decision.allowed:
             return self._blocked_result(
                 request,

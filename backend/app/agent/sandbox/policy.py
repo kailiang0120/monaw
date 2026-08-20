@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 
 from app.agent.sandbox.capabilities import probe_capabilities
@@ -43,8 +44,7 @@ _HOST_REQUIRED_PATTERNS = [
 ]
 
 _BLOCKED_PATTERNS = [
-    r"(?:\bformat\.com\b|\bformat\s+[A-Za-z]:|\bFormat-Volume\b|\bdiskpart\b)",
-    r"\bdiskpart\b",
+    r"(?:\bformat\.com\b|\bformat\s+(?:/fs:\w+\s+)?[A-Za-z]:|\bFormat-Volume\b|\bdiskpart\b)",
     r"\bbcdedit\b",
     r"\btakeown\b",
     r"\bicacls\b\s+[A-Za-z]:\\",
@@ -104,21 +104,24 @@ class SandboxPolicy:
             reason = "No strong sandbox backend is available for this command"
             if profile == "host_required":
                 reason = "Host-required commands need explicit host mode"
-            return self._blocked(profile, network, write_strategy, reason, "sandbox_backend_unavailable")
+            return self._blocked(
+                profile,
+                network,
+                write_strategy,
+                reason,
+                "sandbox_backend_unavailable",
+                requested_shell=request.shell,
+                effective_shell=self._effective_shell(request, None, profile),
+            )
 
-        # The pinned Python image exposes a bash entrypoint only. Keep
-        # Windows' default PowerShell path usable in auto/host modes while
-        # explicit strong-sandbox modes fail closed instead of weakening
-        # isolation silently.
-        if backend == "docker" and request.shell.lower() != "bash":
-            if backend_mode in {"docker", "enforce"}:
-                return self._blocked(
-                    profile,
-                    network,
-                    write_strategy,
-                    "The Docker sandbox currently supports bash commands only",
-                    "unsupported_shell_for_backend",
-                )
+        effective_shell = self._effective_shell(request, backend, profile)
+        shell_fallback = False
+        if backend == "docker" and effective_shell != "bash":
+            # Docker's pinned image has a bash entrypoint. An automatic
+            # request chooses bash when possible; an explicit Windows shell
+            # is routed to the advisory host runner with a visible approval
+            # requirement instead of silently executing on the host.
+            shell_fallback = True
             backend = (
                 "local_restricted"
                 if self.capabilities.local_restricted.available
@@ -138,10 +141,21 @@ class SandboxPolicy:
                 network=network,
                 network_enforcement="none",
                 write_strategy=write_strategy,
+                requested_shell=request.shell,
+                effective_shell=effective_shell,
                 filesystem_policy="host",
                 explicit_approval_required=True,
-                reason="This command will run directly on the host without isolation",
-                reason_code="host_execution_approval_required",
+                reason=(
+                    "Docker supports bash only; this command will run directly on the host "
+                    "after explicit approval"
+                    if shell_fallback
+                    else "This command will run directly on the host without isolation"
+                ),
+                reason_code=(
+                    "docker_shell_fallback_requires_approval"
+                    if shell_fallback
+                    else "host_execution_approval_required"
+                ),
             )
 
         capability = self.capabilities.for_backend(backend)
@@ -174,10 +188,21 @@ class SandboxPolicy:
                 network=network,
                 network_enforcement="advisory",
                 write_strategy=write_strategy,
+                requested_shell=request.shell,
+                effective_shell=effective_shell,
                 filesystem_policy="host",
                 explicit_approval_required=True,
-                reason="This command will use the advisory host runner",
-                reason_code="host_execution_approval_required",
+                reason=(
+                    "Docker supports bash only; this command will use the advisory host runner "
+                    "after explicit approval"
+                    if shell_fallback
+                    else "This command will use the advisory host runner"
+                ),
+                reason_code=(
+                    "docker_shell_fallback_requires_approval"
+                    if shell_fallback
+                    else "host_execution_approval_required"
+                ),
             )
         if network == "deny" and capability.network_enforcement != "enforced":
             return self._blocked(
@@ -200,9 +225,37 @@ class SandboxPolicy:
             network=network,
             network_enforcement=capability.network_enforcement,
             write_strategy=write_strategy,
+            requested_shell=request.shell,
+            effective_shell=effective_shell,
             filesystem_policy="container",
             explicit_approval_required=False,
             reason="Strong sandbox policy allowed the command",
+        )
+
+    def _effective_shell(
+        self,
+        request: SandboxRunRequest,
+        backend: SandboxBackend | None,
+        profile: SandboxProfile,
+    ) -> str:
+        requested = str(request.shell or "auto").lower()
+        if requested != "auto":
+            return requested
+        if profile == "host_required":
+            return "powershell" if os.name == "nt" else "bash"
+        if backend == "docker":
+            return "powershell" if self._looks_like_powershell(request.command) else "bash"
+        return "powershell" if os.name == "nt" else "bash"
+
+    @staticmethod
+    def _looks_like_powershell(command: str) -> bool:
+        text = str(command or "")
+        return bool(
+            re.search(
+                r"(?:\b(?:Get|Set|New|Remove|Write|Where|ForEach|Format|Invoke|Start|Stop|Test|Convert|Select|Out|Measure|Sort|Export|Import)-[A-Za-z]+\b|(?:^|[\s;|])\$[A-Za-z_][A-Za-z0-9_]*|`|\b[A-Za-z]:[\\/]|\s-(?:Recurse|Force|NoProfile|ExecutionPolicy)\b)",
+                text,
+                re.IGNORECASE,
+            )
         )
 
     def _select_backend(self, mode: SandboxMode, profile: SandboxProfile) -> SandboxBackend | None:
@@ -241,6 +294,9 @@ class SandboxPolicy:
         write_strategy: SandboxWriteStrategy,
         reason: str,
         reason_code: str,
+        *,
+        requested_shell: str = "auto",
+        effective_shell: str = "powershell",
     ) -> SandboxDecision:
         return SandboxDecision(
             allowed=False,
@@ -254,6 +310,8 @@ class SandboxPolicy:
             network=network,
             network_enforcement="none",
             write_strategy=write_strategy,
+            requested_shell=requested_shell,
+            effective_shell=effective_shell,
             filesystem_policy="none",
             reason=reason,
             reason_code=reason_code,

@@ -58,6 +58,22 @@ def test_lifespan_does_not_prewarm_browser(monkeypatch):
     assert scheduler_events == ["start", "stop"]
 
 
+def test_mcp_background_startup_preserves_actual_error(monkeypatch):
+    from app.skills.mcp_bridge import connection as connection_module
+
+    monkeypatch.setattr(
+        connection_module,
+        "restart_enabled_mcp_servers",
+        lambda _settings: (_ for _ in ()).throw(RuntimeError("MCP config is invalid")),
+    )
+    main_module.app.state.mcp_status = {"running": False, "state": "starting", "startup_error": "", "servers": []}
+
+    asyncio.run(main_module._start_mcp_runtime(main_module.app))
+
+    assert main_module.app.state.mcp_status["state"] == "failed"
+    assert main_module.app.state.mcp_status["startup_error"] == "MCP config is invalid"
+
+
 def test_startup_security_requires_control_plane_secret(monkeypatch):
     monkeypatch.delenv("MONAW_CONTROL_SECRET", raising=False)
 

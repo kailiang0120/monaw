@@ -433,6 +433,7 @@ def update_permitted_roots(
     roots: list[str],
     *,
     new_rule: PathRule | None = None,
+    merge_existing_rule: bool = False,
 ) -> ControllerPolicyState:
     """Replace the permitted-root view without destroying rule details.
 
@@ -457,7 +458,19 @@ def update_permitted_roots(
         seen.add(root_key)
         prior = existing.get(root_key)
         if prior is not None:
-            path_rules.append(prior)
+            if merge_existing_rule and new_rule is not None and root_key == new_rule_path:
+                path_rules.append(
+                    prior.model_copy(
+                        update={
+                            "read": prior.read or new_rule.read,
+                            "write": prior.write or new_rule.write,
+                            "delete": prior.delete or new_rule.delete,
+                            "launch": prior.launch or new_rule.launch,
+                        }
+                    )
+                )
+            else:
+                path_rules.append(prior)
         elif new_rule is not None and root_key == new_rule_path:
             path_rules.append(new_rule.model_copy(update={"path": root}))
         else:
