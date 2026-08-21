@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 MIGRATION_RE = re.compile(r"^(\d{4})_(.+)\.sql$")
+_TRIGGER_START_RE = re.compile(r"^\s*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b", re.IGNORECASE)
+_TRIGGER_END_RE = re.compile(
+    r"^\s*END\s*;\s*(?:--[^\r\n]*)?$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _migration_dir() -> Path:
@@ -33,8 +38,25 @@ def _iter_sql_statements(script: str):
     migration text for ``Connection.execute`` inside our savepoint.
     """
     buffer = ""
+    in_trigger = False
     for line in str(script or "").splitlines(keepends=True):
         buffer += line
+        if not in_trigger and _TRIGGER_START_RE.match(buffer):
+            in_trigger = True
+        if in_trigger:
+            # complete_statement() can treat the first semicolon in a
+            # CREATE TRIGGER body as a complete statement. Hold triggers
+            # until their END; terminator so a future migration is not split
+            # inside the trigger body. This lightweight guard intentionally
+            # assumes the normal SQLite trigger form; current migrations do
+            # not use triggers.
+            if _TRIGGER_END_RE.search(buffer):
+                statement = buffer.strip()
+                buffer = ""
+                in_trigger = False
+                if statement:
+                    yield statement
+            continue
         if not sqlite3.complete_statement(buffer):
             continue
         statement = buffer.strip()

@@ -13,6 +13,7 @@ from app.agent.sandbox.artifacts import write_artifact as _write_artifact
 from app.agent.sandbox.models import SandboxExecutionRequest, SandboxExecutionResult, SandboxRunMetadata
 from app.agent.sandbox.path_policy import (
     SandboxPathPolicy,
+    DEFAULT_MAX_COPY_OUT_BYTES,
     canonical_path,
     collect_copy_out,
     create_run_workspace,
@@ -99,7 +100,11 @@ class DockerRunner:
             policy = SandboxPathPolicy.from_strings(
                 allowed_input_roots=[str(workdir)],
                 allowed_output_roots=[str(workdir)],
-                max_copy_out_bytes=int((request.resources or {}).get("max_output_bytes") or 104857600),
+                max_copy_out_bytes=int(
+                    (request.resources or {}).get("max_output_bytes")
+                    or getattr(self.settings.resources, "max_output_bytes", 0)
+                    or DEFAULT_MAX_COPY_OUT_BYTES
+                ),
                 max_copy_in_bytes=max_copy_in_bytes,
                 initial_files=initial_files,
             )
@@ -213,6 +218,14 @@ class DockerRunner:
             reason=str(request.env_metadata.get("reason", "")),
             reason_code=str(request.env_metadata.get("reason_code", "allowed")),
         ).model_dump()
+        if metadata["write_strategy"] == "discard":
+            metadata["warnings"].append(
+                "Container filesystem changes are ephemeral; changes outside /workspace are discarded."
+            )
+        elif metadata["write_strategy"] == "copy_out":
+            metadata["warnings"].append(
+                "Container-only changes are ephemeral; only changed or new files under /workspace are copied back."
+            )
         if request.shell.lower() not in self.supported_shells:
             return SandboxExecutionResult(
                 status="blocked",

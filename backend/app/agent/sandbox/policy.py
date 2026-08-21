@@ -43,6 +43,15 @@ _HOST_REQUIRED_PATTERNS = [
     r"\bpywinauto\b",
 ]
 
+_CONTAINER_HOST_TOOL_PATTERNS = [
+    r"(?:^\s*|[;&|()]\s*)(?:git|node|npm|npx|pnpm|yarn|pytest|cargo|go|dotnet|docker)\b",
+    r"(?:^\s*|[;&|()]\s*)(?:dir|type|where|findstr|copy|move|del|erase|ren|rename|cls|tasklist|taskkill)\b",
+    r"\b(?:python|python3|py)\s+-m\s+(?:pytest|pip)\b",
+    r"\b(?:pip(?:\d+(?:\.\d+)?)?|pipx)\s+install\b",
+    r"\buv\s+pip\s+install\b",
+    r"\bpoetry\s+install\b",
+]
+
 _BLOCKED_PATTERNS = [
     r"(?:\bformat\.com\b|\bformat\s+(?:/fs:\w+\s+)?[A-Za-z]:|\bFormat-Volume\b|\bdiskpart\b)",
     r"\bbcdedit\b",
@@ -116,17 +125,26 @@ class SandboxPolicy:
 
         effective_shell = self._effective_shell(request, backend, profile)
         shell_fallback = False
+        host_tool_fallback = bool(
+            backend == "docker"
+            and str(request.shell or "auto").lower() == "auto"
+            and effective_shell == "bash"
+            and self._requires_host_runner(request.command)
+        )
         if backend == "docker" and effective_shell != "bash":
-            # Docker's pinned image has a bash entrypoint. An automatic
-            # request chooses bash when possible; an explicit Windows shell
-            # is routed to the advisory host runner with a visible approval
-            # requirement instead of silently executing on the host.
             shell_fallback = True
+        if shell_fallback or host_tool_fallback:
+            # Docker's pinned image has a bash entrypoint. An automatic
+            # request chooses bash when possible. Commands that need an
+            # explicit Windows shell or a host-only developer tool are routed
+            # to the advisory host runner with a visible approval requirement
+            # instead of silently running in the wrong environment.
             backend = (
                 "local_restricted"
                 if self.capabilities.local_restricted.available
                 else "local_direct"
             )
+            effective_shell = self._effective_shell(request, backend, profile)
 
         if backend == "local_direct":
             return SandboxDecision(
@@ -146,13 +164,18 @@ class SandboxPolicy:
                 filesystem_policy="host",
                 explicit_approval_required=True,
                 reason=(
-                    "Docker supports bash only; this command will run directly on the host "
+                    f"The pinned Docker image does not provide '{self._host_tool_name(request.command)}'; this command "
+                    "will run directly on the host after explicit approval"
+                    if host_tool_fallback
+                    else "Docker supports bash only; this command will run directly on the host "
                     "after explicit approval"
                     if shell_fallback
                     else "This command will run directly on the host without isolation"
                 ),
                 reason_code=(
-                    "docker_shell_fallback_requires_approval"
+                    "docker_host_tool_fallback_requires_approval"
+                    if host_tool_fallback
+                    else "docker_shell_fallback_requires_approval"
                     if shell_fallback
                     else "host_execution_approval_required"
                 ),
@@ -193,13 +216,18 @@ class SandboxPolicy:
                 filesystem_policy="host",
                 explicit_approval_required=True,
                 reason=(
-                    "Docker supports bash only; this command will use the advisory host runner "
+                    f"The pinned Docker image does not provide '{self._host_tool_name(request.command)}'; this command "
+                    "will use the advisory host runner after explicit approval"
+                    if host_tool_fallback
+                    else "Docker supports bash only; this command will use the advisory host runner "
                     "after explicit approval"
                     if shell_fallback
                     else "This command will use the advisory host runner"
                 ),
                 reason_code=(
-                    "docker_shell_fallback_requires_approval"
+                    "docker_host_tool_fallback_requires_approval"
+                    if host_tool_fallback
+                    else "docker_shell_fallback_requires_approval"
                     if shell_fallback
                     else "host_execution_approval_required"
                 ),
@@ -257,6 +285,36 @@ class SandboxPolicy:
                 re.IGNORECASE,
             )
         )
+
+    @staticmethod
+    def _requires_host_runner(command: str) -> bool:
+        text = str(command or "")
+        return any(
+            re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for pattern in _CONTAINER_HOST_TOOL_PATTERNS
+        )
+
+    @staticmethod
+    def _host_tool_name(command: str) -> str:
+        text = str(command or "")
+        match = re.search(
+            r"(?:^\s*|[;&|()]\s*)(git|node|npm|npx|pnpm|yarn|pytest|cargo|go|dotnet|docker|"
+            r"dir|type|where|findstr|copy|move|del|erase|ren|rename|cls|tasklist|taskkill)\b",
+            text,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if match:
+            return match.group(1).lower()
+        for name, pattern in (
+            ("pytest", r"\b(?:python|python3|py)\s+-m\s+pytest\b"),
+            ("pip", r"\b(?:python|python3|py)\s+-m\s+pip\b"),
+            ("pip", r"\b(?:pip(?:\d+(?:\.\d+)?)?|pipx)\s+install\b"),
+            ("uv", r"\buv\s+pip\s+install\b"),
+            ("poetry", r"\bpoetry\s+install\b"),
+        ):
+            if re.search(pattern, text, re.IGNORECASE):
+                return name
+        return "host tool"
 
     def _select_backend(self, mode: SandboxMode, profile: SandboxProfile) -> SandboxBackend | None:
         if mode in {"off", "disabled"}:

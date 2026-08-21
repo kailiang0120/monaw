@@ -38,6 +38,58 @@ def test_exec_tool_returns_pending_approval(monkeypatch):
     assert result["ticket_id"] == "ticket-123"
 
 
+def test_host_tool_approval_preserves_sandbox_reason(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(
+        exec_tools,
+        "build_sandbox_decision",
+        lambda **_kwargs: SandboxDecision(
+            allowed=True,
+            required=False,
+            profile="standard",
+            backend="local_restricted",
+            mode="auto",
+            security_label="advisory",
+            network="deny",
+            network_enforcement="advisory",
+            write_strategy="copy_out",
+            requested_shell="auto",
+            effective_shell="powershell",
+            filesystem_policy="host",
+            explicit_approval_required=True,
+            reason="The pinned Docker image does not provide 'git'; this command will use the advisory host runner after explicit approval",
+            reason_code="docker_host_tool_fallback_requires_approval",
+        ),
+    )
+    monkeypatch.setattr(
+        exec_tools,
+        "resolve_permission",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            blocked=False,
+            requires_access_grant=False,
+            requires_confirmation=False,
+            reason="",
+            reason_code="allowed",
+            policy_source="settings.json",
+        ),
+    )
+
+    def fake_create_ticket(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id="ticket-host-tool")
+
+    monkeypatch.setattr(exec_tools, "create_ticket", fake_create_ticket)
+
+    result = json.loads(
+        exec_tools.exec_tool("git status", workdir=str(tmp_path))
+    )
+
+    assert result["status"] == "pending_approval"
+    assert result["reason_code"] == "docker_host_tool_fallback_requires_approval"
+    assert "'git'" in result["reason"]
+    assert captured["reason"] == result["reason"]
+
+
 def test_exec_approval_ticket_redacts_env_values(monkeypatch):
     monkeypatch.setattr(
         exec_tools,

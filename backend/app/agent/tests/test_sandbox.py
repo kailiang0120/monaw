@@ -1,4 +1,5 @@
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -230,6 +231,66 @@ def test_auto_shell_prefers_bash_for_docker_on_windows_or_posix():
     assert decision.backend == "docker"
     assert decision.requested_shell == "auto"
     assert decision.effective_shell == "bash"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status",
+        "npm install",
+        "node build.js",
+        "npx vite build",
+        "pnpm install",
+        "yarn install",
+        "pytest -q",
+        "cargo build",
+        "docker ps",
+        "dir",
+        "type README.md",
+        "where python",
+        "findstr /i python README.md",
+        "tasklist",
+        "taskkill /PID 1234",
+        "python -m pytest",
+        "pip install requests",
+    ],
+)
+def test_auto_routes_host_tooling_to_approval_required_host_runner(command):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command))
+
+    assert decision.allowed is True
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert decision.reason_code == "docker_host_tool_fallback_requires_approval"
+    assert decision.security_label == "advisory"
+    assert decision.effective_shell == ("powershell" if os.name == "nt" else "bash")
+
+
+def test_auto_host_tool_detection_handles_chains_without_matching_quoted_text():
+    policy = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    )
+
+    chained = policy.decide(SandboxRunRequest(command="echo ok && git status"))
+    quoted = policy.decide(SandboxRunRequest(command='echo "git status"'))
+
+    assert chained.backend == "local_restricted"
+    assert chained.reason.startswith("The pinned Docker image does not provide 'git'")
+    assert quoted.backend == "docker"
+
+
+def test_explicit_bash_keeps_supported_untrusted_command_in_docker():
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command="npm install", shell="bash"))
+
+    assert decision.backend == "docker"
+    assert decision.explicit_approval_required is False
 
 
 def test_explicit_powershell_has_visible_approval_required_fallback_even_in_enforce_mode():

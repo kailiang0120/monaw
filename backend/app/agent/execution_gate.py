@@ -89,7 +89,9 @@ class ExecutionGateService:
                 else:
                     emitted_events.append(resolution_event)
             resolved_output = next_output
-        if self.check_pending_status(resolved_output) is not None:
+        trailing_pending_event = self.check_pending_status(resolved_output)
+        if trailing_pending_event is not None:
+            self._reject_pending_ticket(trailing_pending_event)
             return (
                 json.dumps(
                     {
@@ -101,6 +103,21 @@ class ExecutionGateService:
                 emitted_events,
             )
         return resolved_output, emitted_events
+
+    @staticmethod
+    def _reject_pending_ticket(pending_event: dict[str, Any] | None) -> None:
+        """Retire a ticket that cannot be safely awaited after hop exhaustion."""
+        if not pending_event:
+            return
+        ticket_id = str(pending_event.get("data", {}).get("ticket_id") or "")
+        if not ticket_id:
+            return
+        if pending_event.get("event") == "access_grant_required":
+            resolve_grant(ticket_id, "deny")
+            signal_grant_resume(ticket_id, "deny")
+            return
+        reject_ticket(ticket_id, resolved_by="system:gate_hop_limit")
+        signal_approval_resume(ticket_id, "rejected")
 
     @staticmethod
     def check_pending_status(tool_output: str | dict[str, Any]) -> dict[str, Any] | None:

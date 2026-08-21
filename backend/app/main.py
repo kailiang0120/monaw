@@ -125,6 +125,7 @@ async def lifespan(app: FastAPI):
         retention_stop.set()
         retention_task.cancel()
         await asyncio.gather(retention_task, return_exceptions=True)
+        mcp_startup_task.cancel()
         await asyncio.gather(mcp_startup_task, return_exceptions=True)
         try:
             from app.skills.mcp_bridge.connection import reset_mcp_runtime

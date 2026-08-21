@@ -165,6 +165,35 @@ def test_malformed_skill_metadata_remains_visible_with_load_error(tmp_path, monk
     assert malformed["hidden"] is False
 
 
+def test_skill_without_frontmatter_uses_safe_defaults(tmp_path):
+    skill_dir = tmp_path / "plain_skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("Plain skill body", encoding="utf-8")
+
+    runtime_settings = build_runtime_namespace(_base_settings(), AgentSettings())
+    skills = discover_skills(runtime_settings, skills_dir=tmp_path)
+
+    assert len(skills) == 1
+    assert skills[0].name == "plain-skill"
+    assert skills[0].available is True
+    assert skills[0].body == "Plain skill body"
+
+
+def test_malformed_internal_skill_stays_hidden(tmp_path, monkeypatch):
+    skill_dir = tmp_path / "exec"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: [unterminated\n", encoding="utf-8")
+    monkeypatch.setattr("app.agent.skill_loader.SKILLS_DIR", tmp_path)
+
+    runtime_settings = build_runtime_namespace(_base_settings(), AgentSettings())
+    malformed = next(
+        item for item in available_skill_payload(runtime_settings) if item["name"] == "exec"
+    )
+
+    assert malformed["tier"] == "internal"
+    assert malformed["hidden"] is True
+
+
 def test_load_tools_isolates_broken_skill(tmp_path, monkeypatch):
     good_dir = tmp_path / "good_skill"
     good_dir.mkdir()

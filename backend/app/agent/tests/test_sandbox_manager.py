@@ -310,6 +310,41 @@ def test_manager_rejects_request_backend_that_disagrees_with_policy():
     assert result.sandbox["selected_backend"] == "local_restricted"
 
 
+def test_manager_does_not_call_docker_for_auto_host_tool_fallback(monkeypatch, tmp_path):
+    settings = AgentSettings()
+    capabilities = _capabilities(docker=True, local=True)
+    from app.agent.sandbox.models import SandboxRunRequest
+    from app.agent.sandbox.policy import SandboxPolicy
+
+    decision = SandboxPolicy(settings.sandbox, capabilities=capabilities).decide(
+        SandboxRunRequest(command="git status")
+    )
+    manager = SandboxManager(settings.sandbox, capabilities=capabilities)
+    monkeypatch.setattr(
+        manager.docker,
+        "run",
+        lambda _request: (_ for _ in ()).throw(AssertionError("Docker should not run")),
+    )
+    monkeypatch.setattr(
+        manager.local_restricted,
+        "run",
+        lambda request: SandboxExecutionResult(
+            status="ok",
+            exit_code=0,
+            shell=request.shell,
+            workdir=request.workdir,
+            sandbox={"backend": "local_restricted"},
+        ),
+    )
+    request = _request("git status")
+    request.shell = decision.effective_shell  # type: ignore[assignment]
+    request.backend = decision.backend
+
+    result = manager.run(request, decision=decision)
+
+    assert result.status == "ok"
+
+
 def test_enforce_strong_does_not_accept_advisory_backend():
     settings = AgentSettings()
     settings.sandbox.mode = "enforce"

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 CURRENT_OS = "windows" if os.name == "nt" else "posix"
 _LAST_LOAD_ERRORS: dict[str, str] = {}
+_INTERNAL_SKILL_SLUGS = frozenset({"core", "exec", "filesystem", "memory", "mcp_bridge"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -188,6 +189,15 @@ def _skill_tier(frontmatter: dict[str, Any]) -> str:
     return value
 
 
+def _catalog_tier(entry: SkillCatalogEntry) -> str:
+    # A malformed built-in SKILL.md has no usable frontmatter, but it must
+    # remain hidden from the user-facing catalog while its load error is shown
+    # to operators.
+    if not entry.frontmatter and entry.slug in _INTERNAL_SKILL_SLUGS:
+        return "internal"
+    return _skill_tier(entry.frontmatter)
+
+
 def _load_skill_module(skill_dir: Path):
     module_path = skill_dir / "tools.py"
     if not module_path.exists():
@@ -231,6 +241,7 @@ def discover_skills(
         load_error = entry.load_error or _LAST_LOAD_ERRORS.get(name, "")
         available = os_ok and env_ok and not load_error
         enabled = available and _skill_toggle_enabled(frontmatter, settings, name)
+        tier = _catalog_tier(entry)
 
         # L2: Log why a skill is unavailable so operators don't have to guess.
         unavailable_reason = ""
@@ -260,8 +271,8 @@ def discover_skills(
             available=available,
             unavailable_reason=unavailable_reason,
             load_error=load_error,
-            tier=_skill_tier(frontmatter),
-            recommended=_skill_tier(frontmatter) == "recommended",
+            tier=tier,
+            recommended=tier == "recommended",
         )
         if include_disabled or spec.enabled:
             discovered.append(spec)

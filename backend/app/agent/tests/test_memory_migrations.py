@@ -3,7 +3,23 @@ from __future__ import annotations
 import sqlite3
 
 from app.agent.database import Database
-from app.agent.migrations.runner import apply_migrations
+from app.agent.migrations.runner import _iter_sql_statements, apply_migrations
+
+
+def test_sql_statement_splitter_keeps_trigger_body_together():
+    script = """
+    CREATE TRIGGER after_insert AFTER INSERT ON source
+    BEGIN
+        INSERT INTO audit VALUES (NEW.id);
+        UPDATE source SET touched = 1 WHERE id = NEW.id;
+    END;
+    """
+
+    statements = list(_iter_sql_statements(script))
+
+    assert len(statements) == 1
+    assert statements[0].lstrip().upper().startswith("CREATE TRIGGER")
+    assert statements[0].rstrip().upper().endswith("END;")
 
 
 def test_fresh_database_does_not_create_sqlite_memory_schema(tmp_path):

@@ -139,6 +139,60 @@ def test_handle_pending_tool_output_errors_when_gate_hops_are_exhausted():
     assert result["reason_code"] == "gate_hop_limit_exceeded"
 
 
+def test_gate_hop_exhaustion_rejects_trailing_approval_ticket():
+    service = ExecutionGateService()
+    registry = ToolRegistry()
+    ticket = create_ticket(tool_name="looping_tool")
+    registry.register({"name": "looping_tool", "callable": lambda **_kwargs: "unused"})
+
+    async def always_pending(**_kwargs):
+        yield {"_result": json.dumps({"status": "pending_approval", "ticket_id": ticket.id})}
+
+    service.await_ticket_resolution = always_pending  # type: ignore[method-assign]
+
+    asyncio.run(
+        service.handle_pending_tool_output(
+            tool_output=json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
+            tool_name="looping_tool",
+            arguments={},
+            registry=registry,
+            budget=IterationBudget(max_iterations=1),
+            execute_tool=_fake_execute_tool,
+        )
+    )
+
+    assert ticket.status == TicketStatus.REJECTED
+
+
+def test_gate_hop_exhaustion_denies_trailing_access_grant():
+    service = ExecutionGateService()
+    registry = ToolRegistry()
+    ticket = create_grant_ticket(target_type="path", target_identifier="C:/private")
+    registry.register({"name": "looping_tool", "callable": lambda **_kwargs: "unused"})
+
+    async def always_pending(**_kwargs):
+        yield {
+            "_result": json.dumps(
+                {"status": "pending_access_grant", "ticket_id": ticket.id}
+            )
+        }
+
+    service.await_ticket_resolution = always_pending  # type: ignore[method-assign]
+
+    asyncio.run(
+        service.handle_pending_tool_output(
+            tool_output=json.dumps({"status": "pending_access_grant", "ticket_id": ticket.id}),
+            tool_name="looping_tool",
+            arguments={},
+            registry=registry,
+            budget=IterationBudget(max_iterations=1),
+            execute_tool=_fake_execute_tool,
+        )
+    )
+
+    assert ticket.status == "denied"
+
+
 def test_await_ticket_resolution_returns_denied_when_user_rejects():
     service = ExecutionGateService()
     signal_approval_resume("ticket-denied", "rejected")

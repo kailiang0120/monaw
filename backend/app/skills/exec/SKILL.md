@@ -16,7 +16,7 @@ Execution and safety:
 - Every command is classified and checked against permission, access-grant, approval, and sandbox policy.
 - The default workspace is trusted; blocked disk-formatting commands and blocked system paths/processes remain denied.
 - Elevated execution is intentionally unavailable. An approval request does not bypass a hard policy block.
-- `auto` selects bash for Docker-compatible commands so Docker is used even on Windows. PowerShell/cmd syntax is routed to the advisory host runner with an explicit approval because the pinned image exposes bash only; the same fallback is reported when Docker is unavailable. `direct_rw` writes to the allowed workspace, `copy_out` runs from a temporary copy and collects changed/new outputs, and `discard` keeps command filesystem changes ephemeral.
+- `auto` selects bash for Docker-compatible commands so Docker is used even on Windows. Host-only developer tools (`git`, Node/package managers, test/build CLIs, Docker CLI, and Windows builtins) and PowerShell/cmd syntax are routed to the advisory host runner with an explicit approval because the pinned `python:3.12-slim` image does not provide them; the same fallback is reported when Docker is unavailable. `direct_rw` writes to the allowed workspace, `copy_out` runs from a temporary copy and collects changed/new outputs, and `discard` keeps command filesystem changes ephemeral.
 - Docker uses the configured pinned image, no network by default, a read-only container root, dropped capabilities, process/memory/CPU limits, and `/workspace` mounts only under configured bind roots.
 
 Output and sessions:

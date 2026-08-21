@@ -173,6 +173,65 @@ def test_docker_copy_out_copies_only_changed_or_new_files(tmp_path):
         shutil.rmtree(mount_source, ignore_errors=True)
 
 
+def test_copy_out_size_limit_does_not_leave_partial_destination_changes(tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.default_write_strategy = "copy_out"
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("before-one", encoding="utf-8")
+    second.write_text("before-two", encoding="utf-8")
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    runner = DockerRunner(settings.sandbox)
+
+    mount_source, policy, copied = runner._workspace_mount(request, command_id="copy-atomic")
+    assert mount_source is not None and policy is not None and copied is True
+    try:
+        (mount_source / "first.txt").write_text("after-one", encoding="utf-8")
+        (mount_source / "second.txt").write_text("after-two", encoding="utf-8")
+        policy.max_copy_out_bytes = len("after-one") + len("after-two") - 1
+
+        with pytest.raises(PermissionError, match="copy-out size limit"):
+            collect_copy_out(mount_source, tmp_path, policy)
+
+        assert first.read_text(encoding="utf-8") == "before-one"
+        assert second.read_text(encoding="utf-8") == "before-two"
+    finally:
+        import shutil
+
+        shutil.rmtree(mount_source, ignore_errors=True)
+
+
+def test_docker_result_warns_about_ephemeral_container_filesystem(monkeypatch, tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "discard"}
+    runner = DockerRunner(settings.sandbox)
+
+    monkeypatch.setattr(runner, "is_available", lambda: True)
+    monkeypatch.setattr(
+        docker_backend,
+        "_run_command_capped",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="ok\n", stderr="", returncode=0, timed_out=False, cancelled=False
+        ),
+    )
+
+    result = runner.run(request)
+
+    assert result.status == "ok"
+    assert any("ephemeral" in warning for warning in result.sandbox["warnings"])
+
+
 def test_auto_mode_selects_docker_when_strong_backend_is_available(monkeypatch):
     settings = AgentSettings()
     settings.sandbox.docker.image = "python@sha256:" + "a" * 64

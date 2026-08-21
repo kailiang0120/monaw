@@ -237,8 +237,13 @@ def _permission_check(
     if (decision.requires_confirmation or host_approval_required) and not bypass_confirmation:
         if host_approval_required:
             decision = SimpleNamespace(
-                reason="This command will run on the host without strong isolation.",
-                reason_code="host_execution_approval_required",
+                reason=str(
+                    sandbox.get("reason")
+                    or "This command will run on the host without strong isolation."
+                ),
+                reason_code=str(
+                    sandbox.get("reason_code") or "host_execution_approval_required"
+                ),
                 policy_source="sandbox_policy",
             )
         return _pending_approval(
