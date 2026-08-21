@@ -310,6 +310,23 @@ def test_manager_rejects_request_backend_that_disagrees_with_policy():
     assert result.sandbox["selected_backend"] == "local_restricted"
 
 
+def test_strict_docker_modes_block_host_tools_instead_of_falling_back():
+    for mode in ("docker", "enforce"):
+        settings = AgentSettings()
+        settings.sandbox.mode = mode
+        request = _request("git status")
+        request.shell = "bash"
+
+        result = SandboxManager(
+            settings.sandbox,
+            capabilities=_capabilities(docker=True, local=True),
+        ).run(request)
+
+        assert result.status == "blocked"
+        assert result.reason_code == "docker_command_not_compatible"
+        assert result.sandbox["selected_backend"] == "none"
+
+
 def test_manager_does_not_call_docker_for_auto_host_tool_fallback(monkeypatch, tmp_path):
     settings = AgentSettings()
     capabilities = _capabilities(docker=True, local=True)
