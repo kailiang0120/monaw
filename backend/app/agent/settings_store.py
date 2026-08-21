@@ -249,6 +249,7 @@ class SandboxResourceLimits(BaseModel):
     pids: int = Field(128, ge=16, le=4096)
     max_output_bytes: int = Field(1048576, ge=4096, le=104857600)
     max_copy_in_bytes: int = Field(104857600, ge=1048576, le=1073741824)
+    max_copy_out_bytes: int = Field(104857600, ge=1048576, le=1073741824)
 
 
 class SandboxNetworkSettings(BaseModel):

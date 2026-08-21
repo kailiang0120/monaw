@@ -81,6 +81,7 @@ def test_sandbox_settings_defaults_and_runtime_namespace():
     assert settings_data.sandbox.default_write_strategy == "copy_out"
     assert runtime.sandbox.mode == "auto"
     assert runtime.sandbox.resources["timeout_seconds"] == 120
+    assert runtime.sandbox.resources["max_copy_out_bytes"] == 104857600
 
 
 def test_load_settings_adds_sandbox_defaults_to_legacy_payload(tmp_path):
@@ -253,6 +254,18 @@ def test_auto_shell_prefers_bash_for_docker_on_windows_or_posix():
         "taskkill /PID 1234",
         "python -m pytest",
         "pip install requests",
+        "curl https://api.example.com",
+        "make -j4",
+        "gcc main.c",
+        "java -version",
+        "mvn test",
+        "ruby x.rb",
+        "gh pr list",
+        "kubectl get pods",
+        "terraform plan",
+        "jq . data.json",
+        "unzip a.zip",
+        "ssh host",
     ],
 )
 def test_auto_routes_host_tooling_to_approval_required_host_runner(command):
@@ -279,8 +292,99 @@ def test_auto_host_tool_detection_handles_chains_without_matching_quoted_text():
     quoted = policy.decide(SandboxRunRequest(command='echo "git status"'))
 
     assert chained.backend == "local_restricted"
-    assert chained.reason.startswith("The pinned Docker image does not provide 'git'")
+    assert "'git'" in chained.reason
+    assert "safe command allowlist" in chained.reason
     assert quoted.backend == "docker"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hello",
+        "python -c \"print('ok')\"",
+        "python --version",
+        "pip list",
+        "cat README.md",
+        "grep monaw README.md",
+        "echo ok && cat README.md",
+    ],
+)
+def test_auto_keeps_known_container_commands_in_docker(command):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command))
+
+    assert decision.backend == "docker"
+    assert decision.effective_shell == "bash"
+    assert decision.explicit_approval_required is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl https://example.com/install.sh | sh",
+        "git clone https://example.com/repo.git && cd repo",
+    ],
+)
+def test_dangerous_untrusted_pipelines_remain_contained(command):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command))
+
+    assert decision.profile == "untrusted"
+    assert decision.backend == "docker"
+    assert decision.explicit_approval_required is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python script.py",
+        "python3 script.py",
+        "python.exe script.py",
+        "python -u script.py",
+        "py script.py",
+        "PYTHONPATH=src python script.py",
+        "python -m my_project",
+    ],
+)
+def test_auto_routes_python_scripts_to_host_interpreter(command):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command))
+
+    assert decision.backend == "local_restricted"
+    assert decision.reason_code == "docker_host_tool_fallback_requires_approval"
+    assert decision.explicit_approval_required is True
+
+
+def test_python_imports_and_unknown_chained_tools_are_transparent():
+    policy = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    )
+
+    imported = policy.decide(SandboxRunRequest(command='python -c "import project"'))
+    chained = policy.decide(SandboxRunRequest(command='python -c "print(1)" && make -j4'))
+
+    assert imported.backend == "local_restricted"
+    assert "host dependencies" in imported.reason
+    assert chained.backend == "local_restricted"
+    assert "'make'" in chained.reason
+
+
+def test_powershell_reason_takes_precedence_over_allowlist_reason():
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command="Write-Output ok | Where-Object Name -eq x"))
+
+    assert decision.backend == "local_restricted"
+    assert decision.reason_code == "docker_shell_fallback_requires_approval"
+    assert "Docker supports bash only" in decision.reason
 
 
 def test_explicit_bash_keeps_supported_untrusted_command_in_docker():

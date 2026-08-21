@@ -33,6 +33,11 @@ _UNTRUSTED_PATTERNS = [
     r"\bgit\s+clone\b.*(&&|;|\|)",
 ]
 
+_CONTAINED_UNTRUSTED_PATTERNS = [
+    r"\b(?:curl|wget|irm|iwr|Invoke-WebRequest)\b.*\|\s*(?:sh|bash|cmd|powershell|pwsh|iex|Invoke-Expression)\b",
+    r"\bgit\s+clone\b.*(?:&&|;|\|)",
+]
+
 _HOST_REQUIRED_PATTERNS = [
     r"\bGet-Process\b",
     r"\bGet-Service\b",
@@ -43,14 +48,61 @@ _HOST_REQUIRED_PATTERNS = [
     r"\bpywinauto\b",
 ]
 
-_CONTAINER_HOST_TOOL_PATTERNS = [
-    r"(?:^\s*|[;&|()]\s*)(?:git|node|npm|npx|pnpm|yarn|pytest|cargo|go|dotnet|docker)\b",
-    r"(?:^\s*|[;&|()]\s*)(?:dir|type|where|findstr|copy|move|del|erase|ren|rename|cls|tasklist|taskkill)\b",
-    r"\b(?:python|python3|py)\s+-m\s+(?:pytest|pip)\b",
-    r"\b(?:pip(?:\d+(?:\.\d+)?)?|pipx)\s+install\b",
-    r"\buv\s+pip\s+install\b",
-    r"\bpoetry\s+install\b",
-]
+_CONTAINER_SAFE_EXECUTABLES = frozenset(
+    {
+        "bash",
+        "basename",
+        "cat",
+        "cd",
+        "chmod",
+        "chown",
+        "cp",
+        "cut",
+        "date",
+        "dirname",
+        "du",
+        "echo",
+        "false",
+        "find",
+        "grep",
+        "head",
+        "id",
+        "kill",
+        "ln",
+        "ls",
+        "mkdir",
+        "mktemp",
+        "mv",
+        "od",
+        "pip",
+        "pip3",
+        "printf",
+        "pwd",
+        "python",
+        "python3",
+        "readlink",
+        "realpath",
+        "rm",
+        "rmdir",
+        "sed",
+        "sh",
+        "sleep",
+        "sort",
+        "stat",
+        "tail",
+        "tee",
+        "test",
+        "touch",
+        "tr",
+        "true",
+        "uname",
+        "uniq",
+        "wc",
+    }
+)
+_PYTHON_EXECUTABLES = frozenset(
+    {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
+)
 
 _BLOCKED_PATTERNS = [
     r"(?:\bformat\.com\b|\bformat\s+(?:/fs:\w+\s+)?[A-Za-z]:|\bFormat-Volume\b|\bdiskpart\b)",
@@ -130,6 +182,10 @@ class SandboxPolicy:
             and str(request.shell or "auto").lower() == "auto"
             and effective_shell == "bash"
             and self._requires_host_runner(request.command)
+            and not (
+                profile == "untrusted"
+                and self._requires_contained_untrusted_command(request.command)
+            )
         )
         if backend == "docker" and effective_shell != "bash":
             shell_fallback = True
@@ -164,8 +220,7 @@ class SandboxPolicy:
                 filesystem_policy="host",
                 explicit_approval_required=True,
                 reason=(
-                    f"The pinned Docker image does not provide '{self._host_tool_name(request.command)}'; this command "
-                    "will run directly on the host after explicit approval"
+                    self._host_fallback_reason(request.command, runner="direct")
                     if host_tool_fallback
                     else "Docker supports bash only; this command will run directly on the host "
                     "after explicit approval"
@@ -216,8 +271,7 @@ class SandboxPolicy:
                 filesystem_policy="host",
                 explicit_approval_required=True,
                 reason=(
-                    f"The pinned Docker image does not provide '{self._host_tool_name(request.command)}'; this command "
-                    "will use the advisory host runner after explicit approval"
+                    self._host_fallback_reason(request.command, runner="advisory")
                     if host_tool_fallback
                     else "Docker supports bash only; this command will use the advisory host runner "
                     "after explicit approval"
@@ -289,32 +343,179 @@ class SandboxPolicy:
     @staticmethod
     def _requires_host_runner(command: str) -> bool:
         text = str(command or "")
+        if not text.strip():
+            return False
+        # Command substitutions can invoke an arbitrary executable without
+        # appearing at a shell segment boundary. Keep those on the host
+        # unless the user explicitly requested bash/Docker.
+        if "$(" in text or "`" in text:
+            return True
+        for segment in SandboxPolicy._split_shell_segments(text):
+            executable = SandboxPolicy._segment_executable(segment)
+            if not executable:
+                return True
+            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_script_argument(segment):
+                return True
+            if executable in _PYTHON_EXECUTABLES and re.search(
+                r"\b(?:subprocess|os\.system|Popen|check_call|check_output|import|from)\b",
+                segment,
+                re.IGNORECASE,
+            ):
+                return True
+            if executable in {"pip", "pip3"} and re.search(
+                r"(?<!\S)install(?=\s|$)", segment, re.IGNORECASE
+            ):
+                return True
+            if executable in {"bash", "sh"}:
+                nested = re.search(r"(?:^|\s)-{1,2}(?:l?c|command)\s+(.+)$", segment, re.IGNORECASE)
+                if nested:
+                    inner = nested.group(1).strip()
+                    if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in {'"', "'"}:
+                        inner = inner[1:-1]
+                    if SandboxPolicy._requires_host_runner(inner):
+                        return True
+            if executable not in _CONTAINER_SAFE_EXECUTABLES:
+                return True
+            if executable in {"find", "which"} and re.search(
+                r"(?<!\S)(?:-exec|--exec|xargs)(?=\s|$)", segment, re.IGNORECASE
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _requires_contained_untrusted_command(command: str) -> bool:
+        text = str(command or "")
         return any(
             re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
-            for pattern in _CONTAINER_HOST_TOOL_PATTERNS
+            for pattern in _CONTAINED_UNTRUSTED_PATTERNS
         )
 
     @staticmethod
     def _host_tool_name(command: str) -> str:
-        text = str(command or "")
-        match = re.search(
-            r"(?:^\s*|[;&|()]\s*)(git|node|npm|npx|pnpm|yarn|pytest|cargo|go|dotnet|docker|"
-            r"dir|type|where|findstr|copy|move|del|erase|ren|rename|cls|tasklist|taskkill)\b",
-            text,
-            re.IGNORECASE | re.MULTILINE,
-        )
-        if match:
-            return match.group(1).lower()
-        for name, pattern in (
-            ("pytest", r"\b(?:python|python3|py)\s+-m\s+pytest\b"),
-            ("pip", r"\b(?:python|python3|py)\s+-m\s+pip\b"),
-            ("pip", r"\b(?:pip(?:\d+(?:\.\d+)?)?|pipx)\s+install\b"),
-            ("uv", r"\buv\s+pip\s+install\b"),
-            ("poetry", r"\bpoetry\s+install\b"),
-        ):
-            if re.search(pattern, text, re.IGNORECASE):
-                return name
+        for segment in SandboxPolicy._split_shell_segments(str(command or "")):
+            executable = SandboxPolicy._segment_executable(segment)
+            if not executable:
+                continue
+            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_script_argument(segment):
+                return executable
+            if executable in {"pip", "pip3"} and re.search(
+                r"(?<!\S)install(?=\s|$)", segment, re.IGNORECASE
+            ):
+                return executable
+            if executable not in _CONTAINER_SAFE_EXECUTABLES:
+                return executable
+        if re.search(r"\b(?:python|python3)\s+-m\s+pytest\b", command, re.IGNORECASE):
+            return "pytest"
+        if re.search(r"\b(?:python|python3)\s+-m\s+pip\b", command, re.IGNORECASE):
+            return "pip"
         return "host tool"
+
+    @staticmethod
+    def _host_fallback_reason(command: str, *, runner: str) -> str:
+        suffix = (
+            "will run directly on the host"
+            if runner == "direct"
+            else "will use the advisory host runner"
+        )
+        for segment in SandboxPolicy._split_shell_segments(str(command or "")):
+            executable = SandboxPolicy._segment_executable(segment)
+            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_script_argument(segment):
+                return f"Python script execution uses the host interpreter; this command {suffix} after explicit approval"
+            if executable in _PYTHON_EXECUTABLES and re.search(
+                r"\b(?:subprocess|os\.system|Popen|check_call|check_output|import|from)\b",
+                segment,
+                re.IGNORECASE,
+            ):
+                return f"Python code with host dependencies uses the host interpreter; this command {suffix} after explicit approval"
+        if re.search(
+            r"\b(?:pip|pip3)\s+install\b|\b(?:uv\s+pip|poetry)\s+install\b",
+            str(command or ""),
+            re.IGNORECASE,
+        ):
+            return f"Package installation is host-specific; this command {suffix} after explicit approval"
+        tool = SandboxPolicy._host_tool_name(command)
+        return (
+            f"The command uses '{tool}', which is not in the pinned Docker image's safe command allowlist; "
+            f"this command {suffix} after explicit approval"
+        )
+
+    @staticmethod
+    def _split_shell_segments(command: str) -> list[str]:
+        segments: list[str] = []
+        buffer: list[str] = []
+        quote = ""
+        index = 0
+        text = str(command or "")
+        while index < len(text):
+            char = text[index]
+            if quote:
+                buffer.append(char)
+                if char == quote:
+                    quote = ""
+                elif char == "\\" and quote == '"' and index + 1 < len(text):
+                    index += 1
+                    buffer.append(text[index])
+                index += 1
+                continue
+            if char in {'"', "'"}:
+                quote = char
+                buffer.append(char)
+                index += 1
+                continue
+            if char == "\\" and index + 1 < len(text):
+                buffer.extend((char, text[index + 1]))
+                index += 2
+                continue
+            if text.startswith("&&", index) or text.startswith("||", index):
+                if "".join(buffer).strip():
+                    segments.append("".join(buffer).strip())
+                buffer = []
+                index += 2
+                continue
+            if char in ";|&()\n":
+                if "".join(buffer).strip():
+                    segments.append("".join(buffer).strip())
+                buffer = []
+                index += 1
+                continue
+            buffer.append(char)
+            index += 1
+        if "".join(buffer).strip():
+            segments.append("".join(buffer).strip())
+        return segments
+
+    @staticmethod
+    def _segment_executable(segment: str) -> str:
+        text = str(segment or "").strip()
+        while True:
+            assignment = re.match(r"^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|\"[^\"]*\"|\S+)\s+", text)
+            if assignment is None:
+                break
+            text = text[assignment.end():].lstrip()
+        match = re.match(r"[!\s]*([A-Za-z0-9_./\\-]+)", text)
+        if match is None:
+            return ""
+        return match.group(1).replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+    @staticmethod
+    def _python_script_argument(segment: str) -> bool:
+        executable = SandboxPolicy._segment_executable(segment)
+        if executable not in _PYTHON_EXECUTABLES:
+            return False
+        raw = str(segment or "").strip()
+        executable_match = re.match(r"[!\s]*[A-Za-z0-9_./\\-]+", raw)
+        remainder = raw[executable_match.end():].strip() if executable_match else ""
+        tokens = re.findall(r"\"[^\"]*\"|'[^']*'|\S+", remainder)
+        for token in tokens:
+            normalized = token.strip("\"'")
+            if normalized in {"-c", "--command", "-"}:
+                return False
+            if normalized in {"-m", "--module"}:
+                return True
+            if normalized.startswith("-"):
+                continue
+            return True
+        return False
 
     def _select_backend(self, mode: SandboxMode, profile: SandboxProfile) -> SandboxBackend | None:
         if mode in {"off", "disabled"}:

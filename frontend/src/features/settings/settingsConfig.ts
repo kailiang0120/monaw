@@ -248,6 +248,7 @@ const emptySandbox = (): AgentSettings['sandbox'] => ({
     pids: 128,
     max_output_bytes: 1048576,
     max_copy_in_bytes: 104857600,
+    max_copy_out_bytes: 104857600,
   },
   network: {
     default: 'deny',

@@ -130,6 +130,39 @@ def test_docker_copy_out_uses_a_run_workspace(tmp_path):
             shutil.rmtree(mount_source, ignore_errors=True)
 
 
+def test_copy_out_uses_independent_resource_limit(tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.default_write_strategy = "copy_out"
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    runner = DockerRunner(settings.sandbox)
+
+    mount_source, policy, copied = runner._workspace_mount(request, command_id="copy-default")
+    assert mount_source is not None and policy is not None and copied is True
+    try:
+        assert policy.max_copy_out_bytes == settings.sandbox.resources.max_copy_out_bytes
+        assert policy.max_copy_out_bytes == 104857600
+        assert settings.sandbox.resources.max_output_bytes == 1048576
+    finally:
+        import shutil
+
+        shutil.rmtree(mount_source, ignore_errors=True)
+
+    request.resources = {"max_copy_out_bytes": 4096}
+    mount_source, policy, copied = runner._workspace_mount(request, command_id="copy-override")
+    assert mount_source is not None and policy is not None and copied is True
+    try:
+        assert policy.max_copy_out_bytes == 4096
+    finally:
+        import shutil
+
+        shutil.rmtree(mount_source, ignore_errors=True)
+
+
 def test_docker_copy_in_is_bounded_and_skips_symlink_entries(tmp_path):
     settings = AgentSettings()
     settings.sandbox.allowed_bind_roots = [str(tmp_path)]
@@ -206,7 +239,35 @@ def test_copy_out_size_limit_does_not_leave_partial_destination_changes(tmp_path
         shutil.rmtree(mount_source, ignore_errors=True)
 
 
-def test_docker_result_warns_about_ephemeral_container_filesystem(monkeypatch, tmp_path):
+def test_docker_result_warns_when_copy_out_has_no_workspace_changes(monkeypatch, tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    runner = DockerRunner(settings.sandbox)
+
+    monkeypatch.setattr(runner, "is_available", lambda: True)
+    monkeypatch.setattr(
+        docker_backend,
+        "_run_command_capped",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="ok\n", stderr="", returncode=0, timed_out=False, cancelled=False
+        ),
+    )
+
+    result = runner.run(request)
+
+    assert result.status == "ok"
+    assert any("No changed or new files" in warning for warning in result.sandbox["warnings"])
+    assert result.sandbox["copy_policy"]["deletions_propagated"] is False
+    assert result.sandbox["copy_policy"]["symlinks_copied"] is False
+
+
+def test_docker_discard_reports_ephemeral_filesystem(monkeypatch, tmp_path):
     settings = AgentSettings()
     settings.sandbox.allowed_bind_roots = [str(tmp_path)]
     settings.sandbox.blocked_bind_roots = []
@@ -230,6 +291,38 @@ def test_docker_result_warns_about_ephemeral_container_filesystem(monkeypatch, t
 
     assert result.status == "ok"
     assert any("ephemeral" in warning for warning in result.sandbox["warnings"])
+
+
+def test_docker_manifest_records_copy_out_files(monkeypatch, tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    settings.sandbox.default_write_strategy = "copy_out"
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    runner = DockerRunner(settings.sandbox)
+
+    monkeypatch.setattr(runner, "is_available", lambda: True)
+
+    def fake_run(command, _request, **_kwargs):
+        mount = command[command.index("--mount") + 1]
+        source = mount.split("source=", 1)[1].split(",target=", 1)[0]
+        Path(source, "result.txt").write_text("ok", encoding="utf-8")
+        return SimpleNamespace(
+            stdout="ok\n", stderr="", returncode=0, timed_out=False, cancelled=False
+        )
+
+    monkeypatch.setattr(docker_backend, "_run_command_capped", fake_run)
+
+    result = runner.run(request)
+
+    assert result.status == "ok"
+    assert len(result.sandbox["artifacts"]["copy_out"]) == 1
+    manifest = json.loads(Path(result.sandbox["artifacts"]["manifest_path"]).read_text(encoding="utf-8"))
+    assert len(manifest["artifacts"]["copy_out"]) == 1
 
 
 def test_auto_mode_selects_docker_when_strong_backend_is_available(monkeypatch):

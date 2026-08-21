@@ -196,7 +196,7 @@ skill_creator     Skill creation and reload tools
 web_search        Web search (when Tavily is configured)
 ```
 
-Each `SKILL.md` is the source of truth for a skill's trigger description, `display_name`,
+Each `SKILL.md` must begin with a closed YAML frontmatter block. It is the source of truth for a skill's trigger description, `display_name`,
 one-line `summary`, tier, default, and prompt guidance. Internal skills use
 `tier: internal` and `always: true`; they stay registered for the runtime but are omitted
 from the Settings capability toggles. Optional and recommended skills are the user-facing

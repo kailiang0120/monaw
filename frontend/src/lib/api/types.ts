@@ -695,6 +695,7 @@ export interface AgentSettings {
       pids: number
       max_output_bytes: number
       max_copy_in_bytes: number
+      max_copy_out_bytes: number
     }
     network: {
       default: 'deny' | 'allow_with_approval' | 'allow'

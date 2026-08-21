@@ -5,7 +5,7 @@ Monaw classifies each shell command before starting a process. The decision reco
 ## Modes
 
 - `off` / `disabled`: shell execution is disabled.
-- `auto`: Docker is preferred for normal and untrusted commands that the pinned Python image can execute. `shell=auto` chooses bash for those commands; host-only developer tools and PowerShell/cmd syntax use the advisory host runner only after an explicit approval.
+- `auto`: Docker is preferred for commands whose shell segments use the pinned image's allowlisted Python/coreutils toolchain. `shell=auto` chooses bash for those commands; unknown tools, Python script files, package installs, and PowerShell/cmd syntax use the advisory host runner only after an explicit approval.
 - `enforce`: Docker is required for Docker-compatible commands; an unavailable or unpinned image returns `sandbox_backend_unavailable` or `docker_image_not_pinned`. An explicitly requested non-bash shell is surfaced as an approval-required host fallback.
 - `host`: use the host runner with an explicit approval and no-isolation warning.
 - `docker`: require Docker explicitly.
@@ -21,11 +21,11 @@ There is no WSL backend. Long-running sessions use the local host runners and ar
 
 The shipped Docker image is pinned as `python:3.12-slim@sha256:<64-hex-digest>`. Settings can pull a tag and resolve it to an immutable digest. If the image is unpinned, capability status reports `docker_image_not_pinned` and the Docker runner will not start.
 
-Docker runs use the pinned Python image, not the host's toolchain. Host-only commands are routed to the approval-required host runner; container-only changes are ephemeral unless the selected write strategy copies changed files back from `/workspace`.
+Docker runs use the pinned Python image, not the host's toolchain, and have no network by default. Auto routing is fail-safe: a command is sent to Docker only when every shell segment uses a known-safe image executable; unknown tools and Python script files/modules/import-dependent snippets are routed to the approval-required host runner. A self-contained `python -c` snippet can remain in Docker. Package installation in auto mode is therefore host-specific and approval-gated. Container-only changes are ephemeral unless the selected write strategy copies changed files back from `/workspace`.
 
 ## Workspace and writes
 
-The agent workspace is an allowed bind root by default. `direct_rw` mounts the effective workdir read-write. `copy_out` executes in a temporary run workspace and safely copies only changed/new files back after the command, subject to configured bind-root, copy-in, and copy-out size limits. `discard` does not expose a host workdir to the container.
+The agent workspace is an allowed bind root by default. `direct_rw` mounts the effective workdir read-write. `copy_out` executes in a temporary run workspace and safely copies only changed/new regular files back after the command; deletions are not propagated and symlinks are rejected, subject to configured bind-root, copy-in, and copy-out size limits. `discard` does not expose a host workdir to the container and all container changes are ephemeral.
 
 ## Sessions
 

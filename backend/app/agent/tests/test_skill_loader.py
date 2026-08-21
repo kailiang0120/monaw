@@ -149,7 +149,7 @@ External lookup skill
     assert skills[0].unavailable_reason == "missing_env"
 
 
-def test_malformed_skill_metadata_remains_visible_with_load_error(tmp_path, monkeypatch):
+def test_malformed_skill_metadata_stays_hidden_with_load_error(tmp_path, monkeypatch):
     skill_dir = tmp_path / "malformed_skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("---\nname: [unterminated\n", encoding="utf-8")
@@ -162,7 +162,7 @@ def test_malformed_skill_metadata_remains_visible_with_load_error(tmp_path, monk
     assert malformed["available"] is False
     assert malformed["unavailable_reason"] == "load_error"
     assert malformed["load_error"]
-    assert malformed["hidden"] is False
+    assert malformed["hidden"] is True
 
 
 def test_skill_without_frontmatter_uses_safe_defaults(tmp_path):
@@ -177,6 +177,7 @@ def test_skill_without_frontmatter_uses_safe_defaults(tmp_path):
     assert skills[0].name == "plain-skill"
     assert skills[0].available is True
     assert skills[0].body == "Plain skill body"
+    assert skills[0].tier == "recommended"
 
 
 def test_malformed_internal_skill_stays_hidden(tmp_path, monkeypatch):

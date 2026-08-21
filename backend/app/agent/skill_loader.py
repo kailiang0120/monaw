@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 CURRENT_OS = "windows" if os.name == "nt" else "posix"
 _LAST_LOAD_ERRORS: dict[str, str] = {}
-_INTERNAL_SKILL_SLUGS = frozenset({"core", "exec", "filesystem", "memory", "mcp_bridge"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -190,10 +189,10 @@ def _skill_tier(frontmatter: dict[str, Any]) -> str:
 
 
 def _catalog_tier(entry: SkillCatalogEntry) -> str:
-    # A malformed built-in SKILL.md has no usable frontmatter, but it must
-    # remain hidden from the user-facing catalog while its load error is shown
-    # to operators.
-    if not entry.frontmatter and entry.slug in _INTERNAL_SKILL_SLUGS:
+    # A skill whose metadata failed to parse has no trustworthy tier. Keep it
+    # out of the user-facing catalog while retaining its load error for
+    # operators; a valid file without frontmatter still gets safe defaults.
+    if entry.load_error:
         return "internal"
     return _skill_tier(entry.frontmatter)
 

@@ -101,8 +101,8 @@ class DockerRunner:
                 allowed_input_roots=[str(workdir)],
                 allowed_output_roots=[str(workdir)],
                 max_copy_out_bytes=int(
-                    (request.resources or {}).get("max_output_bytes")
-                    or getattr(self.settings.resources, "max_output_bytes", 0)
+                    (request.resources or {}).get("max_copy_out_bytes")
+                    or getattr(self.settings.resources, "max_copy_out_bytes", 0)
                     or DEFAULT_MAX_COPY_OUT_BYTES
                 ),
                 max_copy_in_bytes=max_copy_in_bytes,
@@ -218,13 +218,16 @@ class DockerRunner:
             reason=str(request.env_metadata.get("reason", "")),
             reason_code=str(request.env_metadata.get("reason_code", "allowed")),
         ).model_dump()
+        metadata["copy_policy"] = {
+            "strategy": metadata["write_strategy"],
+            "container_changes_ephemeral": metadata["write_strategy"] != "direct_rw",
+            "changed_or_new_files_only": metadata["write_strategy"] == "copy_out",
+            "deletions_propagated": False,
+            "symlinks_copied": False,
+        }
         if metadata["write_strategy"] == "discard":
             metadata["warnings"].append(
                 "Container filesystem changes are ephemeral; changes outside /workspace are discarded."
-            )
-        elif metadata["write_strategy"] == "copy_out":
-            metadata["warnings"].append(
-                "Container-only changes are ephemeral; only changed or new files under /workspace are copied back."
             )
         if request.shell.lower() not in self.supported_shells:
             return SandboxExecutionResult(
@@ -294,22 +297,33 @@ class DockerRunner:
             if request.save_output_to or len(raw_stdout) > len(stdout) or len(raw_stderr) > len(stderr):
                 stdout_path = _write_artifact(command_id, "stdout", raw_stdout)
                 stderr_path = _write_artifact(command_id, "stderr", raw_stderr)
-            manifest_path = write_artifact_manifest(
-                command_id,
-                {"stdout_path": stdout_path, "stderr_path": stderr_path, "copy_out": []},
-            )
+            copied_files: list[dict] = []
             metadata["artifacts"] = {
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
-                "manifest_path": manifest_path,
+                "manifest_path": "",
                 "copy_out": [],
             }
             if copied_workspace and mount_source is not None and copy_policy is not None:
-                metadata["artifacts"]["copy_out"] = collect_copy_out(
+                copied_files = collect_copy_out(
                     mount_source,
                     request.workdir or str(WORKSPACE_DIR),
                     copy_policy,
                 )
+                metadata["artifacts"]["copy_out"] = copied_files
+                if not copied_files:
+                    metadata["warnings"].append(
+                        "No changed or new files under /workspace were copied back; container-only changes are ephemeral."
+                    )
+            manifest_path = write_artifact_manifest(
+                command_id,
+                {
+                    "stdout_path": stdout_path,
+                    "stderr_path": stderr_path,
+                    "copy_out": copied_files,
+                },
+            )
+            metadata["artifacts"]["manifest_path"] = manifest_path
             return SandboxExecutionResult(
                 status="error" if completed.timed_out or completed.returncode != 0 else "ok",
                 exit_code=completed.returncode,
