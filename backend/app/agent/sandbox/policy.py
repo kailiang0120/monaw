@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import os
 import re
+import sys
 
 from app.agent.sandbox.capabilities import probe_capabilities
 from app.agent.sandbox.models import (
@@ -25,7 +27,8 @@ _UNTRUSTED_PATTERNS = [
     r"\bnpm\s+(install|ci)\b",
     r"\bpnpm\s+install\b",
     r"\byarn\s+install\b",
-    r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b",
+    r"\bpip(?:\d+(?:\.\d+)?)?\s+(?:download|install|lock|uninstall|wheel)\b",
+    r"\bpip(?:\d+(?:\.\d+)?)?\s+(?:cache\s+(?:purge|remove)|config\s+(?:rename|set|unset))\b",
     r"\bpipx\s+install\b",
     r"\buv\s+pip\s+install\b",
     r"\bpoetry\s+install\b",
@@ -103,6 +106,71 @@ _CONTAINER_SAFE_EXECUTABLES = frozenset(
 _PYTHON_EXECUTABLES = frozenset(
     {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
 )
+_PIP_EXECUTABLES = frozenset({"pip", "pip.exe", "pip3", "pip3.exe"})
+_PIP_STATE_CHANGING_SUBCOMMANDS = frozenset({"download", "install", "lock", "uninstall", "wheel"})
+_PIP_STATE_CHANGING_ACTIONS = {
+    "cache": frozenset({"purge", "remove"}),
+    "config": frozenset({"rename", "set", "unset"}),
+}
+_PIP_OPTIONS_WITH_VALUES = frozenset(
+    {
+        "-c",
+        "-e",
+        "-f",
+        "-i",
+        "-r",
+        "--abi",
+        "--build-constraint",
+        "--cache-dir",
+        "--cert",
+        "--client-cert",
+        "--config-file",
+        "--constraint",
+        "--config-settings",
+        "--editable",
+        "--extra-index-url",
+        "--find-links",
+        "--index-url",
+        "--implementation",
+        "--log",
+        "--log-file",
+        "--no-binary",
+        "--only-binary",
+        "--platform",
+        "--proxy",
+        "--python",
+        "--python-version",
+        "--retries",
+        "--root",
+        "--root-user-action",
+        "--src",
+        "--target",
+        "--timeout",
+        "--trusted-host",
+    }
+)
+_PYTHON_STDLIB_MODULES = frozenset(getattr(sys, "stdlib_module_names", ()))
+_PYTHON_PROCESS_MODULES = frozenset({"asyncio", "multiprocessing", "pty", "subprocess"})
+_PYTHON_PROCESS_CALLS = frozenset(
+    {
+        "call",
+        "check_call",
+        "check_output",
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+        "execv",
+        "fork",
+        "popen",
+        "Popen",
+        "Process",
+        "run",
+        "spawn",
+        "startfile",
+        "system",
+    }
+)
+_PYTHON_PROCESS_NAMES = frozenset({"Popen", "Process"})
+_PYTHON_DYNAMIC_IMPORT_CALLS = frozenset({"__import__", "import_module"})
 
 _BLOCKED_PATTERNS = [
     r"(?:\bformat\.com\b|\bformat\s+(?:/fs:\w+\s+)?[A-Za-z]:|\bFormat-Volume\b|\bdiskpart\b)",
@@ -159,7 +227,11 @@ class SandboxPolicy:
                 "shell_execution_disabled",
             )
 
-        backend_mode = request.requested_backend or self.settings.mode
+        backend_mode = (
+            self.settings.mode
+            if self.settings.mode in {"docker", "enforce"}
+            else request.requested_backend or self.settings.mode
+        )
         backend = self._select_backend(backend_mode, profile)
         if backend is None:
             reason = "No strong sandbox backend is available for this command"
@@ -179,7 +251,6 @@ class SandboxPolicy:
         shell_fallback = False
         host_tool_fallback = bool(
             backend == "docker"
-            and str(request.shell or "auto").lower() == "auto"
             and effective_shell == "bash"
             and self._requires_host_runner(request.command)
             and not (
@@ -190,6 +261,30 @@ class SandboxPolicy:
         if backend == "docker" and effective_shell != "bash":
             shell_fallback = True
         if shell_fallback or host_tool_fallback:
+            if backend_mode in {"docker", "enforce"}:
+                if shell_fallback:
+                    return self._blocked(
+                        profile,
+                        network,
+                        write_strategy,
+                        (
+                            f"Docker mode requires bash, but the requested command resolves to shell "
+                            f"'{effective_shell}'. Use shell='bash' with a Docker-compatible command, "
+                            "or switch to auto or host for approval-required host execution."
+                        ),
+                        "unsupported_shell_for_backend",
+                        requested_shell=request.shell,
+                        effective_shell=effective_shell,
+                    )
+                return self._blocked(
+                    profile,
+                    network,
+                    write_strategy,
+                    self._host_fallback_reason(request.command, runner="blocked"),
+                    "docker_command_not_compatible",
+                    requested_shell=request.shell,
+                    effective_shell=effective_shell,
+                )
             # Docker's pinned image has a bash entrypoint. An automatic
             # request chooses bash when possible. Commands that need an
             # explicit Windows shell or a host-only developer tool are routed
@@ -201,6 +296,8 @@ class SandboxPolicy:
                 else "local_direct"
             )
             effective_shell = self._effective_shell(request, backend, profile)
+            if host_tool_fallback and str(request.shell or "auto").lower() == "bash" and os.name == "nt":
+                effective_shell = "powershell"
 
         if backend == "local_direct":
             return SandboxDecision(
@@ -221,6 +318,7 @@ class SandboxPolicy:
                 explicit_approval_required=True,
                 reason=(
                     self._host_fallback_reason(request.command, runner="direct")
+                    + self._host_fallback_shell_note(request, effective_shell)
                     if host_tool_fallback
                     else "Docker supports bash only; this command will run directly on the host "
                     "after explicit approval"
@@ -272,6 +370,7 @@ class SandboxPolicy:
                 explicit_approval_required=True,
                 reason=(
                     self._host_fallback_reason(request.command, runner="advisory")
+                    + self._host_fallback_shell_note(request, effective_shell)
                     if host_tool_fallback
                     else "Docker supports bash only; this command will use the advisory host runner "
                     "after explicit approval"
@@ -313,7 +412,6 @@ class SandboxPolicy:
             explicit_approval_required=False,
             reason="Strong sandbox policy allowed the command",
         )
-
     def _effective_shell(
         self,
         request: SandboxRunRequest,
@@ -346,25 +444,17 @@ class SandboxPolicy:
         if not text.strip():
             return False
         # Command substitutions can invoke an arbitrary executable without
-        # appearing at a shell segment boundary. Keep those on the host
-        # unless the user explicitly requested bash/Docker.
+        # appearing at a shell segment boundary. Keep those on the host;
+        # explicit bash requests still go through the image allowlist check.
         if "$(" in text or "`" in text:
             return True
         for segment in SandboxPolicy._split_shell_segments(text):
             executable = SandboxPolicy._segment_executable(segment)
             if not executable:
                 return True
-            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_script_argument(segment):
+            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_host_requirement(segment):
                 return True
-            if executable in _PYTHON_EXECUTABLES and re.search(
-                r"\b(?:subprocess|os\.system|Popen|check_call|check_output|import|from)\b",
-                segment,
-                re.IGNORECASE,
-            ):
-                return True
-            if executable in {"pip", "pip3"} and re.search(
-                r"(?<!\S)install(?=\s|$)", segment, re.IGNORECASE
-            ):
+            if executable in _PIP_EXECUTABLES and SandboxPolicy._pip_state_changing(segment):
                 return True
             if executable in {"bash", "sh"}:
                 nested = re.search(r"(?:^|\s)-{1,2}(?:l?c|command)\s+(.+)$", segment, re.IGNORECASE)
@@ -376,7 +466,7 @@ class SandboxPolicy:
                         return True
             if executable not in _CONTAINER_SAFE_EXECUTABLES:
                 return True
-            if executable in {"find", "which"} and re.search(
+            if executable == "find" and re.search(
                 r"(?<!\S)(?:-exec|--exec|xargs)(?=\s|$)", segment, re.IGNORECASE
             ):
                 return True
@@ -396,11 +486,9 @@ class SandboxPolicy:
             executable = SandboxPolicy._segment_executable(segment)
             if not executable:
                 continue
-            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_script_argument(segment):
+            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_host_requirement(segment):
                 return executable
-            if executable in {"pip", "pip3"} and re.search(
-                r"(?<!\S)install(?=\s|$)", segment, re.IGNORECASE
-            ):
+            if executable in _PIP_EXECUTABLES and SandboxPolicy._pip_state_changing(segment):
                 return executable
             if executable not in _CONTAINER_SAFE_EXECUTABLES:
                 return executable
@@ -412,32 +500,69 @@ class SandboxPolicy:
 
     @staticmethod
     def _host_fallback_reason(command: str, *, runner: str) -> str:
-        suffix = (
-            "will run directly on the host"
-            if runner == "direct"
-            else "will use the advisory host runner"
-        )
+        blocked = runner == "blocked"
+        suffix = "will run directly on the host" if runner == "direct" else "will use the advisory host runner"
         for segment in SandboxPolicy._split_shell_segments(str(command or "")):
             executable = SandboxPolicy._segment_executable(segment)
-            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_script_argument(segment):
+            requirement = (
+                SandboxPolicy._python_host_requirement(segment)
+                if executable in _PYTHON_EXECUTABLES
+                else None
+            )
+            if requirement == "script":
+                if blocked:
+                    return "Python script execution needs the host interpreter and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
                 return f"Python script execution uses the host interpreter; this command {suffix} after explicit approval"
-            if executable in _PYTHON_EXECUTABLES and re.search(
-                r"\b(?:subprocess|os\.system|Popen|check_call|check_output|import|from)\b",
-                segment,
-                re.IGNORECASE,
-            ):
-                return f"Python code with host dependencies uses the host interpreter; this command {suffix} after explicit approval"
+            if requirement == "module":
+                if blocked:
+                    return "Python module execution needs the host interpreter and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
+                return f"Python module execution uses the host interpreter; this command {suffix} after explicit approval"
+            if requirement == "dependency":
+                if blocked:
+                    return "Python code uses host dependencies (project or non-standard-library imports) and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
+                return f"Python code uses host dependencies; this command {suffix} after explicit approval"
+            if requirement == "project_path":
+                if blocked:
+                    return "Python code uses a project-specific import path and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
+                return f"Python code uses a project-specific import path; this command {suffix} after explicit approval"
+            if requirement == "process":
+                if blocked:
+                    return "Python code can spawn processes and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
+                return f"Python code can spawn processes; this command {suffix} after explicit approval"
+            if requirement == "unverifiable":
+                if blocked:
+                    return "Python code could not be safely verified for Docker execution. Use auto or host mode for approval-required host execution."
+                return f"Python code could not be safely verified for Docker execution; this command {suffix} after explicit approval"
+            if executable in _PIP_EXECUTABLES and SandboxPolicy._pip_state_changing(segment):
+                if blocked:
+                    return "This pip subcommand changes the environment or writes package artifacts and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
+                return f"This pip subcommand changes the environment or writes package artifacts; this command {suffix} after explicit approval"
         if re.search(
-            r"\b(?:pip|pip3)\s+install\b|\b(?:uv\s+pip|poetry)\s+install\b",
+            r"\b(?:pip|pip3)\s+(?:download|install|lock|uninstall|wheel)\b|\b(?:pip|pip3)\s+(?:cache\s+(?:purge|remove)|config\s+(?:rename|set|unset))\b|\b(?:uv\s+pip|poetry)\s+(?:download|install|lock|uninstall|wheel)\b",
             str(command or ""),
             re.IGNORECASE,
         ):
-            return f"Package installation is host-specific; this command {suffix} after explicit approval"
+            if blocked:
+                return "This package-management command is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
+            return f"This package-management command is host-specific; this command {suffix} after explicit approval"
         tool = SandboxPolicy._host_tool_name(command)
+        if blocked:
+            return (
+                f"The command uses '{tool}', which is not in the pinned Docker image's safe command allowlist. "
+                "Use an allowlisted command, or switch to auto or host for approval-required host execution."
+            )
         return (
             f"The command uses '{tool}', which is not in the pinned Docker image's safe command allowlist; "
             f"this command {suffix} after explicit approval"
         )
+
+    @staticmethod
+    def _host_fallback_shell_note(request: SandboxRunRequest, effective_shell: str) -> str:
+        if str(request.shell or "auto").lower() == "bash" and effective_shell != "bash":
+            return (
+                f" Requested shell 'bash' was overridden with '{effective_shell}' for host execution."
+            )
+        return ""
 
     @staticmethod
     def _split_shell_segments(command: str) -> list[str]:
@@ -486,35 +611,204 @@ class SandboxPolicy:
 
     @staticmethod
     def _segment_executable(segment: str) -> str:
-        text = str(segment or "").strip()
-        while True:
-            assignment = re.match(r"^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|\"[^\"]*\"|\S+)\s+", text)
-            if assignment is None:
-                break
-            text = text[assignment.end():].lstrip()
+        text = SandboxPolicy._strip_leading_assignments(segment)
         match = re.match(r"[!\s]*([A-Za-z0-9_./\\-]+)", text)
         if match is None:
             return ""
         return match.group(1).replace("\\", "/").rsplit("/", 1)[-1].lower()
 
     @staticmethod
+    def _strip_leading_assignments(segment: str) -> str:
+        text = str(segment or "").strip()
+        while True:
+            assignment = re.match(r"^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|\"[^\"]*\"|\S+)\s+", text)
+            if assignment is None:
+                break
+            text = text[assignment.end():].lstrip()
+        return text
+
+    @staticmethod
+    def _shell_words(text: str) -> list[str]:
+        return re.findall(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\S+', str(text or ""))
+
+    @staticmethod
+    def _unquote_shell_word(token: str) -> str:
+        value = str(token or "")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+            if token[0] == '"':
+                value = re.sub(r'\\(["\\])', r"\1", value)
+        return value
+
+    @staticmethod
+    def _python_command_tokens(segment: str) -> list[str]:
+        text = SandboxPolicy._strip_leading_assignments(segment)
+        executable_match = re.match(r"[!\s]*[A-Za-z0-9_./\\-]+", text)
+        if executable_match is None:
+            return []
+        return SandboxPolicy._shell_words(text[executable_match.end():].strip())
+
+    @staticmethod
+    def _python_code_argument(segment: str) -> str | None:
+        tokens = SandboxPolicy._python_command_tokens(segment)
+        for index, token in enumerate(tokens):
+            normalized = SandboxPolicy._unquote_shell_word(token).lower()
+            if normalized in {"-c", "--command"}:
+                if index + 1 >= len(tokens):
+                    return None
+                return SandboxPolicy._unquote_shell_word(tokens[index + 1])
+            if normalized.startswith("-c=") or normalized.startswith("--command="):
+                return SandboxPolicy._unquote_shell_word(token).split("=", 1)[1]
+        return "" if any(SandboxPolicy._unquote_shell_word(token).lower() == "-" for token in tokens) else None
+
+    @staticmethod
+    def _python_has_code_option(segment: str) -> bool:
+        return any(
+            (
+                SandboxPolicy._unquote_shell_word(token).lower() in {"-c", "--command"}
+                or SandboxPolicy._unquote_shell_word(token).lower().startswith(("-c=", "--command="))
+            )
+            for token in SandboxPolicy._python_command_tokens(segment)
+        )
+
+    @staticmethod
+    def _python_uses_project_path(segment: str) -> bool:
+        return bool(re.search(r"(?:^|\s)(?:PYTHONPATH|PYTHONHOME)=", str(segment or ""), re.IGNORECASE))
+
+    @staticmethod
+    def _python_host_requirement(segment: str) -> str | None:
+        executable = SandboxPolicy._segment_executable(segment)
+        if executable not in _PYTHON_EXECUTABLES:
+            return None
+        if SandboxPolicy._python_script_argument(segment):
+            tokens = SandboxPolicy._python_command_tokens(segment)
+            if any(SandboxPolicy._unquote_shell_word(token).lower() in {"-m", "--module"} for token in tokens):
+                return "module"
+            return "script"
+        if SandboxPolicy._python_uses_project_path(segment):
+            return "project_path"
+        code = SandboxPolicy._python_code_argument(segment)
+        if code is None:
+            return "unverifiable" if SandboxPolicy._python_has_code_option(segment) else None
+        if not code:
+            return "unverifiable"
+        try:
+            tree = ast.parse(code, mode="exec")
+        except SyntaxError:
+            return "unverifiable"
+
+        dependency = False
+        process = False
+        imported_process_names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".", 1)[0]
+                    if root in _PYTHON_PROCESS_MODULES:
+                        process = True
+                        imported_process_names.add(alias.asname or root)
+                    elif root == "os":
+                        imported_process_names.add(alias.asname or root)
+                    elif root not in _PYTHON_STDLIB_MODULES:
+                        dependency = True
+            elif isinstance(node, ast.ImportFrom):
+                root = (node.module or "").split(".", 1)[0]
+                if node.level or not root:
+                    dependency = True
+                elif root in _PYTHON_PROCESS_MODULES:
+                    process = True
+                    imported_process_names.update(alias.asname or alias.name for alias in node.names)
+                elif root == "os":
+                    for alias in node.names:
+                        if (
+                            alias.name in _PYTHON_PROCESS_CALLS
+                            or alias.name.startswith("spawn")
+                            or alias.name.startswith("exec")
+                        ):
+                            process = True
+                            imported_process_names.add(alias.asname or alias.name)
+                elif root not in _PYTHON_STDLIB_MODULES:
+                    dependency = True
+            elif isinstance(node, ast.Call):
+                function = node.func
+                if isinstance(function, ast.Name):
+                    if function.id in imported_process_names or function.id in _PYTHON_PROCESS_NAMES:
+                        process = True
+                    elif function.id in _PYTHON_DYNAMIC_IMPORT_CALLS:
+                        dependency = True
+                elif isinstance(function, ast.Attribute):
+                    root_node = function
+                    while isinstance(root_node, ast.Attribute):
+                        root_node = root_node.value
+                    root = root_node.id if isinstance(root_node, ast.Name) else ""
+                    if (
+                        (root in _PYTHON_PROCESS_MODULES or root == "os")
+                        and (
+                            function.attr in _PYTHON_PROCESS_CALLS
+                            or function.attr.startswith("spawn")
+                            or function.attr.startswith("exec")
+                        )
+                    ) or (root in imported_process_names and function.attr in _PYTHON_PROCESS_CALLS):
+                        process = True
+                    if function.attr in _PYTHON_DYNAMIC_IMPORT_CALLS:
+                        dependency = True
+        if process:
+            return "process"
+        if dependency:
+            return "dependency"
+        return None
+
+    @staticmethod
     def _python_script_argument(segment: str) -> bool:
         executable = SandboxPolicy._segment_executable(segment)
         if executable not in _PYTHON_EXECUTABLES:
             return False
-        raw = str(segment or "").strip()
-        executable_match = re.match(r"[!\s]*[A-Za-z0-9_./\\-]+", raw)
-        remainder = raw[executable_match.end():].strip() if executable_match else ""
-        tokens = re.findall(r"\"[^\"]*\"|'[^']*'|\S+", remainder)
+        tokens = SandboxPolicy._python_command_tokens(segment)
         for token in tokens:
-            normalized = token.strip("\"'")
-            if normalized in {"-c", "--command", "-"}:
+            normalized = SandboxPolicy._unquote_shell_word(token)
+            if normalized in {"-c", "--command", "-"} or normalized.startswith(("-c=", "--command=")):
                 return False
             if normalized in {"-m", "--module"}:
                 return True
             if normalized.startswith("-"):
                 continue
             return True
+        return False
+
+    @staticmethod
+    def _pip_state_changing(segment: str) -> bool:
+        executable = SandboxPolicy._segment_executable(segment)
+        if executable not in _PIP_EXECUTABLES:
+            return False
+        tokens = SandboxPolicy._shell_words(SandboxPolicy._strip_leading_assignments(segment))
+        if not tokens:
+            return False
+        subcommand = ""
+        subcommand_index = -1
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            normalized = SandboxPolicy._unquote_shell_word(token).lower()
+            if normalized == "--":
+                if index + 1 < len(tokens):
+                    subcommand = SandboxPolicy._unquote_shell_word(tokens[index + 1]).lower()
+                    subcommand_index = index + 1
+                break
+            if normalized.startswith("-"):
+                option = normalized.split("=", 1)[0]
+                index += 2 if "=" not in normalized and option in _PIP_OPTIONS_WITH_VALUES else 1
+                continue
+            subcommand = normalized
+            subcommand_index = index
+            break
+        if subcommand in _PIP_STATE_CHANGING_SUBCOMMANDS:
+            return True
+        if subcommand in _PIP_STATE_CHANGING_ACTIONS and subcommand_index >= 0:
+            for token in tokens[subcommand_index + 1:]:
+                normalized = SandboxPolicy._unquote_shell_word(token).lower()
+                if normalized.startswith("-"):
+                    continue
+                return normalized in _PIP_STATE_CHANGING_ACTIONS[subcommand]
         return False
 
     def _select_backend(self, mode: SandboxMode, profile: SandboxProfile) -> SandboxBackend | None:

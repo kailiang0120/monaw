@@ -5,10 +5,10 @@ Monaw classifies each shell command before starting a process. The decision reco
 ## Modes
 
 - `off` / `disabled`: shell execution is disabled.
-- `auto`: Docker is preferred for commands whose shell segments use the pinned image's allowlisted Python/coreutils toolchain. `shell=auto` chooses bash for those commands; unknown tools, Python script files, package installs, and PowerShell/cmd syntax use the advisory host runner only after an explicit approval.
-- `enforce`: Docker is required for Docker-compatible commands; an unavailable or unpinned image returns `sandbox_backend_unavailable` or `docker_image_not_pinned`. An explicitly requested non-bash shell is surfaced as an approval-required host fallback.
+- `auto`: Docker is used for the narrow set of allowlisted local-inspection commands, self-contained Python snippets, and dangerous untrusted shapes that are safer when contained. Normal developer tooling, project scripts/imports, state-changing package commands, and PowerShell/cmd syntax use the advisory host runner only after explicit approval.
+- `enforce`: Docker is required for Docker-compatible commands; an unavailable or unpinned image returns `sandbox_backend_unavailable` or `docker_image_not_pinned`. Incompatible shells and commands outside the image allowlist fail closed with an actionable blocked decision; there is no host fallback.
 - `host`: use the host runner with an explicit approval and no-isolation warning.
-- `docker`: require Docker explicitly.
+- `docker`: require Docker explicitly; incompatible shells and commands outside the image allowlist fail closed instead of falling back to the host.
 - `local_restricted`: use the advisory host runner with process-group cleanup and an explicit approval.
 
 There is no WSL backend. Long-running sessions use the local host runners and are capped at a maximum lifetime; Docker sessions are not supported.
@@ -21,7 +21,7 @@ There is no WSL backend. Long-running sessions use the local host runners and ar
 
 The shipped Docker image is pinned as `python:3.12-slim@sha256:<64-hex-digest>`. Settings can pull a tag and resolve it to an immutable digest. If the image is unpinned, capability status reports `docker_image_not_pinned` and the Docker runner will not start.
 
-Docker runs use the pinned Python image, not the host's toolchain, and have no network by default. Auto routing is fail-safe: a command is sent to Docker only when every shell segment uses a known-safe image executable; unknown tools and Python script files/modules/import-dependent snippets are routed to the approval-required host runner. A self-contained `python -c` snippet can remain in Docker. Package installation in auto mode is therefore host-specific and approval-gated. Container-only changes are ephemeral unless the selected write strategy copies changed files back from `/workspace`.
+Docker runs use the pinned Python image, not the host's toolchain. Auto routing is fail-safe: a command is sent to Docker only when every shell segment uses a known-safe image executable and any Python `-c` code is self-contained or uses standard-library imports. Explicit `shell=bash` does not bypass this compatibility check. Unknown tools, project scripts/imports, process-spawning Python code, and state-changing package commands are routed to the approval-required host runner in auto mode and blocked in `docker`/`enforce` modes. A self-contained `python -c` snippet and contained dangerous pipeline can remain in Docker. Docker denies network access by default; a requested allow mode uses Docker's normal bridge network and is not a network-isolated run. `direct_rw` writes through the allowed workspace bind, `copy_out` copies changed/new regular files back from a temporary workspace, and `discard` leaves container changes ephemeral.
 
 ## Workspace and writes
 
@@ -38,4 +38,4 @@ Subprocesses receive a minimal environment allowlist. Secret-looking explicit va
 - `sandbox_backend_unavailable`: install/start Docker, resolve a pinned image, or choose host mode and approve the run.
 - `docker_image_not_pinned`: use **Resolve & pull** in Settings or enter an immutable `name@sha256:<digest>` reference.
 - `shell_execution_disabled`: change the mode from `off` only if shell execution is intended.
-- `unsupported_shell_for_backend`: a defensive runner error; normal `shell=auto` policy resolves Docker commands to bash or reports an approval-required host fallback.
+- `unsupported_shell_for_backend`: Docker supports bash commands only; `auto` reports an approval-required host fallback for incompatible shell syntax, while `docker`/`enforce` block it.

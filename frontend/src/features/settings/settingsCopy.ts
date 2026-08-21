@@ -232,10 +232,10 @@ export const SANDBOX_COPY = {
   mode: 'How strictly commands are isolated.',
   modeHelp: {
     off: 'The agent cannot run shell commands at all.',
-    auto: 'Use the strongest isolation available, and fall back if it is not installed.',
-    enforce: 'Require Docker for Docker-compatible commands; incompatible shell requests show an approval-required host fallback.',
+    auto: 'Use Docker for allowlisted local inspection and contained dangerous shapes; normal developer tooling uses the approval-required host runner.',
+    enforce: 'Require Docker for Docker-compatible commands; incompatible shells and host-only tools are blocked instead of falling back to the host.',
     host: 'Run directly on your machine, asking for approval first.',
-    docker: 'Always run inside a Docker container.',
+    docker: 'Require Docker; incompatible shells and host-only tools are blocked.',
     local_restricted: 'Run on your machine with limits that are best-effort only.',
   },
   network: 'Whether commands running in the sandbox can reach the internet.',

@@ -159,7 +159,7 @@ def test_default_workspace_is_trusted_by_real_permission_policy():
     assert decision.blocked is False
 
 
-def test_policy_uses_docker_for_untrusted_when_strong_backend_available():
+def test_policy_routes_untrusted_host_tooling_to_approval_when_docker_is_available():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
         capabilities=_capabilities(docker=True),
@@ -167,10 +167,9 @@ def test_policy_uses_docker_for_untrusted_when_strong_backend_available():
 
     assert decision.allowed is True
     assert decision.profile == "untrusted"
-    assert decision.backend == "docker"
-    assert decision.security_label == "strong"
-    assert decision.network == "deny"
-    assert decision.network_enforcement == "enforced"
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert decision.reason_code == "docker_host_tool_fallback_requires_approval"
 
 
 def test_policy_approves_untrusted_with_advisory_fallback_when_docker_is_unavailable():
@@ -210,7 +209,7 @@ def test_policy_falls_back_to_local_direct_when_no_backend_available():
     assert decision.security_label == "none"
 
 
-def test_policy_routes_standard_commands_to_docker_when_available():
+def test_policy_routes_unavailable_standard_tools_to_approval_when_docker_available():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
         capabilities=_capabilities(docker=True, local=True),
@@ -218,8 +217,10 @@ def test_policy_routes_standard_commands_to_docker_when_available():
 
     assert decision.allowed is True
     assert decision.profile == "standard"
-    assert decision.backend == "docker"
-    assert decision.security_label == "strong"
+    assert decision.backend == "local_restricted"
+    assert decision.security_label == "advisory"
+    assert decision.explicit_approval_required is True
+    assert decision.reason_code == "docker_host_tool_fallback_requires_approval"
 
 
 def test_auto_shell_prefers_bash_for_docker_on_windows_or_posix():
@@ -320,6 +321,7 @@ def test_auto_keeps_known_container_commands_in_docker(command):
     assert decision.explicit_approval_required is False
 
 
+@pytest.mark.parametrize("mode", ["auto", "docker", "enforce"])
 @pytest.mark.parametrize(
     "command",
     [
@@ -327,9 +329,11 @@ def test_auto_keeps_known_container_commands_in_docker(command):
         "git clone https://example.com/repo.git && cd repo",
     ],
 )
-def test_dangerous_untrusted_pipelines_remain_contained(command):
+def test_dangerous_untrusted_pipelines_remain_contained(command, mode):
+    settings = AgentSettings()
+    settings.sandbox.mode = mode
     decision = SandboxPolicy(
-        AgentSettings().sandbox,
+        settings.sandbox,
         capabilities=_capabilities(docker=True, local=True),
     ).decide(SandboxRunRequest(command=command))
 
@@ -376,6 +380,118 @@ def test_python_imports_and_unknown_chained_tools_are_transparent():
     assert "'make'" in chained.reason
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        'python -c "print(\'from/import\')"',
+        'python -c "print(\'from import subprocess\')"',
+        'python -c "import os; print(os.getcwd())"',
+        'python -c "from pathlib import Path; print(Path.cwd())"',
+    ],
+)
+def test_python_self_contained_code_and_stdlib_imports_remain_in_docker(command):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command, shell="bash"))
+
+    assert decision.backend == "docker"
+    assert decision.explicit_approval_required is False
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_reason"),
+    [
+        ('python -c "import requests; print(requests.__name__)"', "host dependencies"),
+        ('python -c "import subprocess; subprocess.run([\'echo\', \'ok\'])"', "spawn processes"),
+        ('python -c "import subprocess; subprocess.Popen([\'echo\', \'ok\'])"', "spawn processes"),
+        ('python -c "import os; os.system(\'echo ok\')"', "spawn processes"),
+    ],
+)
+def test_python_code_with_host_dependencies_or_process_spawning_routes_to_approval(command, expected_reason):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command, shell="bash"))
+
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert decision.reason_code == "docker_host_tool_fallback_requires_approval"
+    if expected_reason:
+        assert expected_reason in decision.reason
+
+
+@pytest.mark.parametrize("mode", ["docker", "enforce"])
+@pytest.mark.parametrize("command", ["git status", "pip uninstall requests", "python script.py", "python -c \"import requests\""])
+def test_explicit_docker_modes_block_non_allowlisted_tools_and_python(mode, command):
+    settings = AgentSettings()
+    settings.sandbox.mode = mode
+    decision = SandboxPolicy(
+        settings.sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command, shell="bash"))
+
+    assert decision.allowed is False
+    assert decision.backend == "none"
+    assert decision.reason_code == "docker_command_not_compatible"
+    assert "auto or host" in decision.reason
+
+
+@pytest.mark.parametrize("mode", ["docker", "enforce"])
+def test_explicit_docker_modes_block_incompatible_shell(mode):
+    settings = AgentSettings()
+    settings.sandbox.mode = mode
+    decision = SandboxPolicy(
+        settings.sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command="Write-Output ok", shell="powershell"))
+
+    assert decision.allowed is False
+    assert decision.reason_code == "unsupported_shell_for_backend"
+    assert "requires bash" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip uninstall requests",
+        "pip download requests",
+        "pip wheel requests",
+        "pip cache purge",
+        "pip cache remove requests",
+        "pip config set global.index-url https://example.com/simple",
+        "pip --index-url https://example.com/simple install requests",
+    ],
+)
+def test_state_changing_pip_subcommands_route_to_approval_required_host(command):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command, shell="bash"))
+
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert "pip subcommand" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'python -c "__import__(\'project\')"',
+        'python -c "from importlib import import_module; import_module(\'project\')"',
+    ],
+)
+def test_python_dynamic_imports_route_to_approval_required_host(command):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command, shell="bash"))
+
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert "host dependencies" in decision.reason
+
+
 def test_powershell_reason_takes_precedence_over_allowlist_reason():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
@@ -387,17 +503,31 @@ def test_powershell_reason_takes_precedence_over_allowlist_reason():
     assert "Docker supports bash only" in decision.reason
 
 
-def test_explicit_bash_keeps_supported_untrusted_command_in_docker():
+def test_explicit_bash_does_not_bypass_the_container_allowlist():
     decision = SandboxPolicy(
         AgentSettings().sandbox,
         capabilities=_capabilities(docker=True, local=True),
     ).decide(SandboxRunRequest(command="npm install", shell="bash"))
 
-    assert decision.backend == "docker"
-    assert decision.explicit_approval_required is False
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert decision.reason_code == "docker_host_tool_fallback_requires_approval"
 
 
-def test_explicit_powershell_has_visible_approval_required_fallback_even_in_enforce_mode():
+def test_explicit_bash_host_fallback_uses_a_host_shell_on_windows():
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command="git status", shell="bash"))
+
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert decision.effective_shell == ("powershell" if os.name == "nt" else "bash")
+    if os.name == "nt":
+        assert "overridden" in decision.reason
+
+
+def test_explicit_powershell_is_blocked_in_enforce_mode():
     settings = AgentSettings()
     settings.sandbox.mode = "enforce"
     decision = SandboxPolicy(
@@ -405,11 +535,11 @@ def test_explicit_powershell_has_visible_approval_required_fallback_even_in_enfo
         capabilities=_capabilities(docker=True, local=True),
     ).decide(SandboxRunRequest(command="Write-Output ok", shell="powershell"))
 
-    assert decision.allowed is True
-    assert decision.backend == "local_restricted"
+    assert decision.allowed is False
+    assert decision.backend == "none"
     assert decision.effective_shell == "powershell"
-    assert decision.explicit_approval_required is True
-    assert decision.reason_code == "docker_shell_fallback_requires_approval"
+    assert decision.explicit_approval_required is False
+    assert decision.reason_code == "unsupported_shell_for_backend"
 
 
 def test_policy_falls_back_from_docker_for_default_powershell_shell():
