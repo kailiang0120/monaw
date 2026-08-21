@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import os
 import re
-import sys
+import shutil
 
 from app.agent.sandbox.capabilities import probe_capabilities
 from app.agent.sandbox.models import (
@@ -149,27 +149,236 @@ _PIP_OPTIONS_WITH_VALUES = frozenset(
         "--trusted-host",
     }
 )
-_PYTHON_STDLIB_MODULES = frozenset(getattr(sys, "stdlib_module_names", ()))
-_PYTHON_PROCESS_MODULES = frozenset({"asyncio", "multiprocessing", "pty", "subprocess"})
-_PYTHON_PROCESS_CALLS = frozenset(
+# This is the module set for the Python runtime in the default Docker image
+# (python:3.12-slim). It must not come from sys.stdlib_module_names: that
+# describes the backend host and can differ from the interpreter in Docker.
+# In particular, distutils, imp, and asynchat are not available in Python 3.12.
+_PYTHON_312_STDLIB_MODULES = frozenset(
     {
-        "call",
-        "check_call",
-        "check_output",
-        "create_subprocess_exec",
-        "create_subprocess_shell",
-        "execv",
-        "fork",
-        "popen",
-        "Popen",
-        "Process",
-        "run",
-        "spawn",
-        "startfile",
-        "system",
+        "abc",
+        "aifc",
+        "argparse",
+        "array",
+        "ast",
+        "asyncio",
+        "atexit",
+        "audioop",
+        "base64",
+        "bdb",
+        "binascii",
+        "bisect",
+        "bz2",
+        "calendar",
+        "cgi",
+        "cgitb",
+        "chunk",
+        "cmath",
+        "cmd",
+        "code",
+        "codecs",
+        "codeop",
+        "collections",
+        "colorsys",
+        "compileall",
+        "concurrent",
+        "configparser",
+        "contextlib",
+        "contextvars",
+        "copy",
+        "copyreg",
+        "csv",
+        "ctypes",
+        "curses",
+        "dataclasses",
+        "datetime",
+        "dbm",
+        "decimal",
+        "difflib",
+        "dis",
+        "doctest",
+        "email",
+        "encodings",
+        "enum",
+        "errno",
+        "faulthandler",
+        "filecmp",
+        "fileinput",
+        "fnmatch",
+        "fractions",
+        "ftplib",
+        "functools",
+        "gc",
+        "getopt",
+        "getpass",
+        "gettext",
+        "glob",
+        "graphlib",
+        "gzip",
+        "hashlib",
+        "heapq",
+        "hmac",
+        "html",
+        "http",
+        "imaplib",
+        "imghdr",
+        "importlib",
+        "inspect",
+        "io",
+        "ipaddress",
+        "itertools",
+        "json",
+        "keyword",
+        "lib2to3",
+        "linecache",
+        "locale",
+        "logging",
+        "lzma",
+        "mailbox",
+        "mailcap",
+        "marshal",
+        "math",
+        "mimetypes",
+        "mmap",
+        "modulefinder",
+        "multiprocessing",
+        "netrc",
+        "nntplib",
+        "numbers",
+        "operator",
+        "optparse",
+        "os",
+        "pathlib",
+        "pdb",
+        "pickle",
+        "pickletools",
+        "pipes",
+        "pkgutil",
+        "platform",
+        "plistlib",
+        "poplib",
+        "pprint",
+        "profile",
+        "pstats",
+        "pty",
+        "py_compile",
+        "pyclbr",
+        "pydoc",
+        "queue",
+        "quopri",
+        "random",
+        "re",
+        "readline",
+        "reprlib",
+        "runpy",
+        "sched",
+        "secrets",
+        "select",
+        "selectors",
+        "shelve",
+        "shlex",
+        "shutil",
+        "signal",
+        "site",
+        "smtpd",
+        "smtplib",
+        "socket",
+        "socketserver",
+        "sqlite3",
+        "ssl",
+        "stat",
+        "statistics",
+        "string",
+        "stringprep",
+        "struct",
+        "subprocess",
+        "sunau",
+        "symtable",
+        "sys",
+        "sysconfig",
+        "tabnanny",
+        "tarfile",
+        "telnetlib",
+        "tempfile",
+        "textwrap",
+        "threading",
+        "time",
+        "timeit",
+        "tkinter",
+        "token",
+        "tokenize",
+        "tomllib",
+        "trace",
+        "traceback",
+        "tracemalloc",
+        "tty",
+        "turtle",
+        "types",
+        "typing",
+        "unicodedata",
+        "unittest",
+        "urllib",
+        "uuid",
+        "venv",
+        "warnings",
+        "wave",
+        "weakref",
+        "webbrowser",
+        "xml",
+        "xmlrpc",
+        "zipapp",
+        "zipfile",
+        "zipimport",
+        "zlib",
+        "zoneinfo",
     }
 )
-_PYTHON_PROCESS_NAMES = frozenset({"Popen", "Process"})
+_PYTHON_IMAGE_VERSION_RE = re.compile(
+    r"(?:^|/)(?:python):(?P<major>\d+)\.(?P<minor>\d+)(?:[-.@:]|$)",
+    re.IGNORECASE,
+)
+
+
+def _python_stdlib_modules_for_image(image: str) -> frozenset[str] | None:
+    """Return a known stdlib set for the configured image, or fail closed."""
+    match = _PYTHON_IMAGE_VERSION_RE.search(str(image or "").strip())
+    if match is None:
+        return None
+    version = (int(match.group("major")), int(match.group("minor")))
+    if version == (3, 12):
+        return _PYTHON_312_STDLIB_MODULES
+    # An image with an unsupported or untagged Python version is not safe to
+    # classify from the host's module inventory. Treat imports as host-specific
+    # until that image gets an explicit compatibility table or probe.
+    return None
+
+
+_PYTHON_PROCESS_MODULES = frozenset({"asyncio", "multiprocessing", "pty", "subprocess"})
+_PYTHON_PROCESS_CALLS_BY_MODULE = {
+    "asyncio": frozenset({"create_subprocess_exec", "create_subprocess_shell"}),
+    "multiprocessing": frozenset({"Pool", "Process", "fork", "forkserver", "spawn"}),
+    "pty": frozenset({"spawn"}),
+    "subprocess": frozenset(
+        {
+            "call",
+            "check_call",
+            "check_output",
+            "Popen",
+            "run",
+        }
+    ),
+    "os": frozenset(
+        {
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+            "fork",
+            "startfile",
+            "system",
+        }
+    ),
+}
+_PYTHON_PROCESS_NAMES = frozenset({"Popen", "Pool", "Process"})
 _PYTHON_DYNAMIC_IMPORT_CALLS = frozenset({"__import__", "import_module"})
 
 _BLOCKED_PATTERNS = [
@@ -204,6 +413,7 @@ class SandboxPolicy:
     ) -> None:
         self.settings = settings
         self.capabilities = capabilities or probe_capabilities(settings)
+        self._python_stdlib_modules = _python_stdlib_modules_for_image(settings.docker.image)
 
     def decide(self, request: SandboxRunRequest) -> SandboxDecision:
         profile = request.profile or classify_command(
@@ -295,9 +505,12 @@ class SandboxPolicy:
                 if self.capabilities.local_restricted.available
                 else "local_direct"
             )
-            effective_shell = self._effective_shell(request, backend, profile)
-            if host_tool_fallback and str(request.shell or "auto").lower() == "bash" and os.name == "nt":
-                effective_shell = "powershell"
+            if host_tool_fallback:
+                requested_host_shell = effective_shell
+                effective_shell = self._host_fallback_shell(effective_shell)
+            else:
+                requested_host_shell = effective_shell
+                effective_shell = self._effective_shell(request, backend, profile)
 
         if backend == "local_direct":
             return SandboxDecision(
@@ -318,7 +531,7 @@ class SandboxPolicy:
                 explicit_approval_required=True,
                 reason=(
                     self._host_fallback_reason(request.command, runner="direct")
-                    + self._host_fallback_shell_note(request, effective_shell)
+                    + self._host_fallback_shell_note(request, requested_host_shell, effective_shell)
                     if host_tool_fallback
                     else "Docker supports bash only; this command will run directly on the host "
                     "after explicit approval"
@@ -370,7 +583,7 @@ class SandboxPolicy:
                 explicit_approval_required=True,
                 reason=(
                     self._host_fallback_reason(request.command, runner="advisory")
-                    + self._host_fallback_shell_note(request, effective_shell)
+                    + self._host_fallback_shell_note(request, requested_host_shell, effective_shell)
                     if host_tool_fallback
                     else "Docker supports bash only; this command will use the advisory host runner "
                     "after explicit approval"
@@ -412,6 +625,7 @@ class SandboxPolicy:
             explicit_approval_required=False,
             reason="Strong sandbox policy allowed the command",
         )
+
     def _effective_shell(
         self,
         request: SandboxRunRequest,
@@ -439,7 +653,15 @@ class SandboxPolicy:
         )
 
     @staticmethod
-    def _requires_host_runner(command: str) -> bool:
+    def _host_fallback_shell(effective_shell: str) -> str:
+        """Resolve the shell that the advisory host runner can actually use."""
+        if str(effective_shell or "").lower() != "bash":
+            return effective_shell
+        if os.name == "nt" and shutil.which("bash") is None:
+            return "powershell"
+        return "bash"
+
+    def _requires_host_runner(self, command: str) -> bool:
         text = str(command or "")
         if not text.strip():
             return False
@@ -452,7 +674,7 @@ class SandboxPolicy:
             executable = SandboxPolicy._segment_executable(segment)
             if not executable:
                 return True
-            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_host_requirement(segment):
+            if executable in _PYTHON_EXECUTABLES and self._python_host_requirement(segment):
                 return True
             if executable in _PIP_EXECUTABLES and SandboxPolicy._pip_state_changing(segment):
                 return True
@@ -462,7 +684,7 @@ class SandboxPolicy:
                     inner = nested.group(1).strip()
                     if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in {'"', "'"}:
                         inner = inner[1:-1]
-                    if SandboxPolicy._requires_host_runner(inner):
+                    if self._requires_host_runner(inner):
                         return True
             if executable not in _CONTAINER_SAFE_EXECUTABLES:
                 return True
@@ -480,13 +702,12 @@ class SandboxPolicy:
             for pattern in _CONTAINED_UNTRUSTED_PATTERNS
         )
 
-    @staticmethod
-    def _host_tool_name(command: str) -> str:
+    def _host_tool_name(self, command: str) -> str:
         for segment in SandboxPolicy._split_shell_segments(str(command or "")):
             executable = SandboxPolicy._segment_executable(segment)
             if not executable:
                 continue
-            if executable in _PYTHON_EXECUTABLES and SandboxPolicy._python_host_requirement(segment):
+            if executable in _PYTHON_EXECUTABLES and self._python_host_requirement(segment):
                 return executable
             if executable in _PIP_EXECUTABLES and SandboxPolicy._pip_state_changing(segment):
                 return executable
@@ -498,14 +719,13 @@ class SandboxPolicy:
             return "pip"
         return "host tool"
 
-    @staticmethod
-    def _host_fallback_reason(command: str, *, runner: str) -> str:
+    def _host_fallback_reason(self, command: str, *, runner: str) -> str:
         blocked = runner == "blocked"
         suffix = "will run directly on the host" if runner == "direct" else "will use the advisory host runner"
         for segment in SandboxPolicy._split_shell_segments(str(command or "")):
             executable = SandboxPolicy._segment_executable(segment)
             requirement = (
-                SandboxPolicy._python_host_requirement(segment)
+                self._python_host_requirement(segment)
                 if executable in _PYTHON_EXECUTABLES
                 else None
             )
@@ -533,7 +753,7 @@ class SandboxPolicy:
                 if blocked:
                     return "Python code could not be safely verified for Docker execution. Use auto or host mode for approval-required host execution."
                 return f"Python code could not be safely verified for Docker execution; this command {suffix} after explicit approval"
-            if executable in _PIP_EXECUTABLES and SandboxPolicy._pip_state_changing(segment):
+            if executable in _PIP_EXECUTABLES and self._pip_state_changing(segment):
                 if blocked:
                     return "This pip subcommand changes the environment or writes package artifacts and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
                 return f"This pip subcommand changes the environment or writes package artifacts; this command {suffix} after explicit approval"
@@ -545,7 +765,7 @@ class SandboxPolicy:
             if blocked:
                 return "This package-management command is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
             return f"This package-management command is host-specific; this command {suffix} after explicit approval"
-        tool = SandboxPolicy._host_tool_name(command)
+        tool = self._host_tool_name(command)
         if blocked:
             return (
                 f"The command uses '{tool}', which is not in the pinned Docker image's safe command allowlist. "
@@ -557,10 +777,18 @@ class SandboxPolicy:
         )
 
     @staticmethod
-    def _host_fallback_shell_note(request: SandboxRunRequest, effective_shell: str) -> str:
-        if str(request.shell or "auto").lower() == "bash" and effective_shell != "bash":
+    def _host_fallback_shell_note(
+        request: SandboxRunRequest,
+        requested_shell: str,
+        effective_shell: str,
+    ) -> str:
+        if str(requested_shell or "").lower() == "bash" and effective_shell != "bash":
+            if str(request.shell or "auto").lower() == "bash":
+                return (
+                    f" Requested shell 'bash' was overridden with '{effective_shell}' for host execution."
+                )
             return (
-                f" Requested shell 'bash' was overridden with '{effective_shell}' for host execution."
+                f" Docker-compatible shell 'bash' was unavailable; host execution uses '{effective_shell}'."
             )
         return ""
 
@@ -675,8 +903,7 @@ class SandboxPolicy:
     def _python_uses_project_path(segment: str) -> bool:
         return bool(re.search(r"(?:^|\s)(?:PYTHONPATH|PYTHONHOME)=", str(segment or ""), re.IGNORECASE))
 
-    @staticmethod
-    def _python_host_requirement(segment: str) -> str | None:
+    def _python_host_requirement(self, segment: str) -> str | None:
         executable = SandboxPolicy._segment_executable(segment)
         if executable not in _PYTHON_EXECUTABLES:
             return None
@@ -699,37 +926,31 @@ class SandboxPolicy:
 
         dependency = False
         process = False
+        imported_module_aliases: dict[str, str] = {}
         imported_process_names: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
+                if self._python_stdlib_modules is None:
+                    return "unverifiable"
                 for alias in node.names:
                     root = alias.name.split(".", 1)[0]
-                    if root in _PYTHON_PROCESS_MODULES:
-                        process = True
-                        imported_process_names.add(alias.asname or root)
-                    elif root == "os":
-                        imported_process_names.add(alias.asname or root)
-                    elif root not in _PYTHON_STDLIB_MODULES:
+                    imported_module_aliases[alias.asname or root] = root
+                    if root not in self._python_stdlib_modules:
                         dependency = True
             elif isinstance(node, ast.ImportFrom):
+                if self._python_stdlib_modules is None:
+                    return "unverifiable"
                 root = (node.module or "").split(".", 1)[0]
                 if node.level or not root:
                     dependency = True
-                elif root in _PYTHON_PROCESS_MODULES:
-                    process = True
-                    imported_process_names.update(alias.asname or alias.name for alias in node.names)
-                elif root == "os":
-                    for alias in node.names:
-                        if (
-                            alias.name in _PYTHON_PROCESS_CALLS
-                            or alias.name.startswith("spawn")
-                            or alias.name.startswith("exec")
-                        ):
-                            process = True
-                            imported_process_names.add(alias.asname or alias.name)
-                elif root not in _PYTHON_STDLIB_MODULES:
+                elif root not in self._python_stdlib_modules:
                     dependency = True
-            elif isinstance(node, ast.Call):
+                elif root in _PYTHON_PROCESS_MODULES or root == "os":
+                    for alias in node.names:
+                        if alias.name in _PYTHON_PROCESS_CALLS_BY_MODULE.get(root, ()):
+                            imported_process_names.add(alias.asname or alias.name)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
                 function = node.func
                 if isinstance(function, ast.Name):
                     if function.id in imported_process_names or function.id in _PYTHON_PROCESS_NAMES:
@@ -741,14 +962,8 @@ class SandboxPolicy:
                     while isinstance(root_node, ast.Attribute):
                         root_node = root_node.value
                     root = root_node.id if isinstance(root_node, ast.Name) else ""
-                    if (
-                        (root in _PYTHON_PROCESS_MODULES or root == "os")
-                        and (
-                            function.attr in _PYTHON_PROCESS_CALLS
-                            or function.attr.startswith("spawn")
-                            or function.attr.startswith("exec")
-                        )
-                    ) or (root in imported_process_names and function.attr in _PYTHON_PROCESS_CALLS):
+                    module = imported_module_aliases.get(root, root)
+                    if function.attr in _PYTHON_PROCESS_CALLS_BY_MODULE.get(module, ()):
                         process = True
                     if function.attr in _PYTHON_DYNAMIC_IMPORT_CALLS:
                         dependency = True
