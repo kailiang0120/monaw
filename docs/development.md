@@ -319,5 +319,36 @@ committed because timings and paths are machine-specific. Startup time, idle API
 request rate, and representative database growth remain explicit manual fields
 until provider-independent application harnesses are available.
 
-GitHub Actions runs each backend group as a separate Windows job and runs the
-frontend verification workflow on every push and pull request.
+## Per-commit integrity
+
+The test suites prove that the tip of a branch works. They cannot prove that
+each commit leading to it works: a commit that imports a module which only
+lands in a later commit merges cleanly and still passes at the tip, but it
+breaks `git bisect`, a partial revert, and anyone who checks it out.
+
+```powershell
+.\scripts\check-commits.ps1
+.\scripts\check-commits.ps1 -Base main -Head HEAD
+.\scripts\check-commits.ps1 -SkipFrontend
+```
+
+With no arguments the range is whatever the current branch adds on top of
+`origin/main`. Each commit is checked out into a scratch worktree — never your
+working tree, so uncommitted work is safe — and gets the fast checks only:
+every module under `backend/app` compiles and imports, and the frontend
+type-checks. The suites are deliberately not run per commit; that is the tip's
+job and would cost hours.
+
+The backend half runs standalone against any tree:
+
+```powershell
+python scripts\check-imports.py --tree .
+```
+
+Failures are grouped by error text, so the root cause is the first thing
+printed rather than the dozens of submodules that inherit it.
+
+GitHub Actions runs each backend group as a separate Windows job, runs the
+frontend verification workflow, and checks every commit in the pushed or
+proposed range, on every push and pull request. The per-commit job caps the
+range at 30 commits and reports any older ones as skipped.
