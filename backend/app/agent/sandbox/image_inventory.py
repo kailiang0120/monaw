@@ -6,12 +6,16 @@ import json
 import re
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.agent.runtime_paths import runtime_path
 
 
-_INVENTORY_VERSION = 1
+_INVENTORY_VERSION = 2
+# Repinning an image must not accumulate inventories forever. This matches the
+# capability cache bound; an evicted image fails closed until it is probed again.
+_MAX_INVENTORY_ENTRIES = 8
 _INVENTORY_PATH = runtime_path("sandbox", "image-inventories.json")
 _INVENTORY_LOCK = threading.RLock()
 _PINNED_IMAGE_RE = re.compile(r"^[^@\s]+@sha256:[0-9a-fA-F]{64}$")
@@ -53,7 +57,15 @@ def _is_pinned_image(image: str) -> bool:
     return bool(_PINNED_IMAGE_RE.fullmatch(str(image or "").strip()))
 
 
-def _read_inventory(path: Path) -> dict[str, list[str]]:
+def _normalized_module_names(names: object) -> list[str]:
+    if not isinstance(names, list):
+        return []
+    return sorted(
+        {name for name in names if isinstance(name, str) and name and not name.startswith("_")}
+    )
+
+
+def _read_inventory(path: Path) -> dict[str, dict[str, object]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError, TypeError):
@@ -63,19 +75,18 @@ def _read_inventory(path: Path) -> dict[str, list[str]]:
     images = payload.get("python_stdlib_modules")
     if not isinstance(images, dict):
         return {}
-    inventories: dict[str, list[str]] = {}
-    for image, names in images.items():
-        if not isinstance(image, str) or not _is_pinned_image(image) or not isinstance(names, list):
+    inventories: dict[str, dict[str, object]] = {}
+    for image, entry in images.items():
+        if not isinstance(image, str) or not _is_pinned_image(image) or not isinstance(entry, dict):
             continue
-        normalized_names = sorted(
-            {
-                name
-                for name in names
-                if isinstance(name, str) and name and not name.startswith("_")
-            }
-        )
-        if {"builtins", "os", "sys"}.issubset(normalized_names):
-            inventories[image] = normalized_names
+        normalized_names = _normalized_module_names(entry.get("modules"))
+        if not {"builtins", "os", "sys"}.issubset(normalized_names):
+            continue
+        updated_at = entry.get("updated_at")
+        inventories[image] = {
+            "modules": normalized_names,
+            "updated_at": updated_at if isinstance(updated_at, str) else "",
+        }
     return inventories
 
 
@@ -90,7 +101,8 @@ def load_python_module_inventory(
         return None
     inventory_path = path or _INVENTORY_PATH
     with _INVENTORY_LOCK:
-        names = _read_inventory(inventory_path).get(normalized)
+        entry = _read_inventory(inventory_path).get(normalized)
+    names = entry.get("modules") if entry else None
     return frozenset(names) if names else None
 
 
@@ -113,9 +125,21 @@ def store_python_module_inventory(
         raise ValueError("Python module inventory is incomplete.")
 
     inventory_path = path or _INVENTORY_PATH
+    entry = {
+        "modules": names,
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
     with _INVENTORY_LOCK:
         inventories = _read_inventory(inventory_path)
-        inventories[normalized] = names
+        inventories.pop(normalized, None)
+        # Retain the most recently probed other images, then the current one, so
+        # the image being stored is never the entry that gets evicted.
+        ordered = sorted(
+            inventories.items(),
+            key=lambda item: (str(item[1].get("updated_at") or ""), item[0]),
+        )
+        inventories = dict(ordered[-(_MAX_INVENTORY_ENTRIES - 1) :] if _MAX_INVENTORY_ENTRIES > 1 else [])
+        inventories[normalized] = entry
         payload = {
             "version": _INVENTORY_VERSION,
             "python_stdlib_modules": inventories,

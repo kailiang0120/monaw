@@ -386,6 +386,19 @@ def _python_stdlib_modules_for_image(image: str) -> frozenset[str] | None:
     return None
 
 
+def _python_import_support(modules: frozenset[str] | None) -> str:
+    """Report where the import allowlist came from, for status reporting.
+
+    The identity check is exact: only the offline fallback table is that object,
+    so a probed inventory with the same contents still reports as probed.
+    """
+    if modules is None:
+        return "unavailable"
+    if modules is _PYTHON_312_STDLIB_MODULES:
+        return "builtin_fallback"
+    return "probed"
+
+
 _PYTHON_PROCESS_MODULES = frozenset({"asyncio", "multiprocessing", "pty", "subprocess"})
 _PYTHON_PROCESS_CALLS_BY_MODULE = {
     "asyncio": frozenset({"create_subprocess_exec", "create_subprocess_shell"}),
@@ -459,6 +472,7 @@ class SandboxPolicy:
         self.settings = settings
         self.capabilities = capabilities or probe_capabilities(settings)
         self._python_stdlib_modules = _python_stdlib_modules_for_image(settings.docker.image)
+        self.python_import_support = _python_import_support(self._python_stdlib_modules)
 
     def decide(self, request: SandboxRunRequest) -> SandboxDecision:
         profile = request.profile or classify_command(

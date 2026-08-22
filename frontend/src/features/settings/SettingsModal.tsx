@@ -1976,6 +1976,12 @@ export function SettingsModal({
                               {sandboxStatus.fallback_reason_code ? ` · ${sandboxStatus.fallback_reason_code}` : ''}
                             </p>
                           )}
+                          {sandboxStatus?.python_import_support && sandboxStatus.python_import_support !== 'probed' && (
+                            <p className="st-desc mt-1">
+                              Python imports: {sandboxStatus.python_import_support}
+                              {sandboxStatus.python_import_detail ? ` · ${sandboxStatus.python_import_detail}` : ''}
+                            </p>
+                          )}
                         </div>
                         <div className="st-row-control-auto">
                           <Badge tone={sandboxStatus?.isolation === 'strong' ? 'ok' : 'warn'}>

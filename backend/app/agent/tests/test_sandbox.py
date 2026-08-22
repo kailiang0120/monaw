@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agent.sandbox.capabilities import get_sandbox_status
+from app.agent.sandbox.image_inventory import store_python_module_inventory
 from app.agent.sandbox import policy as sandbox_policy
 from app.agent.sandbox.models import (
     SandboxBackendCapability,
@@ -852,6 +853,31 @@ def test_sandbox_status_reports_backend_capabilities():
     assert status["representative_shell"] == "bash"
     assert status["fallback_backend"] == "local_restricted"
     assert status["fallback_reason_code"] == "docker_shell_fallback_requires_approval"
+
+
+def test_sandbox_status_reports_where_the_python_import_allowlist_came_from():
+    settings = AgentSettings()
+    default_status = get_sandbox_status(settings.sandbox, capabilities=_capabilities(docker=True))
+
+    assert default_status["python_import_support"] == "builtin_fallback"
+    assert "Resolve & pull" in default_status["python_import_detail"]
+
+    settings.sandbox.docker.image = "python:3.13-slim@sha256:" + "b" * 64
+    unknown_status = get_sandbox_status(settings.sandbox, capabilities=_capabilities(docker=True))
+
+    # The representative probe is an allowlisted coreutil, so Docker still looks
+    # healthy; the status must say that Python imports will not run there.
+    assert unknown_status["selected_backend"] == "docker"
+    assert unknown_status["isolation"] == "strong"
+    assert unknown_status["python_import_support"] == "unavailable"
+    assert "approval-required host runner" in unknown_status["python_import_detail"]
+
+    store_python_module_inventory(
+        settings.sandbox.docker.image, {"builtins", "os", "sys", "json"}
+    )
+    probed_status = get_sandbox_status(settings.sandbox, capabilities=_capabilities(docker=True))
+
+    assert probed_status["python_import_support"] == "probed"
 
 
 def test_sandbox_status_endpoint_returns_settings_status(monkeypatch):

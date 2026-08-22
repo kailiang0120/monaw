@@ -802,6 +802,8 @@ export interface SandboxStatus {
   fallback_isolation: string
   fallback_reason_code: string
   fallback_reason: string
+  python_import_support: 'probed' | 'builtin_fallback' | 'unavailable' | string
+  python_import_detail: string
   backends: Record<string, {
     backend: string
     enabled: boolean
