@@ -30,7 +30,9 @@ def test_image_inventory_cache_is_bound_to_exact_digest(tmp_path):
         )
         is None
     )
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    assert payload["python_stdlib_modules"][_image()]["updated_at"]
 
 
 def test_image_inventory_cache_rejects_unpinned_or_incomplete_data(tmp_path):
@@ -51,10 +53,10 @@ def test_image_inventory_cache_ignores_corrupt_or_incomplete_entries(tmp_path):
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "python_stdlib_modules": {
-                    _image(): ["os", "sys"],
-                    "python:latest": ["builtins", "os", "sys"],
+                    _image(): {"modules": ["os", "sys"]},
+                    "python:latest": {"modules": ["builtins", "os", "sys"]},
                 },
             }
         ),
@@ -62,6 +64,26 @@ def test_image_inventory_cache_ignores_corrupt_or_incomplete_entries(tmp_path):
     )
 
     assert image_inventory.load_python_module_inventory(_image(), path=path) is None
+
+
+def test_image_inventory_cache_is_bounded_and_keeps_the_newest_images(tmp_path):
+    path = tmp_path / "inventories.json"
+    images = [f"python@sha256:{index:064x}" for index in range(12)]
+
+    for image in images:
+        image_inventory.store_python_module_inventory(
+            image, {"builtins", "os", "sys"}, path=path
+        )
+
+    retained = json.loads(path.read_text(encoding="utf-8"))["python_stdlib_modules"]
+    assert len(retained) == image_inventory._MAX_INVENTORY_ENTRIES
+    # The image stored last is never the entry that gets evicted.
+    assert images[-1] in retained
+    assert images[0] not in retained
+    assert image_inventory.load_python_module_inventory(images[0], path=path) is None
+    assert image_inventory.load_python_module_inventory(images[-1], path=path) == frozenset(
+        {"builtins", "os", "sys"}
+    )
 
 
 def test_python_inventory_probe_uses_hardened_container_and_validates_output(

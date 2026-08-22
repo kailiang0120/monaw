@@ -190,4 +190,6 @@ class SandboxStatus(BaseModel):
     fallback_isolation: str = "none"
     fallback_reason_code: str = ""
     fallback_reason: str = ""
+    python_import_support: str = "unavailable"
+    python_import_detail: str = ""
     backends: dict[str, dict]

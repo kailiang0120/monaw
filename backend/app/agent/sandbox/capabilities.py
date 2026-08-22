@@ -143,6 +143,21 @@ def probe_capabilities(settings: SandboxSettings) -> SandboxCapabilities:
     return probed
 
 
+# The representative status probe uses an allowlisted coreutil, so it reports
+# Docker regardless of whether Python imports can run there. Say so explicitly.
+_PYTHON_IMPORT_SUPPORT_DETAIL = {
+    "probed": "Python imports are checked against a probe of this exact pinned image.",
+    "builtin_fallback": (
+        "Python imports are checked against the built-in python:3.12-slim module list. "
+        "Use Resolve & pull to verify this exact image."
+    ),
+    "unavailable": (
+        "No module inventory for this image, so Python imports are routed to the "
+        "approval-required host runner. Use Resolve & pull to probe the image."
+    ),
+}
+
+
 def get_sandbox_status(
     settings: SandboxSettings,
     *,
@@ -193,6 +208,8 @@ def get_sandbox_status(
         fallback_isolation=powershell_fallback.security_label,
         fallback_reason_code=powershell_fallback.reason_code,
         fallback_reason=powershell_fallback.reason,
+        python_import_support=policy.python_import_support,
+        python_import_detail=_PYTHON_IMPORT_SUPPORT_DETAIL.get(policy.python_import_support, ""),
         backends={
             "docker": probed.docker.model_dump(),
             "local_restricted": probed.local_restricted.model_dump(),
