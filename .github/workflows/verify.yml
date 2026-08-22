@@ -42,10 +42,77 @@ jobs:
         shell: pwsh
         run: ./scripts/test-backend.ps1 -Group ${{ matrix.group }} -TimeoutSeconds 1200
 
+  # The Windows jobs above mock Docker, so nothing there proves the pinned image
+  # exists or that a container actually runs. Linux runners have a working Docker
+  # daemon; this job pulls the digest and exercises the real container paths.
+  # Tests are selected by path because collecting the whole suite would import
+  # the Windows-only computer_use modules.
+  docker-sandbox:
+    name: Docker sandbox (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Sync backend dependencies
+        working-directory: backend
+        run: uv sync --locked
+
+      # Fails if the pinned digest does not resolve, which no other job checks.
+      - name: Pull the pinned sandbox image
+        working-directory: backend
+        run: |
+          image=$(uv run python -c "from app.agent.settings_store import AgentSettings; print(AgentSettings().sandbox.docker.image)")
+          echo "Pinned image: $image"
+          case "$image" in
+            *@sha256:*) ;;
+            *) echo "Sandbox image is not pinned to a digest"; exit 1 ;;
+          esac
+          docker pull "$image"
+
+      - name: Run Docker sandbox tests against a real daemon
+        working-directory: backend
+        run: |
+          uv run pytest -v \
+            app/agent/tests/test_sandbox_docker.py \
+            app/agent/tests/test_sandbox_image_inventory.py
+
+      # Policy decides what may run in the container from a module inventory. If
+      # that inventory is wrong, commands are routed into an image that cannot
+      # run them, which is invisible to every mocked test.
+      - name: Verify the image inventory matches policy's expectations
+        working-directory: backend
+        run: |
+          uv run python -c "
+          from app.agent.settings_store import AgentSettings
+          from app.agent.sandbox.image_inventory import probe_python_module_inventory
+          from app.agent.sandbox.policy import _PYTHON_312_STDLIB_MODULES as table
+
+          image = AgentSettings().sandbox.docker.image
+          actual = probe_python_module_inventory(image)
+          print(f'probed {len(actual)} importable modules in {image}')
+
+          claimed_but_absent = sorted(table - actual)
+          if claimed_but_absent:
+              raise SystemExit(
+                  'Offline table claims modules the image cannot import: '
+                  + ', '.join(claimed_but_absent)
+              )
+          print(f'offline table is a safe subset ({len(actual - table)} extra modules available)')
+          "
+
   commits:
     name: Per-commit integrity
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       # Full history: the range being checked is older than the tip.
@@ -74,16 +141,17 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      # Each commit must compile, import, and type-check on its own. The other
-      # jobs only prove that about the tip, so a commit referencing something
-      # added later still passes them while breaking bisect and revert.
+      # Each commit must stand on its own: compile, import, boot the API,
+      # type-check, and produce a renderer bundle. The other jobs only prove
+      # that about the tip, so a commit referencing something added later still
+      # passes them while breaking bisect, revert, and anyone who checks it out.
       - name: Check every commit in the range
         shell: pwsh
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PUSH_BEFORE: ${{ github.event.before }}
-        run: ./scripts/check-commits.ps1 -MaxCommits 30
+        run: ./scripts/check-commits.ps1 -MaxCommits 20
 
   frontend:
     name: Frontend

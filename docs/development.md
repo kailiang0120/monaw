@@ -334,10 +334,16 @@ breaks `git bisect`, a partial revert, and anyone who checks it out.
 
 With no arguments the range is whatever the current branch adds on top of
 `origin/main`. Each commit is checked out into a scratch worktree — never your
-working tree, so uncommitted work is safe — and gets the fast checks only:
-every module under `backend/app` compiles and imports, and the frontend
-type-checks. The suites are deliberately not run per commit; that is the tip's
-job and would cost hours.
+working tree, so uncommitted work is safe — and must pass five checks:
+
+- every module under `backend/app` compiles,
+- every module imports,
+- the FastAPI app boots and serves `/health`,
+- the frontend type-checks,
+- the renderer bundle builds.
+
+That is roughly 30 seconds per commit. The test suites are deliberately not run
+per commit; that is the tip's job and would cost hours.
 
 The backend half runs standalone against any tree:
 
@@ -348,7 +354,18 @@ python scripts\check-imports.py --tree .
 Failures are grouped by error text, so the root cause is the first thing
 printed rather than the dozens of submodules that inherit it.
 
-GitHub Actions runs each backend group as a separate Windows job, runs the
-frontend verification workflow, and checks every commit in the pushed or
-proposed range, on every push and pull request. The per-commit job caps the
-range at 30 commits and reports any older ones as skipped.
+## Continuous integration
+
+`.github/workflows/verify.yml` runs on every push and pull request:
+
+- **Backend** — each test group as a separate Windows job. Every group in
+  `conftest.py` must also appear in the workflow matrix and in `pytest.ini`;
+  `test_every_backend_test_group_runs_in_ci` fails if the three lists drift,
+  because a group missing from the matrix would pass locally and never run.
+- **Docker sandbox (Linux)** — the Windows jobs mock Docker, so this is the
+  only job that proves the pinned digest resolves, that a container actually
+  runs, and that the offline module table in `policy.py` is a subset of what
+  the image can really import. Tests are selected by path because collecting
+  the whole suite would import the Windows-only `computer_use` modules.
+- **Per-commit integrity** — the checks above, capped at 20 commits.
+- **Frontend** — `npm run verify` (Vitest, Electron tests, type-check, build).
