@@ -4,9 +4,18 @@ import shutil
 import subprocess
 
 from app.agent.sandbox.capabilities import get_sandbox_status
+from app.agent.sandbox.image_inventory import (
+    ImageInventoryProbeError,
+    probe_python_module_inventory,
+    store_python_module_inventory,
+)
 from app.agent.settings_store import load_agent_settings, save_agent_settings
 from app.config import settings
-from app.schemas import SandboxResolveImagePayload, SandboxResolveImageResponse, SandboxStatusPayload
+from app.schemas import (
+    SandboxResolveImagePayload,
+    SandboxResolveImageResponse,
+    SandboxStatusPayload,
+)
 
 router = APIRouter()
 
@@ -21,7 +30,10 @@ async def sandbox_status():
 async def resolve_docker_image(body: SandboxResolveImagePayload):
     image = body.image.strip()
     if any(char.isspace() for char in image) or any(char in image for char in ";&|<>`$\\"):
-        raise HTTPException(status_code=400, detail="Docker image reference contains invalid characters.")
+        raise HTTPException(
+            status_code=400,
+            detail="Docker image reference contains invalid characters.",
+        )
     if shutil.which("docker") is None:
         raise HTTPException(status_code=503, detail="Docker is not installed or not available on PATH.")
 
@@ -54,8 +66,17 @@ async def resolve_docker_image(body: SandboxResolveImagePayload):
     runtime_settings = load_agent_settings(settings)
     runtime_settings.sandbox.docker.image = resolved
     save_agent_settings(runtime_settings)
+    inventory_detail = ""
+    try:
+        modules = probe_python_module_inventory(resolved)
+        store_python_module_inventory(resolved, modules)
+        inventory_detail = f" Verified {len(modules)} importable Python standard-library modules."
+    except (ImageInventoryProbeError, OSError, ValueError) as exc:
+        # Non-Python images remain useful for compatible allowlisted tools.
+        # With no exact inventory, Python imports fail closed in policy.
+        inventory_detail = f" Python imports will fail closed: {exc}"
     return {
         "image": resolved,
-        "detail": "Image pulled and pinned to its immutable digest.",
+        "detail": "Image pulled and pinned to its immutable digest." + inventory_detail,
         "sandbox": get_sandbox_status(runtime_settings.sandbox),
     }

@@ -8,7 +8,11 @@ from fastapi.testclient import TestClient
 
 from app.agent.sandbox.capabilities import get_sandbox_status
 from app.agent.sandbox import policy as sandbox_policy
-from app.agent.sandbox.models import SandboxBackendCapability, SandboxCapabilities, SandboxRunRequest
+from app.agent.sandbox.models import (
+    SandboxBackendCapability,
+    SandboxCapabilities,
+    SandboxRunRequest,
+)
 from app.agent.sandbox.policy import SandboxPolicy, classify_command
 from app.agent.settings_store import (
     AgentSettings,
@@ -149,7 +153,13 @@ def test_format_options_are_not_disk_format_commands(command):
 
 @pytest.mark.parametrize(
     "command",
-    ["format.com E:", "format E:", "format /fs:ntfs D:", "Format-Volume -DriveLetter E", "diskpart"],
+    [
+        "format.com E:",
+        "format E:",
+        "format /fs:ntfs D:",
+        "Format-Volume -DriveLetter E",
+        "diskpart",
+    ],
 )
 def test_disk_format_commands_remain_blocked(command):
     assert classify_command(command) == "blocked"
@@ -282,9 +292,7 @@ def test_auto_routes_host_tooling_to_approval_required_host_runner(command):
     assert decision.explicit_approval_required is True
     assert decision.reason_code == "docker_host_tool_fallback_requires_approval"
     assert decision.security_label == "advisory"
-    assert decision.effective_shell == (
-        "powershell" if os.name == "nt" and shutil.which("bash") is None else "bash"
-    )
+    assert decision.effective_shell == ("powershell" if os.name == "nt" and shutil.which("bash") is None else "bash")
 
 
 def test_auto_host_tool_detection_handles_chains_without_matching_quoted_text():
@@ -387,8 +395,8 @@ def test_python_imports_and_unknown_chained_tools_are_transparent():
 @pytest.mark.parametrize(
     "command",
     [
-        'python -c "print(\'from/import\')"',
-        'python -c "print(\'from import subprocess\')"',
+        "python -c \"print('from/import')\"",
+        "python -c \"print('from import subprocess')\"",
         'python -c "import os; print(os.getcwd())"',
         'python -c "from pathlib import Path; print(Path.cwd())"',
     ],
@@ -403,8 +411,100 @@ def test_python_self_contained_code_and_stdlib_imports_remain_in_docker(command)
     assert decision.explicit_approval_required is False
 
 
-@pytest.mark.parametrize("module", ["distutils", "imp", "asynchat"])
+@pytest.mark.parametrize("module", ["asynchat", "asyncore", "distutils", "imp", "smtpd"])
 def test_python_312_removed_stdlib_modules_route_away_from_docker(module):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=f'python -c "import {module}"', shell="bash"))
+
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert "host dependencies" in decision.reason
+
+
+def test_python_312_offline_inventory_matches_slim_image_constraints(monkeypatch):
+    monkeypatch.setattr(sandbox_policy, "load_python_module_inventory", lambda _image: None)
+
+    modules = sandbox_policy._python_stdlib_modules_for_image("python:3.12-slim@sha256:" + "a" * 64)
+
+    assert modules is not None
+    assert {
+        "antigravity",
+        "builtins",
+        "cProfile",
+        "crypt",
+        "ensurepip",
+        "fcntl",
+        "genericpath",
+        "grp",
+        "idlelib",
+        "nis",
+        "ntpath",
+        "nturl2path",
+        "opcode",
+        "ossaudiodev",
+        "posix",
+        "posixpath",
+        "pwd",
+        "pydoc_data",
+        "pyexpat",
+        "resource",
+        "rlcompleter",
+        "sndhdr",
+        "spwd",
+        "sre_compile",
+        "sre_constants",
+        "sre_parse",
+        "syslog",
+        "termios",
+        "this",
+        "turtledemo",
+        "uu",
+        "wsgiref",
+        "xdrlib",
+    }.issubset(modules)
+    assert {
+        "asynchat",
+        "asyncore",
+        "distutils",
+        "imp",
+        "msilib",
+        "msvcrt",
+        "nt",
+        "smtpd",
+        "tkinter",
+        "turtle",
+        "winreg",
+        "winsound",
+    }.isdisjoint(modules)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'python -c "import builtins; print(builtins.len)"',
+        "python -c \"import cProfile; cProfile.run('1 + 1')\"",
+        "python -c \"import posixpath; print(posixpath.join('a', 'b'))\"",
+        'python -c "import wsgiref; print(wsgiref.__name__)"',
+    ],
+)
+def test_python_312_slim_stdlib_imports_remain_in_docker(command, monkeypatch):
+    monkeypatch.setattr(sandbox_policy, "load_python_module_inventory", lambda _image: None)
+
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command, shell="bash"))
+
+    assert decision.backend == "docker"
+    assert decision.explicit_approval_required is False
+
+
+@pytest.mark.parametrize("module", ["tkinter", "turtle"])
+def test_python_modules_missing_from_slim_image_route_away_from_docker(module, monkeypatch):
+    monkeypatch.setattr(sandbox_policy, "load_python_module_inventory", lambda _image: None)
+
     decision = SandboxPolicy(
         AgentSettings().sandbox,
         capabilities=_capabilities(docker=True, local=True),
@@ -429,6 +529,31 @@ def test_python_import_routing_fails_closed_for_an_unsupported_image_version():
     assert "could not be safely verified" in decision.reason
 
 
+def test_exact_image_probe_inventory_overrides_version_fallback(monkeypatch):
+    settings = AgentSettings()
+    settings.sandbox.docker.image = "custom-python@sha256:" + "a" * 64
+    monkeypatch.setattr(
+        sandbox_policy,
+        "load_python_module_inventory",
+        lambda image: frozenset({"builtins", "os", "sys", "custom_stdlib"}),
+    )
+
+    policy = SandboxPolicy(
+        settings.sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    )
+    verified = policy.decide(
+        SandboxRunRequest(command='python -c "import custom_stdlib"', shell="bash")
+    )
+    missing = policy.decide(
+        SandboxRunRequest(command='python -c "import requests"', shell="bash")
+    )
+
+    assert verified.backend == "docker"
+    assert missing.backend == "local_restricted"
+    assert "host dependencies" in missing.reason
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -451,9 +576,9 @@ def test_python_process_module_imports_without_spawning_remain_in_docker(command
 @pytest.mark.parametrize(
     "command",
     [
-        'python -c "import asyncio; asyncio.create_subprocess_exec(\'echo\', \'ok\')"',
+        "python -c \"import asyncio; asyncio.create_subprocess_exec('echo', 'ok')\"",
         'python -c "import multiprocessing; multiprocessing.Process(target=print)"',
-        'python -c "import subprocess; subprocess.run([\'echo\', \'ok\'])"',
+        "python -c \"import subprocess; subprocess.run(['echo', 'ok'])\"",
     ],
 )
 def test_python_process_module_calls_route_to_approval_required_host(command):
@@ -468,12 +593,45 @@ def test_python_process_module_calls_route_to_approval_required_host(command):
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        "python -c \"import os; print(os.popen('git log').read())\"",
+        "python -c \"import os; os.spawnl(os.P_WAIT, '/bin/ls')\"",
+        "python -c \"import os; os.spawnvpe(os.P_WAIT, 'ls', ['ls'], {})\"",
+        "python -c \"import os; os.execl('/bin/ls', 'ls')\"",
+        "python -c \"import os; os.execle('/bin/ls', 'ls', {})\"",
+        "python -c \"import os; os.posix_spawn('/bin/ls', ['ls'], {})\"",
+        "python -c \"import os; os.posix_spawnp('ls', ['ls'], {})\"",
+        "python -c \"import subprocess; print(subprocess.getoutput('git log'))\"",
+        "python -c \"import subprocess; print(subprocess.getstatusoutput('git log'))\"",
+        "python -c \"from os import popen; print(popen('id').read())\"",
+        "python -c \"from os import execl as launch; launch('/bin/ls', 'ls')\"",
+    ],
+)
+def test_python_process_call_families_route_to_approval_required_host(command):
+    decision = SandboxPolicy(
+        AgentSettings().sandbox,
+        capabilities=_capabilities(docker=True, local=True),
+    ).decide(SandboxRunRequest(command=command, shell="bash"))
+
+    assert decision.backend == "local_restricted"
+    assert decision.explicit_approval_required is True
+    assert "spawn processes" in decision.reason
+
+
+@pytest.mark.parametrize(
     ("command", "expected_reason"),
     [
         ('python -c "import requests; print(requests.__name__)"', "host dependencies"),
-        ('python -c "import subprocess; subprocess.run([\'echo\', \'ok\'])"', "spawn processes"),
-        ('python -c "import subprocess; subprocess.Popen([\'echo\', \'ok\'])"', "spawn processes"),
-        ('python -c "import os; os.system(\'echo ok\')"', "spawn processes"),
+        (
+            "python -c \"import subprocess; subprocess.run(['echo', 'ok'])\"",
+            "spawn processes",
+        ),
+        (
+            "python -c \"import subprocess; subprocess.Popen(['echo', 'ok'])\"",
+            "spawn processes",
+        ),
+        ("python -c \"import os; os.system('echo ok')\"", "spawn processes"),
     ],
 )
 def test_python_code_with_host_dependencies_or_process_spawning_routes_to_approval(command, expected_reason):
@@ -490,7 +648,15 @@ def test_python_code_with_host_dependencies_or_process_spawning_routes_to_approv
 
 
 @pytest.mark.parametrize("mode", ["docker", "enforce"])
-@pytest.mark.parametrize("command", ["git status", "pip uninstall requests", "python script.py", "python -c \"import requests\""])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status",
+        "pip uninstall requests",
+        "python script.py",
+        'python -c "import requests"',
+    ],
+)
 def test_explicit_docker_modes_block_non_allowlisted_tools_and_python(mode, command):
     settings = AgentSettings()
     settings.sandbox.mode = mode
@@ -545,8 +711,8 @@ def test_state_changing_pip_subcommands_route_to_approval_required_host(command)
 @pytest.mark.parametrize(
     "command",
     [
-        'python -c "__import__(\'project\')"',
-        'python -c "from importlib import import_module; import_module(\'project\')"',
+        "python -c \"__import__('project')\"",
+        "python -c \"from importlib import import_module; import_module('project')\"",
     ],
 )
 def test_python_dynamic_imports_route_to_approval_required_host(command):
@@ -590,9 +756,7 @@ def test_explicit_bash_host_fallback_uses_a_host_shell_on_windows():
 
     assert decision.backend == "local_restricted"
     assert decision.explicit_approval_required is True
-    assert decision.effective_shell == (
-        "powershell" if os.name == "nt" and shutil.which("bash") is None else "bash"
-    )
+    assert decision.effective_shell == ("powershell" if os.name == "nt" and shutil.which("bash") is None else "bash")
     if os.name == "nt" and shutil.which("bash") is None:
         assert "overridden" in decision.reason
 
