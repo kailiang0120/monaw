@@ -1,4 +1,8 @@
+import re
 import sqlite3
+from pathlib import Path
+
+from conftest import TEST_GROUPS
 
 from app.agent.db_bootstrap import SCHEMA_VERSION, initialize_database
 from app.agent.memory_repository import MemorySectionRepository
@@ -83,3 +87,39 @@ def test_browser_url_policy_is_separate_from_browser_execution(monkeypatch):
     final_error = validate_fetch_final_url("https://example.com", "https://example.com/redirect", ["example.com"])
     assert final_error is not None
     assert final_error["reason_code"] == "blocked_redirect_host"
+
+
+def test_every_backend_test_group_runs_in_ci():
+    """conftest.py refuses an ungrouped test file; nothing refused an unrun group.
+
+    A group present in conftest.py but missing from the workflow matrix would
+    collect and pass locally while never executing in CI, so the three lists
+    that define the grouping must agree.
+    """
+    repo_root = Path(__file__).resolve().parents[4]
+    workflow = repo_root / ".github/workflows/verify.yml"
+    pytest_ini = repo_root / "backend/pytest.ini"
+
+    workflow_groups = set(
+        re.findall(
+            r"^\s+group:\s*\n((?:\s+-\s+\w+\n)+)",
+            workflow.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )[0].split()
+    ) - {"-"}
+    marker_block = re.search(
+        r"^markers\s*=\s*\n((?:\s+\w+:.*\n)+)",
+        pytest_ini.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    marker_groups = set(re.findall(r"(\w+):", marker_block.group(1)))
+
+    assert workflow_groups, "Could not parse the backend group matrix from verify.yml"
+    assert marker_groups == set(TEST_GROUPS), (
+        "pytest.ini markers and conftest.py TEST_GROUPS disagree: "
+        f"{marker_groups ^ set(TEST_GROUPS)}"
+    )
+    assert workflow_groups == set(TEST_GROUPS), (
+        "verify.yml backend matrix and conftest.py TEST_GROUPS disagree: "
+        f"{workflow_groups ^ set(TEST_GROUPS)}"
+    )

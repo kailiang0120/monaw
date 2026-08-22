@@ -101,19 +101,46 @@ def main() -> int:
 
     # Import for side effects only inside a throwaway home: several modules
     # create runtime directories at import time.
-    with tempfile.TemporaryDirectory(prefix="monaw-import-check-") as home:
+    # ignore_cleanup_errors: booting the app opens a SQLite handle under this
+    # home, and Windows will not delete a file that is still open.
+    with tempfile.TemporaryDirectory(
+        prefix="monaw-import-check-", ignore_cleanup_errors=True
+    ) as home:
         os.environ["MONAW_HOME"] = home
         sys.path.insert(0, str(backend))
         names = _module_names(package_root)
         failures = _import_failures(names)
 
-    if failures:
-        _report("Import", failures)
-        print(f"\nChecked {len(names)} module(s) under {package_root}")
+        if failures:
+            _report("Import", failures)
+            print(f"\nChecked {len(names)} module(s) under {package_root}")
+            return 1
+
+        boot_error = _boot_error()
+
+    if boot_error:
+        print(f"Boot: the FastAPI app does not serve /health -> {boot_error}")
         return 1
 
-    print(f"OK: {len(names)} module(s) under {package_root} compile and import")
+    print(f"OK: {len(names)} module(s) compile and import, and the app serves /health")
     return 0
+
+
+def _boot_error() -> str | None:
+    """Importing a module is weaker than the app actually starting."""
+    os.environ.setdefault("MONAW_CONTROL_SECRET", "x" * 40)
+    try:
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with TestClient(app) as client:
+            response = client.get("/health")
+        if response.status_code != 200:
+            return f"HTTP {response.status_code}"
+    except BaseException as exc:  # noqa: BLE001 - any failure here is a failure
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 if __name__ == "__main__":

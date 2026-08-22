@@ -185,10 +185,15 @@ try {
         if ($frontendReady) {
             Push-Location (Join-Path $worktree "frontend")
             try {
-                # Invoke tsc's entry point directly; npx resolves inconsistently
+                # Invoke the entry points directly; npx resolves inconsistently
                 # through a junction.
                 & node (Join-Path $repoRoot "frontend/node_modules/typescript/bin/tsc") --noEmit
                 if ($LASTEXITCODE -ne 0) { $failures.Add("frontend typecheck") }
+
+                # A tree can type-check and still not bundle, and a broken
+                # bundle is what the end user would actually hit.
+                & node (Join-Path $repoRoot "frontend/node_modules/vite/bin/vite.js") build --logLevel warn
+                if ($LASTEXITCODE -ne 0) { $failures.Add("renderer build") }
             } finally {
                 Pop-Location
             }
