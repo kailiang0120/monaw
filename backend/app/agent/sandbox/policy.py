@@ -6,6 +6,7 @@ import re
 import shutil
 
 from app.agent.sandbox.capabilities import probe_capabilities
+from app.agent.sandbox.image_inventory import load_python_module_inventory
 from app.agent.sandbox.models import (
     SandboxBackend,
     SandboxCapabilities,
@@ -103,9 +104,7 @@ _CONTAINER_SAFE_EXECUTABLES = frozenset(
         "wc",
     }
 )
-_PYTHON_EXECUTABLES = frozenset(
-    {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
-)
+_PYTHON_EXECUTABLES = frozenset({"python", "python.exe", "python3", "python3.exe", "py", "py.exe"})
 _PIP_EXECUTABLES = frozenset({"pip", "pip.exe", "pip3", "pip3.exe"})
 _PIP_STATE_CHANGING_SUBCOMMANDS = frozenset({"download", "install", "lock", "uninstall", "wheel"})
 _PIP_STATE_CHANGING_ACTIONS = {
@@ -149,14 +148,17 @@ _PIP_OPTIONS_WITH_VALUES = frozenset(
         "--trusted-host",
     }
 )
-# This is the module set for the Python runtime in the default Docker image
-# (python:3.12-slim). It must not come from sys.stdlib_module_names: that
-# describes the backend host and can differ from the interpreter in Docker.
-# In particular, distutils, imp, and asynchat are not available in Python 3.12.
+# Offline fallback for modules importable in the default python:3.12-slim image.
+# A persisted probe of the exact pinned image takes precedence. This must not
+# come from the backend interpreter, which can be a different Python version or
+# operating system. Tk modules and Windows-only modules are absent from slim's
+# Linux runtime; Python 3.12 also removed asynchat, asyncore, distutils, imp, and
+# smtpd.
 _PYTHON_312_STDLIB_MODULES = frozenset(
     {
         "abc",
         "aifc",
+        "antigravity",
         "argparse",
         "array",
         "ast",
@@ -167,7 +169,9 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "bdb",
         "binascii",
         "bisect",
+        "builtins",
         "bz2",
+        "cProfile",
         "calendar",
         "cgi",
         "cgitb",
@@ -186,6 +190,7 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "contextvars",
         "copy",
         "copyreg",
+        "crypt",
         "csv",
         "ctypes",
         "curses",
@@ -198,9 +203,11 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "doctest",
         "email",
         "encodings",
+        "ensurepip",
         "enum",
         "errno",
         "faulthandler",
+        "fcntl",
         "filecmp",
         "fileinput",
         "fnmatch",
@@ -208,17 +215,20 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "ftplib",
         "functools",
         "gc",
+        "genericpath",
         "getopt",
         "getpass",
         "gettext",
         "glob",
         "graphlib",
+        "grp",
         "gzip",
         "hashlib",
         "heapq",
         "hmac",
         "html",
         "http",
+        "idlelib",
         "imaplib",
         "imghdr",
         "importlib",
@@ -242,11 +252,16 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "modulefinder",
         "multiprocessing",
         "netrc",
+        "nis",
         "nntplib",
+        "ntpath",
+        "nturl2path",
         "numbers",
+        "opcode",
         "operator",
         "optparse",
         "os",
+        "ossaudiodev",
         "pathlib",
         "pdb",
         "pickle",
@@ -256,19 +271,26 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "platform",
         "plistlib",
         "poplib",
+        "posix",
+        "posixpath",
         "pprint",
         "profile",
         "pstats",
         "pty",
+        "pwd",
         "py_compile",
         "pyclbr",
         "pydoc",
+        "pydoc_data",
+        "pyexpat",
         "queue",
         "quopri",
         "random",
         "re",
         "readline",
         "reprlib",
+        "resource",
+        "rlcompleter",
         "runpy",
         "sched",
         "secrets",
@@ -279,11 +301,15 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "shutil",
         "signal",
         "site",
-        "smtpd",
         "smtplib",
+        "sndhdr",
         "socket",
         "socketserver",
         "sqlite3",
+        "spwd",
+        "sre_compile",
+        "sre_constants",
+        "sre_parse",
         "ssl",
         "stat",
         "statistics",
@@ -295,15 +321,17 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "symtable",
         "sys",
         "sysconfig",
+        "syslog",
         "tabnanny",
         "tarfile",
         "telnetlib",
         "tempfile",
+        "termios",
         "textwrap",
+        "this",
         "threading",
         "time",
         "timeit",
-        "tkinter",
         "token",
         "tokenize",
         "tomllib",
@@ -311,9 +339,10 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "traceback",
         "tracemalloc",
         "tty",
-        "turtle",
+        "turtledemo",
         "types",
         "typing",
+        "uu",
         "unicodedata",
         "unittest",
         "urllib",
@@ -323,6 +352,8 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "wave",
         "weakref",
         "webbrowser",
+        "wsgiref",
+        "xdrlib",
         "xml",
         "xmlrpc",
         "zipapp",
@@ -340,6 +371,9 @@ _PYTHON_IMAGE_VERSION_RE = re.compile(
 
 def _python_stdlib_modules_for_image(image: str) -> frozenset[str] | None:
     """Return a known stdlib set for the configured image, or fail closed."""
+    probed = load_python_module_inventory(image)
+    if probed is not None:
+        return probed
     match = _PYTHON_IMAGE_VERSION_RE.search(str(image or "").strip())
     if match is None:
         return None
@@ -362,24 +396,35 @@ _PYTHON_PROCESS_CALLS_BY_MODULE = {
             "call",
             "check_call",
             "check_output",
+            "getoutput",
+            "getstatusoutput",
             "Popen",
             "run",
         }
     ),
     "os": frozenset(
         {
-            "execv",
-            "execve",
-            "execvp",
-            "execvpe",
             "fork",
+            "popen",
+            "posix_spawn",
+            "posix_spawnp",
             "startfile",
             "system",
         }
     ),
 }
+_PYTHON_PROCESS_CALL_PREFIXES_BY_MODULE = {
+    "os": ("exec", "spawn"),
+}
 _PYTHON_PROCESS_NAMES = frozenset({"Popen", "Pool", "Process"})
 _PYTHON_DYNAMIC_IMPORT_CALLS = frozenset({"__import__", "import_module"})
+
+
+def _is_python_process_call(module: str, name: str) -> bool:
+    return name in _PYTHON_PROCESS_CALLS_BY_MODULE.get(module, ()) or any(
+        name.startswith(prefix) for prefix in _PYTHON_PROCESS_CALL_PREFIXES_BY_MODULE.get(module, ())
+    )
+
 
 _BLOCKED_PATTERNS = [
     r"(?:\bformat\.com\b|\bformat\s+(?:/fs:\w+\s+)?[A-Za-z]:|\bFormat-Volume\b|\bdiskpart\b)",
@@ -425,9 +470,21 @@ class SandboxPolicy:
         trust_class = "untrusted" if profile == "untrusted" else "trusted"
 
         if request.elevated:
-            return self._blocked(profile, network, write_strategy, "Elevated execution is blocked", "elevated_blocked")
+            return self._blocked(
+                profile,
+                network,
+                write_strategy,
+                "Elevated execution is blocked",
+                "elevated_blocked",
+            )
         if profile == "blocked":
-            return self._blocked(profile, network, write_strategy, "Command matches a blocked sandbox pattern", "command_blocked")
+            return self._blocked(
+                profile,
+                network,
+                write_strategy,
+                "Command matches a blocked sandbox pattern",
+                "command_blocked",
+            )
         if not self.settings.enabled or self.settings.mode in {"off", "disabled"}:
             return self._blocked(
                 profile,
@@ -463,10 +520,7 @@ class SandboxPolicy:
             backend == "docker"
             and effective_shell == "bash"
             and self._requires_host_runner(request.command)
-            and not (
-                profile == "untrusted"
-                and self._requires_contained_untrusted_command(request.command)
-            )
+            and not (profile == "untrusted" and self._requires_contained_untrusted_command(request.command))
         )
         if backend == "docker" and effective_shell != "bash":
             shell_fallback = True
@@ -500,11 +554,7 @@ class SandboxPolicy:
             # explicit Windows shell or a host-only developer tool are routed
             # to the advisory host runner with a visible approval requirement
             # instead of silently running in the wrong environment.
-            backend = (
-                "local_restricted"
-                if self.capabilities.local_restricted.available
-                else "local_direct"
-            )
+            backend = "local_restricted" if self.capabilities.local_restricted.available else "local_direct"
             if host_tool_fallback:
                 requested_host_shell = effective_shell
                 effective_shell = self._host_fallback_shell(effective_shell)
@@ -533,8 +583,7 @@ class SandboxPolicy:
                     self._host_fallback_reason(request.command, runner="direct")
                     + self._host_fallback_shell_note(request, requested_host_shell, effective_shell)
                     if host_tool_fallback
-                    else "Docker supports bash only; this command will run directly on the host "
-                    "after explicit approval"
+                    else "Docker supports bash only; this command will run directly on the host after explicit approval"
                     if shell_fallback
                     else "This command will run directly on the host without isolation"
                 ),
@@ -688,19 +737,14 @@ class SandboxPolicy:
                         return True
             if executable not in _CONTAINER_SAFE_EXECUTABLES:
                 return True
-            if executable == "find" and re.search(
-                r"(?<!\S)(?:-exec|--exec|xargs)(?=\s|$)", segment, re.IGNORECASE
-            ):
+            if executable == "find" and re.search(r"(?<!\S)(?:-exec|--exec|xargs)(?=\s|$)", segment, re.IGNORECASE):
                 return True
         return False
 
     @staticmethod
     def _requires_contained_untrusted_command(command: str) -> bool:
         text = str(command or "")
-        return any(
-            re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
-            for pattern in _CONTAINED_UNTRUSTED_PATTERNS
-        )
+        return any(re.search(pattern, text, re.IGNORECASE | re.MULTILINE) for pattern in _CONTAINED_UNTRUSTED_PATTERNS)
 
     def _host_tool_name(self, command: str) -> str:
         for segment in SandboxPolicy._split_shell_segments(str(command or "")):
@@ -724,19 +768,19 @@ class SandboxPolicy:
         suffix = "will run directly on the host" if runner == "direct" else "will use the advisory host runner"
         for segment in SandboxPolicy._split_shell_segments(str(command or "")):
             executable = SandboxPolicy._segment_executable(segment)
-            requirement = (
-                self._python_host_requirement(segment)
-                if executable in _PYTHON_EXECUTABLES
-                else None
-            )
+            requirement = self._python_host_requirement(segment) if executable in _PYTHON_EXECUTABLES else None
             if requirement == "script":
                 if blocked:
                     return "Python script execution needs the host interpreter and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
-                return f"Python script execution uses the host interpreter; this command {suffix} after explicit approval"
+                return (
+                    f"Python script execution uses the host interpreter; this command {suffix} after explicit approval"
+                )
             if requirement == "module":
                 if blocked:
                     return "Python module execution needs the host interpreter and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
-                return f"Python module execution uses the host interpreter; this command {suffix} after explicit approval"
+                return (
+                    f"Python module execution uses the host interpreter; this command {suffix} after explicit approval"
+                )
             if requirement == "dependency":
                 if blocked:
                     return "Python code uses host dependencies (project or non-standard-library imports) and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
@@ -784,12 +828,8 @@ class SandboxPolicy:
     ) -> str:
         if str(requested_shell or "").lower() == "bash" and effective_shell != "bash":
             if str(request.shell or "auto").lower() == "bash":
-                return (
-                    f" Requested shell 'bash' was overridden with '{effective_shell}' for host execution."
-                )
-            return (
-                f" Docker-compatible shell 'bash' was unavailable; host execution uses '{effective_shell}'."
-            )
+                return f" Requested shell 'bash' was overridden with '{effective_shell}' for host execution."
+            return f" Docker-compatible shell 'bash' was unavailable; host execution uses '{effective_shell}'."
         return ""
 
     @staticmethod
@@ -852,7 +892,7 @@ class SandboxPolicy:
             assignment = re.match(r"^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|\"[^\"]*\"|\S+)\s+", text)
             if assignment is None:
                 break
-            text = text[assignment.end():].lstrip()
+            text = text[assignment.end() :].lstrip()
         return text
 
     @staticmethod
@@ -874,7 +914,7 @@ class SandboxPolicy:
         executable_match = re.match(r"[!\s]*[A-Za-z0-9_./\\-]+", text)
         if executable_match is None:
             return []
-        return SandboxPolicy._shell_words(text[executable_match.end():].strip())
+        return SandboxPolicy._shell_words(text[executable_match.end() :].strip())
 
     @staticmethod
     def _python_code_argument(segment: str) -> str | None:
@@ -947,7 +987,7 @@ class SandboxPolicy:
                     dependency = True
                 elif root in _PYTHON_PROCESS_MODULES or root == "os":
                     for alias in node.names:
-                        if alias.name in _PYTHON_PROCESS_CALLS_BY_MODULE.get(root, ()):
+                        if _is_python_process_call(root, alias.name):
                             imported_process_names.add(alias.asname or alias.name)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -963,7 +1003,7 @@ class SandboxPolicy:
                         root_node = root_node.value
                     root = root_node.id if isinstance(root_node, ast.Name) else ""
                     module = imported_module_aliases.get(root, root)
-                    if function.attr in _PYTHON_PROCESS_CALLS_BY_MODULE.get(module, ()):
+                    if _is_python_process_call(module, function.attr):
                         process = True
                     if function.attr in _PYTHON_DYNAMIC_IMPORT_CALLS:
                         dependency = True
@@ -1019,7 +1059,7 @@ class SandboxPolicy:
         if subcommand in _PIP_STATE_CHANGING_SUBCOMMANDS:
             return True
         if subcommand in _PIP_STATE_CHANGING_ACTIONS and subcommand_index >= 0:
-            for token in tokens[subcommand_index + 1:]:
+            for token in tokens[subcommand_index + 1 :]:
                 normalized = SandboxPolicy._unquote_shell_word(token).lower()
                 if normalized.startswith("-"):
                     continue

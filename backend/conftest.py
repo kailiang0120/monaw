@@ -43,6 +43,7 @@ TEST_GROUPS = {
         "test_sandbox.py",
         "test_sandbox_docker.py",
         "test_sandbox_environment.py",
+        "test_sandbox_image_inventory.py",
         "test_sandbox_manager.py",
         "test_sandbox_path_policy.py",
         "test_sandbox_sessions.py",
@@ -73,11 +74,7 @@ TEST_GROUPS = {
     },
 }
 
-_GROUP_BY_FILE = {
-    filename: group
-    for group, filenames in TEST_GROUPS.items()
-    for filename in filenames
-}
+_GROUP_BY_FILE = {filename: group for group, filenames in TEST_GROUPS.items() for filename in filenames}
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -92,9 +89,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
     if unclassified:
         names = ", ".join(sorted(unclassified))
-        raise pytest.UsageError(
-            f"Backend tests must be assigned to one TEST_GROUPS entry in conftest.py: {names}"
-        )
+        raise pytest.UsageError(f"Backend tests must be assigned to one TEST_GROUPS entry in conftest.py: {names}")
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +108,18 @@ def isolate_approval_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     broker._resume_events.clear()
     broker._resume_decisions.clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_sandbox_image_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Keep per-image capability probes deterministic and out of user runtime data."""
+    import app.agent.sandbox.image_inventory as image_inventory
+
+    monkeypatch.setattr(
+        image_inventory,
+        "_INVENTORY_PATH",
+        tmp_path / "image-inventories.json",
+    )
 
 
 @pytest.fixture(autouse=True)
