@@ -1,6 +1,8 @@
 import asyncio
 import json
 import shutil
+import threading
+import time
 from pathlib import Path
 from app.agent.iteration_budget import IterationBudget
 from app.agent.tool_registry import ToolRegistry
@@ -846,6 +848,403 @@ def test_turn_loop_executes_tool_and_finishes():
     assert events[-1]["event"] == "done"
     assert memory.tool_results == [("echo_tool", "echo:hello")]
     assert memory.added_messages[-1] == ("assistant", "All done.")
+
+
+def test_turn_loop_overlaps_safe_tools_and_preserves_model_result_order():
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+
+    def first_tool() -> str:
+        first_entered.set()
+        return "first" if second_entered.wait(1.0) else "first:serial"
+
+    def second_tool() -> str:
+        second_entered.set()
+        return "second" if first_entered.wait(1.0) else "second:serial"
+
+    registry = ToolRegistry(
+        [
+            {
+                "name": "first_tool",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": first_tool,
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            },
+            {
+                "name": "second_tool",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": second_tool,
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            },
+        ]
+    )
+
+    class TwoToolLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(call_id="first", tool_name="first_tool", arguments={}),
+                        ToolCallRequest(call_id="second", tool_name="second_tool", arguments={}),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            return final_answer_response("Finished.")
+
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(
+        llm_client=TwoToolLLM(),
+        registry=registry,
+        memory=memory,
+        max_parallel_tool_calls=2,
+    )
+
+    async def collect():
+        return [event async for event in loop.run("run both", "conv-parallel", system_prompt="system")]
+
+    events = asyncio.run(collect())
+    tool_end_events = [event for event in events if event["event"] == "tool_end"]
+
+    assert [event["data"]["call_id"] for event in tool_end_events] == ["first", "second"]
+    assert [event["data"]["output"] for event in tool_end_events] == ["first", "second"]
+    assert [call["tool_name"] for call in memory.persisted_turns[0]["tool_calls"]] == [
+        "first_tool",
+        "second_tool",
+    ]
+
+
+def test_turn_loop_bounds_safe_tool_concurrency():
+    active = 0
+    maximum_active = 0
+    active_lock = threading.Lock()
+
+    def bounded_tool(label: str) -> str:
+        nonlocal active, maximum_active
+        with active_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(0.04)
+            return label
+        finally:
+            with active_lock:
+                active -= 1
+
+    registry = ToolRegistry(
+        [
+            {
+                "name": "bounded_tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"label": {"type": "string"}},
+                    "required": ["label"],
+                },
+                "callable": bounded_tool,
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            }
+        ]
+    )
+
+    class ManyToolLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(
+                            call_id=f"call-{index}",
+                            tool_name="bounded_tool",
+                            arguments={"label": str(index)},
+                        )
+                        for index in range(5)
+                    ],
+                    finish_reason="tool_calls",
+                )
+            return final_answer_response("Finished.")
+
+    loop = TurnLoop(
+        llm_client=ManyToolLLM(),
+        registry=registry,
+        memory=FakeMemory(),
+        max_parallel_tool_calls=2,
+    )
+
+    async def collect():
+        return [event async for event in loop.run("run several", "conv-bounded", system_prompt="system")]
+
+    asyncio.run(collect())
+
+    assert 1 < maximum_active <= 2
+
+
+def test_turn_loop_isolates_parallel_tool_errors():
+    def maybe_fail(mode: str) -> str:
+        if mode == "fail":
+            raise RuntimeError("expected failure")
+        return "ok"
+
+    registry = ToolRegistry(
+        [
+            {
+                "name": "maybe_fail",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"mode": {"type": "string"}},
+                    "required": ["mode"],
+                },
+                "callable": maybe_fail,
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            }
+        ]
+    )
+
+    class ErrorIsolationLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(call_id="bad", tool_name="maybe_fail", arguments={"mode": "fail"}),
+                        ToolCallRequest(call_id="good", tool_name="maybe_fail", arguments={"mode": "ok"}),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            return final_answer_response("Finished.")
+
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(llm_client=ErrorIsolationLLM(), registry=registry, memory=memory)
+
+    async def collect():
+        return [event async for event in loop.run("run both", "conv-error-isolation", system_prompt="system")]
+
+    events = asyncio.run(collect())
+    tool_end_events = [event for event in events if event["event"] == "tool_end"]
+
+    assert [event["data"]["status"] for event in tool_end_events] == ["error", "ok"]
+    assert [call["status"] for call in memory.persisted_turns[0]["tool_calls"]] == ["error", "complete"]
+
+
+def test_turn_loop_orders_invalid_safe_call_between_valid_results():
+    def echo(label: str) -> str:
+        return label
+
+    registry = ToolRegistry(
+        [
+            {
+                "name": "echo",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"label": {"type": "string"}},
+                    "required": ["label"],
+                },
+                "callable": echo,
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            }
+        ]
+    )
+
+    class MixedValidityLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(call_id="valid-1", tool_name="echo", arguments={"label": "one"}),
+                        ToolCallRequest(call_id="invalid", tool_name="echo", arguments={}),
+                        ToolCallRequest(call_id="valid-2", tool_name="echo", arguments={"label": "two"}),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            return final_answer_response("Finished.")
+
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(llm_client=MixedValidityLLM(), registry=registry, memory=memory)
+
+    async def collect():
+        return [event async for event in loop.run("run mixed", "conv-mixed-validity", system_prompt="system")]
+
+    events = asyncio.run(collect())
+    tool_end_events = [event for event in events if event["event"] == "tool_end"]
+
+    assert [event["data"]["call_id"] for event in tool_end_events] == ["valid-1", "invalid", "valid-2"]
+    assert json.loads(tool_end_events[1]["data"]["output"])["reason_code"] == "invalid_tool_arguments"
+
+
+def test_turn_loop_cancels_and_drains_all_parallel_tool_tasks():
+    started: set[str] = set()
+    cancelled: set[str] = set()
+    all_started = asyncio.Event()
+
+    async def slow_tool(label: str) -> str:
+        started.add(label)
+        if len(started) == 2:
+            all_started.set()
+        try:
+            await asyncio.sleep(999)
+        except asyncio.CancelledError:
+            cancelled.add(label)
+            raise
+        return label
+
+    registry = ToolRegistry(
+        [
+            {
+                "name": "slow_parallel",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"label": {"type": "string"}},
+                    "required": ["label"],
+                },
+                "callable": slow_tool,
+                "execution_mode": "async",
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            }
+        ]
+    )
+
+    class SlowParallelLLM:
+        async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(call_id="slow-a", tool_name="slow_parallel", arguments={"label": "a"}),
+                    ToolCallRequest(call_id="slow-b", tool_name="slow_parallel", arguments={"label": "b"}),
+                ],
+                finish_reason="tool_calls",
+            )
+
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(llm_client=SlowParallelLLM(), registry=registry, memory=memory)
+
+    async def collect_until_cancelled():
+        stream = loop.run("start parallel work", "conv-parallel-cancel", system_prompt="system")
+        events = []
+        try:
+            while True:
+                event = await stream.__anext__()
+                events.append(event)
+                if event["event"] == "tool_start" and len(
+                    [item for item in events if item["event"] == "tool_start"]
+                ) == 2:
+                    await asyncio.wait_for(all_started.wait(), timeout=1.0)
+                    break
+        finally:
+            await stream.aclose()
+        return events, not any(
+            task.get_name().startswith("turn-tool-")
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+        )
+
+    events, no_orphans = asyncio.run(collect_until_cancelled())
+
+    assert events[-1]["event"] == "tool_start"
+    assert cancelled == {"a", "b"}
+    assert no_orphans
+    persisted = memory.persisted_turns[0]["tool_calls"]
+    assert [json.loads(call["input"])["label"] for call in persisted] == ["a", "b"]
+    assert [call["status"] for call in persisted] == ["cancelled", "cancelled"]
+
+
+def test_turn_loop_preserves_completed_parallel_sibling_when_other_is_cancelled():
+    started: set[str] = set()
+    cancelled: set[str] = set()
+    all_started = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def mixed_tool(label: str) -> str:
+        started.add(label)
+        if len(started) == 2:
+            all_started.set()
+        if label == "done":
+            await asyncio.sleep(0.02)
+            completed.set()
+            return "done"
+        try:
+            await asyncio.sleep(999)
+        except asyncio.CancelledError:
+            cancelled.add(label)
+            raise
+        return label
+
+    registry = ToolRegistry(
+        [
+            {
+                "name": "mixed_parallel",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"label": {"type": "string"}},
+                    "required": ["label"],
+                },
+                "callable": mixed_tool,
+                "execution_mode": "async",
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            }
+        ]
+    )
+
+    class MixedParallelLLM:
+        async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(call_id="done", tool_name="mixed_parallel", arguments={"label": "done"}),
+                    ToolCallRequest(call_id="hang", tool_name="mixed_parallel", arguments={"label": "hang"}),
+                ],
+                finish_reason="tool_calls",
+            )
+
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(llm_client=MixedParallelLLM(), registry=registry, memory=memory)
+
+    async def collect_until_cancelled():
+        stream = loop.run("finish one", "conv-completed-sibling", system_prompt="system")
+        events = []
+        try:
+            while True:
+                event = await stream.__anext__()
+                events.append(event)
+                if event["event"] == "tool_start" and len(
+                    [item for item in events if item["event"] == "tool_start"]
+                ) == 2:
+                    await asyncio.wait_for(all_started.wait(), timeout=1.0)
+                    await asyncio.wait_for(completed.wait(), timeout=1.0)
+                    break
+        finally:
+            await stream.aclose()
+        return events, not any(
+            task.get_name().startswith("turn-tool-")
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+        )
+
+    events, no_orphans = asyncio.run(collect_until_cancelled())
+
+    assert events[-1]["event"] == "tool_start"
+    assert cancelled == {"hang"}
+    assert no_orphans
+    persisted = memory.persisted_turns[0]["tool_calls"]
+    assert [json.loads(call["input"])["label"] for call in persisted] == ["done", "hang"]
+    assert [call["status"] for call in persisted] == ["complete", "cancelled"]
+    assert persisted[0]["output"] == "done"
 
 
 def test_turn_loop_propagates_conversation_context_to_sync_tools():

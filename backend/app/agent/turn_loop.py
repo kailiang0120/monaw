@@ -726,6 +726,7 @@ class TurnLoop:
         max_turn_seconds: float = 1800.0,
         max_llm_call_seconds: float = 300.0,
         observability: ObservabilityPort | None = None,
+        max_parallel_tool_calls: int = 4,
     ) -> None:
         self.llm_client = llm_client
         self.registry = registry
@@ -735,6 +736,7 @@ class TurnLoop:
         self._turn_budget_max_iterations = seed_budget.max_iterations
         self.max_turn_seconds = max_turn_seconds
         self.max_llm_call_seconds = max_llm_call_seconds
+        self.max_parallel_tool_calls = max(1, int(max_parallel_tool_calls))
         self.executor = ToolExecutor()
         self.policy = ToolPolicy()
         self.execution_gate = ExecutionGateService()
@@ -938,7 +940,12 @@ class TurnLoop:
         persisted_tool_calls: list[dict] = []
         last_tool_name = ""
         latest_progress_text = ""
-        active_tool_call: dict | None = None
+        # Calls are prepared in model order, but a safe contiguous batch may
+        # have several invocations in flight at once.  Keep every started call
+        # until its ordered result has been persisted so cancellation can
+        # account for the whole batch rather than only the last call.
+        active_tool_calls: dict[str, dict] = {}
+        active_tool_tasks: dict[str, asyncio.Task] = {}
         turn_persisted = False
         obs_usage_total = UsageStats()
 
@@ -989,6 +996,7 @@ class TurnLoop:
             risk: str = "",
             error_code: str = "",
             metadata: dict | None = None,
+            duration_ms: int | None = None,
         ) -> None:
             _obs_event(
                 "tool_call_finished",
@@ -996,7 +1004,11 @@ class TurnLoop:
                 status=status,
                 error_code=error_code,
                 error_message=output if status not in {"ok", "complete", "success"} else "",
-                duration_ms=round((time.perf_counter() - started) * 1000),
+                duration_ms=(
+                    duration_ms
+                    if duration_ms is not None
+                    else round((time.perf_counter() - started) * 1000)
+                ),
                 output={"output": output, "call_id": call_id, "risk": risk},
                 metadata=metadata or {},
             )
@@ -1024,8 +1036,14 @@ class TurnLoop:
 
         def _tool_calls_for_persist() -> list[dict]:
             tool_calls = [dict(tool_call) for tool_call in persisted_tool_calls]
-            if active_tool_call is not None:
-                tool_calls.append(dict(active_tool_call))
+            tool_calls.extend(
+                {
+                    key: tool_call[key]
+                    for key in ("tool_name", "input", "output", "status")
+                    if key in tool_call
+                }
+                for tool_call in active_tool_calls.values()
+            )
             return tool_calls
 
         def _emit_response_token(content: str) -> None:
@@ -1134,6 +1152,496 @@ class TurnLoop:
             pending_final_text = ""
             consecutive_text_only = 0
             force_tool_choice_next = False
+            parallel_semaphore = asyncio.Semaphore(self.max_parallel_tool_calls)
+
+            async def _cancel_active_tool_tasks() -> None:
+                """Cancel and drain invocation tasks created for this turn."""
+                tasks = list(active_tool_tasks.values())
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                active_tool_tasks.clear()
+
+            def _mark_active_tool_calls_cancelled() -> None:
+                cancelled_output = json.dumps(
+                    {
+                        "status": "cancelled",
+                        "reason_code": "user_stopped",
+                        "error": "Stopped by user before the tool finished.",
+                    },
+                    ensure_ascii=False,
+                )
+                for active_call in active_tool_calls.values():
+                    completed = bool(active_call.get("completed"))
+                    if not completed:
+                        active_call.update({"output": cancelled_output, "status": "cancelled"})
+                    if active_call.get("observability_finished"):
+                        continue
+                    if completed:
+                        observed_status = "ok" if active_call.get("status") == "complete" else "error"
+                    else:
+                        observed_status = "cancelled"
+                    observed_output = str(active_call.get("output") or cancelled_output)
+                    _obs_tool_end(
+                        str(active_call.get("tool_name") or "tool"),
+                        observed_output,
+                        observed_status,
+                        str(active_call.get("call_id") or ""),
+                        float(active_call.get("obs_tool_started_at") or time.perf_counter()),
+                        error_code="" if observed_status in {"ok", "complete"} else "cancelled",
+                        duration_ms=(
+                            int(active_call["duration_ms"])
+                            if completed and active_call.get("duration_ms") is not None
+                            else None
+                        ),
+                    )
+                    active_call["observability_finished"] = True
+
+            async def _invoke_prepared_tool(prepared: dict) -> ToolCallResult:
+                """Invoke one preflighted tool, converting ordinary failures to results."""
+                tool_name = str(prepared["tool_name"])
+                call_id = str(prepared["call_id"])
+                try:
+                    async with parallel_semaphore:
+                        _transition(run_state.tool_execution)
+                        result = await self._execute_tool_result(
+                            budget,
+                            prepared["tool_dict"],
+                            prepared["arguments"],
+                            call_id=call_id,
+                        )
+                        completed_at = time.perf_counter()
+                        active_call = active_tool_calls.get(prepared["active_key"])
+                        if active_call is not None:
+                            active_call.update(
+                                {
+                                    "output": result.output,
+                                    "status": "complete" if result.status == "ok" else result.status,
+                                    "completed": result.status not in {"pending_approval", "pending_access_grant"},
+                                    "duration_ms": round(
+                                        (completed_at - float(active_call.get("obs_tool_started_at") or completed_at))
+                                        * 1000
+                                    ),
+                                }
+                            )
+                        return result
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    tool_output = json.dumps(
+                        {"status": "error", "error": str(exc)}
+                    )
+                    _obs_error(
+                        str(exc),
+                        error_type=type(exc).__name__,
+                        metadata={"phase": "tool_call", "tool": tool_name, "call_id": call_id},
+                    )
+                    result = ToolCallResult.from_output(
+                        call_id=call_id,
+                        name=tool_name,
+                        output=tool_output,
+                        fallback_status="error",
+                    )
+                    active_call = active_tool_calls.get(prepared["active_key"])
+                    if active_call is not None:
+                        completed_at = time.perf_counter()
+                        active_call.update(
+                            {
+                                "output": result.output,
+                                "status": "error",
+                                "completed": result.status not in {"pending_approval", "pending_access_grant"},
+                                "duration_ms": round(
+                                    (completed_at - float(active_call.get("obs_tool_started_at") or completed_at))
+                                    * 1000
+                                ),
+                            }
+                        )
+                    return result
+
+            async def _run_prepared_batch(prepared_calls: list[dict], *, parallel: bool) -> list[ToolCallResult]:
+                """Run a prepared batch while retaining task ownership for cancellation."""
+                tasks: list[asyncio.Task] = []
+                for prepared in prepared_calls:
+                    task = asyncio.create_task(
+                        _invoke_prepared_tool(prepared),
+                        name=f"turn-tool-{prepared['call_id']}",
+                    )
+                    active_tool_tasks[prepared["active_key"]] = task
+                    tasks.append(task)
+
+                if not parallel:
+                    # A serial barrier still uses a tracked task so a turn
+                    # cancellation can drain it through the same path.
+                    result = await tasks[0]
+                    active_tool_tasks.pop(prepared_calls[0]["active_key"], None)
+                    return [result]
+
+                values = await asyncio.gather(*tasks, return_exceptions=True)
+                results: list[ToolCallResult] = []
+                for prepared, value in zip(prepared_calls, values):
+                    active_tool_tasks.pop(prepared["active_key"], None)
+                    if isinstance(value, asyncio.CancelledError):
+                        raise value
+                    if isinstance(value, BaseException):
+                        # The invocation wrapper normally converts exceptions,
+                        # but isolate a failure from its sibling if a future
+                        # error escapes that boundary.
+                        tool_name = str(prepared["tool_name"])
+                        output = json.dumps({"status": "error", "error": str(value)})
+                        _obs_error(
+                            str(value),
+                            error_type=type(value).__name__,
+                            metadata={
+                                "phase": "tool_call",
+                                "tool": tool_name,
+                                "call_id": str(prepared["call_id"]),
+                            },
+                        )
+                        value = ToolCallResult.from_output(
+                            call_id=str(prepared["call_id"]),
+                            name=tool_name,
+                            output=output,
+                            fallback_status="error",
+                        )
+                        active_call = active_tool_calls.get(prepared["active_key"])
+                        if active_call is not None:
+                            active_call.update(
+                                {
+                                    "output": output,
+                                    "status": "error",
+                                    "completed": True,
+                                    "duration_ms": round(
+                                        (time.perf_counter() - float(active_call.get("obs_tool_started_at") or time.perf_counter()))
+                                        * 1000
+                                    ),
+                                }
+                            )
+                    results.append(value)
+                return results
+
+            async def _process_tool_result(prepared: dict, tool_result: ToolCallResult) -> None:
+                """Apply gate handling and all existing ordered result guards."""
+                nonlocal final_text, stop_requested, terminal_error, incomplete_reason_code
+
+                call_id = str(prepared["call_id"])
+                step_id = str(prepared["step_id"])
+                plan_step = prepared["plan_step"]
+                tool_name = str(prepared["tool_name"])
+                arguments = prepared["arguments"]
+                policy_decision = prepared["policy_decision"]
+                tool_dict = prepared["tool_dict"]
+                status = "ok" if tool_result.status == "ok" else "error"
+                tool_output = tool_result.output
+
+                for _gate_hop in range(self.execution_gate.MAX_GATE_HOPS):
+                    pending_event = self._check_pending_status(tool_output)
+                    if pending_event is None:
+                        break
+                    _transition(run_state.waiting_for, str(pending_event.get("event") or ""))
+                    _put(pending_event)
+                    ticket_id = pending_event["data"]["ticket_id"]
+                    resolved_output: str | None = None
+                    async for resolution_event in self._await_ticket_resolution(
+                        budget,
+                        ticket_id,
+                        pending_event["event"],
+                        tool_dict,
+                        arguments,
+                    ):
+                        if "_result" in resolution_event:
+                            resolved_output = resolution_event["_result"]
+                        else:
+                            _put(resolution_event)
+                    tool_output = resolved_output or json.dumps(
+                        {"status": "error", "error": "Resolution lost."}
+                    )
+
+                status = self._tool_output_status(tool_output, status)
+                recovery_prompt = ""
+                blocked_key = _blocked_tool_key(tool_name, arguments, tool_output)
+                if blocked_key is not None:
+                    blocked_tool_counts[blocked_key] = blocked_tool_counts.get(blocked_key, 0) + 1
+                    if blocked_tool_counts[blocked_key] >= 2:
+                        status = "error"
+                        blocked_payload = _parse_tool_json(tool_output)
+                        if blocked_key not in blocked_tool_recoveries:
+                            blocked_tool_recoveries.add(blocked_key)
+                            policy_repeat_recoveries.add(tool_call_signature(tool_name, arguments))
+                            tool_output = json.dumps(
+                                {
+                                    "status": "error",
+                                    "code": "repeated_blocked_tool_result",
+                                    "tool": tool_name,
+                                    "arguments": arguments,
+                                    "recovery_required": True,
+                                    "error": (
+                                        "The same tool action was blocked repeatedly. "
+                                        "Use a different permitted action, ask for permission changes, "
+                                        "or report the blocker."
+                                    ),
+                                    "last_result": blocked_payload,
+                                },
+                                ensure_ascii=False,
+                            )
+                            recovery_prompt = _build_repeat_recovery_prompt(
+                                reason_code="repeated_blocked_tool_result",
+                                tool_name=tool_name,
+                                arguments=arguments,
+                                last_result=blocked_payload,
+                            )
+                            logger.info(
+                                "turn_loop prompted recovery after repeated blocked tool result "
+                                "conversation_id=%s tool=%s arguments=%s",
+                                conversation_id,
+                                tool_name,
+                                arguments,
+                            )
+                            _obs_event(
+                                "guardrail_triggered",
+                                level="warning",
+                                status="error",
+                                tool_name=tool_name,
+                                error_code="repeated_blocked_tool_result",
+                                error_message="Repeated blocked tool result; recovery prompt inserted.",
+                                input={"arguments": arguments, "call_id": call_id},
+                                output={"last_result": blocked_payload},
+                                metadata={"recovery_required": True},
+                            )
+                        else:
+                            stop_requested = True
+                            terminal_error = True
+                            incomplete_reason_code = "repeated_blocked_tool_result"
+                            tool_output = json.dumps(
+                                {
+                                    "status": "error",
+                                    "code": "repeated_blocked_tool_result",
+                                    "tool": tool_name,
+                                    "arguments": arguments,
+                                    "error": (
+                                        "The same tool action was blocked repeatedly after a recovery prompt. "
+                                        "Ask for permission changes or choose a different action before continuing."
+                                    ),
+                                    "last_result": blocked_payload,
+                                },
+                                ensure_ascii=False,
+                            )
+                            final_text = (
+                                "Stopped: the same tool action was blocked repeatedly after a recovery prompt. "
+                                "Adjust the permission settings or choose another action before continuing."
+                            )
+                            logger.warning(
+                                "turn_loop stopped: repeated blocked tool result after recovery "
+                                "conversation_id=%s tool=%s arguments=%s",
+                                conversation_id,
+                                tool_name,
+                                arguments,
+                            )
+                            _obs_event(
+                                "guardrail_triggered",
+                                level="warning",
+                                status="error",
+                                tool_name=tool_name,
+                                error_code="repeated_blocked_tool_result",
+                                error_message=final_text,
+                                input={"arguments": arguments, "call_id": call_id},
+                                output={"last_result": blocked_payload},
+                                metadata={"after_recovery": True},
+                            )
+                if _is_browser_observation_action(tool_name, arguments) and status == "ok":
+                    browser_repeat_counts.clear()
+                if _is_browser_repeat_guarded(tool_name, arguments) and status == "ok":
+                    repeat_key = _repeat_key(tool_name, arguments, tool_output)
+                    browser_repeat_counts[repeat_key] = browser_repeat_counts.get(repeat_key, 0) + 1
+                    if browser_repeat_counts[repeat_key] >= 2:
+                        status = "error"
+                        repeated_browser_result = tool_output
+                        if repeat_key not in browser_repeat_recoveries:
+                            browser_repeat_recoveries.add(repeat_key)
+                            policy_repeat_recoveries.add(tool_call_signature(tool_name, arguments))
+                            tool_output = json.dumps(
+                                {
+                                    "status": "error",
+                                    "code": "stalled_repeat_detected",
+                                    "tool": tool_name,
+                                    "arguments": arguments,
+                                    "recovery_required": True,
+                                    "error": (
+                                        "Repeated the same browser action with the same arguments "
+                                        "and unchanged page state. Inspect status/tabs/snapshot or report the blocker."
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            )
+                            recovery_prompt = _build_repeat_recovery_prompt(
+                                reason_code="stalled_repeat_detected",
+                                tool_name=tool_name,
+                                arguments=arguments,
+                                last_result=repeated_browser_result,
+                            )
+                            logger.info(
+                                "turn_loop prompted recovery after repeated browser action "
+                                "conversation_id=%s tool=%s arguments=%s",
+                                conversation_id,
+                                tool_name,
+                                arguments,
+                            )
+                            _obs_event(
+                                "guardrail_triggered",
+                                level="warning",
+                                status="error",
+                                tool_name=tool_name,
+                                error_code="stalled_repeat_detected",
+                                error_message="Repeated browser action with unchanged page state; recovery prompt inserted.",
+                                input={"arguments": arguments, "call_id": call_id},
+                                output={"last_result": repeated_browser_result},
+                                metadata={"recovery_required": True},
+                            )
+                        else:
+                            stop_requested = True
+                            terminal_error = True
+                            incomplete_reason_code = "stalled_repeat_detected"
+                            tool_output = json.dumps(
+                                {
+                                    "status": "error",
+                                    "code": "stalled_repeat_detected",
+                                    "tool": tool_name,
+                                    "arguments": arguments,
+                                    "error": (
+                                        "Repeated the same browser action with the same arguments "
+                                        "and unchanged page state after a recovery prompt. "
+                                        "Inspect the browser status/snapshot or adjust the plan before continuing."
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            )
+                            final_text = (
+                                "Stopped: repeated browser action with unchanged page state after a recovery prompt. "
+                                "Inspect the browser status/snapshot or adjust the plan before continuing."
+                            )
+                            logger.warning(
+                                "turn_loop stopped: repeated browser action after recovery "
+                                "conversation_id=%s tool=%s arguments=%s",
+                                conversation_id,
+                                tool_name,
+                                arguments,
+                            )
+                            _obs_event(
+                                "guardrail_triggered",
+                                level="warning",
+                                status="error",
+                                tool_name=tool_name,
+                                error_code="stalled_repeat_detected",
+                                error_message=final_text,
+                                input={"arguments": arguments, "call_id": call_id},
+                                output={"last_result": repeated_browser_result},
+                                metadata={"after_recovery": True},
+                            )
+
+                raw_tool_output = tool_output
+                active_call = active_tool_calls.get(prepared["active_key"])
+                if active_call is not None:
+                    active_call.update(
+                        {
+                            "output": raw_tool_output,
+                            "status": "complete" if status == "ok" else status,
+                        }
+                    )
+                image_attachments = _extract_image_attachments(tool_name, raw_tool_output)
+                tool_result = ToolCallResult.from_output(
+                    call_id=call_id,
+                    name=tool_name,
+                    output=raw_tool_output,
+                    fallback_status="ok" if status == "ok" else "error",
+                    metadata={"policy": policy_decision.metadata},
+                )
+                result_signature = str(
+                    policy_decision.metadata.get("signature")
+                    or tool_call_signature(tool_name, arguments)
+                )
+                last_tool_outputs_by_signature[result_signature] = raw_tool_output
+
+                _put({
+                    "event": "tool_end",
+                    "data": {
+                        "tool": tool_name,
+                        "output": raw_tool_output,
+                        "status": status,
+                        "call_id": call_id,
+                        "risk": policy_decision.risk,
+                    },
+                })
+                _obs_tool_end(
+                    tool_name,
+                    raw_tool_output,
+                    status,
+                    call_id,
+                    prepared["obs_tool_started_at"],
+                    risk=policy_decision.risk,
+                    error_code=_tool_error_code(raw_tool_output) if status != "ok" else "",
+                    duration_ms=(
+                        int(active_call["duration_ms"])
+                        if active_call is not None and active_call.get("duration_ms") is not None
+                        else None
+                    ),
+                )
+                if active_call is not None:
+                    active_call["observability_finished"] = True
+                if plan_step is not None:
+                    verified = status == "ok"
+                    plan_step.status = "done" if verified else "failed"
+                    if callable(sync_plan_progress):
+                        sync_plan_progress(conversation_id, execution_plan)
+                    _put({
+                        "event": "observation",
+                        "data": {
+                            "step_id": step_id,
+                            "verified": verified,
+                            "detail": _compact_tool_observation(tool_name, raw_tool_output) if verified else raw_tool_output,
+                        },
+                    })
+                    _put({
+                        "event": "step_complete",
+                        "data": {
+                            "step_id": step_id,
+                            "status": "done" if verified else "failed",
+                        },
+                    })
+
+                self.memory.add_tool_outcome(conversation_id, tool_name, raw_tool_output)
+                persisted_tool_calls.append(
+                    {
+                        "tool_name": tool_name,
+                        "input": json.dumps(arguments, ensure_ascii=False),
+                        "output": raw_tool_output,
+                        "status": "complete" if status == "ok" else status,
+                    }
+                )
+                active_tool_calls.pop(prepared["active_key"], None)
+                message_entry = build_tool_result_message(
+                    tool_result,
+                    provider=str(getattr(self.llm_client, "provider", "") or ""),
+                )
+                if image_attachments:
+                    message_entry["images"] = image_attachments
+                    message_entry["ephemeral"] = True
+                messages.append(message_entry)
+                if recovery_prompt:
+                    messages.append({"role": "user", "content": recovery_prompt})
+
+            async def _flush_prepared_tool_calls(prepared_calls: list[dict]) -> None:
+                """Invoke and process the calls collected before a serial barrier."""
+                if not prepared_calls:
+                    return
+                calls = list(prepared_calls)
+                prepared_calls.clear()
+                results = await _run_prepared_batch(
+                    calls,
+                    parallel=len(calls) > 1,
+                )
+                for prepared, result in zip(calls, results):
+                    await _process_tool_result(prepared, result)
 
             for iteration_index in range(self._max_iterations):
                 if stop_requested:
@@ -1582,7 +2090,10 @@ class TurnLoop:
                     sync_plan_progress(conversation_id, execution_plan)
 
                 for batch in can_parallelize(call_dicts, self.registry.get_tool):
+                    prepared_tool_calls: list[dict] = []
                     for tool_call in batch:
+                        if stop_requested:
+                            break
                         step_id = str(tool_call.get("step_id") or "")
                         call_id = str(tool_call.get("call_id") or step_id or tool_call.get("name") or "tool-call")
                         plan_step = plan_by_step_id.get(step_id)
@@ -1607,6 +2118,9 @@ class TurnLoop:
                         last_tool_name = raw_request.name
                         dispatched = self.registry.dispatch(raw_request.name, raw_request.arguments)
                         if dispatched is None:
+                            await _flush_prepared_tool_calls(prepared_tool_calls)
+                            if stop_requested:
+                                break
                             policy_decision = self.policy.decide(
                                 request=raw_request,
                                 registry=self.registry,
@@ -1684,6 +2198,9 @@ class TurnLoop:
                         tool_name = str(tool_dict["name"])
                         last_tool_name = tool_name
                         if validation_errors:
+                            await _flush_prepared_tool_calls(prepared_tool_calls)
+                            if stop_requested:
+                                break
                             tool_output = json.dumps(
                                 {
                                     "status": "error",
@@ -1751,6 +2268,9 @@ class TurnLoop:
                             arguments=arguments,
                         )
                         if not policy_decision.allowed:
+                            await _flush_prepared_tool_calls(prepared_tool_calls)
+                            if stop_requested:
+                                break
                             blocked_code = policy_decision.metadata.get("code", "tool_policy_blocked")
                             recovery_prompt = ""
                             tool_output = json.dumps(
@@ -1893,19 +2413,6 @@ class TurnLoop:
                                 break
                             continue
 
-                        active_tool_call = {
-                            "tool_name": tool_name,
-                            "input": json.dumps(arguments, ensure_ascii=False),
-                            "output": json.dumps(
-                                {
-                                    "status": "cancelled",
-                                    "reason_code": "user_stopped",
-                                    "error": "Stopped by user before the tool finished.",
-                                },
-                                ensure_ascii=False,
-                            ),
-                            "status": "cancelled",
-                        }
                         obs_tool_started_at = _obs_tool_start(
                             tool_name,
                             arguments,
@@ -1921,323 +2428,43 @@ class TurnLoop:
                                 "risk": policy_decision.risk,
                             },
                         })
-                        try:
-                            _transition(run_state.tool_execution)
-                            tool_result = await self._execute_tool_result(
-                                budget,
-                                tool_dict,
-                                arguments,
-                                call_id=call_id,
-                            )
-                            tool_output = tool_result.output
-                            status = "ok" if tool_result.status == "ok" else "error"
-                        except Exception as exc:
-                            tool_output = json.dumps(
-                                {"status": "error", "error": str(exc)}
-                            )
-                            status = "error"
-                            _obs_error(
-                                str(exc),
-                                error_type=type(exc).__name__,
-                                metadata={"phase": "tool_call", "tool": tool_name, "call_id": call_id},
-                            )
-                            tool_result = ToolCallResult.from_output(
-                                call_id=call_id,
-                                name=tool_name,
-                                output=tool_output,
-                                fallback_status="error",
-                            )
-
-                        for _gate_hop in range(self.execution_gate.MAX_GATE_HOPS):
-                            pending_event = self._check_pending_status(tool_output)
-                            if pending_event is None:
-                                break
-                            _transition(run_state.waiting_for, str(pending_event.get("event") or ""))
-                            _put(pending_event)
-                            ticket_id = pending_event["data"]["ticket_id"]
-                            resolved_output: str | None = None
-                            async for resolution_event in self._await_ticket_resolution(
-                                budget,
-                                ticket_id,
-                                pending_event["event"],
-                                tool_dict,
-                                arguments,
-                            ):
-                                if "_result" in resolution_event:
-                                    resolved_output = resolution_event["_result"]
-                                else:
-                                    _put(resolution_event)
-                            tool_output = resolved_output or json.dumps(
-                                {"status": "error", "error": "Resolution lost."}
-                            )
-
-                        status = self._tool_output_status(tool_output, status)
-                        recovery_prompt = ""
-                        blocked_key = _blocked_tool_key(tool_name, arguments, tool_output)
-                        if blocked_key is not None:
-                            blocked_tool_counts[blocked_key] = blocked_tool_counts.get(blocked_key, 0) + 1
-                            if blocked_tool_counts[blocked_key] >= 2:
-                                status = "error"
-                                blocked_payload = _parse_tool_json(tool_output)
-                                if blocked_key not in blocked_tool_recoveries:
-                                    blocked_tool_recoveries.add(blocked_key)
-                                    policy_repeat_recoveries.add(tool_call_signature(tool_name, arguments))
-                                    tool_output = json.dumps(
-                                        {
-                                            "status": "error",
-                                            "code": "repeated_blocked_tool_result",
-                                            "tool": tool_name,
-                                            "arguments": arguments,
-                                            "recovery_required": True,
-                                            "error": (
-                                                "The same tool action was blocked repeatedly. "
-                                                "Use a different permitted action, ask for permission changes, "
-                                                "or report the blocker."
-                                            ),
-                                            "last_result": blocked_payload,
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    recovery_prompt = _build_repeat_recovery_prompt(
-                                        reason_code="repeated_blocked_tool_result",
-                                        tool_name=tool_name,
-                                        arguments=arguments,
-                                        last_result=blocked_payload,
-                                    )
-                                    logger.info(
-                                        "turn_loop prompted recovery after repeated blocked tool result "
-                                        "conversation_id=%s tool=%s arguments=%s",
-                                        conversation_id,
-                                        tool_name,
-                                        arguments,
-                                    )
-                                    _obs_event(
-                                        "guardrail_triggered",
-                                        level="warning",
-                                        status="error",
-                                        tool_name=tool_name,
-                                        error_code="repeated_blocked_tool_result",
-                                        error_message="Repeated blocked tool result; recovery prompt inserted.",
-                                        input={"arguments": arguments, "call_id": call_id},
-                                        output={"last_result": blocked_payload},
-                                        metadata={"recovery_required": True},
-                                    )
-                                else:
-                                    stop_requested = True
-                                    terminal_error = True
-                                    incomplete_reason_code = "repeated_blocked_tool_result"
-                                    tool_output = json.dumps(
-                                        {
-                                            "status": "error",
-                                            "code": "repeated_blocked_tool_result",
-                                            "tool": tool_name,
-                                            "arguments": arguments,
-                                            "error": (
-                                                "The same tool action was blocked repeatedly after a recovery prompt. "
-                                                "Ask for permission changes or choose a different action before continuing."
-                                            ),
-                                            "last_result": blocked_payload,
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    final_text = (
-                                        "Stopped: the same tool action was blocked repeatedly after a recovery prompt. "
-                                        "Adjust the permission settings or choose another action before continuing."
-                                    )
-                                    logger.warning(
-                                        "turn_loop stopped: repeated blocked tool result after recovery "
-                                        "conversation_id=%s tool=%s arguments=%s",
-                                        conversation_id,
-                                        tool_name,
-                                        arguments,
-                                    )
-                                    _obs_event(
-                                        "guardrail_triggered",
-                                        level="warning",
-                                        status="error",
-                                        tool_name=tool_name,
-                                        error_code="repeated_blocked_tool_result",
-                                        error_message=final_text,
-                                        input={"arguments": arguments, "call_id": call_id},
-                                        output={"last_result": blocked_payload},
-                                        metadata={"after_recovery": True},
-                                    )
-                        if _is_browser_observation_action(tool_name, arguments) and status == "ok":
-                            browser_repeat_counts.clear()
-                        if _is_browser_repeat_guarded(tool_name, arguments) and status == "ok":
-                            repeat_key = _repeat_key(tool_name, arguments, tool_output)
-                            browser_repeat_counts[repeat_key] = browser_repeat_counts.get(repeat_key, 0) + 1
-                            if browser_repeat_counts[repeat_key] >= 2:
-                                status = "error"
-                                repeated_browser_result = tool_output
-                                if repeat_key not in browser_repeat_recoveries:
-                                    browser_repeat_recoveries.add(repeat_key)
-                                    policy_repeat_recoveries.add(tool_call_signature(tool_name, arguments))
-                                    tool_output = json.dumps(
-                                        {
-                                            "status": "error",
-                                            "code": "stalled_repeat_detected",
-                                            "tool": tool_name,
-                                            "arguments": arguments,
-                                            "recovery_required": True,
-                                            "error": (
-                                                "Repeated the same browser action with the same arguments "
-                                                "and unchanged page state. Inspect status/tabs/snapshot or report the blocker."
-                                            ),
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    recovery_prompt = _build_repeat_recovery_prompt(
-                                        reason_code="stalled_repeat_detected",
-                                        tool_name=tool_name,
-                                        arguments=arguments,
-                                        last_result=repeated_browser_result,
-                                    )
-                                    logger.info(
-                                        "turn_loop prompted recovery after repeated browser action "
-                                        "conversation_id=%s tool=%s arguments=%s",
-                                        conversation_id,
-                                        tool_name,
-                                        arguments,
-                                    )
-                                    _obs_event(
-                                        "guardrail_triggered",
-                                        level="warning",
-                                        status="error",
-                                        tool_name=tool_name,
-                                        error_code="stalled_repeat_detected",
-                                        error_message="Repeated browser action with unchanged page state; recovery prompt inserted.",
-                                        input={"arguments": arguments, "call_id": call_id},
-                                        output={"last_result": repeated_browser_result},
-                                        metadata={"recovery_required": True},
-                                    )
-                                else:
-                                    stop_requested = True
-                                    terminal_error = True
-                                    incomplete_reason_code = "stalled_repeat_detected"
-                                    tool_output = json.dumps(
-                                        {
-                                            "status": "error",
-                                            "code": "stalled_repeat_detected",
-                                            "tool": tool_name,
-                                            "arguments": arguments,
-                                            "error": (
-                                                "Repeated the same browser action with the same arguments "
-                                                "and unchanged page state after a recovery prompt. "
-                                                "Inspect status/tabs/snapshot or report the blocker."
-                                            ),
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    final_text = (
-                                        "Stopped: repeated browser action with unchanged page state after a recovery prompt. "
-                                        "Inspect the browser status/snapshot or adjust the plan before continuing."
-                                    )
-                                    logger.warning(
-                                        "turn_loop stopped: repeated browser action after recovery "
-                                        "conversation_id=%s tool=%s arguments=%s",
-                                        conversation_id,
-                                        tool_name,
-                                        arguments,
-                                    )
-                                    _obs_event(
-                                        "guardrail_triggered",
-                                        level="warning",
-                                        status="error",
-                                        tool_name=tool_name,
-                                        error_code="stalled_repeat_detected",
-                                        error_message=final_text,
-                                        input={"arguments": arguments, "call_id": call_id},
-                                        output={"last_result": repeated_browser_result},
-                                        metadata={"after_recovery": True},
-                                    )
-
-                        raw_tool_output = tool_output
-                        active_tool_call = {
+                        active_key = f"{call_id}:{len(active_tool_calls)}"
+                        active_tool_calls[active_key] = {
+                            "call_id": call_id,
                             "tool_name": tool_name,
                             "input": json.dumps(arguments, ensure_ascii=False),
-                            "output": raw_tool_output,
-                            "status": "complete" if status == "ok" else status,
+                            "output": json.dumps(
+                                {
+                                    "status": "cancelled",
+                                    "reason_code": "user_stopped",
+                                    "error": "Stopped by user before the tool finished.",
+                                },
+                                ensure_ascii=False,
+                            ),
+                            "status": "cancelled",
+                            "obs_tool_started_at": obs_tool_started_at,
+                            "observability_finished": False,
                         }
-                        image_attachments = _extract_image_attachments(tool_name, raw_tool_output)
-                        tool_result = ToolCallResult.from_output(
-                            call_id=call_id,
-                            name=tool_name,
-                            output=raw_tool_output,
-                            fallback_status="ok" if status == "ok" else "error",
-                            metadata={"policy": policy_decision.metadata},
-                        )
-                        result_signature = str(
-                            policy_decision.metadata.get("signature")
-                            or tool_call_signature(tool_name, arguments)
-                        )
-                        last_tool_outputs_by_signature[result_signature] = raw_tool_output
-
-                        _put({
-                            "event": "tool_end",
-                            "data": {
-                                "tool": tool_name,
-                                "output": raw_tool_output,
-                                "status": status,
-                                "call_id": call_id,
-                                "risk": policy_decision.risk,
-                            },
-                        })
-                        _obs_tool_end(
-                            tool_name,
-                            raw_tool_output,
-                            status,
-                            call_id,
-                            obs_tool_started_at,
-                            risk=policy_decision.risk,
-                            error_code=_tool_error_code(raw_tool_output) if status != "ok" else "",
-                        )
-                        if plan_step is not None:
-                            verified = status == "ok"
-                            plan_step.status = "done" if verified else "failed"
-                            if callable(sync_plan_progress):
-                                sync_plan_progress(conversation_id, execution_plan)
-                            _put({
-                                "event": "observation",
-                                "data": {
-                                    "step_id": step_id,
-                                    "verified": verified,
-                                    "detail": _compact_tool_observation(tool_name, raw_tool_output) if verified else raw_tool_output,
-                                },
-                            })
-                            _put({
-                                "event": "step_complete",
-                                "data": {
-                                    "step_id": step_id,
-                                    "status": "done" if verified else "failed",
-                                },
-                            })
-
-                        self.memory.add_tool_outcome(
-                            conversation_id, tool_name, raw_tool_output
-                        )
-                        persisted_tool_calls.append(
+                        prepared_tool_calls.append(
                             {
+                                "active_key": active_key,
+                                "call_id": call_id,
+                                "step_id": step_id,
+                                "plan_step": plan_step,
                                 "tool_name": tool_name,
-                                "input": json.dumps(arguments, ensure_ascii=False),
-                                "output": raw_tool_output,
-                                "status": "complete" if status == "ok" else status,
+                                "arguments": arguments,
+                                "tool_dict": tool_dict,
+                                "policy_decision": policy_decision,
+                                "obs_tool_started_at": obs_tool_started_at,
                             }
                         )
-                        active_tool_call = None
-                        message_entry = build_tool_result_message(
-                            tool_result,
-                            provider=str(getattr(self.llm_client, "provider", "") or ""),
-                        )
-                        if image_attachments:
-                            message_entry["images"] = image_attachments
-                            message_entry["ephemeral"] = True
-                        messages.append(message_entry)
-                        if recovery_prompt:
-                            messages.append({"role": "user", "content": recovery_prompt})
+                        # Invocation and result handling happen after all
+                        # calls in this contiguous batch have passed the
+                        # preflight checks, allowing safe calls to overlap.
+                        continue
 
-                        if stop_requested:
-                            break
+                    if prepared_tool_calls:
+                        await _flush_prepared_tool_calls(prepared_tool_calls)
                     if stop_requested:
                         break
 
@@ -2381,6 +2608,12 @@ class TurnLoop:
                 except Exception:
                     logger.exception("schedule_long_term_learning failed")
         except asyncio.CancelledError:
+            cleanup_active_tasks = locals().get("_cancel_active_tool_tasks")
+            if callable(cleanup_active_tasks):
+                await cleanup_active_tasks()
+            mark_active_calls = locals().get("_mark_active_tool_calls_cancelled")
+            if callable(mark_active_calls):
+                mark_active_calls()
             _transition(run_state.cancel, "cancelled")
             partial_text = _assistant_message_on_cancel()
             try:
@@ -2412,6 +2645,12 @@ class TurnLoop:
                 )
             raise
         except Exception as exc:
+            cleanup_active_tasks = locals().get("_cancel_active_tool_tasks")
+            if callable(cleanup_active_tasks):
+                await cleanup_active_tasks()
+            mark_active_calls = locals().get("_mark_active_tool_calls_cancelled")
+            if callable(mark_active_calls):
+                mark_active_calls()
             _transition(run_state.fail, "internal_error")
             logger.exception("react_worker error: %s", exc)
             _obs_error(

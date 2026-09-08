@@ -178,6 +178,118 @@ def test_can_parallelize_uses_tool_metadata_resource_locks():
     assert can_parallelize(calls, registry.get_tool) == [[calls[0]], [calls[1]]]
 
 
+def test_can_parallelize_preserves_order_around_serial_barriers():
+    registry = ToolRegistry(
+        [
+            {
+                "name": "safe_a",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "a",
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True},
+            },
+            {
+                "name": "unsafe",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "unsafe",
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": False, "resource_locks": ["state"]},
+            },
+            {
+                "name": "safe_b",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "b",
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True},
+            },
+            {
+                "name": "safe_c",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "c",
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True},
+            },
+        ]
+    )
+    calls = [
+        {"name": "safe_a", "arguments": {}},
+        {"name": "unsafe", "arguments": {}},
+        {"name": "safe_b", "arguments": {}},
+        {"name": "safe_c", "arguments": {}},
+    ]
+
+    assert can_parallelize(calls, registry.get_tool) == [
+        [calls[0]],
+        [calls[1]],
+        [calls[2], calls[3]],
+    ]
+
+
+def test_can_parallelize_treats_conflicting_resources_and_affinity_as_barriers():
+    registry = ToolRegistry(
+        [
+            {
+                "name": "resource_a",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "a",
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True, "resource_locks": ["shared"]},
+            },
+            {
+                "name": "resource_b",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "b",
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True, "resource_locks": ["shared"]},
+            },
+            {
+                "name": "affine",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "affine",
+                "execution_mode": "sync_thread_affine",
+                "affinity_group": "same-thread",
+                "metadata": {"parallel_safe": True},
+            },
+        ]
+    )
+    calls = [
+        {"name": "resource_a", "arguments": {}},
+        {"name": "resource_b", "arguments": {}},
+        {"name": "affine", "arguments": {}},
+    ]
+
+    assert can_parallelize(calls, registry.get_tool) == [[calls[0]], [calls[1]], [calls[2]]]
+
+
+def test_can_parallelize_unknown_lookup_and_high_risk_metadata_are_serial():
+    registry = ToolRegistry(
+        [
+            {
+                "name": "safe",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "safe",
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True},
+            },
+            {
+                "name": "risky",
+                "parameters": {"type": "object", "properties": {}},
+                "callable": lambda: "risky",
+                "execution_mode": "sync_stateless",
+                "domain": "desktop",
+                "metadata": {"parallel_safe": True, "risk_level": "high"},
+            },
+        ]
+    )
+    calls = [
+        {"name": "safe", "arguments": {}},
+        {"name": "missing", "arguments": {}},
+        {"name": "risky", "arguments": {}},
+    ]
+
+    assert can_parallelize(calls, registry.get_tool) == [[calls[0]], [calls[1]], [calls[2]]]
+
+
 def test_get_all_tools_can_hide_model_invisible_aliases():
     registry = ToolRegistry(
         [

@@ -85,7 +85,16 @@ def _tool_metadata(name: str, tool_lookup=None) -> dict:
     if callable(tool_lookup):
         tool = tool_lookup(name)
         if isinstance(tool, dict):
-            return tool.get("metadata", {}) or {}
+            metadata = dict(tool.get("metadata", {}) or {})
+            # Execution affinity is part of the descriptor rather than the
+            # safety metadata in older skill definitions.
+            metadata.setdefault("execution_mode", tool.get("execution_mode"))
+            metadata.setdefault("affinity_group", tool.get("affinity_group"))
+            metadata.setdefault("domain", tool.get("domain"))
+            return metadata
+        # A registry lookup is authoritative.  Do not infer that an unknown
+        # dynamically named tool is safe from a similarly named fallback.
+        return {"parallel_safe": False, "unknown": True}
     if name in _NEVER_PARALLEL:
         return {"parallel_safe": False, "resource_locks": [name], "mutates_state": True}
     if name in _PARALLEL_SAFE:
@@ -93,56 +102,75 @@ def _tool_metadata(name: str, tool_lookup=None) -> dict:
     return {}
 
 
+def _tool_is_parallel_safe(name: str, metadata: dict, *, default: bool = False) -> bool:
+    """Return whether a tool may share an invocation batch with another tool.
+
+    Browser tools and thread-affine tools retain their serial semantics even when
+    a dynamically loaded descriptor accidentally marks them as read-only.  An
+    unknown tool is also kept behind a serial barrier until its descriptor can
+    be inspected by the normal dispatch/policy path.
+    """
+    if name in _NEVER_PARALLEL or name.startswith("browser_"):
+        return False
+    if metadata.get("unknown") or metadata.get("mutates_state") is True:
+        return False
+    if str(metadata.get("risk_level") or "").lower() == "high":
+        return False
+    if str(metadata.get("domain") or "").lower() in {"desktop", "interaction"}:
+        return False
+    if str(metadata.get("execution_mode") or "") == "sync_thread_affine":
+        return False
+    if metadata.get("affinity_group"):
+        return False
+    return bool(metadata.get("parallel_safe", default))
+
+
 def can_parallelize(tool_calls: list[dict], tool_lookup=None) -> list[list[dict]]:
-    """Group tool calls into batches that can execute safely in parallel."""
+    """Group calls into order-preserving, contiguous parallel-safe batches.
+
+    Unsafe or unknown calls are serial barriers.  A resource conflict is also a
+    barrier, so calls are never moved ahead of an earlier mutating call merely
+    because another safe call appears later in the model response.
+    """
     if len(tool_calls) <= 1:
         return [tool_calls] if tool_calls else []
 
-    names = {tc.get("name", "") for tc in tool_calls}
-    if tool_lookup is None and names & _NEVER_PARALLEL:
-        return [[tc] for tc in tool_calls]
-    if tool_lookup is not None and any(
-        not bool(_tool_metadata(tc.get("name", ""), tool_lookup).get("parallel_safe", tc.get("name", "") in _PARALLEL_SAFE))
-        for tc in tool_calls
-    ):
-        return [[tc] for tc in tool_calls]
-
+    batches: list[list[dict]] = []
     parallel_batch: list[dict] = []
-    sequential: list[list[dict]] = []
-    seen_paths: set[str] = set()
     locked_resources: set[str] = set()
 
+    def flush_parallel_batch() -> None:
+        nonlocal parallel_batch, locked_resources
+        if parallel_batch:
+            batches.append(parallel_batch)
+            parallel_batch = []
+            locked_resources = set()
+
     for tc in tool_calls:
-        name = tc.get("name", "")
-        args = tc.get("arguments", {})
+        name = str(tc.get("name") or "")
         metadata = _tool_metadata(name, tool_lookup)
-        resource_locks = [str(item) for item in (metadata.get("resource_locks") or []) if str(item)]
-        parallel_safe = bool(metadata.get("parallel_safe", name in _PARALLEL_SAFE))
-        path = (
-            args.get("path")
-            or args.get("source")
-            or args.get("destination")
-            or args.get("workdir")
-            or ""
-        )
+        default_safe = name in _PARALLEL_SAFE
+        parallel_safe = _tool_is_parallel_safe(name, metadata, default=default_safe)
+        resource_locks = {
+            str(item)
+            for item in (metadata.get("resource_locks") or [])
+            if str(item)
+        }
 
-        if not parallel_safe or any(lock in locked_resources for lock in resource_locks):
-            sequential.append([tc])
-        elif name in _PARALLEL_SAFE or parallel_safe:
-            parallel_batch.append(tc)
-            locked_resources.update(resource_locks)
-        elif path and path in seen_paths:
-            sequential.append([tc])
-        else:
-            if path:
-                seen_paths.add(path)
-            locked_resources.update(resource_locks)
-            parallel_batch.append(tc)
+        if not parallel_safe:
+            flush_parallel_batch()
+            batches.append([tc])
+            continue
 
-    batches: list[list[dict]] = []
-    if parallel_batch:
-        batches.append(parallel_batch)
-    batches.extend(sequential)
+        if resource_locks & locked_resources:
+            flush_parallel_batch()
+            batches.append([tc])
+            continue
+
+        parallel_batch.append(tc)
+        locked_resources.update(resource_locks)
+
+    flush_parallel_batch()
     return batches
 
 
