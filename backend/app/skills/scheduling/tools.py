@@ -5,9 +5,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.agent.approval_broker import create_ticket
 from app.agent.database import get_db
-from app.agent.run_context import current_execution_principal
-from app.agent.scheduler import ScheduledTaskService, get_scheduled_task_service
+from app.agent.execution_resume import register_executor
+from app.agent.run_context import current_execution_principal, current_interactive
+from app.agent.scheduler import ScheduledTaskService, get_scheduled_task_service, telegram_chat_allowed
 
 
 def _json(payload: dict[str, Any]) -> str:
@@ -54,7 +56,7 @@ def _validate_cron(cron_expr: str) -> None:
         raise ValueError(f"Invalid cron expression: {cron_expr}")
 
 
-def scheduled_task_create(
+def _raw_scheduled_task_create(
     title: str,
     prompt: str,
     schedule_kind: str = "cron",
@@ -80,6 +82,14 @@ def scheduled_task_create(
         return _json({"status": "error", "error": "schedule_kind must be cron, interval, or once"})
     if overlap_policy not in {"skip", "queue", "cancel_previous"}:
         return _json({"status": "error", "error": "overlap_policy must be skip, queue, or cancel_previous"})
+    if notify_telegram and telegram_chat_id.strip() and not telegram_chat_allowed(telegram_chat_id):
+        return _json(
+            {
+                "status": "blocked",
+                "reason_code": "telegram_chat_not_allowed",
+                "error": "telegram_chat_id is not in the Telegram allowed users or chats.",
+            }
+        )
 
     try:
         if schedule_kind == "cron":
@@ -143,12 +153,99 @@ def scheduled_task_create(
         return _json({"status": "error", "error": str(exc)})
 
 
+def _interactive_required(action: str) -> str | None:
+    if current_interactive():
+        return None
+    return _json(
+        {
+            "status": "blocked",
+            "reason_code": "interactive_session_required",
+            "error": f"{action} requires an interactive desktop session.",
+        }
+    )
+
+
+def scheduled_task_create(
+    title: str,
+    prompt: str,
+    schedule_kind: str = "cron",
+    cron_expr: str = "",
+    interval_seconds: int = 0,
+    run_at: str = "",
+    timezone_name: str = "UTC",
+    enabled: bool = True,
+    overlap_policy: str = "skip",
+    notify_telegram: bool = False,
+    telegram_chat_id: str = "",
+    reuse_conversation: bool = False,
+) -> str:
+    """Stage a scheduled task for user approval.
+
+    A scheduled task is a persistent prompt that later runs unattended, so an
+    injected instruction must not be able to install one silently.
+    """
+    blocked = _interactive_required("Creating a scheduled task")
+    if blocked:
+        return blocked
+    args = {
+        "title": str(title or "").strip(),
+        "prompt": str(prompt or "").strip(),
+        "schedule_kind": schedule_kind,
+        "cron_expr": cron_expr,
+        "interval_seconds": int(interval_seconds or 0),
+        "run_at": run_at,
+        "timezone_name": timezone_name,
+        "enabled": bool(enabled),
+        "overlap_policy": overlap_policy,
+        "notify_telegram": bool(notify_telegram),
+        "telegram_chat_id": str(telegram_chat_id or ""),
+        "reuse_conversation": bool(reuse_conversation),
+    }
+    if not args["title"]:
+        return _json({"status": "error", "error": "title is required"})
+    if not args["prompt"]:
+        return _json({"status": "error", "error": "prompt is required"})
+    if args["notify_telegram"] and args["telegram_chat_id"].strip() and not telegram_chat_allowed(args["telegram_chat_id"]):
+        return _json(
+            {
+                "status": "blocked",
+                "reason_code": "telegram_chat_not_allowed",
+                "error": "telegram_chat_id is not in the Telegram allowed users or chats.",
+            }
+        )
+    schedule = cron_expr or (f"every {args['interval_seconds']}s" if args["interval_seconds"] else run_at)
+    description = f"Create scheduled task '{args['title']}' ({schedule_kind} {schedule}): {args['prompt'][:160]}"
+    if args["notify_telegram"]:
+        description += f" [notify Telegram {args['telegram_chat_id'] or 'default'}]"
+    ticket = create_ticket(
+        action_type="scheduled_task",
+        tool_name="scheduled_task_create",
+        target_app="scheduler",
+        risk_level="medium",
+        reason="Scheduled tasks run prompts unattended and need approval.",
+        action_description=description,
+        payload={"input_str": json.dumps(args, ensure_ascii=False, sort_keys=True), "args": args},
+    )
+    return _json(
+        {
+            "status": "pending_approval",
+            "ticket_id": ticket.id,
+            "action": description,
+            "reason": "Scheduled tasks run prompts unattended and need approval.",
+            "reason_code": "confirmation_required",
+        }
+    )
+
+
 def scheduled_task_list(limit: int = 20) -> str:
     tasks = get_db().list_scheduled_tasks()[: max(1, min(100, int(limit or 20)))]
     return _json({"status": "ok", "tasks": [_normalize_task(task) for task in tasks], "count": len(tasks)})
 
 
 def scheduled_task_delete(task_id: str) -> str:
+    blocked = _interactive_required("Deleting a scheduled task")
+    if blocked:
+        return blocked
     deleted = get_db().delete_scheduled_task(task_id.strip())
     if not deleted:
         return _json({"status": "error", "error": f"Scheduled task {task_id} not found"})
@@ -156,6 +253,9 @@ def scheduled_task_delete(task_id: str) -> str:
 
 
 async def scheduled_task_run_now(task_id: str) -> str:
+    blocked = _interactive_required("Running a scheduled task")
+    if blocked:
+        return blocked
     service = get_scheduled_task_service()
     if service is None:
         return _json({"status": "error", "error": "Scheduled task service is not running"})
@@ -167,6 +267,10 @@ async def scheduled_task_run_now(task_id: str) -> str:
 
 
 def register_tools(registry, _settings=None) -> None:
+    register_executor(
+        "scheduled_task_create",
+        lambda input_str: _raw_scheduled_task_create(**(json.loads(input_str) if input_str else {})),
+    )
     common = {
         "domain": "general",
         "execution_mode": "sync_stateless",

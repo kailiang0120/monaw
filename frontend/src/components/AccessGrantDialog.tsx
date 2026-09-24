@@ -28,7 +28,7 @@ export function AccessGrantDialog({ ticket, onResolved }: Props) {
   const TypeIcon = ticket.target_type === 'app' ? Shield : ShieldCheck
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+    <div className="fixed inset-0 below-app-bar z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
       <div className="panel w-full max-w-md overflow-hidden rounded-2xl">
         <div className="flex items-center gap-3 border-b border-white/[0.07] px-5 py-4">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-400/20 bg-amber-400/10">

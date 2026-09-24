@@ -1,12 +1,15 @@
 import { KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { Check, ChevronUp, FileText, Loader2, Mic, Paperclip, Send, Shield, Square, Terminal, X } from 'lucide-react'
 import { ContextUsageBar } from './ContextUsageBar'
+import { Dropdown } from './Dropdown'
+import { formatReasoningEffort, providerOptions, reasoningEffortsForProvider } from '../features/settings/settingsConfig'
 import { fetchContextUsage } from '../lib/api/conversations'
 import { transcribeSpeech } from '../lib/api/speechToText'
 import { uploadAttachment } from '../lib/api/uploads'
-import type { AgentSettings, ContextUsage, UploadedAttachment } from '../lib/api/types'
+import type { AgentSettings, ContextUsage, ModelOptions, UploadedAttachment } from '../lib/api/types'
 
 type ApprovalMode = AgentSettings['permissions']['mode']
+type ModelSelection = Pick<AgentSettings['llm'], 'provider' | 'model_name' | 'reasoning_effort'>
 
 const APPROVAL_OPTIONS: Array<{ value: ApprovalMode; label: string }> = [
   { value: 'default', label: 'Default' },
@@ -40,6 +43,13 @@ interface Props {
   disabled?: boolean
   disabledReason?: string
   approvalMode: ApprovalMode
+  modelSelection: ModelSelection
+  modelOptions: ModelOptions
+  hasGoogleKey?: boolean
+  modelSelectionDisabled?: boolean
+  modelSelectionError?: string
+  onModelSelectionChange: (selection: ModelSelection) => void
+  focusRequestKey?: number
   approvalModeDisabled?: boolean
   onApprovalModeChange: (mode: ApprovalMode) => void
 }
@@ -54,6 +64,13 @@ export function InputBar({
   disabled,
   disabledReason,
   approvalMode,
+  modelSelection,
+  modelOptions,
+  hasGoogleKey = false,
+  modelSelectionDisabled,
+  modelSelectionError,
+  onModelSelectionChange,
+  focusRequestKey = 0,
   approvalModeDisabled,
   onApprovalModeChange,
 }: Props) {
@@ -67,6 +84,7 @@ export function InputBar({
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const previousFocusRequestKeyRef = useRef(focusRequestKey)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const recordingSegmentChunksRef = useRef<Blob[]>([])
@@ -86,9 +104,21 @@ export function InputBar({
   const voiceTranscriptQueueRef = useRef<Map<number, string>>(new Map())
   const voiceStopRequestedRef = useRef(false)
   const activeApprovalLabel = APPROVAL_OPTIONS.find((o) => o.value === approvalMode)?.label ?? approvalMode
+  const modelChoices = providerOptions(modelOptions)
+    .filter((provider) => provider.id !== 'gemini' || hasGoogleKey)
+    .flatMap((provider) =>
+      provider.models.map((model) => ({
+        value: `${provider.id}:${model}`,
+        label: `${provider.label} · ${model}`,
+      })),
+    )
+  const selectedModelAvailable = modelChoices.some(
+    (choice) => choice.value === `${modelSelection.provider}:${modelSelection.model_name}`,
+  )
+  const effortChoices = reasoningEffortsForProvider(modelSelection.provider, modelSelection.model_name)
   const placeholder = disabled && disabledReason
     ? disabledReason
-    : 'Ask the agent to investigate, edit files, automate the browser, or explain a result…'
+    : 'Enter to send · Shift+Enter for newline'
   const slashQuery = value.startsWith('/') && !value.includes('\n') && !value.includes(' ')
     ? value.slice(1).toLowerCase()
     : ''
@@ -99,6 +129,12 @@ export function InputBar({
     })
     : []
   const showSlashCommands = !recording && !isStreaming && !disabled && slashCommandMatches.length > 0
+
+  useEffect(() => {
+    if (previousFocusRequestKeyRef.current === focusRequestKey) return
+    previousFocusRequestKeyRef.current = focusRequestKey
+    textareaRef.current?.focus()
+  }, [focusRequestKey])
 
   useEffect(() => () => {
     if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current)
@@ -143,7 +179,7 @@ export function InputBar({
   const handleSend = async () => {
     const trimmed = value.trim()
     const message = trimmed || (selectedFiles.length ? 'Please review the attached file(s).' : '')
-    if (!message || isStreaming || disabled || uploading || recording || transcribing) return
+    if (!message || !selectedModelAvailable || isStreaming || disabled || uploading || recording || transcribing) return
     setUploadError('')
     setUploading(true)
     try {
@@ -542,10 +578,11 @@ export function InputBar({
                 onChange={(e) => setValue(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onInput={handleInput}
+                aria-label="Message"
                 placeholder={placeholder}
                 rows={1}
                 disabled={disabled}
-                className="w-full min-h-9 max-h-44 resize-none bg-transparent text-sm leading-relaxed text-neutral-100 outline-none placeholder:text-neutral-600 disabled:opacity-50"
+                className="chat-composer-input w-full min-h-9 max-h-44 resize-none bg-transparent text-sm leading-relaxed outline-none disabled:opacity-50"
               />
             )}
           </div>
@@ -581,12 +618,8 @@ export function InputBar({
             </div>
           )}
 
-          {/* Bottom action row — hint left, permission + send right */}
-          <div className="flex items-center justify-between gap-3 px-3 pb-3 pt-1.5">
-            <span className="text-[10px] text-neutral-700 select-none">
-              {disabled && disabledReason ? disabledReason : 'Enter sends · Shift+Enter newline'}
-            </span>
-
+          {/* Bottom action row */}
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-3 pb-3 pt-1.5">
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -613,9 +646,6 @@ export function InputBar({
               >
                 {transcribing ? <Loader2 size={12} className="animate-spin" /> : recording ? <Square size={12} fill="currentColor" /> : <Mic size={12} />}
               </button>
-
-              {/* Context usage ring */}
-              <ContextUsageBar usage={contextUsage} />
 
               {/* Permission dropdown */}
               <div className="relative">
@@ -658,12 +688,46 @@ export function InputBar({
                   </div>
                 )}
               </div>
+            </div>
+
+            <div className="flex min-w-0 items-center justify-end gap-2">
+              {!recording && (
+                <>
+                  <Dropdown<string>
+                    ariaLabel="Model"
+                    value={`${modelSelection.provider}:${modelSelection.model_name}`}
+                    options={modelChoices}
+                    placeholder="Choose a model"
+                    onChange={(selection) => {
+                      const separator = selection.indexOf(':')
+                      const provider = selection.slice(0, separator) as ModelSelection['provider']
+                      const model_name = selection.slice(separator + 1)
+                      onModelSelectionChange({ ...modelSelection, provider, model_name })
+                    }}
+                    disabled={modelSelectionDisabled}
+                    size="sm"
+                    className="w-[170px] max-w-[42vw]"
+                  />
+                  <Dropdown<ModelSelection['reasoning_effort']>
+                    ariaLabel="Reasoning effort"
+                    value={modelSelection.reasoning_effort}
+                    options={effortChoices.map((effort) => ({ value: effort, label: formatReasoningEffort(effort) }))}
+                    onChange={(reasoning_effort) => onModelSelectionChange({ ...modelSelection, reasoning_effort })}
+                    disabled={modelSelectionDisabled}
+                    size="sm"
+                    className="w-[105px]"
+                  />
+                </>
+              )}
+
+              {/* Context usage ring */}
+              <ContextUsageBar usage={contextUsage} />
 
               {/* Send / Stop */}
               <button
                 type="button"
                 onClick={isStreaming ? onStop : () => { void handleSend() }}
-                disabled={!isStreaming && ((!value.trim() && selectedFiles.length === 0) || disabled || uploading || recording || transcribing)}
+                disabled={!isStreaming && ((!value.trim() && selectedFiles.length === 0) || !selectedModelAvailable || disabled || uploading || recording || transcribing)}
                 className={`h-7 w-7 shrink-0 rounded-lg ${
                   isStreaming
                     ? 'inline-flex items-center justify-center bg-red-500/15 text-red-300 ring-1 ring-red-400/20 hover:bg-red-500/25'
@@ -675,6 +739,14 @@ export function InputBar({
               </button>
             </div>
           </div>
+          {modelSelectionError && <div role="alert" className="px-3 pb-2 text-[11px] text-red-300">{modelSelectionError}</div>}
+          {!selectedModelAvailable && (
+            <div role="status" className="px-3 pb-2 text-[11px] text-amber-300">
+              {modelSelection.provider === 'gemini' && !hasGoogleKey
+                ? 'Add a Google API key in Settings or choose another model.'
+                : 'Choose an available model.'}
+            </div>
+          )}
         </div>
       </div>
     </footer>

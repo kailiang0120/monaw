@@ -526,6 +526,7 @@ def test_approving_filtered_candidate_raises_instead_of_silent_reject(tmp_path):
 
 def test_memory_tool_records_execution_principal_provenance(tmp_path, monkeypatch):
     store = _store(tmp_path)
+    monkeypatch.setattr(type(store), "write_policy", property(lambda _self: "auto_reviewed"))
     monkeypatch.setattr(memory_tools, "get_long_term_memory", lambda: store)
     tokens = [
         (run_context.reset_current_interactive, run_context.set_current_interactive(True)),
@@ -546,6 +547,35 @@ def test_memory_tool_records_execution_principal_provenance(tmp_path, monkeypatc
     assert memory["source_permission_profile_id"] == "profile-1"
     assert memory["source_execution_source"] == "desktop"
     assert memory["source_conversation_id"] == "conv-provenance"
+
+
+def test_memory_tool_queues_agent_memories_for_review_by_default(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    monkeypatch.setattr(type(store), "write_policy", property(lambda _self: "auto_with_review"))
+    monkeypatch.setattr(memory_tools, "get_long_term_memory", lambda: store)
+    token = run_context.set_current_interactive(True)
+    try:
+        result = json.loads(memory_tools._memory_remember("The user prefers reviewed memories.", "preference"))
+    finally:
+        run_context.reset_current_interactive(token)
+
+    assert result["status"] == "pending_review"
+    assert store.list_memories(status="active") == []
+    assert store.list_candidates(status="new")[0]["content"] == "The user prefers reviewed memories."
+
+
+def test_memory_tool_respects_disabled_write_policy(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    monkeypatch.setattr(type(store), "write_policy", property(lambda _self: "off"))
+    monkeypatch.setattr(memory_tools, "get_long_term_memory", lambda: store)
+    token = run_context.set_current_interactive(True)
+    try:
+        result = json.loads(memory_tools._memory_remember("The user prefers nothing stored.", "preference"))
+    finally:
+        run_context.reset_current_interactive(token)
+
+    assert result["reason_code"] == "memory_writes_disabled"
+    assert store.list_memories(status="active") == []
 
 
 def test_memory_tool_blocks_non_interactive_mutation(tmp_path, monkeypatch):

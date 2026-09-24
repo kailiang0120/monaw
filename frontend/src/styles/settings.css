@@ -146,6 +146,27 @@
   background: var(--st-surface-sunken);
 }
 
+.st-usage-window {
+  padding: 0.75rem;
+  border: 1px solid var(--st-border);
+  border-radius: 0.625rem;
+  background: var(--st-surface-muted);
+}
+
+.st-usage-track {
+  height: 0.25rem;
+  margin-top: 0.625rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--st-border-strong);
+}
+
+.st-usage-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--st-accent);
+}
+
 .st-row {
   display: flex;
   align-items: flex-start;

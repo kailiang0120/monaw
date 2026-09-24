@@ -16,6 +16,7 @@ metadata:
 Use these tools for website fetching and browser automation tasks.
 
 Preferred workflow:
+- When `mcp__Chrome-dev-tools__list_pages` is available, use Chrome DevTools MCP to control the user's open Chrome tabs. Start with `list_pages` and `take_snapshot`, then act on snapshot element IDs. This connection provides hover, drag, dialog, upload, and other actions in addition to clicking and typing. Keep using that connection for the task instead of opening a separate managed browser.
 - For read-only URL retrieval, extraction, or summarization, use `browser_fetch` before opening a browser tab. It uses local HTTP plus Scrapling parsing first, with optional rendering through Monaw's browser session.
 - Start with `browser_open` to create or reuse the browser session.
 - Always use `observe -> decide -> act -> verify`: inspect state, choose one safe next action, execute it, then verify before continuing.
@@ -52,7 +53,7 @@ Rules:
 - Do not use desktop-control tools for websites when browser-use tools can do the job directly.
 - Do not open a browser tab just to read a public URL if `browser_fetch` can retrieve the needed text or selector content.
 - Do not guess selectors if `browser_snapshot` can give you a `ref`.
-- Use `browser_evaluate` only when the structured snapshot is not enough.
+- Use `browser_evaluate` only when the structured snapshot is not enough. It runs arbitrary page JavaScript, so outside Full access it asks the user for approval every time; prefer `browser_snapshot`, `browser_extract_text`, and `browser_find` first.
 - If multiple visible fields could match, do not type yet. Take another snapshot, use `browser_evaluate` to inspect labels/attributes, or click only after the correct field is clear.
 
 ## Browser Tool Policy

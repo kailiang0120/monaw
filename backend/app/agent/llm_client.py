@@ -196,20 +196,12 @@ def _tools_to_openai_responses(tools: list[dict]) -> list[dict]:
     ]
 
 
-def _openai_reasoning_effort(value: str) -> str:
-    effort = str(value or "").strip().lower()
-    if effort in {"none", "minimal"}:
-        return "minimal"
-    if effort in {"low", "medium", "high"}:
-        return effort
-    if effort in {"xhigh", "max"}:
-        return "high"
-    return "medium"
+def _openai_reasoning_effort(value: str, model_name: str = "") -> str:
+    return provider_requests.openai_reasoning_effort(value, model_name)
 
 
 def _openai_model_supports_reasoning_config(model_name: str) -> bool:
-    model = str(model_name or "").strip().lower()
-    return model.startswith(("gpt-5", "o1", "o3", "o4"))
+    return provider_requests.openai_model_supports_reasoning_config(model_name)
 
 
 def _gemini_thinking_config(model_name: str, reasoning_effort: str, types_mod):
@@ -279,7 +271,7 @@ def _tool_output_response_payload(output: str) -> dict:
 
 
 def build_tool_result_message(result: ToolCallResult, *, provider: str = "") -> dict:
-    if str(provider or "").lower() == "openai":
+    if str(provider or "").lower() in {"openai", "codex"}:
         return {
             "type": "function_call_output",
             "call_id": result.call_id,
@@ -310,7 +302,7 @@ def _model_supports_vision(provider: str, model_name: str) -> bool:
     if provider_name == "gemini":
         return model.startswith("gemini")
     if provider_name == "openai":
-        return model.startswith(("gpt-4", "gpt-5", "o1", "o3", "o4"))
+        return model.startswith(("gpt-4", "gpt-5", "gpt-6", "o1", "o3", "o4"))
     return True
 
 
@@ -560,8 +552,10 @@ class LLMClient:
         elif self.provider == "openai":
             from openai import AsyncOpenAI
             self._openai_client = AsyncOpenAI(api_key=api_key)
+        elif self.provider == "codex":
+            pass
         else:
-            raise ValueError(f"Unsupported provider: {provider!r}. Use 'openai' or 'gemini'.")
+            raise ValueError(f"Unsupported provider: {provider!r}.")
         self.provider_adapter = create_llm_provider_adapter(self.provider, self)
 
     @staticmethod
@@ -586,15 +580,19 @@ class LLMClient:
         system_prompt: str = "",
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
         tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        return await _with_retry(
-            lambda: self.provider_adapter.chat_with_tools(
-                messages,
-                tools,
-                system_prompt,
-                stream_callback,
-                tool_choice,
+        async def call_provider() -> LLMResponse:
+            if reasoning_callback is not None and self.provider in {"openai", "codex"}:
+                return await self.provider_adapter.chat_with_tools(
+                    messages, tools, system_prompt, stream_callback, tool_choice,
+                    reasoning_callback=reasoning_callback,
+                )
+            return await self.provider_adapter.chat_with_tools(
+                messages, tools, system_prompt, stream_callback, tool_choice,
             )
+        return await _with_retry(
+            call_provider
         )
 
     async def chat(
@@ -614,6 +612,53 @@ class LLMClient:
     # ------------------------------------------------------------------
     # Gemini implementation (google-genai SDK)
     # ------------------------------------------------------------------
+
+    async def _codex_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        system_prompt: str,
+        stream_callback: Callable[[str], Awaitable[None]] | None,
+        tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
+    ) -> LLMResponse:
+        # Codex has no tool_choice; the turn loop's text-only reprompts cover it.
+        from app.agent.codex_account import codex_account
+
+        result = await codex_account.model_call(
+            model=self.model_name,
+            effort=self.reasoning_effort,
+            messages=messages,
+            tools=tools,
+            system_prompt=system_prompt,
+            stream_callback=stream_callback,
+            reasoning_callback=reasoning_callback,
+        )
+        calls = [
+            ToolCallRequest(call_id=call.call_id, tool_name=call.name, arguments=call.arguments)
+            for call in result.tool_calls
+        ]
+        # Same Responses items as the OpenAI API path, so history replays natively.
+        provider_messages: list[dict] = []
+        if calls and result.content:
+            provider_messages.append({"role": "assistant", "content": result.content})
+        provider_messages += [
+            {
+                "type": "function_call",
+                "call_id": call.call_id,
+                "name": call.tool_name,
+                "arguments": json.dumps(call.arguments, ensure_ascii=False),
+            }
+            for call in calls
+        ]
+        return LLMResponse(
+            content=result.content,
+            tool_calls=calls,
+            finish_reason="tool_calls" if calls else "stop",
+            reasoning_content=result.reasoning,
+            provider_messages=provider_messages,
+            usage=UsageStats(**result.usage, source="codex_account"),
+        )
 
     async def _gemini_chat(
         self,
@@ -747,6 +792,7 @@ class LLMClient:
         system_prompt: str,
         stream_callback: Callable[[str], Awaitable[None]] | None,
         tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         return await self._openai_responses_chat(
             messages,
@@ -754,6 +800,7 @@ class LLMClient:
             system_prompt,
             stream_callback,
             tool_choice,
+            reasoning_callback,
         )
 
     async def _openai_responses_chat(
@@ -763,6 +810,7 @@ class LLMClient:
         system_prompt: str,
         stream_callback: Callable[[str], Awaitable[None]] | None,
         tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         kwargs = provider_requests.openai_responses_kwargs(
             model_name=self.model_name,
@@ -774,8 +822,8 @@ class LLMClient:
             tool_choice=tool_choice,
         )
 
-        if stream_callback is not None:
-            return await self._openai_responses_stream(kwargs, stream_callback)
+        if stream_callback is not None or reasoning_callback is not None:
+            return await self._openai_responses_stream(kwargs, stream_callback, reasoning_callback)
         return await self._openai_responses_no_stream(kwargs)
 
     async def _openai_responses_no_stream(self, kwargs: dict) -> LLMResponse:
@@ -799,7 +847,8 @@ class LLMClient:
     async def _openai_responses_stream(
         self,
         kwargs: dict,
-        stream_callback: Callable[[str], Awaitable[None]],
+        stream_callback: Callable[[str], Awaitable[None]] | None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         stream = await self._openai_client.responses.create(**{**kwargs, "stream": True})
         collected_content = ""
@@ -813,9 +862,13 @@ class LLMClient:
                 delta = str(_obj_get(event, "delta", "") or "")
                 if delta:
                     collected_content += delta
-                    await stream_callback(delta)
-            elif event_type in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}:
-                collected_reasoning_content += str(_obj_get(event, "delta", "") or "")
+                    if stream_callback is not None:
+                        await stream_callback(delta)
+            elif event_type == "response.reasoning_summary_text.delta":
+                delta = str(_obj_get(event, "delta", "") or "")
+                collected_reasoning_content += delta
+                if delta and reasoning_callback is not None:
+                    await reasoning_callback(delta)
             elif event_type == "response.output_item.added":
                 item = _obj_get(event, "item", None)
                 if _obj_get(item, "type", "") == "function_call":
@@ -841,18 +894,23 @@ class LLMClient:
                 )
                 buf["name"] = str(_obj_get(event, "name", "") or buf["name"])
                 buf["arguments_buf"] = str(_obj_get(event, "arguments", "") or buf["arguments_buf"])
-            elif event_type == "response.completed":
+            elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
                 final_response = _obj_get(event, "response", None)
 
         if final_response is not None:
+            status = str(_obj_get(final_response, "status", "") or "")
+            if status == "failed":
+                error = _obj_get(final_response, "error", None)
+                raise RuntimeError(str(_obj_get(error, "message", "") or "OpenAI response failed."))
             final_content, final_reasoning = _openai_response_text_and_reasoning(final_response)
+            final_tool_calls = _extract_openai_response_tool_calls(final_response)
+            incomplete_details = _obj_get(final_response, "incomplete_details", None)
+            truncated = status == "incomplete" and _obj_get(incomplete_details, "reason", "") == "max_output_tokens"
             return LLMResponse(
                 content=final_content or collected_content,
-                tool_calls=_extract_openai_response_tool_calls(final_response),
+                tool_calls=[] if truncated else final_tool_calls,
                 finish_reason=(
-                    "tool_calls"
-                    if _extract_openai_response_tool_calls(final_response)
-                    else "stop"
+                    "length" if truncated else "tool_calls" if final_tool_calls else "stop"
                 ),
                 reasoning_content=final_reasoning or collected_reasoning_content,
                 provider_messages=_openai_response_provider_messages(final_response),

@@ -302,6 +302,8 @@ def _settings_cache_key(settings) -> str:
 
 def _provider_api_key(settings) -> str:
     provider = str(getattr(settings, "model_provider", "openai") or "openai").lower()
+    if provider == "codex":
+        return ""
     if provider == "gemini":
         return getattr(settings, "google_api_key", "")
     return getattr(settings, "openai_api_key", "")

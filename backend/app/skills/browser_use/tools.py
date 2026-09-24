@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
 from app.agent.approval_broker import create_ticket
+from app.agent.controller_policy import ActionType, resolve_permission
 from app.agent.run_context import current_interactive
 from app.agent.response_attachments import (
     MAX_GENERATED_SCREENSHOT_DIMENSION_PX,
@@ -35,6 +36,9 @@ from .url_policy import (
 
 from .dom_scripts import (
     _ELEMENT_METADATA_SCRIPT,
+    _FILE_CHOOSER_GUARD_ARM_SCRIPT,
+    _FILE_CHOOSER_GUARD_READ_SCRIPT,
+    _OPENS_FILE_INPUT_JS,
     _GLOBAL_DECLUTTER_SCRIPT,
     _INTERACTIVE_SELECTOR,
     _MATCH_REF_SCRIPT,
@@ -155,7 +159,88 @@ def _looks_like_download_target(meta: dict[str, Any] | None) -> bool:
 def _looks_like_file_input(meta: dict[str, Any] | None) -> bool:
     if not isinstance(meta, dict):
         return False
+    if meta.get("opens_file_input"):
+        return True
     return str(meta.get("tag") or "").lower() == "input" and str(meta.get("type") or "").lower() == "file"
+
+
+# Fields that identify what an approved click was aimed at. Replay refuses to
+# click if the element under the same ref/selector/point has changed since.
+_TARGET_FINGERPRINT_KEYS = ("tag", "type", "id", "name", "href", "download", "opens_file_input")
+
+
+def _target_fingerprint(meta: dict[str, Any] | None) -> dict[str, Any]:
+    meta = meta if isinstance(meta, dict) else {}
+    fingerprint = {key: meta.get(key) or "" for key in _TARGET_FINGERPRINT_KEYS}
+    fingerprint["text"] = str(meta.get("text") or "")[:80]
+    return fingerprint
+
+
+def _approved_target_mismatch(expected: dict[str, Any] | None, meta: dict[str, Any] | None) -> str | None:
+    if not expected:
+        return None
+    current = _target_fingerprint(meta)
+    changed = [key for key, value in expected.items() if current.get(key, "") != value]
+    if not changed:
+        return None
+    return _json_output(
+        {
+            "status": "blocked",
+            "reason_code": "approved_target_changed",
+            "error": "The page changed since approval; the element under this click is no longer the approved one.",
+            "changed_fields": changed,
+        }
+    )
+
+
+def _click_transfer_approval(
+    meta: dict[str, Any] | None,
+    click_payload: dict[str, Any],
+    *,
+    chooser_opened: bool = False,
+) -> str | None:
+    """Ask before a click that can upload local files or download remote ones."""
+    payload = {**click_payload, "expected_target": _target_fingerprint(meta)}
+    if chooser_opened or _looks_like_file_input(meta):
+        return _pending_browser_approval(
+            tool_name="browser_click",
+            action_type="browser_file_upload",
+            action_description="Open a browser file chooser",
+            reason=(
+                "The page tried to open a local file chooser for upload."
+                if chooser_opened
+                else "Clicking this browser target may open a local file chooser for upload."
+            ),
+            reason_code="browser_file_chooser_approval_required",
+            payload_args=payload,
+        )
+    if _looks_like_download_target(meta):
+        return _pending_browser_approval(
+            tool_name="browser_click",
+            action_type="browser_download",
+            action_description="Click a browser download target",
+            reason="Clicking this browser target may download a file.",
+            reason_code="browser_download_approval_required",
+            payload_args=payload,
+            target_url=str((meta or {}).get("href") or ""),
+        )
+    return None
+
+
+async def _arm_file_chooser_guard(page) -> bool:
+    try:
+        return bool(await page.evaluate(_FILE_CHOOSER_GUARD_ARM_SCRIPT))
+    except Exception:
+        return False
+
+
+async def _file_chooser_guard_tripped(page) -> bool:
+    await _sleep_after_action(0.15)
+    try:
+        return bool(await page.evaluate(_FILE_CHOOSER_GUARD_READ_SCRIPT))
+    except Exception:
+        # The click navigated away; a new document has no pending chooser.
+        return False
 
 
 async def _point_element_metadata(page, x: int, y: int) -> dict[str, Any] | None:
@@ -166,6 +251,7 @@ async def _point_element_metadata(page, x: int, y: int) -> dict[str, Any] | None
               const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
               const el = document.elementFromPoint(x, y);
               if (!el) return null;
+              """ + _OPENS_FILE_INPUT_JS + """
               const rect = el.getBoundingClientRect();
               return JSON.stringify({
                 ref: el.getAttribute('data-agent-ref') || '',
@@ -176,6 +262,7 @@ async def _point_element_metadata(page, x: int, y: int) -> dict[str, Any] | None
                 name: el.getAttribute('name') || '',
                 href: el instanceof HTMLAnchorElement ? (el.href || el.getAttribute('href') || '') : '',
                 download: el.getAttribute('download') || '',
+                opens_file_input: opensFileInput(el),
                 aria_label: el.getAttribute('aria-label') || '',
                 text: normalize(el.innerText || el.textContent || ''),
                 x: Math.round(rect.x),
@@ -1563,6 +1650,10 @@ async def browser_tabs(
     if normalized_action == "list":
         return _json_output({"status": "ok", "tabs": await manager.tabs()})
     if normalized_action == "new":
+        if url:
+            url, policy_error = _browser_url_policy(manager, url, action="browser_tabs")
+            if policy_error:
+                return _json_output(policy_error)
         page = await browser.new_page(url or None)
         await _sleep_after_action(0.6)
         _invalidate_dom_cache(manager, "browser_tabs_new")
@@ -1687,6 +1778,7 @@ async def browser_click(
     expect_new_tab: bool = False,
     timeout_seconds: float = 10,
     _bypass_gate: bool = False,
+    _expected_target: dict[str, Any] | None = None,
 ) -> str:
     page = await _current_page(
         manager,
@@ -1698,62 +1790,39 @@ async def browser_click(
     resolved_selector = ""
     target_after: dict[str, Any] | None = None
 
+    click_payload = _browser_click_payload(
+        ref=ref,
+        selector=selector,
+        text=text,
+        exact_text=exact_text,
+        x=x,
+        y=y,
+        button=button,
+        clicks=clicks,
+        tab_target_id=tab_target_id,
+        tab_index=tab_index,
+        wait_for_selector=wait_for_selector,
+        wait_for_text=wait_for_text,
+        wait_for_url_contains=wait_for_url_contains,
+        expect_new_tab=expect_new_tab,
+        timeout_seconds=timeout_seconds,
+    )
+
     if x is not None and y is not None:
-        if not _bypass_gate:
-            point_meta = await _point_element_metadata(page, int(x), int(y))
-            if _looks_like_file_input(point_meta):
-                return _pending_browser_approval(
-                    tool_name="browser_click",
-                    action_type="browser_file_upload",
-                    action_description="Open a browser file chooser",
-                    reason="Clicking this browser target may open a local file chooser for upload.",
-                    reason_code="browser_file_chooser_approval_required",
-                    payload_args=_browser_click_payload(
-                        ref=ref,
-                        selector=selector,
-                        text=text,
-                        exact_text=exact_text,
-                        x=x,
-                        y=y,
-                        button=button,
-                        clicks=clicks,
-                        tab_target_id=tab_target_id,
-                        tab_index=tab_index,
-                        wait_for_selector=wait_for_selector,
-                        wait_for_text=wait_for_text,
-                        wait_for_url_contains=wait_for_url_contains,
-                        expect_new_tab=expect_new_tab,
-                        timeout_seconds=timeout_seconds,
-                    ),
-                )
-            if _looks_like_download_target(point_meta):
-                return _pending_browser_approval(
-                    tool_name="browser_click",
-                    action_type="browser_download",
-                    action_description="Click a browser download target",
-                    reason="Clicking this browser target may download a file.",
-                    reason_code="browser_download_approval_required",
-                    payload_args=_browser_click_payload(
-                        ref=ref,
-                        selector=selector,
-                        text=text,
-                        exact_text=exact_text,
-                        x=x,
-                        y=y,
-                        button=button,
-                        clicks=clicks,
-                        tab_target_id=tab_target_id,
-                        tab_index=tab_index,
-                        wait_for_selector=wait_for_selector,
-                        wait_for_text=wait_for_text,
-                        wait_for_url_contains=wait_for_url_contains,
-                        expect_new_tab=expect_new_tab,
-                        timeout_seconds=timeout_seconds,
-                    ),
-                    target_url=str((point_meta or {}).get("href") or ""),
-                )
+        point_meta = await _point_element_metadata(page, int(x), int(y))
+        if _bypass_gate:
+            mismatch = _approved_target_mismatch(_expected_target, point_meta)
+            if mismatch:
+                return mismatch
+        else:
+            pending = _click_transfer_approval(point_meta, click_payload)
+            if pending:
+                return pending
         mouse = await _page_mouse(page)
+        guarded = not _bypass_gate and await _arm_file_chooser_guard(page)
         await mouse.click(int(x), int(y), button=button, click_count=max(1, clicks))
+        if guarded and await _file_chooser_guard_tripped(page):
+            return _click_transfer_approval(point_meta, click_payload, chooser_opened=True)
         clicked.update({"x": int(x), "y": int(y), "button": button, "clicks": max(1, clicks)})
     else:
         element, resolved_selector = await _resolve_element(
@@ -1765,59 +1834,18 @@ async def browser_click(
             exact_text=exact_text,
         )
         element_meta = await _element_metadata(page, resolved_selector)
-        if not _bypass_gate:
-            if _looks_like_file_input(element_meta):
-                return _pending_browser_approval(
-                    tool_name="browser_click",
-                    action_type="browser_file_upload",
-                    action_description="Open a browser file chooser",
-                    reason="Clicking this browser target may open a local file chooser for upload.",
-                    reason_code="browser_file_chooser_approval_required",
-                    payload_args=_browser_click_payload(
-                        ref=ref,
-                        selector=selector,
-                        text=text,
-                        exact_text=exact_text,
-                        x=x,
-                        y=y,
-                        button=button,
-                        clicks=clicks,
-                        tab_target_id=tab_target_id,
-                        tab_index=tab_index,
-                        wait_for_selector=wait_for_selector,
-                        wait_for_text=wait_for_text,
-                        wait_for_url_contains=wait_for_url_contains,
-                        expect_new_tab=expect_new_tab,
-                        timeout_seconds=timeout_seconds,
-                    ),
-                )
-            if _looks_like_download_target(element_meta):
-                return _pending_browser_approval(
-                    tool_name="browser_click",
-                    action_type="browser_download",
-                    action_description="Click a browser download target",
-                    reason="Clicking this browser target may download a file.",
-                    reason_code="browser_download_approval_required",
-                    payload_args=_browser_click_payload(
-                        ref=ref,
-                        selector=selector,
-                        text=text,
-                        exact_text=exact_text,
-                        x=x,
-                        y=y,
-                        button=button,
-                        clicks=clicks,
-                        tab_target_id=tab_target_id,
-                        tab_index=tab_index,
-                        wait_for_selector=wait_for_selector,
-                        wait_for_text=wait_for_text,
-                        wait_for_url_contains=wait_for_url_contains,
-                        expect_new_tab=expect_new_tab,
-                        timeout_seconds=timeout_seconds,
-                    ),
-                    target_url=str((element_meta or {}).get("href") or ""),
-                )
+        if _bypass_gate:
+            mismatch = _approved_target_mismatch(_expected_target, element_meta)
+            if mismatch:
+                return mismatch
+        else:
+            pending = _click_transfer_approval(element_meta, click_payload)
+            if pending:
+                return pending
+        guarded = not _bypass_gate and await _arm_file_chooser_guard(page)
         await element.click(button=button, click_count=max(1, clicks))
+        if guarded and await _file_chooser_guard_tripped(page):
+            return _click_transfer_approval(element_meta, click_payload, chooser_opened=True)
         clicked.update(
             {
                 "mode": "element",
@@ -1955,6 +1983,39 @@ async def browser_type(
     )
 
 
+_ACTIVATION_KEYS = frozenset({"enter", "numpadenter", "space", " "})
+
+
+def _is_activation_key(key: str) -> bool:
+    return str(key or "").strip().lower().split("+")[-1] in _ACTIVATION_KEYS
+
+
+async def _active_element_metadata(page) -> dict[str, Any] | None:
+    try:
+        result = await page.evaluate(
+            "() => { " + _OPENS_FILE_INPUT_JS + " const el = document.activeElement;"
+            " return JSON.stringify(el ? { tag: (el.tagName || '').toLowerCase(),"
+            " type: el.getAttribute('type') || '', opens_file_input: opensFileInput(el) } : null); }"
+        )
+    except Exception:
+        return None
+    decoded = _decode_json_string(result)
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _file_chooser_key_blocked(key: str) -> str:
+    # A key press has no approval replay, so point the agent at the click path,
+    # which asks the user before opening the chooser.
+    return _json_output(
+        {
+            "status": "blocked",
+            "reason_code": "browser_file_chooser_approval_required",
+            "key": key,
+            "error": "This key would open a local file chooser. Use browser_click on the upload control so the user can approve it.",
+        }
+    )
+
+
 async def browser_press(
     manager,
     key: str,
@@ -1966,7 +2027,12 @@ async def browser_press(
         target_id=tab_target_id,
         index=None if tab_index < 0 else tab_index,
     )
+    if _is_activation_key(key) and _looks_like_file_input(await _active_element_metadata(page)):
+        return _file_chooser_key_blocked(key)
+    guarded = await _arm_file_chooser_guard(page)
     await page.press(key)
+    if guarded and await _file_chooser_guard_tripped(page):
+        return _file_chooser_key_blocked(key)
     await _sleep_after_action(0.2)
     _invalidate_dom_cache(manager, "browser_press")
     return _json_output({"status": "ok", "key": key, "page": await manager.page_metadata(page), "cache_invalidated": True})
@@ -2499,7 +2565,10 @@ async def browser_full_page_screenshot(
         stealth_init = await _install_stealth_init(manager, browser)
 
     if url.strip():
-        await page.goto(url.strip())
+        url, policy_error = _browser_url_policy(manager, url.strip(), action="browser_full_page_screenshot")
+        if policy_error:
+            return _json_output(policy_error)
+        await page.goto(url)
         await _wait_after_navigation(page, "domcontentloaded", timeout_seconds=15)
         await _sleep_after_action(0.7)
 
@@ -2593,7 +2662,47 @@ async def browser_evaluate(
     args: list[Any] | None = None,
     tab_target_id: str = "",
     tab_index: int = -1,
+    _bypass_gate: bool = False,
 ) -> str:
+    if not _bypass_gate:
+        # Arbitrary JavaScript in a logged-in tab can read cookies and storage,
+        # submit forms, or start downloads, so it is gated like exec.
+        decision = resolve_permission(ActionType.EXEC)
+        if decision.blocked:
+            return _json_output(
+                {
+                    "status": "blocked",
+                    "reason": decision.reason,
+                    "reason_code": decision.reason_code,
+                    "policy_source": decision.policy_source,
+                }
+            )
+        if decision.requires_confirmation:
+            payload_args = {
+                "script": script,
+                "args": list(args or []),
+                "tab_target_id": tab_target_id,
+                "tab_index": tab_index,
+            }
+            description = f"Run JavaScript in the browser tab: {str(script or '')[:160]}"
+            ticket = create_ticket(
+                action_type="browser_evaluate",
+                tool_name="browser_evaluate",
+                risk_level="high",
+                reason=decision.reason,
+                action_description=description,
+                payload={"input_str": json.dumps(payload_args, ensure_ascii=False, sort_keys=True), "args": payload_args},
+            )
+            return _json_output(
+                {
+                    "status": "pending_approval",
+                    "ticket_id": ticket.id,
+                    "action": description,
+                    "reason": decision.reason,
+                    "reason_code": decision.reason_code,
+                    "policy_source": decision.policy_source,
+                }
+            )
     page = await _current_page(
         manager,
         target_id=tab_target_id,

@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 from pathlib import Path
 
 from app.agent.runtime_paths import RUNTIME_DIR
-from app.security.control_plane import CONTROL_SECRET_ENV
+from app.security.control_plane import capture_control_secret
 
 
 def validate_control_plane_secret() -> None:
-    secret = os.environ.get(CONTROL_SECRET_ENV, "").strip()
+    secret = capture_control_secret()
     if len(secret) < 32:
         raise RuntimeError("control-plane secret is missing or too short")
 

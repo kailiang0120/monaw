@@ -114,8 +114,15 @@ def tools_to_openai_responses(tools: list[dict]) -> list[dict]:
 
 
 
-def openai_reasoning_effort(value: str) -> str:
+def openai_reasoning_effort(value: str, model_name: str = "") -> str:
     effort = str(value or "").strip().lower()
+    model = str(model_name or "").strip().lower()
+    if model.startswith("gpt-6"):
+        if effort == "none" and model == "gpt-6-astra":
+            return "low"
+        if effort == "minimal":
+            return "low"
+        return effort if effort in {"none", "low", "medium", "high", "xhigh", "max"} else "medium"
     if effort in {"none", "minimal"}:
         return "minimal"
     if effort in {"low", "medium", "high"}:
@@ -127,7 +134,7 @@ def openai_reasoning_effort(value: str) -> str:
 
 def openai_model_supports_reasoning_config(model_name: str) -> bool:
     model = str(model_name or "").strip().lower()
-    return model.startswith(("gpt-5", "o1", "o3", "o4"))
+    return model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4"))
 
 
 def gemini_thinking_config(model_name: str, reasoning_effort: str, types_mod):
@@ -365,7 +372,7 @@ def openai_responses_kwargs(
     if system_prompt:
         kwargs["instructions"] = system_prompt
     if openai_model_supports_reasoning_config(model_name):
-        effort = openai_reasoning_effort(reasoning_effort)
+        effort = openai_reasoning_effort(reasoning_effort, model_name)
         reasoning: dict[str, str] = {"effort": effort}
         if effort != "none":
             reasoning["summary"] = "auto"

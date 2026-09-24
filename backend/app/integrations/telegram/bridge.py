@@ -12,11 +12,18 @@ from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import settings
-from app.agent.access_grant_broker import resolve_grant, signal_resume as signal_grant_resume
+from app.agent.access_grant_broker import (
+    get_grant_ticket,
+    grant_validation_error,
+    resolve_grant,
+    signal_resume as signal_grant_resume,
+)
 from app.agent.approval_broker import (
     approve_ticket,
+    get_ticket as get_approval_ticket,
     reject_ticket,
     signal_resume as signal_approval_resume,
+    ticket_validation_error,
 )
 from app.agent.identity import DEFAULT_AGENT_NAME
 from app.agent.response_attachments import (
@@ -917,6 +924,21 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+def _telegram_ticket_error(ticket, chat_id: int, *, grant: bool) -> str:
+    """Telegram may only resolve tickets raised by a run in this same chat.
+
+    Without this, any allowlisted Telegram user (or group member) could approve
+    pending desktop tickets, or persist an "always" grant, by ticket id alone.
+    """
+    if ticket is None:
+        return "ticket not found"
+    if ticket.execution_source != "telegram" or ticket.permission_profile_id != f"telegram:{chat_id}:restricted":
+        return "ticket was not raised from this Telegram chat"
+    if grant:
+        return grant_validation_error(ticket, expected_session_id="telegram")
+    return ticket_validation_error(ticket, expected_session_id="telegram")
+
+
 async def permission_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
@@ -942,8 +964,18 @@ async def permission_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     resolved_by = _telegram_resolved_by(update)
     text = "Permission request is no longer pending."
     answer = "Already handled."
+    chat_id = int(update.effective_chat.id)
+    is_grant = action.startswith("grant_")
+    ticket_error = _telegram_ticket_error(
+        get_grant_ticket(ticket_id) if is_grant else get_approval_ticket(ticket_id),
+        chat_id,
+        grant=is_grant,
+    )
 
-    if action == "approve":
+    if ticket_error and (action in {"approve", "reject"} or is_grant):
+        answer = "Not allowed."
+        text = f"Cannot resolve ticket {ticket_id} from Telegram: {ticket_error}."
+    elif action == "approve":
         ticket = approve_ticket(ticket_id, resolved_by=resolved_by)
         if ticket is not None:
             signal_approval_resume(ticket_id, "approved")

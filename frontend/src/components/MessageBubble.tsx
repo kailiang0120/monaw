@@ -3,7 +3,6 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   AlertTriangle,
-  BrainCircuit,
   Check,
   CheckCircle2,
   CircleDashed,
@@ -14,16 +13,18 @@ import {
   Image,
   Loader2,
   Play,
-  Timer,
+  SquareTerminal,
   Wrench,
   X,
   XCircle,
 } from 'lucide-react'
-import mascotDefault from '../assets/mascots/mascot.png'
-import mascotGood from '../assets/mascots/good.png'
-import mascotCurious from '../assets/mascots/curious.png'
-import mascotStart from '../assets/mascots/start.png'
-import mascotThinking from '../assets/mascots/thinking.png'
+import mascotAlert from '../assets/mascots/alert.gif'
+import mascotCurious from '../assets/mascots/curious.gif'
+import mascotSuccess from '../assets/mascots/success.gif'
+import mascotThinking from '../assets/mascots/thinking.gif'
+import mascotAlertStill from '../assets/mascots/curious.png'
+import mascotSuccessStill from '../assets/mascots/good.png'
+import mascotThinkingStill from '../assets/mascots/thinking.png'
 import { PlanProgress } from './PlanProgress'
 import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
@@ -35,9 +36,12 @@ import type { UploadedAttachment } from '../lib/api/types'
 import type { ActivityItem, ApprovalNotice, Message, ToolCall } from '../hooks/useChat'
 
 const MIN_IMAGE_PREVIEW_DIMENSION_PX = 16
-const MAX_VISIBLE_THINKING_CHARS = 500
 const FORMATTED_RESPONSE_CACHE_LIMIT = 300
 const formattedResponseCache = new Map<string, string>()
+
+type DisplayActivity =
+  | { id: string; type: 'progress'; content: string }
+  | { id: string; type: 'tools'; toolCalls: ToolCall[] }
 
 function cachedFormatAgentResponse(message: Message): string {
   const revision = message.contentRevision ?? message.content.length
@@ -53,86 +57,15 @@ function cachedFormatAgentResponse(message: Message): string {
   return formatted
 }
 
-function isDisplayableThinking(thinking?: string): thinking is string {
-  const trimmed = thinking?.trim()
-  return Boolean(trimmed && trimmed.length <= MAX_VISIBLE_THINKING_CHARS)
-}
-
-function ThinkingStatusIcon({ className = '' }: { className?: string }) {
-  return (
-    <span className={`relative flex h-4 w-4 shrink-0 items-center justify-center text-accent-light ${className}`} aria-hidden>
-      <span className="absolute h-3.5 w-3.5 animate-ping rounded-full border border-accent-light/35" />
-      <BrainCircuit size={15} strokeWidth={2.2} className="relative" />
-    </span>
-  )
-}
-
-function TypingDots({ className = '' }: { className?: string }) {
-  return (
-    <span
-      className={`inline-flex shrink-0 items-end gap-[3px] ${className}`}
-      aria-hidden
-    >
-      <span
-        className="h-1.5 w-1.5 rounded-full bg-accent-light animate-typing-dot"
-        style={{ animationDelay: '0ms' }}
-      />
-      <span
-        className="h-1.5 w-1.5 rounded-full bg-accent-light animate-typing-dot"
-        style={{ animationDelay: '160ms' }}
-      />
-      <span
-        className="h-1.5 w-1.5 rounded-full bg-accent-light animate-typing-dot"
-        style={{ animationDelay: '320ms' }}
-      />
-    </span>
-  )
-}
-
-function streamingStatus(message: Message): { label: string; detail?: string } | null {
-  if (!message.streaming) return null
-  const tools = message.toolCalls ?? []
-  const pending = tools.filter((t) => t.pending)
-
-  if (pending.length > 0) {
-    return {
-      label: pending.length === 1 ? 'Running tool' : `Running ${pending.length} tools`,
-      detail: pending.map((t) => t.tool).join(', '),
-    }
-  }
-
-  const activeStep = message.stepProgress?.find((s) => s.status === 'active')
-  if (activeStep) {
-    const stepIndex = (message.stepProgress?.indexOf(activeStep) ?? 0) + 1
-    const total = message.stepProgress?.length ?? 1
-    return { label: `Executing step ${stepIndex}/${total}`, detail: activeStep.description }
-  }
-
-  const retryingStep = message.stepProgress?.find((s) => s.status === 'retrying')
-  if (retryingStep) {
-    return { label: 'Retrying step', detail: retryingStep.description }
-  }
-
-  if (message.plan && !message.content.trim()) {
-    return { label: 'Planning', detail: 'Breaking the task into executable steps' }
-  }
-
-  if (!message.content.trim()) {
-    return { label: 'Thinking', detail: 'Waiting for the first response token' }
-  }
-
-  return null
-}
-
 function formatResponseDuration(durationMs: number): string {
   if (!Number.isFinite(durationMs) || durationMs < 0) return ''
   if (durationMs < 1000) return `${Math.max(0.1, durationMs / 1000).toFixed(1)}s`
-  if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`
+  if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(1)}s`
 
-  const totalSeconds = Math.round(durationMs / 1000)
+  const totalSeconds = durationMs / 1000
   const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+  const seconds = (totalSeconds % 60).toFixed(1)
+  return `${minutes}m ${seconds}s`
 }
 
 export const MessageBubble = memo(function MessageBubble({
@@ -147,8 +80,8 @@ export const MessageBubble = memo(function MessageBubble({
 
   if (isUser) {
     return (
-      <div className="mb-5 flex justify-end animate-slide-up">
-        <div className="max-w-[78%] rounded-2xl rounded-tr-md bg-accent px-4 py-3 text-sm leading-relaxed text-white shadow-lg shadow-accent/10">
+      <div className="mb-2 flex justify-end animate-slide-up">
+        <div className="max-w-[78%] rounded-2xl rounded-tr-md bg-accent px-3.5 py-2 text-sm leading-relaxed text-white shadow-lg shadow-accent/10">
           <div>{message.content}</div>
           <AttachmentStrip attachments={message.attachments} compact />
         </div>
@@ -156,324 +89,197 @@ export const MessageBubble = memo(function MessageBubble({
     )
   }
 
-  const status = streamingStatus(message)
   const hasBody = message.content.trim().length > 0
   const formattedContent = useMemo(
     () => (hasBody ? cachedFormatAgentResponse(message) : ''),
     [hasBody, message],
   )
-  const showToolCalls = message.toolCalls && message.toolCalls.length > 0
-  const showThinking = !message.streaming && isDisplayableThinking(message.thinking)
-  const showPlan = message.stepProgress && message.stepProgress.length > 0
+  const steps = message.stepProgress ?? []
   const runStatus = message.streaming ? 'streaming' : message.runStatus ?? 'complete'
-  const activityItems = message.activityItems ?? (
-    message.streaming && message.toolCalls
-      ? message.toolCalls.map((toolCall, index) => ({
-          id: toolCall.id || `${toolCall.tool}-${index}`,
-          type: 'tool' as const,
-          toolCall,
-        }))
-      : []
-  )
-  const showLiveActivity = activityItems.length > 0 && (
-    message.streaming || runStatus === 'paused' || runStatus === 'error'
-  ) && !hasBody
-  const showExecutionSummary = !showLiveActivity && !message.streaming && (showPlan || showToolCalls)
-  const responseDuration = message.responseDurationMs !== undefined
-    ? formatResponseDuration(message.responseDurationMs)
-    : ''
-  const showLiveDuration = message.streaming && message.responseStartedAtMs !== undefined
-  const showLiveWorkPanel =
-    (!hasBody && (status || (message.streaming && showPlan))) || showThinking
-  const statusBadge =
-    runStatus === 'streaming'
-      ? { label: 'Streaming', className: 'border-accent/30 bg-accent/10 text-accent-light' }
-      : runStatus === 'paused'
-        ? { label: 'Paused', className: 'border-amber-400/25 bg-amber-400/10 text-amber-200' }
-        : runStatus === 'error'
-          ? { label: 'Error', className: 'border-red-400/25 bg-red-400/10 text-red-200' }
-          : { label: 'Complete', className: 'border-white/[0.08] bg-white/[0.03] text-neutral-500' }
-
-  const mascotSrc =
-    runStatus === 'complete' ? mascotGood
-    : runStatus === 'streaming' ? mascotThinking
-    : mascotCurious
+  const mascotSrc = runStatus === 'streaming' ? mascotThinking
+    : runStatus === 'complete' ? mascotSuccess
+      : runStatus === 'error' ? mascotAlert : mascotCurious
+  const mascotStillSrc = runStatus === 'streaming' ? mascotThinkingStill
+    : runStatus === 'complete' ? mascotSuccessStill : mascotAlertStill
+  const activityItems: ActivityItem[] = message.activityItems ?? message.toolCalls?.map((toolCall, index) => ({
+    id: toolCall.id || `${toolCall.tool}-${index}`,
+    type: 'tool' as const,
+    toolCall,
+  })) ?? []
+  const displayActivities = groupDisplayActivities(activityItems, message.content)
 
   return (
-    <article className="mb-6 flex gap-3 animate-slide-up">
-      <div className="mt-1 h-10 w-10 shrink-0 overflow-hidden rounded-xl">
-        <img
-          src={mascotSrc}
-          alt="Agent mascot"
-          className="h-full w-full object-contain"
-          draggable={false}
-        />
-      </div>
-      <div className="min-w-0 flex-1 space-y-3">
-        <div className="flex items-center gap-2">
-          <span className="max-w-[14rem] truncate text-xs font-medium text-neutral-300">
-            {assistantLabel}
-          </span>
-          <span className={`status-pill ${statusBadge.className}`}>
-            {statusBadge.label}
-          </span>
-        </div>
-
-        {showLiveWorkPanel && (
-          <LiveWorkPanel
-            status={status}
-            thinking={showThinking ? message.thinking : undefined}
-            streaming={message.streaming}
-            steps={message.stepProgress ?? []}
-            startedAtMs={showLiveDuration ? message.responseStartedAtMs : undefined}
+    <article className="mb-5 space-y-2.5" aria-label={`${assistantLabel} response`}>
+      <div className="flex items-center gap-2 border-b border-white/[0.08] pb-1.5">
+        <picture className="h-7 w-7 shrink-0" >
+          <source media="(prefers-reduced-motion: reduce)" srcSet={mascotStillSrc} />
+          <img src={mascotSrc} alt={`${assistantLabel} mascot`} className="h-full w-full object-contain" draggable={false} />
+        </picture>
+        {(message.streaming || message.responseDurationMs !== undefined) ? (
+          <WorkDuration
+            streaming={message.streaming === true}
+            startedAtMs={message.responseStartedAtMs}
+            durationMs={message.responseDurationMs}
           />
-        )}
+        ) : <span className="text-xs text-neutral-500">{assistantLabel}</span>}
+      </div>
 
-        {showLiveActivity && (
-          <ActivityTimeline items={activityItems} />
-        )}
+      {displayActivities.map((item) => item.type === 'progress'
+        ? <p key={item.id} className="text-sm leading-relaxed text-neutral-300" role="status" aria-live="polite">{item.content}</p>
+        : <ToolActivityGroup key={item.id} messageId={message.id} toolCalls={item.toolCalls} streaming={message.streaming === true} />)}
 
-        {message.approvals && message.approvals.length > 0 && (
-          <div className="space-y-2">
-            {message.approvals.map((a, i) => (
-              <ApprovalCard key={`${a.ticket_id}-${i}`} notice={a} />
-            ))}
-          </div>
-        )}
+      {steps.length > 0 && <PlanActivity steps={steps} />}
 
-        {hasBody && (
-          <div className="agent-prose max-w-none text-sm leading-relaxed text-neutral-200">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                pre({ children }) {
+      {(runStatus === 'paused' || runStatus === 'error') && (
+        <p className={runStatus === 'error' ? 'text-xs text-red-300' : 'text-xs text-amber-300'}>
+          {runStatus === 'error' ? 'Stopped with an error' : 'Paused'}
+        </p>
+      )}
+
+      {message.approvals && message.approvals.length > 0 && (
+        <div className="space-y-2">
+          {message.approvals.map((a, i) => (
+            <ApprovalCard key={`${a.ticket_id}-${i}`} notice={a} />
+          ))}
+        </div>
+      )}
+
+      {hasBody && (
+        <div className="agent-prose max-w-none text-sm leading-relaxed text-neutral-200">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              pre({ children }) {
+                return (
+                  <pre className="my-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-black/30 p-4">
+                    {children}
+                  </pre>
+                )
+              },
+              code({ className, children, ...props }) {
+                const isInline = !className
+                if (isInline) {
                   return (
-                    <pre className="my-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-black/30 p-4">
-                      {children}
-                    </pre>
-                  )
-                },
-                code({ className, children, ...props }) {
-                  const isInline = !className
-                  if (isInline) {
-                    return (
-                      <code
-                        className="rounded-md border border-white/[0.08] bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs code-token"
-                        {...props}
-                      >
-                        {children}
-                      </code>
-                    )
-                  }
-
-                  return (
-                    <code className={`font-mono text-xs text-neutral-200 ${className ?? ''}`} {...props}>
+                    <code
+                      className="rounded-md border border-white/[0.08] bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs code-token"
+                      {...props}
+                    >
                       {children}
                     </code>
                   )
-                },
-                table({ children }) {
-                  return (
-                    <div className="my-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-white/[0.025]">
-                      <table className="min-w-full border-collapse text-left text-xs text-neutral-200">
-                        {children}
-                      </table>
-                    </div>
-                  )
-                },
-                th({ children }) {
-                  return (
-                    <th className="border-b border-white/[0.08] bg-white/[0.04] px-3 py-2 font-semibold text-neutral-100">
-                      {children}
-                    </th>
-                  )
-                },
-                td({ children }) {
-                  return (
-                    <td className="border-t border-white/[0.06] px-3 py-2 align-top">
-                      {children}
-                    </td>
-                  )
-                },
-                a({ children, href }) {
-                  return (
-                    <a href={href} target="_blank" rel="noreferrer">
-                      {children}
-                    </a>
-                  )
-                },
-              }}
-            >
-              {formattedContent}
-            </ReactMarkdown>
-          </div>
-        )}
+                }
 
-        <AttachmentStrip attachments={message.attachments} />
+                return (
+                  <code className={`font-mono text-xs text-neutral-200 ${className ?? ''}`} {...props}>
+                    {children}
+                  </code>
+                )
+              },
+              table({ children }) {
+                return (
+                  <div className="my-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-white/[0.025]">
+                    <table className="min-w-full border-collapse text-left text-xs text-neutral-200">
+                      {children}
+                    </table>
+                  </div>
+                )
+              },
+              th({ children }) {
+                return (
+                  <th className="border-b border-white/[0.08] bg-white/[0.04] px-3 py-2 font-semibold text-neutral-100">
+                    {children}
+                  </th>
+                )
+              },
+              td({ children }) {
+                return (
+                  <td className="border-t border-white/[0.06] px-3 py-2 align-top">
+                    {children}
+                  </td>
+                )
+              },
+              a({ children, href }) {
+                return (
+                  <a href={href} target="_blank" rel="noreferrer">
+                    {children}
+                  </a>
+                )
+              },
+            }}
+          >
+            {formattedContent}
+          </ReactMarkdown>
+        </div>
+      )}
 
-        {showExecutionSummary && (
-          <ExecutionSummary
-            messageId={message.id}
-            steps={message.stepProgress ?? []}
-            toolCalls={message.toolCalls ?? []}
-          />
-        )}
-
-        {!message.streaming && responseDuration && (
-          <ResponseTimer duration={responseDuration} />
-        )}
-      </div>
+      <AttachmentStrip attachments={message.attachments} />
     </article>
   )
 })
 
-function ResponseTimer({
-  startedAtMs,
-  duration,
-}: {
-  startedAtMs?: number
-  duration?: string
-}) {
-  const [now, setNow] = useState(() => Date.now())
-  const isLive = startedAtMs !== undefined
-
-  useVisibleInterval(() => setNow(Date.now()), isLive ? 250 : null)
-
-  const label = isLive
-    ? `Elapsed time ${formatResponseDuration(Math.max(0, now - startedAtMs))}`
-    : `Response time ${duration}`
-
-  return (
-    <div
-      className="flex items-center gap-1.5 text-[11px] text-neutral-500"
-      aria-label={label}
-    >
-      <Timer size={12} className="shrink-0 text-neutral-600" aria-hidden />
-      <span>{label}</span>
-    </div>
-  )
+function groupDisplayActivities(activityItems: ActivityItem[], answer: string): DisplayActivity[] {
+  const groups: DisplayActivity[] = []
+  for (const item of activityItems) {
+    if (item.type === 'progress') {
+      const content = item.content.trim()
+      if (content && !answer.trim().startsWith(content)) {
+        groups.push({ id: item.id, type: 'progress', content })
+      }
+      continue
+    }
+    const previous = groups[groups.length - 1]
+    if (previous?.type === 'tools') {
+      previous.toolCalls.push(item.toolCall)
+    } else {
+      groups.push({ id: item.id, type: 'tools', toolCalls: [item.toolCall] })
+    }
+  }
+  return groups
 }
 
-function LiveWorkPanel({
-  status,
-  thinking,
+function WorkDuration({
   streaming,
-  steps,
   startedAtMs,
+  durationMs,
 }: {
-  status: ReturnType<typeof streamingStatus>
-  thinking?: string
-  streaming?: boolean
-  steps: NonNullable<Message['stepProgress']>
+  streaming: boolean
   startedAtMs?: number
+  durationMs?: number
 }) {
-  const hasThinking = isDisplayableThinking(thinking)
-  const hasPlan = steps.length > 0
-  const hasDetails = hasThinking || hasPlan
-  const [open, setOpen] = useState(false)
-  const completedSteps = steps.filter((step) => step.status === 'done').length
-  const title = status?.label ?? (hasThinking ? 'Thinking' : 'Planning')
-  const detail = status?.detail ?? (streaming ? 'Preparing next step' : undefined)
-
-  const indicator = streaming ? (
-    <TypingDots className="ml-0.5" />
-  ) : (
-    <ThinkingStatusIcon />
-  )
-
-  const row = (
-    <div className="relative flex min-w-0 items-center gap-3 px-3 py-2">
-      {indicator}
-      <div className="flex min-w-0 flex-1 items-baseline gap-2">
-        <span className="shrink-0 text-[12px] font-medium text-neutral-200">{title}</span>
-        {detail && (
-          <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-500">
-            <span className="mx-1.5 text-neutral-700">·</span>
-            {detail}
-          </span>
-        )}
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        {hasPlan && (
-          <span className="font-mono text-[10px] text-neutral-500">
-            {completedSteps}/{steps.length}
-          </span>
-        )}
-        {hasThinking && (
-          <span className="rounded-full border border-accent/25 bg-accent/10 px-1.5 py-px text-[9px] font-medium uppercase tracking-wider text-accent-light">
-            Trace
-          </span>
-        )}
-        {streaming && startedAtMs !== undefined && (
-          <InlineElapsed startedAtMs={startedAtMs} />
-        )}
-        {hasDetails && (
-          <span className="text-neutral-600">
-            {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-          </span>
-        )}
-      </div>
-    </div>
-  )
+  const [now, setNow] = useState(() => Date.now())
+  useVisibleInterval(() => setNow(Date.now()), streaming && startedAtMs !== undefined ? 100 : null)
+  const duration = streaming && startedAtMs !== undefined
+    ? formatResponseDuration(Math.max(0, now - startedAtMs))
+    : durationMs !== undefined ? formatResponseDuration(durationMs) : ''
+  const label = `${streaming ? 'Working' : 'Worked'}${duration ? ` for ${duration}` : ''}`
 
   return (
-    <div
-      className="live-surface relative overflow-hidden rounded-xl text-xs"
-      role="status"
-      aria-live="polite"
-    >
-      {streaming && (
-        <span
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden"
-          aria-hidden
-        >
-          <span className="live-shimmer absolute inset-0 animate-progress-shimmer" />
-        </span>
-      )}
-      {hasDetails ? (
-        <button
-          type="button"
-          onClick={() => setOpen((value) => !value)}
-          className="block w-full text-left transition-colors hover:bg-white/[0.025] focus:outline-none focus:ring-2 focus:ring-accent/20"
-          aria-expanded={open}
-        >
-          {row}
-        </button>
-      ) : (
-        row
-      )}
-
-      {open && hasDetails && (
-        <div className="space-y-3 border-t border-lime-300/[0.10] p-3">
-          {hasPlan && <PlanProgress steps={steps} title="Plan" />}
-          {hasThinking && (
-            <section aria-label="Reasoning trace" className="rounded-lg bg-black/15 px-3 py-2">
-              <p className="section-label mb-1.5 flex items-center gap-1.5">
-                <BrainCircuit size={11} className="text-accent-light" aria-hidden />
-                Reasoning trace
-              </p>
-              <p className="thinking-trace max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[11px] italic leading-relaxed text-neutral-400">
-                {thinking}
-              </p>
-            </section>
-          )}
-        </div>
-      )}
+    <div className="text-xs text-neutral-500" role="status" aria-live="off">
+      {label}
     </div>
   )
 }
 
-function InlineElapsed({ startedAtMs }: { startedAtMs: number }) {
-  const [now, setNow] = useState(() => Date.now())
-  useVisibleInterval(() => setNow(Date.now()), 250)
-  const duration = formatResponseDuration(Math.max(0, now - startedAtMs))
+function PlanActivity({ steps }: { steps: NonNullable<Message['stepProgress']> }) {
+  const [expanded, setExpanded] = useState(false)
+  const activeStep = steps.find((step) => step.status === 'active' || step.status === 'retrying')
+  const completed = steps.filter((step) => step.status === 'done').length
+  const label = activeStep?.description || `Plan · ${completed}/${steps.length} done`
+
   return (
-    <span
-      className="font-mono text-[10px] tabular-nums text-neutral-500"
-      aria-label={`Elapsed time ${duration}`}
-    >
-      {duration}
-    </span>
+    <div className="text-xs">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full min-w-0 items-center gap-2 py-1 text-left text-neutral-400 hover:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-accent/20"
+      >
+        <CircleDashed size={14} className="shrink-0" aria-hidden />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {expanded ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
+      </button>
+      {expanded && <div className="ml-5 pt-2"><PlanProgress steps={steps} title="Plan" /></div>}
+    </div>
   )
 }
 
@@ -644,47 +450,48 @@ function formatBytes(size: number): string {
   return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`
 }
 
-function ActivityTimeline({ items }: { items: ActivityItem[] }) {
-  const progressItems = items.filter(
-    (item): item is Extract<ActivityItem, { type: 'progress' }> => item.type === 'progress',
-  )
-  const toolCalls = items
-    .filter((item): item is Extract<ActivityItem, { type: 'tool' }> => item.type === 'tool')
-    .map((item) => item.toolCall)
-  const latestProgress = progressItems[progressItems.length - 1]
+function ToolActivityGroup({
+  messageId,
+  toolCalls,
+  streaming,
+}: {
+  messageId: string
+  toolCalls: ToolCall[]
+  streaming: boolean
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const pendingTool = toolCalls.find((call) => call.pending)
+  const allCommands = toolCalls.every((call) => /^exec(?:_|$)/.test(call.tool))
+  const allBrowser = toolCalls.every((call) =>
+    call.tool.startsWith('browser_') || call.tool.startsWith('mcp__Chrome-dev-tools__'))
+  const label = pendingTool
+    ? toolCallActivityLabel(pendingTool)
+    : allCommands ? `Ran ${toolCalls.length === 1 ? 'command' : 'commands'}`
+      : allBrowser ? 'Used browser'
+        : `Used ${toolCalls.length === 1 ? 'tool' : 'tools'}`
+
+  useEffect(() => {
+    if (streaming && pendingTool) setExpanded(true)
+  }, [streaming, Boolean(pendingTool)])
 
   return (
-    <div className="space-y-2" aria-live="polite">
-      {latestProgress && (
-        <ProgressUpdate
-          content={latestProgress.content}
-          count={progressItems.length}
-        />
-      )}
-      {toolCalls.length > 0 && <ToolCallScroller toolCalls={toolCalls} />}
-    </div>
-  )
-}
-
-function ProgressUpdate({ content, count = 1 }: { content: string; count?: number }) {
-  return (
-    <div
-      className="relative flex items-start gap-3 py-1 pl-3 pr-1 text-sm leading-relaxed text-neutral-200"
-      role="status"
-      aria-live="polite"
-    >
-      <span
-        className="narration-accent pointer-events-none absolute inset-y-1 left-0 w-[3px] rounded-full"
-        aria-hidden
-      />
-      <p className="min-w-0 flex-1 break-words text-[13.5px]">{content}</p>
-      {count > 1 && (
-        <span
-          className="shrink-0 self-center rounded-full border border-accent/25 bg-accent/10 px-2 py-0.5 font-mono text-[10px] tabular-nums text-accent-light"
-          aria-label={`${count} updates`}
-        >
-          {count}
-        </span>
+    <div className="text-xs">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full min-w-0 items-center gap-2 py-1 text-left text-neutral-400 hover:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-accent/20"
+      >
+        {allCommands ? <SquareTerminal size={14} className="shrink-0" aria-hidden />
+          : <Wrench size={14} className="shrink-0" aria-hidden />}
+        <span className="min-w-0 flex-1 truncate" title={label}>{label}</span>
+        {expanded ? <ChevronDown size={13} className="shrink-0" aria-hidden />
+          : <ChevronRight size={13} className="shrink-0" aria-hidden />}
+      </button>
+      {expanded && (
+        <div className="mt-1">
+          <ToolCallScroller messageId={messageId} toolCalls={toolCalls} />
+        </div>
       )}
     </div>
   )
@@ -724,17 +531,25 @@ function toolInputSummary(toolCall: ToolCall): string {
   try {
     const parsed = JSON.parse(raw)
     if (typeof parsed === 'object' && parsed !== null) {
-      const preview = parsed.url || parsed.path || parsed.query || parsed.command || parsed.code || parsed.content || parsed.selector || parsed.text || parsed.action || ''
+      const preview = parsed.command || parsed.cmd || parsed.code || parsed.url || parsed.path || parsed.query || parsed.content || parsed.selector || parsed.text || parsed.action || ''
       if (typeof preview === 'string' && preview.length > 0) {
-        return preview.length > 60 ? preview.slice(0, 57) + '...' : preview
+        return preview.replace(/\s+/g, ' ').trim()
       }
     }
   } catch { /* not JSON */ }
-  if (raw.length > 60) return raw.slice(0, 57) + '...'
-  return raw
+  return raw.length > 180 ? `${raw.slice(0, 177)}...` : raw
 }
 
-const INITIAL_VISIBLE = 3
+function toolCallActivityLabel(toolCall: ToolCall): string {
+  const summary = toolInputSummary(toolCall)
+  const status = toolCallStatus(toolCall)
+  if (/^exec(?:_|$)/.test(toolCall.tool) && summary && summary !== '{}') {
+    const verb = status === 'running' ? 'Running' : status === 'error' ? 'Failed' : 'Ran'
+    return `${verb} ${summary}`
+  }
+  const verb = status === 'running' ? 'Using' : status === 'error' ? 'Failed' : 'Used'
+  return `${verb} ${toolCall.tool}${summary && summary !== '{}' ? ` · ${summary}` : ''}`
+}
 
 function ToolCallScroller({
   messageId,
@@ -745,18 +560,20 @@ function ToolCallScroller({
 }) {
   const [resolvedCalls, setResolvedCalls] = useState(toolCalls)
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [showAll, setShowAll] = useState(false)
   const [loadingDetails, setLoadingDetails] = useState(false)
   const [detailsError, setDetailsError] = useState('')
   const detailsRequestedRef = useRef(false)
-  const hasRunning = resolvedCalls.some((t) => t.pending)
-  const visibleCalls = showAll ? resolvedCalls : resolvedCalls.slice(0, INITIAL_VISIBLE)
-  const hiddenCount = Math.max(0, resolvedCalls.length - INITIAL_VISIBLE)
   const expandedToolCall = resolvedCalls.find((toolCall, index) => toolCallKey(toolCall, index) === expandedId)
 
   useEffect(() => {
-    setResolvedCalls(toolCalls)
-    setExpandedId(null)
+    setResolvedCalls((previous) => {
+      const loadedDetails = new Map(previous.flatMap((call, index) =>
+        call.previewOnly === false ? [[toolCallKey(call, index), call] as const] : [],
+      ))
+      return toolCalls.map((call, index) =>
+        call.previewOnly ? loadedDetails.get(toolCallKey(call, index)) ?? call : call,
+      )
+    })
     setDetailsError('')
     setLoadingDetails(false)
     detailsRequestedRef.current = false
@@ -811,48 +628,33 @@ function ToolCallScroller({
   }, [expandedToolCall?.previewOnly, messageId])
 
   return (
-    <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.025] text-xs">
-      <div className="flex min-w-0 items-center gap-2 px-3 py-2">
-        <Wrench size={13} className="shrink-0 text-neutral-400" aria-hidden />
-        <span className="shrink-0 font-medium text-neutral-300">
-          {hasRunning ? 'Running tools' : 'Tools'}
-        </span>
-        <span className="status-pill border-white/[0.08] bg-white/[0.03] text-neutral-500">
-          {resolvedCalls.length}
-        </span>
-      </div>
-      <div className="activity-tool-scroll max-h-[132px] overflow-y-auto" role="tablist" aria-label="Tool calls">
-          {visibleCalls.map((toolCall, index) => {
-            const key = toolCallKey(toolCall, index)
-            const status = toolCallStatus(toolCall)
-            const isExpanded = expandedId === key || (toolCall.pending === true)
-            const summary = toolInputSummary(toolCall)
+    <ol className="space-y-1" aria-label="Tool calls">
+      {resolvedCalls.map((toolCall, index) => {
+        const key = toolCallKey(toolCall, index)
+        const status = toolCallStatus(toolCall)
+        const isExpanded = expandedId === key
+        const label = toolCallActivityLabel(toolCall)
 
-          return (
-            <div key={key} className="border-t border-white/[0.06]">
+        return (
+            <li key={key} className="min-w-0">
               <button
                 type="button"
-                role="tab"
-                aria-selected={isExpanded}
-                onClick={() => setExpandedId(isExpanded && !toolCall.pending ? null : key)}
-                className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-white/[0.035] focus:outline-none focus:ring-2 focus:ring-accent/20"
+                aria-expanded={isExpanded}
+                onClick={() => setExpandedId(isExpanded ? null : key)}
+                className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1.5 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus:ring-2 focus:ring-accent/20"
+                title={label}
               >
+                {/^(?:exec|exec_)/.test(toolCall.tool)
+                  ? <SquareTerminal size={13} className="shrink-0 text-neutral-500" aria-hidden />
+                  : <Wrench size={13} className="shrink-0 text-neutral-500" aria-hidden />}
+                <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-400">{label}</span>
                 <ToolTabStatusIcon status={status} />
-                <span className="shrink-0 font-mono text-[11px] font-medium text-neutral-200">
-                  {toolCall.tool}
-                </span>
-                {summary && !isExpanded && (
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-500">
-                    {summary}
-                  </span>
-                )}
-                {!summary && <span className="min-w-0 flex-1" />}
-                <span className="shrink-0 text-neutral-500">
+                <span className="shrink-0 text-neutral-600" aria-hidden>
                   {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 </span>
               </button>
               {isExpanded && (
-                <div className="space-y-2 border-t border-white/[0.04] bg-black/15 px-3 py-2.5">
+                <div className="mb-2 space-y-3 rounded-lg bg-black/15 px-2 py-2.5">
                   {toolCall.previewOnly && loadingDetails && (
                     <p className="text-[11px] italic text-neutral-500">Loading full tool details...</p>
                   )}
@@ -867,85 +669,47 @@ function ToolCallScroller({
                   ) : null}
                 </div>
               )}
-            </div>
-          )
-        })}
-      </div>
-      {!showAll && hiddenCount > 0 && (
-        <button
-          type="button"
-          onClick={() => setShowAll(true)}
-          className="flex w-full items-center justify-center gap-1 border-t border-white/[0.06] px-3 py-2 text-[11px] text-neutral-500 transition-colors hover:bg-white/[0.035] hover:text-neutral-300"
-        >
-          Show {hiddenCount} more tool{hiddenCount > 1 ? 's' : ''}
-          <ChevronDown size={12} />
-        </button>
-      )}
-    </div>
+            </li>
+        )
+      })}
+    </ol>
   )
 }
 
 function ToolPayloadInline({ label, value }: { label: string; value: string }) {
-  const [collapsed, setCollapsed] = useState(value.length > 300)
-  const displayValue = collapsed ? value.slice(0, 300) + '...' : value
+  const [showFull, setShowFull] = useState(false)
+  const formattedValue = useMemo(() => formatToolPayload(value), [value])
+  const truncated = !showFull && formattedValue.length > 800
+  const displayValue = truncated ? `${formattedValue.slice(0, 800)}…` : formattedValue
   return (
     <div>
       <p className="section-label">{label}</p>
-      <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-white/[0.04] bg-black/20 p-2 font-mono text-[11px] text-neutral-400">
+      <pre className="mt-1 whitespace-pre-wrap break-words rounded-lg border border-white/[0.04] bg-black/20 p-3 font-mono text-xs leading-5 text-neutral-400">
         {displayValue}
       </pre>
-      {collapsed && (
+      {truncated && (
         <button
           type="button"
-          onClick={() => setCollapsed(false)}
-          className="mt-1 text-[10px] text-accent-light hover:underline"
+          onClick={() => setShowFull(true)}
+          className="mt-1 text-xs text-accent-light hover:underline"
         >
-          Show full output
+          {label === 'Input' ? 'Show full input' : 'Show full result'}
         </button>
       )}
     </div>
   )
 }
 
-function ExecutionSummary({
-  messageId,
-  steps,
-  toolCalls,
-}: {
-  messageId: string
-  steps: NonNullable<Message['stepProgress']>
-  toolCalls: NonNullable<Message['toolCalls']>
-}) {
-  const [expanded, setExpanded] = useState(false)
-  const completedSteps = steps.filter((step) => step.status === 'done').length
-  const executedTools = toolCalls.filter((tool) => !tool.pending).length
-
-  return (
-    <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.025] text-xs">
-      <button
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-white/[0.035] focus:outline-none focus:ring-2 focus:ring-accent/20"
-      >
-        <span className="min-w-0 flex-1 text-neutral-300">
-          Plan {completedSteps}/{steps.length || 0} done · Tools executed {executedTools}
-        </span>
-        <span className="text-[11px] text-neutral-500">
-          {expanded ? 'Hide details' : 'Expand to see all'}
-        </span>
-        {expanded ? <ChevronDown size={13} className="text-neutral-500" /> : <ChevronRight size={13} className="text-neutral-500" />}
-      </button>
-
-      {expanded && (
-        <div className="space-y-3 border-t border-white/[0.08] p-3">
-          {steps.length > 0 && <PlanProgress steps={steps} />}
-          {toolCalls.length > 0 && (
-            <ToolCallScroller messageId={messageId} toolCalls={toolCalls} />
-          )}
-        </div>
-      )}
-    </div>
-  )
+function formatToolPayload(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.length > 50_000 || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    return value
+  }
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2)
+  } catch {
+    return value
+  }
 }
 
 function ApprovalCard({ notice }: { notice: ApprovalNotice }) {

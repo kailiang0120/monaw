@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { fetchMessageToolCalls } from '../lib/api/conversations'
 import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
+import type { Message } from '../hooks/useChat'
 import { MessageBubble } from './MessageBubble'
 
 vi.mock('../lib/api/conversations', () => ({
@@ -17,6 +18,7 @@ vi.mock('../lib/api/files', () => ({
 describe('MessageBubble', () => {
   afterEach(() => {
     cleanup()
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
@@ -32,7 +34,20 @@ describe('MessageBubble', () => {
     )
 
     expect(screen.getByText('Acme overview')).toBeInTheDocument()
-    expect(screen.getByText('Monaw')).toBeInTheDocument()
+    expect(screen.getByRole('article', { name: 'Monaw response' })).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'Monaw mascot' })).toHaveAttribute('src', expect.stringMatching(/success\.gif/))
+  })
+
+  it('switches the mascot animation while the assistant is working', () => {
+    const { rerender } = render(<MessageBubble message={{
+      id: 'msg-mascot', role: 'assistant', content: '', streaming: true,
+    }} />)
+    expect(screen.getByRole('img', { name: 'Monaw mascot' })).toHaveAttribute('src', expect.stringMatching(/thinking\.gif/))
+
+    rerender(<MessageBubble message={{
+      id: 'msg-mascot', role: 'assistant', content: 'Done.', streaming: false,
+    }} />)
+    expect(screen.getByRole('img', { name: 'Monaw mascot' })).toHaveAttribute('src', expect.stringMatching(/success\.gif/))
   })
 
   it('uses the configured agent name for assistant messages', () => {
@@ -47,10 +62,10 @@ describe('MessageBubble', () => {
       />,
     )
 
-    expect(screen.getByText('Hermes')).toBeInTheDocument()
+    expect(screen.getByRole('article', { name: 'Hermes response' })).toBeInTheDocument()
   })
 
-  it('shows response time below completed assistant responses', () => {
+  it('shows elapsed work time as a quiet line above completed activity', () => {
     render(
       <MessageBubble
         message={{
@@ -70,13 +85,29 @@ describe('MessageBubble', () => {
       />,
     )
 
-    const summary = screen.getByText(/Tools executed 1/)
-    const timer = screen.getByLabelText('Response time 1.5s')
-    expect(timer).toBeInTheDocument()
-    expect(summary.compareDocumentPosition(timer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('Worked for 1.5s')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Used browser' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Response time 1.5s')).not.toBeInTheDocument()
   })
 
-  it('shows only answer content while assistant content is streaming', () => {
+  it('keeps completed replies quiet without an empty summary card', () => {
+    render(
+      <MessageBubble
+        message={{
+          id: 'msg-complete-quiet',
+          role: 'assistant',
+          content: 'Finished answer.',
+          responseDurationMs: 2400,
+        }}
+      />,
+    )
+
+    expect(screen.queryByText('Complete')).not.toBeInTheDocument()
+    expect(screen.getByText('Worked for 2.4s')).toBeInTheDocument()
+    expect(screen.queryByText('No model summary returned')).not.toBeInTheDocument()
+  })
+
+  it('shows answer content, work state, and elapsed time while streaming', () => {
     vi.spyOn(Date, 'now').mockReturnValue(2_000)
 
     render(
@@ -92,8 +123,25 @@ describe('MessageBubble', () => {
     )
 
     expect(screen.getByText('Still writing.')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Elapsed time 1.5s')).not.toBeInTheDocument()
-    expect(screen.queryByText('Writing response')).not.toBeInTheDocument()
+    expect(screen.getByText('Working for 1.5s')).toBeInTheDocument()
+    expect(screen.queryByText('Writing answer')).not.toBeInTheDocument()
+  })
+
+  it('updates the work timer in tenths of a second', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(1_000))
+    render(
+      <MessageBubble message={{
+        id: 'msg-tenths', role: 'assistant', content: '', streaming: true,
+        responseStartedAtMs: 500,
+      }} />,
+    )
+
+    expect(screen.getByText('Working for 0.5s')).toBeInTheDocument()
+    act(() => vi.advanceTimersByTime(100))
+    expect(screen.getByText('Working for 0.6s')).toBeInTheDocument()
+    act(() => vi.advanceTimersByTime(20_800))
+    expect(screen.getByText('Working for 21.4s')).toBeInTheDocument()
   })
 
   it('renders structured plain text with headings and tables', () => {
@@ -213,7 +261,7 @@ const answer = 42
     expect(screen.queryByRole('link', { name: /browser_snapshot_bad/i })).not.toBeInTheDocument()
   })
 
-  it('compresses live progress and tool calls into a scrollable tool panel', () => {
+  it('shows progress as plain text and exposes live tool details', () => {
     render(
       <MessageBubble
         message={{
@@ -250,15 +298,103 @@ const answer = 42
       />,
     )
 
-    expect(screen.queryByText('Opening the browser.')).not.toBeInTheDocument()
+    expect(screen.getByText('Opening the browser.')).toBeInTheDocument()
     expect(screen.getByText('Inspecting the page.')).toBeInTheDocument()
-    expect(screen.getByRole('tablist', { name: 'Tool calls' })).toBeInTheDocument()
-    expect(screen.getAllByRole('tab')).toHaveLength(2)
-    expect(screen.getByText('{"include_screenshot":true}')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Used browser' }))
+    const lists = screen.getAllByRole('list', { name: 'Tool calls' })
+    expect(lists).toHaveLength(2)
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+    const transcript = screen.getByRole('article', { name: 'Monaw response' }).textContent ?? ''
+    expect(transcript.indexOf('Opening the browser.')).toBeLessThan(transcript.indexOf('Used browser'))
+    expect(transcript.indexOf('Used browser')).toBeLessThan(transcript.indexOf('Inspecting the page.'))
 
-    fireEvent.click(screen.getByRole('tab', { name: /browser_tabs/ }))
+    fireEvent.click(within(lists[1]).getByRole('button', { name: /Using browser_snapshot/ }))
+    expect(screen.getByText(/"include_screenshot": true/)).toBeInTheDocument()
+
+    fireEvent.click(within(lists[0]).getByRole('button', { name: /Used browser_tabs/ }))
 
     expect(screen.getByText('tabs ok')).toBeInTheDocument()
+  })
+
+  it('keeps every tool call available during a long run', () => {
+    render(
+      <MessageBubble
+        message={{
+          id: 'msg-recent-tools',
+          role: 'assistant',
+          content: '',
+          streaming: true,
+          toolCalls: [1, 2, 3, 4].map((index) => ({
+            id: `call-${index}`,
+            tool: `tool_${index}`,
+            input: '{}',
+            pending: index === 4,
+            output: index === 4 ? undefined : 'Done',
+          })),
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('list', { name: 'Tool calls' })).toBeInTheDocument()
+    expect(screen.getAllByRole('listitem')).toHaveLength(4)
+    const calls = screen.getByRole('list', { name: 'Tool calls' })
+    expect(within(calls).getByRole('button', { name: /Used tool_1/ })).toBeInTheDocument()
+    expect(within(calls).getByRole('button', { name: /Using tool_4/ })).toBeInTheDocument()
+  })
+
+  it('shows expandable command activity below plain progress', () => {
+    render(
+      <MessageBubble
+        message={{
+          id: 'msg-command-activity',
+          role: 'assistant',
+          content: '',
+          streaming: true,
+          activityItems: [
+            { id: 'progress-command', type: 'progress', content: 'Assessing test behavior' },
+            {
+              id: 'tool-command',
+              type: 'tool',
+              toolCall: {
+                id: 'tool-command',
+                tool: 'exec',
+                input: '{"command":"npm test"}',
+                output: '20 tests passed',
+              },
+            },
+          ],
+        }}
+      />,
+    )
+
+    expect(screen.getByText('Assessing test behavior')).toBeInTheDocument()
+    const heading = screen.getByRole('button', { name: 'Ran command' })
+    expect(heading).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(heading)
+    const command = within(screen.getByRole('list', { name: 'Tool calls' })).getByRole('button', { name: 'Ran npm test' })
+    expect(command).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(command)
+    expect(screen.getByText(/"command": "npm test"/)).toBeInTheDocument()
+    expect(screen.getByText('20 tests passed')).toBeInTheDocument()
+
+    fireEvent.click(heading)
+    expect(heading).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', { name: 'Ran npm test' })).not.toBeInTheDocument()
+  })
+
+  it('labels Chrome DevTools MCP calls as browser activity', () => {
+    render(<MessageBubble message={{
+      id: 'msg-mcp-browser',
+      role: 'assistant',
+      content: 'Page inspected.',
+      toolCalls: [{
+        id: 'mcp-browser-1', tool: 'mcp__Chrome-dev-tools__take_snapshot',
+        input: '{}', output: 'snapshot',
+      }],
+    }} />)
+
+    expect(screen.getByRole('button', { name: 'Used browser' })).toBeInTheDocument()
   })
 
   it('loads full tool details on demand for preview-only history rows', async () => {
@@ -275,34 +411,34 @@ const answer = 42
       },
     ] as any)
 
-    render(
-      <MessageBubble
-        message={{
+    const message: Message = {
+      id: '42',
+      role: 'assistant',
+      content: 'Done.',
+      toolCalls: [
+        {
           id: '42',
-          role: 'assistant',
-          content: 'Done.',
-          toolCalls: [
-            {
-              id: '42',
-              tool: 'browser_snapshot',
-              input: '{"url":"https://example.com/preview"}',
-              output: 'preview result',
-              status: 'complete',
-              previewOnly: true,
-            },
-          ],
-        }}
-      />,
-    )
+          tool: 'browser_snapshot',
+          input: '{"url":"https://example.com/preview"}',
+          output: 'preview result',
+          status: 'complete',
+          previewOnly: true,
+        },
+      ],
+    }
+    const { rerender } = render(<MessageBubble message={message} />)
 
-    fireEvent.click(screen.getByRole('button', { name: /expand to see all/i }))
-    fireEvent.click(screen.getByRole('tab', { name: /browser_snapshot/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Used browser' }))
+    fireEvent.click(within(screen.getByRole('list', { name: 'Tool calls' })).getByRole('button', { name: /browser_snapshot/ }))
 
     expect(await screen.findByText('full snapshot payload')).toBeInTheDocument()
     expect(fetchMessageToolCalls).toHaveBeenCalledWith(42, expect.any(AbortSignal))
+
+    rerender(<MessageBubble message={{ ...message }} />)
+    expect(screen.getByText('full snapshot payload')).toBeInTheDocument()
   })
 
-  it('keeps the reasoning trace collapsed behind a Trace toggle until clicked', () => {
+  it('does not show a reasoning summary', () => {
     render(
       <MessageBubble
         message={{
@@ -314,35 +450,12 @@ const answer = 42
       />,
     )
 
-    expect(screen.getByText('Trace')).toBeInTheDocument()
+    expect(screen.getByText('Done.')).toBeInTheDocument()
+    expect(screen.queryByText('Reasoning summary')).not.toBeInTheDocument()
     expect(screen.queryByText('Checked the available context.')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { expanded: false }))
-
-    expect(screen.getByText('Checked the available context.')).toBeInTheDocument()
-    expect(screen.getByLabelText('Reasoning trace')).toBeInTheDocument()
   })
 
-  it('does not expose reasoning trace while the answer is still streaming', () => {
-    render(
-      <MessageBubble
-        message={{
-          id: 'msg-live-thinking',
-          role: 'assistant',
-          content: '',
-          streaming: true,
-          thinking: 'Still reasoning through the request.',
-        }}
-      />,
-    )
-
-    expect(screen.getByText('Thinking')).toBeInTheDocument()
-    expect(screen.getByText('Waiting for the first response token')).toBeInTheDocument()
-    expect(screen.queryByText('Trace')).not.toBeInTheDocument()
-    expect(screen.queryByText('Still reasoning through the request.')).not.toBeInTheDocument()
-  })
-
-  it('hides the live planning card once answer playback has started', () => {
+  it('keeps active plan progress visible after answer playback starts', () => {
     render(
       <MessageBubble
         message={{
@@ -364,43 +477,122 @@ const answer = 42
     )
 
     expect(screen.getByText('The answer is now typing.')).toBeInTheDocument()
-    expect(screen.queryByText('Planning')).not.toBeInTheDocument()
-    expect(screen.queryByText('Prepare response')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prepare response' })).toBeInTheDocument()
   })
 
-  it('hides live progress once answer playback has started', () => {
-    render(
+  it('shows progress before a simple answer without repeating its text', () => {
+    const answer = 'I am Monaw, your local assistant.'
+    const { rerender } = render(
       <MessageBubble
         message={{
           id: 'msg-answer-progress',
           role: 'assistant',
-          content: 'The visible answer.',
+          content: '',
           streaming: true,
           activityItems: [
-            { id: 'progress-final', type: 'progress', content: 'The leaked progress answer.' },
+            { id: 'progress-final', type: 'progress', content: answer },
           ],
         }}
       />,
     )
 
-    expect(screen.getByText('The visible answer.')).toBeInTheDocument()
-    expect(screen.queryByText('The leaked progress answer.')).not.toBeInTheDocument()
-  })
+    const article = screen.getByText(answer).closest('article')
+    expect(article).toBeTruthy()
+    expect(article).not.toHaveClass('animate-slide-up')
+    expect(screen.getByText(answer)).toBeInTheDocument()
 
-  it('does not display thinking traces that exceed the visible length limit', () => {
-    render(
+    rerender(
       <MessageBubble
         message={{
-          id: 'msg-long-thinking',
+          id: 'msg-answer-progress',
           role: 'assistant',
-          content: 'Done.',
-          thinking: 'tool signature '.repeat(1_000),
+          content: answer,
+          streaming: true,
+          activityItems: [
+            { id: 'progress-final', type: 'progress', content: answer },
+          ],
         }}
       />,
     )
 
-    expect(screen.queryByText('Reasoning trace')).not.toBeInTheDocument()
-    expect(screen.queryByText(/tool signature/)).not.toBeInTheDocument()
-    expect(screen.getByText('Done.')).toBeInTheDocument()
+    expect(screen.getAllByText(answer)).toHaveLength(1)
+    expect(screen.getByText('Working')).toBeInTheDocument()
+    expect(screen.getByText(answer).closest('article')).toBe(article)
+
+    rerender(
+      <MessageBubble
+        message={{
+          id: 'msg-answer-progress',
+          role: 'assistant',
+          content: answer,
+          streaming: false,
+          responseDurationMs: 1200,
+          activityItems: [
+            { id: 'progress-final', type: 'progress', content: answer },
+          ],
+        }}
+      />,
+    )
+
+    expect(screen.getAllByText(answer)).toHaveLength(1)
+    expect(screen.getByText('Worked for 1.2s')).toBeInTheDocument()
+    expect(screen.getByText(answer).closest('article')).toBe(article)
   })
+
+  it('replaces greeting progress when the final answer starts with it', () => {
+    render(
+      <MessageBubble
+        message={{
+          id: 'msg-greeting',
+          role: 'assistant',
+          content: 'Hi Kai! What can I help you with?',
+          activityItems: [
+            { id: 'progress-greeting', type: 'progress', content: 'Hi Kai!' },
+          ],
+        }}
+      />,
+    )
+
+    expect(screen.getAllByText(/Hi Kai!/)).toHaveLength(1)
+    expect(screen.getByText('Hi Kai! What can I help you with?')).toBeInTheDocument()
+  })
+
+  it('keeps a streamed reply mounted when it completes', () => {
+    const { rerender } = render(
+      <MessageBubble
+        message={{
+          id: 'msg-completion-transition',
+          role: 'assistant',
+          content: 'The answer is arriving.',
+          streaming: true,
+          responseStartedAtMs: 100,
+          activityItems: [
+            { id: 'progress-1', type: 'progress', content: 'Checking the result.' },
+          ],
+        }}
+      />,
+    )
+    const article = screen.getByText('Checking the result.').closest('article')
+
+    rerender(
+      <MessageBubble
+        message={{
+          id: 'msg-completion-transition',
+          role: 'assistant',
+          content: 'The answer is arriving.',
+          streaming: false,
+          runStatus: 'complete',
+          responseStartedAtMs: 100,
+          responseDurationMs: 1200,
+          activityItems: [
+            { id: 'progress-1', type: 'progress', content: 'Checking the result.' },
+          ],
+        }}
+      />,
+    )
+
+    expect(screen.getByText('Checking the result.').closest('article')).toBe(article)
+    expect(screen.getByText('Worked for 1.2s')).toBeInTheDocument()
+  })
+
 })

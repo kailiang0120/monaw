@@ -6,6 +6,8 @@ Monaw uses the `browser-use` skill for browser automation. It can fetch known UR
 
 Open Settings -> Browser.
 
+To let Monaw control tabs in your everyday running Chrome, enable **Connect to my Chrome** there. In Chrome 144 or later, open `chrome://inspect/#remote-debugging`, turn on remote debugging, and approve Chrome's connection prompt. Save Monaw's settings. This adds the Chrome DevTools MCP connection and gives the agent page snapshots, clicks, typing, hover, drag, dialogs, uploads, and other browser actions in those tabs. Chrome may ask again when the connection restarts.
+
 Browser settings are stored in runtime settings. Runtime browser folders are under:
 
 ```text
@@ -32,7 +34,7 @@ browser\chrome.log
 
 Managed mode is safest for automation because it uses an isolated profile and dedicated runtime folder.
 
-System mode does not launch your normal Chrome profile. It only attaches to an existing DevTools endpoint, normally `http://127.0.0.1:9222`.
+System mode for the built-in browser tools attaches to an existing DevTools endpoint, normally `http://127.0.0.1:9222`. The **Connect to my Chrome** option above uses Chrome's direct connection flow for your running browser.
 
 ## Important Settings
 
@@ -58,7 +60,7 @@ System mode does not launch your normal Chrome profile. It only attaches to an e
 
 ## Starting Chrome For System Mode
 
-Use managed mode unless you specifically need a real Chrome profile.
+Use **Connect to my Chrome** for your running Chrome profile. The port-based system mode below remains available for a manually started debugging endpoint.
 
 For Chrome DevTools workflows, start Chrome manually with remote debugging and set the system CDP URL in Settings -> Browser:
 

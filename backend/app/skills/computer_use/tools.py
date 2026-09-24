@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from app.agent.access_grant_broker import create_grant_ticket
@@ -394,6 +395,7 @@ def _permission_for_batch(
     window: dict[str, Any] | None = None,
     *,
     target_app: str = "",
+    state_id: str = "",
 ) -> dict[str, Any] | None:
     window = dict(window or {})
     target_app = str(target_app or window.get("process_name") or window.get("app") or window.get("title") or "")
@@ -417,18 +419,27 @@ def _permission_for_batch(
             "policy_source": "settings.json",
         }
 
-    needed: list[ActionType] = []
+    # Launches are checked against the app being launched, not the window the
+    # batch targets; otherwise approving "a batch on notepad" launches anything.
+    needed: list[tuple[ActionType, str]] = []
+    launch_aliases: list[str] = []
     for action in actions:
         kind = str(action.get("type") or "").strip().lower()
         if kind in {"click", "scroll", "drag", "set_value", "select_option", "invoke", "secondary_action"}:
-            needed.append(ActionType.CLICK)
+            needed.append((ActionType.CLICK, target_app))
         elif kind in {"type_text", "press_key"}:
-            needed.append(ActionType.TYPE)
+            needed.append((ActionType.TYPE, target_app))
         elif kind == "launch_app":
-            needed.append(ActionType.LAUNCH_APP)
+            alias = str(action.get("app") or action.get("alias") or "")
+            launch_aliases.append(alias)
+            needed.append((ActionType.LAUNCH_APP, alias))
 
-    for action_type in dict.fromkeys(needed):
-        decision = resolve_permission(action_type, target_app=target_app)
+    # Evaluate every action before asking for confirmation: approval replays
+    # the batch with the gate bypassed, so a hard block or access grant on a
+    # later action must not hide behind an earlier confirmation prompt.
+    confirmation = None
+    for action_type, app_target in dict.fromkeys(needed):
+        decision = resolve_permission(action_type, target_app=app_target)
         if decision.blocked:
             return {
                 "status": "blocked",
@@ -439,9 +450,10 @@ def _permission_for_batch(
         if decision.requires_access_grant:
             ticket = create_grant_ticket(
                 target_type="app",
-                target_identifier=target_app,
-                display_name=target_app,
+                target_identifier=app_target,
+                display_name=app_target,
                 action_context="Computer functions action batch",
+                requested_access="launch" if action_type == ActionType.LAUNCH_APP else "read",
             )
             return {
                 "status": "pending_access_grant",
@@ -451,25 +463,31 @@ def _permission_for_batch(
                 "display_name": ticket.display_name,
                 "action_context": ticket.action_context,
             }
-        if decision.requires_confirmation:
-            args = {"window": window, "actions": actions}
-            ticket = create_ticket(
-                action_type="computer_functions_act",
-                tool_name="computer_functions_act",
-                target_app=target_app,
-                risk_level="medium",
-                reason=decision.reason,
-                action_description=f"Computer action batch on {target_app}",
-                payload={"input_str": json.dumps(args, ensure_ascii=False, sort_keys=True), "args": args},
-            )
-            return {
-                "status": "pending_approval",
-                "ticket_id": ticket.id,
-                "action": f"Computer action batch on {target_app}",
-                "reason": decision.reason,
-                "reason_code": decision.reason_code,
-                "policy_source": decision.policy_source,
-            }
+        if decision.requires_confirmation and confirmation is None:
+            confirmation = decision
+
+    if confirmation is not None:
+        args = {"window": window, "actions": actions, "state_id": state_id}
+        description = f"Computer action batch on {target_app}"
+        if launch_aliases:
+            description += f" (launches: {', '.join(dict.fromkeys(launch_aliases))})"
+        ticket = create_ticket(
+            action_type="computer_functions_act",
+            tool_name="computer_functions_act",
+            target_app=target_app,
+            risk_level="medium",
+            reason=confirmation.reason,
+            action_description=description,
+            payload={"input_str": json.dumps(args, ensure_ascii=False, sort_keys=True), "args": args},
+        )
+        return {
+            "status": "pending_approval",
+            "ticket_id": ticket.id,
+            "action": description,
+            "reason": confirmation.reason,
+            "reason_code": confirmation.reason_code,
+            "policy_source": confirmation.policy_source,
+        }
     return None
 
 
@@ -511,7 +529,7 @@ def _computer_functions_act(
         target_app = ""
         if launch_only:
             target_app = launch_targets[0] if len(set(launch_targets)) == 1 else "multiple_apps"
-        pending = _permission_for_batch(actions, batch_target, target_app=target_app)
+        pending = _permission_for_batch(actions, batch_target, target_app=target_app, state_id=state_id)
         if pending is not None:
             return json.dumps(pending, ensure_ascii=False)
 
@@ -678,6 +696,10 @@ def _computer_functions_list_processes(sort_by: str = "memory", limit: int = 20)
     return json.dumps(data, ensure_ascii=False)
 
 
+def _process_name_key(name: str) -> str:
+    return os.path.basename(str(name or "").strip().lower()).removesuffix(".exe")
+
+
 def _terminate_process(name_or_pid: str, force: bool = False) -> str:
     target = str(name_or_pid or "").strip()
     if not target:
@@ -688,19 +710,44 @@ def _terminate_process(name_or_pid: str, force: bool = False) -> str:
         import psutil
 
         target_pid = int(target) if target.isdigit() else None
+        target_key = _process_name_key(target)
+        protected_pids = {os.getpid(), os.getppid()}
         killed: list[dict[str, Any]] = []
+        refused: list[dict[str, Any]] = []
         for proc in psutil.process_iter(["pid", "name"]):
             try:
-                if target_pid is not None and proc.info["pid"] != target_pid:
+                pid = proc.info["pid"]
+                name = proc.info["name"] or ""
+                if target_pid is not None and pid != target_pid:
                     continue
-                if target_pid is None and target.lower() not in (proc.info["name"] or "").lower():
+                # Exact name match only: a substring match would let "power" or
+                # "e" reach blocked processes such as powershell.exe or monaw.exe.
+                if target_pid is None and _process_name_key(name) != target_key:
+                    continue
+                # A PID says nothing about what it points at, so check the real
+                # process name against the blocked list before terminating.
+                if _is_blocked_app(name) or pid in protected_pids:
+                    refused.append({"pid": pid, "name": name, "reason_code": "blocked_app"})
                     continue
                 proc.kill() if force else proc.terminate()
-                killed.append({"pid": proc.info["pid"], "name": proc.info["name"]})
+                killed.append({"pid": pid, "name": name})
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-        _audit.log("computer_functions.kill_process", data={"target": target, "force": force, "count": len(killed)})
-        return json.dumps({"status": "ok", "killed": killed}, ensure_ascii=False)
+        _audit.log(
+            "computer_functions.kill_process",
+            data={"target": target, "force": force, "count": len(killed), "refused": len(refused)},
+        )
+        if refused and not killed:
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "reason_code": "blocked_app",
+                    "error": f"Blocked process target: {target}",
+                    "refused": refused,
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps({"status": "ok", "killed": killed, "refused": refused}, ensure_ascii=False)
     except ImportError:
         return json.dumps({
             "status": "error",

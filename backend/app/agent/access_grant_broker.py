@@ -213,15 +213,63 @@ def grant_validation_error(
     return ""
 
 
-def _session_grant_identifier(identifier: str) -> str:
-    return "|".join((
-        current_control_session_id(),
-        current_execution_source(),
-        current_principal_id(),
-        current_permission_profile_id(),
-        current_conversation_id(),
-        identifier,
-    ))
+# Which stored path-grant access levels satisfy a requested one; mirrors the
+# permanent PathRule translation (write implies read, delete implies both).
+_SATISFYING_PATH_ACCESS: dict[str, tuple[str, ...]] = {
+    "read": ("read", "write", "delete"),
+    "write": ("write", "delete"),
+    "delete": ("delete",),
+    "launch": ("launch",),
+}
+
+
+def _grant_access_key(target_type: str, access: str) -> str:
+    # App grants cover the app as a whole; path grants are scoped by access.
+    return access if target_type == "path" else ""
+
+
+def _session_grant_identifier(
+    identifier: str,
+    access: str = "",
+    *,
+    control_session_id: str | None = None,
+    execution_source: str | None = None,
+    principal_id: str | None = None,
+    permission_profile_id: str | None = None,
+    conversation_id: str | None = None,
+) -> str:
+    # JSON rather than a joined string: principal ids embed Telegram display
+    # names, which could otherwise contain the separator and collide scopes.
+    return json.dumps(
+        [
+            current_control_session_id() if control_session_id is None else control_session_id,
+            current_execution_source() if execution_source is None else execution_source,
+            current_principal_id() if principal_id is None else principal_id,
+            current_permission_profile_id() if permission_profile_id is None else permission_profile_id,
+            current_conversation_id() if conversation_id is None else conversation_id,
+            identifier,
+            access,
+        ],
+        separators=(",", ":"),
+    )
+
+
+def _ticket_grant_identifier(ticket: AccessGrantTicket) -> str:
+    """Scope a grant to the run that asked for it, not the resolving request.
+
+    ``resolve_grant`` runs inside the HTTP/Telegram handler, whose run context
+    is all defaults; keying off it stored every grant in one shared scope that
+    the requesting run never matched.
+    """
+    return _session_grant_identifier(
+        ticket.target_identifier,
+        _grant_access_key(ticket.target_type, ticket.requested_access),
+        control_session_id=ticket.control_session_id,
+        execution_source=ticket.execution_source,
+        principal_id=ticket.principal_id,
+        permission_profile_id=ticket.permission_profile_id,
+        conversation_id=ticket.conversation_id,
+    )
 
 
 def resolve_grant(
@@ -255,26 +303,27 @@ def resolve_grant(
 
     if decision == "always":
         _persist_permanent_grant(ticket)
-    elif decision == "session":
-        get_db().add_session_grant(
-            ticket.target_type, _session_grant_identifier(ticket.target_identifier), "session"
-        )
-    elif decision == "once":
-        get_db().add_session_grant(
-            ticket.target_type, _session_grant_identifier(ticket.target_identifier), "once"
-        )
+    elif decision in {"session", "once"}:
+        get_db().add_session_grant(ticket.target_type, _ticket_grant_identifier(ticket), decision)
 
     return ticket
 
 
-def check_session_grant(target_type: str, identifier: str) -> bool:
-    """Check if a session grant exists for this target."""
-    scoped_identifier = _session_grant_identifier(identifier)
-    grant = get_db().check_session_grant(target_type, scoped_identifier)
-    if grant == "once":
-        get_db().consume_once_grant(target_type, scoped_identifier)
-        return True
-    return grant is not None
+def check_session_grant(target_type: str, identifier: str, access: str = "read") -> bool:
+    """Check (and for "once", atomically consume) a grant for this run's scope."""
+    db = get_db()
+    if target_type == "path":
+        stored_access = _SATISFYING_PATH_ACCESS.get(access, (access,))
+    else:
+        stored_access = ("",)
+    for candidate in stored_access:
+        scoped_identifier = _session_grant_identifier(identifier, candidate)
+        grant = db.check_session_grant(target_type, scoped_identifier)
+        if grant == "session":
+            return True
+        if grant == "once" and db.consume_once_grant(target_type, scoped_identifier):
+            return True
+    return False
 
 
 def clear_session_grants() -> None:

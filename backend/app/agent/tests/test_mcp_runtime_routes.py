@@ -249,8 +249,10 @@ def test_model_options_endpoint_returns_backend_model_catalog():
     assert response.status_code == 200
     payload = response.json()
     providers = {item["id"]: item for item in payload["providers"]}
-    assert providers["openai"]["label"] == "OpenAI"
-    assert providers["openai"]["models"] == ["gpt-5.6-luna"]
+    assert providers["openai"]["label"] == "OpenAI API"
+    assert providers["openai"]["models"] == ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"]
+    assert providers["codex"]["label"] == "OpenAI account"
+    assert providers["codex"]["models"] == providers["openai"]["models"]
     assert providers["gemini"]["label"] == "Google"
     assert providers["gemini"]["models"][0].startswith("gemini-3")
     assert "deepseek" not in providers

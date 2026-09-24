@@ -14,6 +14,7 @@ declare global {
       selectDirectory?: (defaultPath?: string) => Promise<string>
       setTheme?: (theme: 'dark' | 'light') => Promise<void>
       backendBaseUrl: string
+      platform?: string
       isElectron: boolean
     }
   }

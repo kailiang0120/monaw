@@ -1533,6 +1533,18 @@ def test_start_managed_locked_passes_headless_flag_to_chrome():
     assert "--headless=new" in args
     assert "--disable-gpu" in args
     assert "--disable-blink-features=AutomationControlled" in args
+    assert "--start-maximized" not in args
+
+
+def test_visible_managed_chrome_opens_maximized():
+    args = browser_manager_module._build_managed_launch_args(
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Users\agent\profile",
+        43210,
+    )
+
+    assert "--start-maximized" in args
+    assert "--headless=new" not in args
 
 
 def test_wait_for_cdp_endpoint_bails_when_process_exits(monkeypatch):

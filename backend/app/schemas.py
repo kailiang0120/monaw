@@ -87,7 +87,7 @@ class ContextUsageBreakdownItemPayload(BaseModel):
     label: str
     tokens: int
     percentage: float
-    kind: str = Field("used", pattern="^(used|reserved|free)$")
+    kind: str = Field("used", pattern="^(used|reserved|free|excluded)$")
     detail: str = ""
     count: int = 0
 
@@ -127,7 +127,7 @@ class ChatJobOut(BaseModel):
     dropped_subscriber_events: int = 0
 
 
-VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 class ConfirmationSettingsPayload(BaseModel):
@@ -170,7 +170,7 @@ class PermissionProfilePayload(BaseModel):
 
 
 class LLMSettingsPayload(BaseModel):
-    provider: str = Field("openai", pattern="^(openai|gemini)$")
+    provider: str = Field("openai", pattern="^(openai|gemini|codex)$")
     model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: str = Field("medium", pattern="^(none|minimal|low|medium|high|xhigh|max)$")
     max_iterations_per_turn: int = Field(40, ge=1, le=500)
@@ -405,7 +405,7 @@ class SettingsUpdate(BaseModel):
     permissions: Optional[PermissionSettingsPayload] = None
     sandbox: Optional[SandboxSettingsPayload] = None
     identity: Optional[IdentitySettingsPayload] = None
-    model_provider: Optional[str] = Field(None, pattern="^(openai|gemini)$")
+    model_provider: Optional[str] = Field(None, pattern="^(openai|gemini|codex)$")
     openai_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
     tavily_api_key: Optional[str] = None

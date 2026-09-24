@@ -281,3 +281,72 @@ def test_filesystem_recursive_copy_rejects_symlink(policy_env):
 
     assert result["status"] == "error"
     assert result["reason_code"] == "symlink_target_rejected"
+
+
+@pytest.mark.parametrize(
+    ("operation", "pattern_kwarg"),
+    [("list", "pattern"), ("search", "glob")],
+)
+def test_filesystem_glob_pattern_cannot_escape_gated_base(policy_env, tmp_path, operation, pattern_kwarg):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("needle", encoding="utf-8")
+
+    call = file_ops.file_list if operation == "list" else file_ops.file_search
+    args = (str(policy_env.root),) if operation == "list" else (str(policy_env.root), "needle")
+    for pattern in ("../outside/*", "..\outside\*", "**/../../outside/*", str(outside / "*")):
+        result = json.loads(call(*args, **{pattern_kwarg: pattern}))
+        assert result["status"] == "error", pattern
+        assert result["reason_code"] in {"path_traversal_rejected", "glob_pattern_rejected"}
+
+
+def test_filesystem_search_skips_links_that_leave_gated_base(policy_env, tmp_path):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("needle", encoding="utf-8")
+    try:
+        (policy_env.root / "linked.txt").symlink_to(outside / "secret.txt")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    result = json.loads(file_ops.file_search(str(policy_env.root), "needle"))
+
+    assert result["status"] == "ok"
+    assert result["count"] == 0
+
+
+@pytest.mark.parametrize("operation", ["move", "rename"])
+def test_filesystem_overwrite_of_directory_respects_delete_disabled(policy_env, operation):
+    settings_data = _settings_for_root(policy_env.root)
+    settings_data.permissions.allow_delete = False
+    policy_env.save_settings(settings_data)
+    source = policy_env.root / "source"
+    source.mkdir()
+    destination = policy_env.root / "victim"
+    destination.mkdir()
+    (destination / "keep.txt").write_text("keep", encoding="utf-8")
+
+    if operation == "move":
+        result = json.loads(file_ops.fs_move(str(source), str(destination), overwrite=True))
+    else:
+        result = json.loads(file_ops.fs_rename(str(source), "victim", overwrite=True))
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "delete_disabled"
+    assert (destination / "keep.txt").exists()
+
+
+def test_filesystem_cannot_rewrite_agent_settings(policy_env):
+    import app.agent.controller_policy as cp
+
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    settings_path = cp._settings_json_path()
+    original = settings_path.read_text(encoding="utf-8")
+
+    result = json.loads(file_ops.file_write(str(settings_path), "{}", overwrite=True))
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "protected_control_path"
+    assert settings_path.read_text(encoding="utf-8") == original

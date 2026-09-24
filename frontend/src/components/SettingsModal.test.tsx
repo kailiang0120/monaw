@@ -3,11 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   fetchModelOptions,
+  fetchOpenAIAccountStatus,
   fetchSettings,
   fetchWorkspaceInstructions,
   resetWorkspaceInstructions,
   updateSettings,
   updateWorkspaceInstructions,
+  startOpenAIAccountLogin,
 } from '../lib/api/settings'
 import {
   fetchMemoryCandidates,
@@ -21,6 +23,9 @@ import { SettingsModal } from '../features/settings/SettingsModal'
 const mocks = vi.hoisted(() => ({
   fetchSettings: vi.fn(),
   fetchModelOptions: vi.fn(),
+  fetchOpenAIAccountStatus: vi.fn(),
+  startOpenAIAccountLogin: vi.fn(),
+  logoutOpenAIAccount: vi.fn(),
   fetchSandboxStatus: vi.fn(),
   fetchSpeechToTextStatus: vi.fn(),
   fetchWorkspaceInstructions: vi.fn(),
@@ -74,6 +79,9 @@ vi.mock('../lib/api/diagnostics', () => ({
 vi.mock('../lib/api/settings', () => ({
   fetchSettings: mocks.fetchSettings,
   fetchModelOptions: mocks.fetchModelOptions,
+  fetchOpenAIAccountStatus: mocks.fetchOpenAIAccountStatus,
+  startOpenAIAccountLogin: mocks.startOpenAIAccountLogin,
+  logoutOpenAIAccount: mocks.logoutOpenAIAccount,
   fetchSandboxStatus: mocks.fetchSandboxStatus,
   fetchSpeechToTextStatus: mocks.fetchSpeechToTextStatus,
   fetchWorkspaceInstructions: mocks.fetchWorkspaceInstructions,
@@ -367,10 +375,11 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
 
 describe('SettingsModal', () => {
   beforeEach(() => {
+    vi.mocked(fetchOpenAIAccountStatus).mockResolvedValue({ connected: false, plan: '', limits: [], usage_error: '' })
     vi.mocked(fetchSettings).mockResolvedValue(buildSettings() as any)
     vi.mocked(fetchModelOptions).mockResolvedValue({
       providers: [
-        { id: 'openai', label: 'OpenAI', models: ['gpt-5.6-luna'] },
+        { id: 'openai', label: 'OpenAI', models: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'] },
         {
           id: 'gemini',
           label: 'Google',
@@ -489,27 +498,34 @@ describe('SettingsModal', () => {
     cleanup()
   })
 
-  it('shows Google chat models separately from vision fallback models', async () => {
+  it('keeps model selection and image help out of Settings', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
-    expect(await screen.findByRole('heading', { name: 'Model' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Provider' }))
-    fireEvent.click(screen.getByRole('option', { name: 'Google' }))
-    expect(screen.getByText('gemini-3.1-pro-preview')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
-    expect(screen.getByRole('option', { name: 'High' })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'Medium' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'Minimal' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('option', { name: 'High' }))
-    const modelButtons = screen.getAllByRole('button', { name: 'Model' })
-    fireEvent.click(modelButtons[modelButtons.length - 1])
-    expect(screen.getByRole('option', { name: 'gemini-3-flash-preview' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('option', { name: 'gemini-3-flash-preview' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
-    expect(screen.getByRole('option', { name: 'Minimal' })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'Medium' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /Connections/i }))
-    expect(screen.getByText(/Google key saved: yes/i)).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Voice & limits' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Provider' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reasoning effort' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Reading images and screenshots')).not.toBeInTheDocument()
+  })
+
+  it('configures direct control of the running Chrome browser', async () => {
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Connect to my Chrome' }))
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        mcp: expect.objectContaining({
+          enabled: true,
+          servers: expect.arrayContaining([expect.objectContaining({
+            name: 'Chrome-dev-tools',
+            command: 'npx',
+            args: ['-y', 'chrome-devtools-mcp@latest', '--autoConnect'],
+          })]),
+        }),
+      }))
+    })
   })
 
   it('renders skill display metadata and hides internal skills', async () => {
@@ -521,29 +537,6 @@ describe('SettingsModal', () => {
     expect(screen.getByText('Browse and interact with websites.')).toBeInTheDocument()
     expect(screen.queryByText('Core utilities')).not.toBeInTheDocument()
     expect(screen.queryByText('MCP integrations')).not.toBeInTheDocument()
-  })
-
-  it('saves Google as a primary Gemini chat provider', async () => {
-    render(<SettingsModal onClose={() => {}} />)
-
-    await screen.findByRole('heading', { name: 'Model' })
-    fireEvent.click(screen.getByRole('button', { name: 'Provider' }))
-    fireEvent.click(screen.getByRole('option', { name: 'Google' }))
-    const modelButtons = screen.getAllByRole('button', { name: 'Model' })
-    fireEvent.click(modelButtons[modelButtons.length - 1])
-    fireEvent.click(screen.getByRole('option', { name: 'gemini-3-flash-preview' }))
-    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
-
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        expected_settings_version: 'settings-v1',
-        llm: expect.objectContaining({
-          provider: 'gemini',
-          model_name: 'gemini-3-flash-preview',
-          reasoning_effort: 'medium',
-        }),
-      }))
-    })
   })
 
   it('shows faster-whisper speech-to-text status and downloads the local model', async () => {
@@ -591,6 +584,50 @@ describe('SettingsModal', () => {
     expect(updateSettings).not.toHaveBeenCalledWith(expect.objectContaining({
       openai_api_key: expect.anything(),
     }))
+  })
+
+  it('offers ChatGPT account sign-in alongside the API key connection', async () => {
+    vi.mocked(startOpenAIAccountLogin).mockResolvedValue({
+      auth_url: 'https://auth.openai.com/example',
+      login_id: 'login-1',
+    })
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
+    expect(await screen.findByText('OpenAI account')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
+    await waitFor(() => expect(startOpenAIAccountLogin).toHaveBeenCalledOnce())
+    expect(openSpy).toHaveBeenCalledWith('https://auth.openai.com/example', '_blank', 'noopener,noreferrer')
+    expect(screen.getByText('Open sign-in page')).toHaveAttribute('href', 'https://auth.openai.com/example')
+    openSpy.mockRestore()
+  })
+
+  it('shows account usage remaining and reset times when connected', async () => {
+    vi.mocked(fetchOpenAIAccountStatus).mockResolvedValue({
+      connected: true,
+      plan: 'plus',
+      usage_error: '',
+      limits: [
+        {
+          limit_id: 'codex', limit_name: 'Codex', window: 'primary',
+          used_percent: 20, window_duration_mins: 300, resets_at: 1800000000,
+        },
+        {
+          limit_id: 'codex', limit_name: 'Codex', window: 'secondary',
+          used_percent: 60, window_duration_mins: 10080, resets_at: 1800500000,
+        },
+      ],
+    })
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
+    expect(await screen.findByText('5-hour limit')).toBeInTheDocument()
+    expect(screen.getByText('Weekly limit')).toBeInTheDocument()
+    expect(screen.getByText('80% left')).toBeInTheDocument()
+    expect(screen.getByText('40% left')).toBeInTheDocument()
+    expect(screen.getAllByText(/^Resets /)).toHaveLength(2)
+    const callsBeforeRefresh = vi.mocked(fetchOpenAIAccountStatus).mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh usage' }))
+    await waitFor(() => expect(fetchOpenAIAccountStatus).toHaveBeenCalledTimes(callsBeforeRefresh + 1))
   })
 
   it('saves Telegram allowlist fields from the Telegram connection portal', async () => {
@@ -849,15 +886,6 @@ describe('SettingsModal', () => {
         }),
       }))
     })
-  })
-
-  it('reads images with the selected model instead of a separate vision model', async () => {
-    render(<SettingsModal onClose={() => {}} />)
-
-    expect(await screen.findByText(/Reading images and screenshots/i)).toBeInTheDocument()
-    expect(screen.getByText(/reads them natively/i)).toBeInTheDocument()
-    expect(screen.queryByLabelText('Vision fallback')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Vision model')).not.toBeInTheDocument()
   })
 
   it('switches preset permissions to custom when a preset toggle changes', async () => {

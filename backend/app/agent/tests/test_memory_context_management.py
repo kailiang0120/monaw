@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 from app.agent.context_usage import (
     build_context_usage_report,
+    count_text_tokens,
+    estimate_message_tokens,
     model_compaction_threshold,
     model_context_token_limit,
     token_estimation_method,
@@ -130,8 +132,8 @@ def test_memory_manager_builds_structured_context_and_history(monkeypatch, tmp_p
     assert history[0]["role"] == "assistant"
     assert "Earlier conversation summary" in history[0]["content"]
     assert history[-1]["role"] == "assistant"
-    assert usage["limit"] == 200000
-    assert usage["compaction_at"] == 185000
+    assert usage["limit"] == 256000
+    assert usage["compaction_at"] == 236800
     assert usage["used"] > 0
     assert usage["percentage"] >= 0
 
@@ -304,12 +306,13 @@ def test_context_usage_endpoint_returns_report(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["used"] > 0
-    assert payload["limit"] == 200000
-    assert payload["compaction_at"] == 185000
+    assert payload["limit"] == 256000
+    assert payload["compaction_at"] == 236800
     assert payload["estimator"]
     assert any(item["key"] == "messages" for item in payload["breakdown"])
     assert any(item["key"] == "builtin_tools" for item in payload["breakdown"])
     assert any(item["key"] == "deferred_tools" for item in payload["breakdown"])
+    assert next(item for item in payload["breakdown"] if item["key"] == "deferred_tools")["kind"] == "excluded"
 
 
 def test_messages_endpoint_returns_preview_tool_calls_and_detail_endpoint(monkeypatch, tmp_path):
@@ -478,6 +481,7 @@ def test_context_usage_report_counts_runtime_skills_and_tools():
     assert any(item["key"] == "builtin_tools" for item in report["breakdown"])
     assert any(item["key"] == "mcp_tools" for item in report["breakdown"])
     assert any(item["key"] == "deferred_tools" for item in report["breakdown"])
+    assert report["used"] == sum(item["tokens"] for item in report["breakdown"] if item["kind"] == "used")
 
 
 def test_context_usage_uses_model_specific_window_and_tokenizer():
@@ -485,10 +489,28 @@ def test_context_usage_uses_model_specific_window_and_tokenizer():
     luna_snapshot = SimpleNamespace(provider="openai", model_name="gpt-5.6-luna-2026-03-17")
     gemini = SimpleNamespace(provider="gemini", model_name="gemini-3.1-pro-preview")
     unknown = SimpleNamespace(provider="openai", model_name="gpt-unlisted")
+    gpt6 = SimpleNamespace(provider="openai", model_name="gpt-6-luna")
 
-    assert model_context_token_limit(luna) == 200_000
-    assert model_compaction_threshold(luna) == 185_000
-    assert model_context_token_limit(luna_snapshot) == 200_000
-    assert model_context_token_limit(gemini) == 200_000
+    assert model_context_token_limit(luna) == 256_000
+    assert model_compaction_threshold(luna) == 236_800
+    assert model_context_token_limit(luna_snapshot) == 256_000
+    assert model_context_token_limit(gemini) == 256_000
+    assert model_compaction_threshold(gemini) == 236_800
+    assert model_context_token_limit(gpt6) == 256_000
+    assert model_compaction_threshold(gpt6) == 236_800
     assert model_context_token_limit(unknown) == 200_000
-    assert token_estimation_method(luna) in {"chars/4 fallback", "tiktoken:o200k_base", "tiktoken:cl100k_base"}
+    assert token_estimation_method(luna) in {"character estimate (no tokenizer)", "tiktoken:o200k_base estimate", "tiktoken:cl100k_base estimate"}
+    assert token_estimation_method(gemini) == "Gemini character estimate (not exact tokenizer)"
+    assert count_text_tokens("你好世界", llm_client=gemini) >= 4
+
+
+def test_openai_context_estimate_includes_responses_tool_history():
+    client = SimpleNamespace(provider="openai", model_name="gpt-6-luna", supports_vision=False)
+    plain = estimate_message_tokens([{"role": "user", "content": "Use a tool"}], llm_client=client)
+    with_tool_history = estimate_message_tokens([
+        {"role": "user", "content": "Use a tool"},
+        {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": '{"query":"hello"}'},
+        {"type": "function_call_output", "call_id": "call_1", "output": "Found a useful result"},
+    ], llm_client=client)
+
+    assert with_tool_history > plain + count_text_tokens("Found a useful result", llm_client=client)

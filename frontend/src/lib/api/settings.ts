@@ -32,6 +32,38 @@ export async function fetchModelOptions(signal?: AbortSignal): Promise<ModelOpti
   return res.json()
 }
 
+export interface OpenAIAccountStatus {
+  connected: boolean
+  plan: string
+  limits: Array<{
+    limit_id: string
+    limit_name: string
+    window: 'primary' | 'secondary'
+    used_percent: number | null
+    window_duration_mins: number | null
+    resets_at: number | null
+  }>
+  usage_error: string
+}
+
+export async function fetchOpenAIAccountStatus(signal?: AbortSignal): Promise<OpenAIAccountStatus> {
+  const res = await apiFetch(`${BASE}/api/openai-account/status`, { signal })
+  if (!res.ok) await throwApiError(res, 'Failed to fetch OpenAI account status')
+  return res.json()
+}
+
+export async function startOpenAIAccountLogin(): Promise<{ auth_url: string; login_id: string }> {
+  const res = await apiFetch(`${BASE}/api/openai-account/login`, { method: 'POST' })
+  if (!res.ok) await throwApiError(res, 'Failed to start OpenAI account sign-in')
+  return res.json()
+}
+
+export async function logoutOpenAIAccount(): Promise<OpenAIAccountStatus> {
+  const res = await apiFetch(`${BASE}/api/openai-account/logout`, { method: 'POST' })
+  if (!res.ok) await throwApiError(res, 'Failed to sign out of OpenAI account')
+  return res.json()
+}
+
 export async function fetchWorkspaceInstructions(signal?: AbortSignal): Promise<WorkspaceInstructions> {
   const res = await apiFetch(`${BASE}/api/settings/workspace-instructions`, { signal })
   if (!res.ok) await throwApiError(res, 'Failed to fetch custom instructions')

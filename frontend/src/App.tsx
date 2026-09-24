@@ -1,4 +1,5 @@
 import { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react'
+import { AppBar } from './components/AppBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatWindow } from './components/ChatWindow'
 import { InputBar } from './components/InputBar'
@@ -12,15 +13,17 @@ import {
   runScheduledTaskNow,
   updateScheduledTask,
 } from './lib/api/scheduledTasks'
-import { fetchSettings, updateSettings } from './lib/api/settings'
+import { fetchModelOptions, fetchSettings, updateSettings } from './lib/api/settings'
+import { FALLBACK_MODEL_OPTIONS, reasoningEffortsForProvider } from './features/settings/settingsConfig'
 import { syncStoredApiKeysToBackendWithRetry } from './lib/apiKeySync'
 import { fetchPendingAccessGrants } from './lib/api/accessGrants'
 import { subscribeServerEvents, type ServerEvent } from './lib/api/serverEvents'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from './lib/identity'
-import type { AgentSettings, Conversation, ScheduledTask, UploadedAttachment } from './lib/api/types'
+import type { AgentSettings, Conversation, ModelOptions, ScheduledTask, UploadedAttachment } from './lib/api/types'
 
 type ApprovalMode = AgentSettings['permissions']['mode']
 type ThemeMode = 'dark' | 'light'
+type ModelSelection = Pick<AgentSettings['llm'], 'provider' | 'model_name' | 'reasoning_effort'>
 
 const THEME_STORAGE_KEY = 'agent_theme'
 const STARTUP_REFRESH_RETRIES = 20
@@ -73,6 +76,14 @@ export default function App() {
   const [isBackendReady, setIsBackendReady] = useState(() => typeof window === 'undefined' || !window.electronAPI?.isElectron)
   const [theme, setTheme] = useState<ThemeMode>(() => initialTheme())
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('default')
+  const [modelSelection, setModelSelection] = useState<ModelSelection>({
+    provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'medium',
+  })
+  const [modelOptions, setModelOptions] = useState<ModelOptions>(FALLBACK_MODEL_OPTIONS)
+  const [hasGoogleKey, setHasGoogleKey] = useState(false)
+  const [savingModelSelection, setSavingModelSelection] = useState(false)
+  const [modelSelectionError, setModelSelectionError] = useState('')
+  const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0)
   const [agentName, setAgentName] = useState(DEFAULT_AGENT_NAME)
   const [savingApprovalMode, setSavingApprovalMode] = useState(false)
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([])
@@ -135,6 +146,12 @@ export default function App() {
       const settings = await fetchSettings()
       setIsBackendReady(true)
       setApprovalMode(settings.permissions.mode)
+      setModelSelection({
+        provider: settings.llm.provider,
+        model_name: settings.llm.model_name,
+        reasoning_effort: settings.llm.reasoning_effort,
+      })
+      setHasGoogleKey(settings.api_keys.has_google_key)
       setAgentName(resolveAgentName(settings.identity?.agent_name))
       return true
     } catch {
@@ -145,6 +162,12 @@ export default function App() {
   const refreshVisibleSettings = async () => {
     await loadVisibleSettings()
   }
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetchModelOptions(controller.signal).then(setModelOptions).catch(() => {})
+    return () => controller.abort()
+  }, [])
 
   const loadPendingAccessGrant = useCallback(async () => {
     try {
@@ -165,11 +188,13 @@ export default function App() {
   }, [setPendingAccessGrant])
 
   useEffect(() => {
-    syncStoredApiKeysToBackendWithRetry()
-
     let cancelled = false
     let retryTimer: number | null = null
     let attempts = 0
+
+    void syncStoredApiKeysToBackendWithRetry().then(() => {
+      if (!cancelled) void loadVisibleSettings()
+    })
 
     const refreshStartupData = async () => {
       const [conversationsOk, scheduledTasksOk, settingsOk] = await Promise.all([
@@ -303,6 +328,38 @@ export default function App() {
     }
   }
 
+  const handleModelSelectionChange = async (next: ModelSelection) => {
+    if (savingModelSelection) return
+    const previous = modelSelection
+    const supportedEfforts = reasoningEffortsForProvider(next.provider, next.model_name)
+    const normalized = {
+      ...next,
+      reasoning_effort: supportedEfforts.includes(next.reasoning_effort)
+        ? next.reasoning_effort
+        : supportedEfforts.includes('medium') ? 'medium' as const : supportedEfforts[0],
+    }
+    setModelSelection(normalized)
+    setModelSelectionError('')
+    setSavingModelSelection(true)
+    try {
+      const settings = await updateSettings({
+        model_provider: normalized.provider,
+        model_name: normalized.model_name,
+        reasoning_effort: normalized.reasoning_effort,
+      })
+      setModelSelection({
+        provider: settings.llm.provider,
+        model_name: settings.llm.model_name,
+        reasoning_effort: settings.llm.reasoning_effort,
+      })
+    } catch (error) {
+      setModelSelection(previous)
+      setModelSelectionError(error instanceof Error ? error.message : 'Could not change model')
+    } finally {
+      setSavingModelSelection(false)
+    }
+  }
+
   const handleSend = (text: string, attachments: UploadedAttachment[] = []) => {
     sendMessage(text, attachments, (newConvId) => {
       setActiveConvId(newConvId)
@@ -398,60 +455,77 @@ export default function App() {
     : null
 
   return (
-    <div className={`app-surface ${theme === 'light' ? 'theme-light' : 'theme-dark'} flex h-screen w-screen overflow-hidden`}>
-      <Sidebar
-        conversations={conversations}
-        activeId={activeConvId}
-        collapsed={isSidebarCollapsed}
-        onToggleCollapsed={() => setIsSidebarCollapsed((value) => !value)}
-        onSelect={handleSelectConversation}
-        onNew={handleNewChat}
-        onDelete={handleDeleteConversation}
-        onRename={(id, title) => handleRenameConversation(id, title)}
-        onRefreshConversation={(id) => {
-          if (id === activeConvId) handleRefreshChat()
-        }}
-        onOpenSettings={() => setShowSettings(true)}
-        scheduledTasks={scheduledTasks}
-        onOpenScheduledTaskCreate={openScheduledTaskCreate}
-        onOpenScheduledTaskEdit={openScheduledTaskEdit}
-        onSelectScheduledRun={handleSelectScheduledRun}
-        onToggleScheduledTaskEnabled={handleToggleScheduledTaskEnabled}
-        onDeleteScheduledTask={handleDeleteScheduledTask}
-        onRunScheduledTask={handleRunScheduledTask}
+    <div className={`app-surface ${theme === 'light' ? 'theme-light' : 'theme-dark'} flex h-screen w-screen flex-col overflow-hidden`}>
+      <AppBar
+        sidebarCollapsed={isSidebarCollapsed}
+        onToggleSidebar={() => setIsSidebarCollapsed((value) => !value)}
+        onNewChat={handleNewChat}
         agentName={agentName}
-        theme={theme}
-        onToggleTheme={() => setTheme((value) => (value === 'light' ? 'dark' : 'light'))}
+        conversationTitle={activeConversation?.title}
+        onRenameConversation={activeConvId ? (title) => handleRenameConversation(activeConvId, title) : undefined}
+        status={!isBackendReady ? 'starting' : isStreaming ? 'working' : 'ready'}
+        approvalMode={approvalMode}
+        onOpenPermissions={() => setShowSettings(true)}
       />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <Sidebar
+          conversations={conversations}
+          activeId={activeConvId}
+          collapsed={isSidebarCollapsed}
+          onToggleCollapsed={() => setIsSidebarCollapsed((value) => !value)}
+          onSelect={handleSelectConversation}
+          onDelete={handleDeleteConversation}
+          onRename={(id, title) => handleRenameConversation(id, title)}
+          onRefreshConversation={(id) => {
+            if (id === activeConvId) handleRefreshChat()
+          }}
+          onOpenSettings={() => setShowSettings(true)}
+          scheduledTasks={scheduledTasks}
+          onOpenScheduledTaskCreate={openScheduledTaskCreate}
+          onOpenScheduledTaskEdit={openScheduledTaskEdit}
+          onSelectScheduledRun={handleSelectScheduledRun}
+          onToggleScheduledTaskEnabled={handleToggleScheduledTaskEnabled}
+          onDeleteScheduledTask={handleDeleteScheduledTask}
+          onRunScheduledTask={handleRunScheduledTask}
+          theme={theme}
+          onToggleTheme={() => setTheme((value) => (value === 'light' ? 'dark' : 'light'))}
+        />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <ChatWindow
-            messages={messages}
-            isLoadingHistory={isLoadingHistory}
-            isLoadingOlderHistory={isLoadingOlderHistory}
-            hasMoreHistory={hasMoreHistory}
-            conversationTitle={activeConversation?.title}
-            isStreaming={isStreaming}
-            agentName={agentName}
-            onLoadOlderMessages={loadOlderMessages}
-            onRename={activeConvId ? (title) => handleRenameConversation(activeConvId, title) : undefined}
-            onPromptSelect={handleSend}
-          />
-          <InputBar
-            onSend={handleSend}
-            onStop={stopStreaming}
-            isStreaming={isStreaming}
-            conversationId={activeConvId}
-            contextRefreshKey={messages.length}
-            usageRefreshKey={usageRefreshKey}
-            disabled={isLoadingHistory || !isBackendReady}
-            disabledReason={!isBackendReady ? 'Waiting for the local backend to finish starting…' : undefined}
-            approvalMode={approvalMode}
-            approvalModeDisabled={savingApprovalMode}
-            onApprovalModeChange={handleApprovalModeChange}
-          />
-        </main>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <ChatWindow
+              messages={messages}
+              isLoadingHistory={isLoadingHistory}
+              isLoadingOlderHistory={isLoadingOlderHistory}
+              hasMoreHistory={hasMoreHistory}
+              conversationId={activeConvId}
+              isStreaming={isStreaming}
+              agentName={agentName}
+              onLoadOlderMessages={loadOlderMessages}
+              onPromptSelect={handleSend}
+            />
+            <InputBar
+              onSend={handleSend}
+              onStop={stopStreaming}
+              isStreaming={isStreaming}
+              conversationId={activeConvId}
+              contextRefreshKey={messages.length}
+              usageRefreshKey={usageRefreshKey}
+              disabled={!isBackendReady}
+              disabledReason={!isBackendReady ? 'Waiting for the local backend to finish starting…' : undefined}
+              approvalMode={approvalMode}
+              modelSelection={modelSelection}
+              modelOptions={modelOptions}
+              hasGoogleKey={hasGoogleKey}
+              modelSelectionDisabled={savingModelSelection}
+              modelSelectionError={modelSelectionError}
+              onModelSelectionChange={handleModelSelectionChange}
+              focusRequestKey={composerFocusRequestKey}
+              approvalModeDisabled={savingApprovalMode}
+              onApprovalModeChange={handleApprovalModeChange}
+            />
+          </main>
+        </div>
       </div>
 
       <ApprovalToast
@@ -475,6 +549,7 @@ export default function App() {
             observabilityRefreshKey={observabilityRefreshKey}
             onClose={() => {
               setShowSettings(false)
+              setComposerFocusRequestKey((value) => value + 1)
               void refreshVisibleSettings()
             }}
           />

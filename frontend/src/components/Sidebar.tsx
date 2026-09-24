@@ -1,9 +1,7 @@
 import { useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Clock3, MessageSquare, Moon, Plus, RefreshCw, Settings, Sun, Trash2 } from 'lucide-react'
+import { Clock3, MessageSquare, Moon, RefreshCw, Settings, Sun, Trash2 } from 'lucide-react'
 import type { Conversation, ScheduledTask } from '../lib/api/types'
-import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
 import { ScheduledTasksList } from './scheduling/ScheduledTasksList'
-import appLogo from '../assets/Logo.png'
 
 type ThemeMode = 'dark' | 'light'
 
@@ -13,7 +11,6 @@ interface Props {
   collapsed: boolean
   onToggleCollapsed: () => void
   onSelect: (id: string) => void
-  onNew: () => void
   onDelete: (id: string) => void
   onRename?: (id: string, title: string) => void
   onRefreshConversation?: (id: string) => void
@@ -25,7 +22,6 @@ interface Props {
   onToggleScheduledTaskEnabled: (id: string, enabled: boolean) => void
   onDeleteScheduledTask: (id: string) => void
   onRunScheduledTask: (id: string) => void
-  agentName?: string
   theme: ThemeMode
   onToggleTheme: () => void
 }
@@ -73,7 +69,6 @@ export function Sidebar({
   collapsed,
   onToggleCollapsed,
   onSelect,
-  onNew,
   onDelete,
   onRename,
   onRefreshConversation,
@@ -85,7 +80,6 @@ export function Sidebar({
   onToggleScheduledTaskEnabled,
   onDeleteScheduledTask,
   onRunScheduledTask,
-  agentName = DEFAULT_AGENT_NAME,
   theme,
   onToggleTheme,
 }: Props) {
@@ -108,7 +102,6 @@ export function Sidebar({
   const cancelEdit = () => setEditingId(null)
 
   const groups = groupByDate(conversations)
-  const assistantLabel = resolveAgentName(agentName)
   const ThemeIcon = theme === 'light' ? Moon : Sun
   const nextThemeLabel = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'
 
@@ -128,24 +121,6 @@ export function Sidebar({
           type="button"
           onClick={onToggleCollapsed}
           className="ghost-button h-9 w-9 rounded-xl"
-          aria-label="Expand sidebar"
-          title="Expand sidebar"
-        >
-          <img src={appLogo} alt="Monaw logo" className="h-8 w-8 object-contain" draggable={false} />
-        </button>
-        <button
-          type="button"
-          onClick={onNew}
-          className="primary-button mt-2 h-9 w-9 rounded-xl"
-          aria-label="New chat"
-          title="New chat"
-        >
-          <Plus size={15} />
-        </button>
-        <button
-          type="button"
-          onClick={onToggleCollapsed}
-          className="ghost-button mt-2 h-9 w-9 rounded-xl"
           aria-label="Scheduled tasks"
           title="Scheduled tasks"
         >
@@ -202,41 +177,6 @@ export function Sidebar({
             : 'opacity-100 delay-[80ms] animate-slide-in-panel'
         }`}
       >
-        {/* Header: workspace label + New Chat + collapse toggle */}
-        <div className="drag-region border-b border-white/[0.05] px-3 pt-3 pb-2">
-          <div className="no-drag flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <img src={appLogo} alt="Monaw logo" className="h-8 w-8 shrink-0 object-contain" draggable={false} />
-              <div className="min-w-0">
-                <p className="section-label">Workspace</p>
-                <h2 className="mt-0.5 max-w-32 truncate text-[13px] font-semibold tracking-tight text-neutral-100">
-                  {assistantLabel}
-                </h2>
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-1">
-              <button
-                type="button"
-                onClick={onNew}
-                className="ghost-button h-8 w-8 rounded-lg"
-                aria-label="New chat"
-                title="New chat"
-              >
-                <Plus size={15} />
-              </button>
-              <button
-                type="button"
-                onClick={onToggleCollapsed}
-                className="ghost-button h-8 w-8 rounded-lg"
-                aria-label="Collapse sidebar"
-                title="Collapse sidebar"
-              >
-                <ChevronLeft size={15} />
-              </button>
-            </div>
-          </div>
-        </div>
-
         {/* Scheduled tasks + conversation list */}
         <div className="flex-1 overflow-y-auto px-2 py-2">
           <ScheduledTasksList

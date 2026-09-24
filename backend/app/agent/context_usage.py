@@ -6,7 +6,7 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from app.agent.llm_client import _normalise_messages_for_openai, _tools_to_openai
+from app.agent.llm_client import _normalise_messages_for_openai_responses, _tools_to_openai_responses
 from app.agent.llm_constants import DEFAULT_OPENAI_CHAT_MODEL
 
 try:
@@ -16,7 +16,8 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 
 DEFAULT_CONTEXT_TOKEN_LIMIT = 200_000
-DEFAULT_COMPACTION_RATIO = 0.925  # 185 000 / 200 000
+APP_CONTEXT_TOKEN_LIMIT = 256_000
+DEFAULT_COMPACTION_RATIO = 0.925
 _OPENAI_REPLY_PRIMER_TOKENS = 3
 _OPENAI_MESSAGE_OVERHEAD_TOKENS = 3
 _OPENAI_NAME_OVERHEAD_TOKENS = 1
@@ -25,13 +26,19 @@ _TOOL_OVERHEAD_TOKENS = 12
 _IMAGE_ATTACHMENT_TOKEN_FALLBACK = 850
 _CHARS_PER_TOKEN_FALLBACK = 4
 _OPENAI_CONTEXT_WINDOWS = {
-    "gpt-5.6-luna": 200_000,
+    "gpt-5.6": 1_050_000,
+    "gpt-5.6-luna": 1_050_000,
+    "gpt-5.6-terra": 1_050_000,
+    "gpt-5.6-sol": 1_050_000,
+    "gpt-6-luna": 1_050_000,
+    "gpt-6-sol": 1_050_000,
+    "gpt-6-astra": 1_050_000,
 }
 _GEMINI_CONTEXT_WINDOWS = {
-    "gemini-3.1-pro-preview": 200_000,
-    "gemini-3.1-flash-lite": 200_000,
-    "gemini-3.1-flash-lite-preview": 200_000,
-    "gemini-3-flash-preview": 200_000,
+    "gemini-3.1-pro-preview": 1_048_576,
+    "gemini-3.1-flash-lite": 1_048_576,
+    "gemini-3.1-flash-lite-preview": 1_048_576,
+    "gemini-3-flash-preview": 1_048_576,
 }
 
 def _provider_name(llm_client) -> str:
@@ -70,28 +77,29 @@ def _lookup_context_window(model: str, windows: dict[str, int]) -> int:
 def model_context_token_limit(llm_client) -> int:
     provider = _provider_name(llm_client)
     model = _model_name(llm_client)
-    if provider == "openai":
-        return _lookup_context_window(model, _OPENAI_CONTEXT_WINDOWS)
+    if provider in {"openai", "codex"}:
+        return min(APP_CONTEXT_TOKEN_LIMIT, _lookup_context_window(model, _OPENAI_CONTEXT_WINDOWS))
     if provider == "gemini":
-        return _lookup_context_window(model, _GEMINI_CONTEXT_WINDOWS)
+        return min(APP_CONTEXT_TOKEN_LIMIT, _lookup_context_window(model, _GEMINI_CONTEXT_WINDOWS))
     return DEFAULT_CONTEXT_TOKEN_LIMIT
 
 
 def model_compaction_threshold(llm_client) -> int:
-    return int(model_context_token_limit(llm_client) * DEFAULT_COMPACTION_RATIO)
+    limit = model_context_token_limit(llm_client)
+    return int(limit * DEFAULT_COMPACTION_RATIO)
 
 
 def _encoding_name(provider: str, model_name: str) -> str:
     model = model_name.lower()
-    if provider == "openai":
+    if provider in {"openai", "codex"}:
         try:
             return tiktoken.encoding_for_model(model_name).name if tiktoken is not None else ""
         except Exception:
-            if model.startswith(("gpt-5", "gpt-4.1", "gpt-4o", "o1", "o3", "o4")):
+            if model.startswith(("gpt-5", "gpt-6", "gpt-4.1", "gpt-4o", "o1", "o3", "o4")):
                 return "o200k_base"
             return "cl100k_base"
     if provider == "gemini":
-        return "o200k_base"
+        return ""
     return "cl100k_base"
 
 
@@ -106,24 +114,29 @@ def _load_encoding(name: str):
 
 
 def token_estimation_method(llm_client) -> str:
+    if _provider_name(llm_client) == "gemini":
+        return "Gemini character estimate (not exact tokenizer)"
     encoding_name = _encoding_name(_provider_name(llm_client), _model_name(llm_client))
     encoding = _load_encoding(encoding_name)
     if encoding is not None:
-        return f"tiktoken:{encoding.name}"
-    return "chars/4 fallback"
+        return f"tiktoken:{encoding.name} estimate"
+    return "character estimate (no tokenizer)"
 
 
 def count_text_tokens(text: str, *, llm_client) -> int:
     content = str(text or "")
     if not content:
         return 0
-    encoding = _load_encoding(_encoding_name(_provider_name(llm_client), _model_name(llm_client)))
+    provider = _provider_name(llm_client)
+    encoding = _load_encoding(_encoding_name(provider, _model_name(llm_client)))
     if encoding is not None:
         try:
             return len(encoding.encode(content))
         except Exception:
             pass
-    return max(1, len(content) // _CHARS_PER_TOKEN_FALLBACK)
+    ascii_chars = sum(ord(char) < 128 for char in content)
+    non_ascii_chars = len(content) - ascii_chars
+    return max(1, (ascii_chars + _CHARS_PER_TOKEN_FALLBACK - 1) // _CHARS_PER_TOKEN_FALLBACK + non_ascii_chars)
 
 
 def _count_content_tokens(content: Any, *, llm_client) -> int:
@@ -136,9 +149,9 @@ def _count_content_tokens(content: Any, *, llm_client) -> int:
         for item in content:
             if isinstance(item, dict):
                 part_type = str(item.get("type") or "").lower()
-                if part_type == "text":
+                if part_type in {"text", "input_text"}:
                     total += count_text_tokens(str(item.get("text") or ""), llm_client=llm_client)
-                elif part_type == "image_url":
+                elif part_type in {"image_url", "input_image"}:
                     total += _IMAGE_ATTACHMENT_TOKEN_FALLBACK
                 else:
                     total += count_text_tokens(
@@ -158,7 +171,7 @@ def _count_content_tokens(content: Any, *, llm_client) -> int:
 
 def estimate_message_tokens(messages: list[dict], *, llm_client) -> int:
     provider = _provider_name(llm_client)
-    if provider == "openai":
+    if provider in {"openai", "codex"}:
         return _estimate_openai_message_tokens(messages, llm_client=llm_client)
 
     total = 2
@@ -172,14 +185,19 @@ def estimate_message_tokens(messages: list[dict], *, llm_client) -> int:
 
 
 def _estimate_openai_message_tokens(messages: list[dict], *, llm_client) -> int:
-    normalized = _normalise_messages_for_openai(
+    normalized = _normalise_messages_for_openai_responses(
         messages,
-        system_prompt="",
         include_images=bool(getattr(llm_client, "supports_vision", False)),
     )
     total = _OPENAI_REPLY_PRIMER_TOKENS
     for message in normalized:
         total += _OPENAI_MESSAGE_OVERHEAD_TOKENS
+        if message.get("type") in {"function_call", "function_call_output", "reasoning"}:
+            total += count_text_tokens(
+                json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                llm_client=llm_client,
+            )
+            continue
         for key, value in message.items():
             if key == "content":
                 total += _count_content_tokens(value, llm_client=llm_client)
@@ -199,8 +217,8 @@ def _estimate_openai_message_tokens(messages: list[dict], *, llm_client) -> int:
 def estimate_tool_schema_tokens(tools: list[dict], *, llm_client) -> int:
     provider = _provider_name(llm_client)
     normalized_tools: list[dict]
-    if provider == "openai":
-        normalized_tools = _tools_to_openai(tools)
+    if provider in {"openai", "codex"}:
+        normalized_tools = _tools_to_openai_responses(tools)
     else:
         normalized_tools = [
             {
@@ -377,12 +395,13 @@ def build_context_usage_report(
                 label="Deferred compatibility tools",
                 tokens=deferred_tool_tokens,
                 limit=limit,
+                kind="excluded",
                 detail="Hidden or compatibility-only tool schemas kept out of the default model call",
                 count=len(deferred_tools),
             )
         )
 
-    used = sum(item["tokens"] for item in breakdown)
+    used = sum(item["tokens"] for item in breakdown if item["kind"] == "used")
     percentage = round((used / limit) * 100, 1) if limit else 0.0
     compaction_buffer_tokens = max(compaction_at - used, 0)
     free_tokens = max(limit - used, 0)
@@ -420,8 +439,10 @@ def build_context_usage_report(
         "estimator": token_estimation_method(llm_client),
         "breakdown": breakdown,
         "notes": (
-            "Counts the next provider request shape, including runtime prompt, skills, "
-            "long-term memory, and normalized tool schemas."
+            "Monaw limits its working context to 256k tokens for supported models. "
+            "Estimates the next provider request, including runtime prompt, skills, "
+            "long-term memory, and visible tool schemas. Hidden tools are excluded. "
+            "Gemini token counts require the provider countTokens API for exact values."
         ),
     }
 

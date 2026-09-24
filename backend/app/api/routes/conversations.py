@@ -210,19 +210,6 @@ def _summary_tool_calls(db, *, message_id: int, limit: int) -> list[ToolCallOut]
     ]
 
 
-def _completion_protocol_text() -> str:
-    return "\n".join(
-        [
-            "## Completion Protocol",
-            "- Use the same decision rule for every provider and model.",
-            "- If more work is needed, call the next real tool instead of describing the tool you plan to use.",
-            "- If the request can be answered without tools, answer directly and finish the turn.",
-            "- Do not send a greeting, filler, or a progress-only update when tools are still available.",
-            "- Do not claim that you already answered a fresh user question unless the persisted conversation history shows that exact answer.",
-        ]
-    )
-
-
 @router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations(
     limit: int = Query(100, ge=1, le=CONVERSATION_LIST_LIMIT_MAX),
@@ -242,6 +229,9 @@ async def create_conversation(body: ConversationCreate):
 
 @router.get("/conversations/{conv_id}/context-usage", response_model=ContextUsagePayload)
 async def get_context_usage(conv_id: str):
+    from app.agent.turn_loop import _completion_protocol_prompt
+    from app.agent.workspace_instructions import build_workspace_instruction_prompt
+
     db = get_db()
     if db.get_conversation(conv_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -250,6 +240,7 @@ async def get_context_usage(conv_id: str):
     runtime_settings = build_runtime_namespace(settings, load_agent_settings(settings))
     runtime = get_runtime(runtime_settings)
     visible_tools = runtime.tool_registry.get_all_tools(visible_only=True)
+    model_tools = visible_tools
     all_tools = runtime.tool_registry.get_all_tools(visible_only=False)
     visible_names = {str(tool.get("name", "")) for tool in visible_tools}
     hidden_tools = [tool for tool in all_tools if str(tool.get("name", "")) not in visible_names]
@@ -265,7 +256,8 @@ async def get_context_usage(conv_id: str):
             skill_sections.get("browser_policy", ""),
             skill_sections.get("computer_use_policy", ""),
             build_identity_prompt(runtime_settings),
-            _completion_protocol_text(),
+            build_workspace_instruction_prompt(),
+            _completion_protocol_prompt(""),
         ]
         if part
     )
@@ -287,7 +279,7 @@ async def get_context_usage(conv_id: str):
         runtime_prompt_text=runtime_prompt_text,
         skill_prompt_text=skill_prompt_text,
         long_term_context=long_term_context,
-        visible_tools=visible_tools,
+        visible_tools=model_tools,
         hidden_tools=hidden_tools,
         tool_call_count=tool_call_count,
         limit=model_context_token_limit(runtime.llm_client),

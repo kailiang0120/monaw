@@ -58,6 +58,21 @@ def _zoneinfo(name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+def telegram_chat_allowed(chat_id: str) -> bool:
+    """Only deliver scheduled output to Telegram users/chats the owner allowlisted."""
+    try:
+        target = int(str(chat_id or "").strip())
+        from app.integrations.telegram.bridge import telegram_authorization_from_settings
+
+        authorization = telegram_authorization_from_settings()
+    except Exception:
+        return False
+    if authorization.allow_all:
+        return True
+    # A private chat's id equals the user's id, so allowed users count too.
+    return target in authorization.allowed_chat_ids or target in authorization.allowed_user_ids
+
+
 def set_scheduled_task_service(service: "ScheduledTaskService | None") -> None:
     global _SERVICE
     _SERVICE = service
@@ -490,6 +505,12 @@ class ScheduledTaskService:
 
         bot = get_telegram_bot()
         if bot is None:
+            return
+        if not telegram_chat_allowed(str(row.get("telegram_chat_id") or "")):
+            logger.warning(
+                "scheduled-tasks: refusing Telegram notification for task %s to a chat outside the allowlist",
+                row.get("id"),
+            )
             return
         title = str(row.get("title") or "Scheduled task").strip()
         body = final_text.strip() if status == "ok" else f"Scheduled task failed: {error or 'unknown error'}"

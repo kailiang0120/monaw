@@ -14,6 +14,8 @@
   .theme-dark {
     --st-bg: #262624;
     --st-bg-nav: #1e1d1b;
+    /* Must match TITLE_BAR_OVERLAY.dark in electron/main.js. */
+    --st-appbar: #1a1917;
     --st-surface: #2f2e2b;
     --st-surface-hover: #37352f;
     --st-surface-muted: #232220;
@@ -53,6 +55,8 @@
   .theme-light {
     --st-bg: #faf9f5;
     --st-bg-nav: #f0eee6;
+    /* Must match TITLE_BAR_OVERLAY.light in electron/main.js. */
+    --st-appbar: #ecebe3;
     --st-surface: #ffffff;
     --st-surface-hover: #f4f2ea;
     --st-surface-muted: #f4f2ea;
@@ -91,6 +95,10 @@
 }
 
 @layer base {
+  :root {
+    --app-bar-height: 44px;
+  }
+
   * {
     box-sizing: border-box;
   }
@@ -210,6 +218,14 @@
     color: var(--st-text-faint);
   }
 
+  .chat-composer-input {
+    color: var(--st-text);
+  }
+
+  .chat-composer-input::placeholder {
+    color: var(--st-text-faint);
+  }
+
   .control:focus {
     outline: none;
     border-color: var(--st-accent-border);
@@ -283,14 +299,8 @@
 
   /* --------------------------------------------------------------- scroll --- */
 
-  .settings-scroll-area,
-  .activity-tool-scroll {
+  .settings-scroll-area {
     scrollbar-gutter: stable;
-  }
-
-  .activity-tool-scroll::-webkit-scrollbar {
-    width: 3px;
-    height: 3px;
   }
 
   .image-strip-scroll {
@@ -573,9 +583,314 @@
   .code-token {
     color: var(--st-accent-text);
   }
+
+  /* -------------------------------------------------------------- app bar --- */
+  /* One bar replaces the OS title bar. The left cap tracks the sidebar width so
+     the navigation column reads as a single piece from top to bottom; the
+     session capsule carries status, title, and the permission level. */
+
+  .app-bar {
+    --app-bar-cap: 16rem;
+    --app-bar-cap-inset: 0.75rem;
+    position: relative;
+    z-index: 30;
+    display: grid;
+    grid-template-columns: var(--app-bar-cap) minmax(0, 1fr) auto;
+    align-items: center;
+    height: var(--app-bar-height);
+    flex-shrink: 0;
+    background: var(--st-appbar);
+    color: var(--st-text);
+    user-select: none;
+    transition: grid-template-columns 220ms ease-in-out;
+    /* Leave room for native caption buttons drawn by Window Controls Overlay. */
+    padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+  }
+
+  .app-bar--collapsed {
+    --app-bar-cap: 3.5rem;
+  }
+
+  .app-bar--mac {
+    --app-bar-cap-inset: 5rem;
+  }
+
+  .app-bar--mac.app-bar--collapsed {
+    --app-bar-cap: 8.5rem;
+  }
+
+  .app-bar--caption .app-bar-actions {
+    padding-right: 0.5rem;
+  }
+
+  .app-bar-cap {
+    display: flex;
+    height: 100%;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0 0.5rem 0 var(--app-bar-cap-inset);
+    background: var(--st-bg-nav);
+    border-right: 1px solid var(--st-border);
+  }
+
+  .app-bar--collapsed .app-bar-cap {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .app-bar--mac.app-bar--collapsed .app-bar-cap {
+    justify-content: flex-end;
+    padding-right: 0.5rem;
+  }
+
+  .app-bar-wordmark {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 13px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+
+  .app-bar-icon-button {
+    display: inline-flex;
+    height: 30px;
+    width: 30px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    color: var(--st-text-faint);
+    transition: background-color 150ms, color 150ms;
+  }
+
+  .app-bar-icon-button:hover {
+    background: var(--st-surface-hover);
+    color: var(--st-text);
+  }
+
+  .app-bar-icon-button:focus-visible,
+  .app-bar-new:focus-visible,
+  .app-bar-mode:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--st-focus);
+  }
+
+  .app-bar-center {
+    display: flex;
+    min-width: 0;
+    justify-content: center;
+    padding: 0 1rem;
+  }
+
+  .app-bar-capsule {
+    display: inline-flex;
+    height: 30px;
+    max-width: min(100%, 38rem);
+    min-width: 0;
+    align-items: center;
+    gap: 0.625rem;
+    padding: 0 0.3125rem 0 0.75rem;
+    border: 1px solid var(--st-border);
+    border-radius: 999px;
+    background: var(--st-surface-muted);
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--st-text) 4%, transparent);
+  }
+
+  .app-bar-status {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.4375rem;
+    color: var(--st-text-faint);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .app-bar-status-dot {
+    position: relative;
+    height: 7px;
+    width: 7px;
+    border-radius: 999px;
+    background: var(--st-ok);
+  }
+
+  .app-bar[data-status='starting'] .app-bar-status-dot {
+    background: var(--st-warn);
+    animation: appBarBreathe 1.8s ease-in-out infinite;
+  }
+
+  .app-bar[data-status='working'] .app-bar-status {
+    color: var(--st-accent-text);
+  }
+
+  .app-bar[data-status='working'] .app-bar-status-dot {
+    background: var(--st-accent-text);
+  }
+
+  .app-bar[data-status='working'] .app-bar-status-dot::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 999px;
+    border: 1.5px solid var(--st-accent-text);
+    animation: appBarPing 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+
+  .app-bar-divider {
+    height: 14px;
+    width: 1px;
+    flex-shrink: 0;
+    background: var(--st-border-strong);
+  }
+
+  .app-bar-title,
+  .app-bar-title-input {
+    min-width: 0;
+    max-width: 22rem;
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--st-text);
+  }
+
+  .app-bar-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .app-bar-title--editable {
+    cursor: text;
+  }
+
+  .app-bar-title--editable:hover {
+    color: var(--st-accent-text);
+  }
+
+  .app-bar-title-input {
+    width: 18rem;
+    border-radius: 6px;
+    background: var(--st-surface-sunken);
+    padding: 1px 6px;
+    outline: none;
+    box-shadow: 0 0 0 1px var(--st-accent-border);
+  }
+
+  .app-bar-mode {
+    display: inline-flex;
+    height: 22px;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.3125rem;
+    padding: 0 0.5625rem;
+    border: 1px solid var(--st-border);
+    border-radius: 999px;
+    background: var(--st-surface-sunken);
+    color: var(--st-text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    transition: border-color 150ms, color 150ms;
+  }
+
+  .app-bar-mode:hover {
+    border-color: var(--st-border-strong);
+    color: var(--st-text);
+  }
+
+  .app-bar-mode--default {
+    border-color: var(--st-ok-border);
+    color: var(--st-ok);
+  }
+
+  .app-bar-mode--full_access {
+    border-color: var(--st-warn-border);
+    background: var(--st-warn-soft);
+    color: var(--st-warn);
+  }
+
+  .app-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0 0.75rem 0 0.25rem;
+  }
+
+  .app-bar-new {
+    display: inline-flex;
+    height: 30px;
+    align-items: center;
+    gap: 0.4375rem;
+    padding: 0 0.75rem;
+    border: 1px solid var(--st-border);
+    border-radius: 9px;
+    background: var(--st-surface);
+    color: var(--st-text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    transition: background-color 150ms, border-color 150ms, color 150ms;
+  }
+
+  .app-bar-new:hover {
+    border-color: var(--st-accent-border);
+    background: var(--st-accent-soft);
+    color: var(--st-accent-text);
+  }
+
+  /* Hairline under the bar separating it from the content. */
+  .app-bar::after {
+    content: '';
+    pointer-events: none;
+    position: absolute;
+    inset: auto 0 0 0;
+    height: 1px;
+    background: var(--st-border);
+  }
+
+  @keyframes appBarBreathe {
+    0%, 100% { opacity: 0.45; }
+    50% { opacity: 1; }
+  }
+
+  @keyframes appBarPing {
+    0% { transform: scale(0.6); opacity: 0.9; }
+    100% { transform: scale(1.6); opacity: 0; }
+  }
+
+
+  @media (prefers-reduced-motion: reduce) {
+    .app-bar,
+    .app-bar[data-status='working'] .app-bar-status-dot::after,
+    .app-bar[data-status='starting'] .app-bar-status-dot {
+      animation: none;
+      transition: none;
+    }
+  }
+
+  @media (max-width: 900px) {
+    .app-bar-new span {
+      display: none;
+    }
+    .app-bar-new {
+      width: 30px;
+      justify-content: center;
+      padding: 0;
+    }
+  }
 }
 
 @layer utilities {
+  /* Full-window overlays stop at the app bar: on Windows the native caption
+     buttons are drawn above the page, so anything under them gets covered. */
+  .below-app-bar {
+    top: var(--app-bar-height, 0px) !important;
+  }
   .drag-region {
     -webkit-app-region: drag;
   }

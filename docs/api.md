@@ -64,6 +64,9 @@ unauthenticated runtime endpoint.
 | `DELETE` | `/api/observability/support-mode` | `diagnostics:control` | `ObservabilitySupportModeOut` |
 | `GET` | `/api/observability/support-mode` | `diagnostics:read` | `ObservabilitySupportModeOut` |
 | `POST` | `/api/observability/support-mode` | `diagnostics:control` | `ObservabilitySupportModeOut` |
+| `POST` | `/api/openai-account/login` | `settings:write` | `dict` |
+| `POST` | `/api/openai-account/logout` | `settings:write` | `dict` |
+| `GET` | `/api/openai-account/status` | `settings:read` | `dict` |
 | `POST` | `/api/privacy/delete-data` | `agent:run` | `DataDeletionResult` |
 | `POST` | `/api/sandbox/docker/resolve-image` | `settings:read` | `SandboxResolveImageResponse` |
 | `GET` | `/api/sandbox/status` | `settings:read` | `SandboxStatusPayload` |

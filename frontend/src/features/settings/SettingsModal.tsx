@@ -73,13 +73,17 @@ import {
   deleteSpeechToTextModel,
   downloadSpeechToTextModel,
   fetchModelOptions,
+  fetchOpenAIAccountStatus,
   fetchSettings,
   fetchSandboxStatus,
   fetchSpeechToTextStatus,
   fetchWorkspaceInstructions,
   offloadSpeechToTextModel,
+  logoutOpenAIAccount,
   resetWorkspaceInstructions,
   resolveSandboxDockerImage,
+  startOpenAIAccountLogin,
+  type OpenAIAccountStatus,
   updateSettings,
   updateWorkspaceInstructions,
 } from '../../lib/api/settings'
@@ -101,14 +105,9 @@ import {
   emptyAppRule,
   emptyPathRule,
   FALLBACK_MODEL_OPTIONS,
-  formatReasoningEffort,
   formatUnavailableReason,
-  modelsForProvider,
   normalizeDraft,
   permissionProfileFromPermissions,
-  providerLabel,
-  providerOptions,
-  reasoningEffortsForProvider,
   type ModelOptionsCatalog,
   type MCPServerTemplateKey,
 } from './settingsConfig'
@@ -183,6 +182,19 @@ function draftSignature(
   })
 }
 
+function accountUsageWindowLabel(minutes: number | null, window: 'primary' | 'secondary'): string {
+  if (!minutes || minutes <= 0) return window === 'primary' ? 'Primary limit' : 'Secondary limit'
+  if (minutes === 7 * 24 * 60) return 'Weekly limit'
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}-day limit`
+  if (minutes % 60 === 0) return `${minutes / 60}-hour limit`
+  return `${minutes}-minute limit`
+}
+
+function accountResetTime(timestamp: number | null): string {
+  if (!timestamp || !Number.isFinite(timestamp)) return 'Reset time unavailable'
+  return `Resets ${new Date(timestamp * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
+}
+
 export function SettingsModal({
   onClose,
   diagnosticsRefreshKey = 0,
@@ -194,6 +206,11 @@ export function SettingsModal({
   const [activeTab, setActiveTab] = useState<SettingsTab>('model')
   const [navQuery, setNavQuery] = useState('')
   const [openaiKey, setOpenaiKey] = useState('')
+  const [openaiAccount, setOpenaiAccount] = useState<OpenAIAccountStatus | null>(null)
+  const [openaiAccountBusy, setOpenaiAccountBusy] = useState(false)
+  const [refreshingOpenAIUsage, setRefreshingOpenAIUsage] = useState(false)
+  const [openaiAccountError, setOpenaiAccountError] = useState('')
+  const [openaiAccountAuthUrl, setOpenaiAccountAuthUrl] = useState('')
   const [tavilyKey, setTavilyKey] = useState('')
   const [googleKey, setGoogleKey] = useState('')
   const [telegramBotToken, setTelegramBotToken] = useState('')
@@ -233,6 +250,71 @@ export function SettingsModal({
   const [baselineSignature, setBaselineSignature] = useState('')
 
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const refresh = async () => {
+      try {
+        const status = await fetchOpenAIAccountStatus(controller.signal)
+        if (!controller.signal.aborted) {
+          setOpenaiAccount(status)
+          if (status.connected) setOpenaiAccountAuthUrl('')
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) setOpenaiAccountError(error instanceof Error ? error.message : 'Account status unavailable.')
+      }
+    }
+    void refresh()
+    if (openaiAccountAuthUrl) {
+      const interval = window.setInterval(() => { void refresh() }, 2000)
+      const timeout = window.setTimeout(() => {
+        setOpenaiAccountAuthUrl('')
+        setOpenaiAccountError('Sign-in timed out. Try again.')
+      }, 10 * 60 * 1000)
+      return () => { controller.abort(); window.clearInterval(interval); window.clearTimeout(timeout) }
+    }
+    return () => controller.abort()
+  }, [openaiAccountAuthUrl])
+
+  const signInOpenAIAccount = async () => {
+    setOpenaiAccountBusy(true)
+    setOpenaiAccountError('')
+    try {
+      const login = await startOpenAIAccountLogin()
+      if (!/^https:\/\//i.test(login.auth_url)) throw new Error('Invalid sign-in URL returned.')
+      setOpenaiAccountAuthUrl(login.auth_url)
+      window.open(login.auth_url, '_blank', 'noopener,noreferrer')
+    } catch (error) {
+      setOpenaiAccountError(error instanceof Error ? error.message : 'Could not start sign-in.')
+    } finally {
+      setOpenaiAccountBusy(false)
+    }
+  }
+
+  const signOutOpenAIAccount = async () => {
+    setOpenaiAccountBusy(true)
+    setOpenaiAccountError('')
+    try {
+      setOpenaiAccount(await logoutOpenAIAccount())
+      setOpenaiAccountAuthUrl('')
+    } catch (error) {
+      setOpenaiAccountError(error instanceof Error ? error.message : 'Could not sign out.')
+    } finally {
+      setOpenaiAccountBusy(false)
+    }
+  }
+
+  const refreshOpenAIUsage = async () => {
+    setRefreshingOpenAIUsage(true)
+    setOpenaiAccountError('')
+    try {
+      setOpenaiAccount(await fetchOpenAIAccountStatus())
+    } catch (error) {
+      setOpenaiAccountError(error instanceof Error ? error.message : 'Could not refresh usage limits.')
+    } finally {
+      setRefreshingOpenAIUsage(false)
+    }
+  }
 
   const storeMcpDiagnostics = (items: MCPServerDiagnostics[]) => {
     const next: Record<string, MCPServerDiagnostics> = {}
@@ -738,7 +820,7 @@ export function SettingsModal({
 
   if (!draft) {
     return (
-      <div className="st-overlay fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="st-overlay fixed inset-0 below-app-bar z-50 flex items-center justify-center p-4">
         <div className="settings-shell max-w-md rounded-2xl px-5 py-4">
           {loadError ? (
             <div>
@@ -766,6 +848,8 @@ export function SettingsModal({
   }
   const browserSkillEnabled = !!draft.tools.skills['browser-use'] && (browserSkill?.available ?? true)
   const mcpFeatureEnabled = !!draft.mcp.enabled
+  const directChromeServer = draft.mcp.servers.find((server) => server.name === 'Chrome-dev-tools')
+  const directChromeEnabled = Boolean(draft.mcp.enabled && directChromeServer?.enabled && directChromeServer.args.includes('--autoConnect'))
   const mcpFeatureDiagnostics = Object.values(mcpDiagnostics)
   const mcpFeatureAvailable = mcpFeatureDiagnostics[0]?.feature_available ?? true
   const mcpFeatureUnavailableReason = mcpFeatureDiagnostics[0]?.feature_unavailable_reason ?? ''
@@ -834,7 +918,7 @@ export function SettingsModal({
 
   return (
     <div
-      className="st-overlay fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="st-overlay fixed inset-0 below-app-bar z-50 flex items-center justify-center p-4"
       onClick={(e) => e.target === e.currentTarget && requestClose()}
     >
       <div
@@ -938,77 +1022,6 @@ export function SettingsModal({
                 <>
                   <PageHeader title={PAGE_COPY.model.label} description={PAGE_COPY.model.blurb} />
                   <div className="space-y-4">
-                    <SettingsCard
-                      title="Which model to use"
-                      footnote="Each provider needs its own API key saved under Connections."
-                    >
-                      <SettingRow label="Provider" description={MODEL_COPY.provider}>
-                        <Dropdown<AgentSettings['llm']['provider']>
-                          ariaLabel="Provider"
-                          value={draft.llm.provider}
-                          options={providerOptions(modelOptions).map((p) => ({
-                            value: p.id,
-                            label: providerLabel(p.id, modelOptions),
-                          }))}
-                          onChange={(provider) => {
-                            const modelName = modelsForProvider(provider, modelOptions)[0]
-                            const reasoningOptions = reasoningEffortsForProvider(provider, modelName)
-                            updateDraft((current) => ({
-                              ...current,
-                              llm: {
-                                ...current.llm,
-                                provider,
-                                model_name: modelName,
-                                reasoning_effort: reasoningOptions.includes(current.llm.reasoning_effort)
-                                  ? current.llm.reasoning_effort
-                                  : reasoningOptions[0],
-                              },
-                            }))
-                          }}
-                        />
-                      </SettingRow>
-                      <SettingRow label="Model" description={MODEL_COPY.model}>
-                        <Dropdown<string>
-                          ariaLabel="Model"
-                          value={draft.llm.model_name}
-                          options={modelsForProvider(draft.llm.provider, modelOptions).map((m) => ({ value: m, label: m }))}
-                          onChange={(model_name) => updateDraft((current) => {
-                            const reasoningOptions = reasoningEffortsForProvider(current.llm.provider, model_name)
-                            return {
-                              ...current,
-                              llm: {
-                                ...current.llm,
-                                model_name,
-                                reasoning_effort: reasoningOptions.includes(current.llm.reasoning_effort)
-                                  ? current.llm.reasoning_effort
-                                  : reasoningOptions[0],
-                              },
-                            }
-                          })}
-                        />
-                      </SettingRow>
-                      <SettingRow label="Reasoning effort" description={MODEL_COPY.reasoningEffort}>
-                        <Dropdown<AgentSettings['llm']['reasoning_effort']>
-                          ariaLabel="Reasoning effort"
-                          value={draft.llm.reasoning_effort}
-                          options={reasoningEffortsForProvider(draft.llm.provider, draft.llm.model_name).map((e) => ({
-                            value: e,
-                            label: formatReasoningEffort(e),
-                          }))}
-                          onChange={(reasoning_effort) => updateDraft((current) => ({
-                            ...current,
-                            llm: { ...current.llm, reasoning_effort },
-                          }))}
-                        />
-                      </SettingRow>
-                    </SettingsCard>
-
-                    <SettingsCard title="Reading images and screenshots">
-                      <div className="px-4 py-4">
-                        <Note tone="info">{MODEL_COPY.vision}</Note>
-                      </div>
-                    </SettingsCard>
-
                     <SettingsCard
                       title="Voice input"
                       description={MODEL_COPY.speechLocalIntro}
@@ -1125,6 +1138,71 @@ export function SettingsModal({
                 <>
                   <PageHeader title={PAGE_COPY.apiKeys.label} description={PAGE_COPY.apiKeys.blurb} />
                   <div className="space-y-4">
+                    <SettingsCard
+                      title="OpenAI account"
+                      description="Use your ChatGPT account through the Codex SDK. The OpenAI API key connection below remains available."
+                      action={
+                        <Badge tone={openaiAccount?.connected ? 'ok' : 'warn'}>
+                          {openaiAccount?.connected ? `Connected${openaiAccount.plan ? ` · ${openaiAccount.plan}` : ''}` : 'Not connected'}
+                        </Badge>
+                      }
+                    >
+                      <div className="flex flex-wrap items-center gap-3 p-4">
+                        {openaiAccount?.connected ? (
+                          <>
+                            <button type="button" className="st-btn st-btn-secondary" disabled={openaiAccountBusy} onClick={() => void signOutOpenAIAccount()}>
+                              Sign out
+                            </button>
+                            <button type="button" className="st-btn st-btn-ghost" disabled={refreshingOpenAIUsage} onClick={() => void refreshOpenAIUsage()}>
+                              <RotateCcw size={13} className={refreshingOpenAIUsage ? 'animate-spin' : ''} />
+                              Refresh usage
+                            </button>
+                          </>
+                        ) : (
+                          <button type="button" className="st-btn st-btn-primary" disabled={openaiAccountBusy || !!openaiAccountAuthUrl} onClick={() => void signInOpenAIAccount()}>
+                            {openaiAccountBusy ? 'Opening sign-in…' : openaiAccountAuthUrl ? 'Waiting for sign-in…' : 'Sign in with ChatGPT'}
+                          </button>
+                        )}
+                        {openaiAccountAuthUrl && !openaiAccount?.connected && (
+                          <a href={openaiAccountAuthUrl} target="_blank" rel="noopener noreferrer">Open sign-in page</a>
+                        )}
+                        {openaiAccountError && <p role="alert" className="text-sm text-red-600">{openaiAccountError}</p>}
+                      </div>
+                      {openaiAccount?.connected && (
+                        <div className="px-4 pb-4">
+                          {openaiAccount.limits?.length ? (
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              {openaiAccount.limits.map((limit) => {
+                                const remaining = limit.used_percent == null
+                                  ? null
+                                  : Math.max(0, Math.round(100 - limit.used_percent))
+                                return (
+                                  <div className="st-usage-window" key={`${limit.limit_id}-${limit.window}`}>
+                                    <div className="flex items-center justify-between gap-3">
+                                      <span className="st-label">
+                                        {openaiAccount.limits.some((other) => other.limit_id !== limit.limit_id) ? `${limit.limit_name} · ` : ''}
+                                        {accountUsageWindowLabel(limit.window_duration_mins, limit.window)}
+                                      </span>
+                                      <strong className="text-xs font-semibold" style={{ color: 'var(--st-accent-text)' }}>
+                                        {remaining == null ? '—' : `${remaining}% left`}
+                                      </strong>
+                                    </div>
+                                    {remaining != null && (
+                                      <div className="st-usage-track" role="progressbar" aria-label={accountUsageWindowLabel(limit.window_duration_mins, limit.window)} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining}>
+                                        <div className="st-usage-fill" style={{ width: `${remaining}%` }} />
+                                      </div>
+                                    )}
+                                    <p className="st-hint mt-2">{accountResetTime(limit.resets_at)}</p>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <p className="st-hint">{openaiAccount.usage_error || 'Usage limits are not available for this account.'}</p>
+                          )}
+                        </div>
+                      )}
+                    </SettingsCard>
                     <SettingsCard>
                       <div className="p-4">
                         <ConnectionPortalPanel
@@ -1420,6 +1498,48 @@ export function SettingsModal({
                       </Note>
                     )}
 
+                    <SettingsCard title="Control your open Chrome">
+                      <SwitchRow
+                        label="Connect to my Chrome"
+                        description="Let the agent inspect and interact with tabs in your running Chrome through Chrome DevTools."
+                        checked={directChromeEnabled}
+                        onChange={(checked) => updateDraft((current) => {
+                          const template = MCP_SERVER_TEMPLATES.chromeDevToolsAutoConnect.build()
+                          const existingIndex = current.mcp.servers.findIndex((server) => server.name === template.name)
+                          if (!checked) {
+                            return {
+                              ...current,
+                              mcp: {
+                                ...current.mcp,
+                                servers: current.mcp.servers.filter((server) =>
+                                  server.name !== template.name || !server.args.includes('--autoConnect')),
+                              },
+                            }
+                          }
+                          const servers = [...current.mcp.servers]
+                          if (existingIndex >= 0) {
+                            servers[existingIndex] = {
+                              ...servers[existingIndex],
+                              enabled: true,
+                              transport: template.transport,
+                              command: template.command,
+                              args: template.args,
+                              startup_timeout_ms: template.startup_timeout_ms,
+                              call_timeout_ms: template.call_timeout_ms,
+                              description: template.description,
+                            }
+                          } else {
+                            servers.push(template)
+                          }
+                          return { ...current, mcp: { ...current.mcp, enabled: true, servers } }
+                        })}
+                      />
+                      <div className="px-4 pb-4 text-xs text-[var(--st-text-muted)]">
+                        In Chrome 144 or later, open <code>chrome://inspect/#remote-debugging</code>, enable remote
+                        debugging, and approve Chrome’s connection prompt. Save these settings to connect Monaw.
+                      </div>
+                    </SettingsCard>
+
                     <SettingsCard title="Status">
                       <div className="grid grid-cols-3">
                         <StatusCell label="Skill" value={browserSkillEnabled ? 'On' : 'Off'} />
@@ -1490,7 +1610,7 @@ export function SettingsModal({
                           ariaLabel="Connection strategy"
                           value={draft.browser.system_connection_strategy === 'launch' ? 'auto' : draft.browser.system_connection_strategy}
                           options={[
-                            { value: 'auto', label: 'Attach, else launch' },
+                            { value: 'auto', label: 'Attach if available' },
                             { value: 'attach', label: 'Attach only' },
                           ]}
                           onChange={(system_connection_strategy) => updateDraft((current) => ({

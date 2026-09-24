@@ -78,7 +78,30 @@ def _memory_remember(content: str, category: str = "fact") -> str:
     if not current_interactive():
         return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Memory writes require an interactive session."})
     principal = current_execution_principal()
-    memory = get_long_term_memory().remember(
+    store = get_long_term_memory()
+    policy = store.write_policy
+    if policy == "off":
+        return _json({"status": "blocked", "reason_code": "memory_writes_disabled", "error": "Memory writes are turned off in Settings."})
+    if policy != "auto_reviewed":
+        # Text the agent chooses to remember may come from a web page or file it
+        # read; queue it for the user instead of trusting it in future prompts.
+        candidate = store.add_candidate(
+            content,
+            category=category,
+            confidence=1.0,
+            reason="memory_remember tool",
+            source_conversation_id=principal.conversation_id,
+        )
+        if candidate is None:
+            return _json({"status": "error", "error": "Memory was rejected by safety filters."})
+        return _json(
+            {
+                "status": "pending_review",
+                "candidate": candidate,
+                "message": "Saved for the user to review in Settings > Memory; it is not used until approved.",
+            }
+        )
+    memory = store.remember(
         content,
         category=category,
         confidence=1.0,

@@ -106,7 +106,7 @@ export interface ContextUsage {
     label: string
     tokens: number
     percentage: number
-    kind: 'used' | 'reserved' | 'free'
+    kind: 'used' | 'reserved' | 'free' | 'excluded'
     detail: string
     count: number
   }[]
@@ -619,9 +619,9 @@ export interface MemoryEpisode {
 
 export interface AgentSettings {
   llm: {
-    provider: 'openai' | 'gemini'
+    provider: 'openai' | 'gemini' | 'codex'
     model_name: string
-    reasoning_effort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+    reasoning_effort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
     max_iterations_per_turn: number
     max_turn_seconds: number
     max_llm_call_seconds: number

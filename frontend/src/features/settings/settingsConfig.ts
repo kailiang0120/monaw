@@ -3,7 +3,7 @@ import { DEFAULT_AGENT_NAME, resolveAgentName } from '../../lib/identity'
 
 export type ModelOptionsCatalog = ModelOptions
 
-export const OPENAI_MODELS = ['gpt-5.6-luna']
+export const OPENAI_MODELS = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra']
 export const GEMINI_MODELS = [
   'gemini-3.1-pro-preview',
   'gemini-3.1-flash-lite',
@@ -12,7 +12,8 @@ export const GEMINI_MODELS = [
 ]
 export const FALLBACK_MODEL_OPTIONS: ModelOptionsCatalog = {
   providers: [
-    { id: 'openai', label: 'OpenAI', models: OPENAI_MODELS },
+    { id: 'openai', label: 'OpenAI API', models: OPENAI_MODELS },
+    { id: 'codex', label: 'OpenAI account', models: OPENAI_MODELS },
     { id: 'gemini', label: 'Google', models: GEMINI_MODELS },
   ],
 }
@@ -24,6 +25,7 @@ export const OPENAI_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_eff
   'medium',
   'high',
   'xhigh',
+  'max',
 ]
 export const GEMINI_PRO_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_effort']> = [
   'low',
@@ -81,7 +83,12 @@ export function reasoningEffortsForProvider(
     if (modelName.startsWith('gemini-2.5') && modelName.includes('pro')) return GEMINI_25_PRO_REASONING_EFFORTS
     return GEMINI_25_FLASH_REASONING_EFFORTS
   }
-  return OPENAI_REASONING_EFFORTS
+  if (provider === 'codex') return modelName === 'gpt-6-luna'
+    ? OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none')
+    : [...OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none'), 'ultra']
+  return modelName === 'gpt-6-astra'
+    ? OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none')
+    : OPENAI_REASONING_EFFORTS
 }
 
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -284,6 +291,7 @@ export const MCP_SERVER_TEMPLATES = {
       name: 'Chrome-dev-tools',
       command: 'npx',
       args: ['-y', 'chrome-devtools-mcp@latest', '--autoConnect'],
+      startup_timeout_ms: 60000,
       call_timeout_ms: 90000,
       description: 'Attach to a running Chrome 144+ session after remote debugging is enabled in chrome://inspect/#remote-debugging.',
     }),
@@ -455,5 +463,6 @@ export function formatReasoningEffort(effort: AgentSettings['llm']['reasoning_ef
   if (effort === 'minimal') return 'Minimal'
   if (effort === 'xhigh') return 'X-High'
   if (effort === 'max') return 'Max'
+  if (effort === 'ultra') return 'Ultra'
   return effort.charAt(0).toUpperCase() + effort.slice(1)
 }

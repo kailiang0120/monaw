@@ -13,6 +13,7 @@ from app.agent.settings_store import (
     AgentSettings,
     AppRule,
     BrowserUseSettings,
+    LLMSettings,
     MCPServerConfig,
     PathRule,
     _LEGACY_BROWSER_DOWNLOADS_DIR,
@@ -286,7 +287,7 @@ def test_retired_provider_in_stored_settings_migrates_to_openai_default(tmp_path
     loaded = load_agent_settings(settings_path=settings_path)
 
     assert loaded.llm.provider == "openai"
-    assert loaded.llm.model_name == "gpt-5.6-luna"
+    assert loaded.llm.model_name == "gpt-6-luna"
     assert loaded.llm.reasoning_effort == "high"
     assert not hasattr(loaded.llm, "vision_fallback_enabled")
 
@@ -298,7 +299,13 @@ def test_retired_openai_model_in_stored_settings_migrates_to_current_model(tmp_p
         encoding="utf-8",
     )
 
-    assert load_agent_settings(settings_path=settings_path).llm.model_name == "gpt-5.6-luna"
+    assert load_agent_settings(settings_path=settings_path).llm.model_name == "gpt-6-luna"
+
+
+def test_gpt6_astra_normalizes_unsupported_reasoning_effort():
+    assert LLMSettings(model_name="gpt-6-astra", reasoning_effort="none").reasoning_effort == "low"
+    assert LLMSettings(model_name="gpt-6-sol", reasoning_effort="minimal").reasoning_effort == "low"
+    assert LLMSettings(model_name="gpt-6-luna", reasoning_effort="none").reasoning_effort == "none"
 
 
 def test_stored_gemini_selection_survives_migration(tmp_path):
@@ -332,7 +339,7 @@ def test_default_skills_use_recommended_profile():
     settings_data = AgentSettings()
 
     assert settings_data.llm.provider == "openai"
-    assert settings_data.llm.model_name == "gpt-5.6-luna"
+    assert settings_data.llm.model_name == "gpt-6-luna"
     assert settings_data.tools.skills == default_skill_flags()
     assert settings_data.mcp.enabled is True
 

@@ -30,6 +30,13 @@ const APP_THEME_COLORS = {
   dark: '#111b13',
   light: '#f7fbdf',
 }
+// The renderer draws its own app bar; on Windows/Linux the native caption
+// buttons are overlaid on it, so their colors must match the bar surface.
+const APP_BAR_HEIGHT = 44
+const TITLE_BAR_OVERLAY = {
+  dark: { color: '#1a1917', symbolColor: '#b2afa5', height: APP_BAR_HEIGHT },
+  light: { color: '#ecebe3', symbolColor: '#5f5d56', height: APP_BAR_HEIGHT },
+}
 
 let mainWindow = null
 let backendProcess = null
@@ -411,6 +418,9 @@ function applyNativeTheme(theme) {
   nativeTheme.themeSource = safeTheme
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setBackgroundColor(APP_THEME_COLORS[safeTheme])
+    if (process.platform !== 'darwin') {
+      mainWindow.setTitleBarOverlay(TITLE_BAR_OVERLAY[safeTheme])
+    }
   }
 }
 
@@ -425,8 +435,10 @@ function createWindow() {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    frame: process.platform !== 'darwin',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    ...(process.platform === 'darwin'
+      ? { frame: false, trafficLightPosition: { x: 16, y: 15 } }
+      : { titleBarOverlay: TITLE_BAR_OVERLAY.dark }),
     autoHideMenuBar: true,
     backgroundColor: APP_THEME_COLORS.dark,
     ...(appIconPath ? { icon: appIconPath } : {}),

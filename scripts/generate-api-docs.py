@@ -36,7 +36,7 @@ def _route_scope(path: str, methods: set[str]) -> str:
     method = sorted(methods)[0] if methods else "GET"
     if not path.startswith("/api"):
         return "unauthenticated"
-    if path.startswith("/api/settings"):
+    if path.startswith("/api/settings") or path.startswith("/api/openai-account"):
         return "settings:read" if method == "GET" else "settings:write"
     if path.startswith("/api/sandbox"):
         return "settings:read"

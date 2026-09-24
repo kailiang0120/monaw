@@ -113,9 +113,9 @@ class PermissionProfileSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    provider: Literal["openai", "gemini"] = "openai"
+    provider: Literal["openai", "gemini", "codex"] = "openai"
     model_name: str = DEFAULT_OPENAI_CHAT_MODEL
-    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] = "medium"
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] = "medium"
     max_iterations_per_turn: int = Field(40, ge=1, le=500)
     max_turn_seconds: int = Field(1800, ge=30, le=14400)
     max_llm_call_seconds: int = Field(300, ge=30, le=1800)
@@ -124,8 +124,15 @@ class LLMSettings(BaseModel):
     def normalize_provider_models(self) -> "LLMSettings":
         if self.provider == "gemini" and self.model_name not in GEMINI_CHAT_MODELS:
             self.model_name = DEFAULT_GEMINI_CHAT_MODEL
-        if self.provider == "openai" and self.model_name not in OPENAI_CHAT_MODELS:
+        if self.provider in {"openai", "codex"} and self.model_name not in OPENAI_CHAT_MODELS:
             self.model_name = DEFAULT_OPENAI_CHAT_MODEL
+        if self.provider in {"openai", "codex"} and self.model_name.startswith("gpt-6"):
+            if self.reasoning_effort == "minimal" or (self.model_name == "gpt-6-astra" and self.reasoning_effort == "none"):
+                self.reasoning_effort = "low"
+        if self.provider == "codex" and self.reasoning_effort == "none":
+            self.reasoning_effort = "low"
+        if self.reasoning_effort == "ultra" and (self.provider != "codex" or self.model_name == "gpt-6-luna"):
+            self.reasoning_effort = "max"
         return self
 
 
@@ -439,7 +446,7 @@ def _normalize_browser_payload(browser: Any) -> dict[str, Any]:
 
 def build_default_agent_settings(base_settings) -> AgentSettings:
     mode = "default"
-    provider = base_settings.model_provider if base_settings.model_provider in {"openai", "gemini"} else "openai"
+    provider = base_settings.model_provider if base_settings.model_provider in {"openai", "gemini", "codex"} else "openai"
     model_name = str(getattr(base_settings, "model_name", "") or "").strip()
     if provider == "gemini" and model_name not in GEMINI_CHAT_MODELS:
         model_name = DEFAULT_GEMINI_CHAT_MODEL
@@ -449,7 +456,7 @@ def build_default_agent_settings(base_settings) -> AgentSettings:
             model_name=model_name or base_settings.model_name,
             reasoning_effort=(
                 base_settings.reasoning_effort
-                if base_settings.reasoning_effort in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+                if base_settings.reasoning_effort in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
                 else "medium"
             ),
         ),

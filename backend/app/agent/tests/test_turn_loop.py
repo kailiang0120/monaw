@@ -6,10 +6,10 @@ import time
 from pathlib import Path
 from app.agent.iteration_budget import IterationBudget
 from app.agent.tool_registry import ToolRegistry
-from app.agent.turn_loop import TurnLoop, _extract_image_attachments, _repeat_key
+from app.agent.turn_loop import TurnLoop, _conversation_title_from_prompt, _extract_image_attachments, _repeat_key
 from app.agent.run_context import current_conversation_id
 from app.agent.controller_policy import load_policy, update_permitted_roots
-from app.agent.llm_client import LLMResponse, ToolCallRequest
+from app.agent.llm_client import LLMClient, LLMResponse, ToolCallRequest
 
 
 def final_answer_response(answer: str, attachment_paths: list[str] | None = None) -> LLMResponse:
@@ -37,6 +37,12 @@ def png_header(width: int, height: int) -> bytes:
         + height.to_bytes(4, "big")
         + b"\x08\x02\x00\x00\x00"
     )
+
+
+def test_conversation_title_uses_first_line_and_stays_compact() -> None:
+    assert _conversation_title_from_prompt("Summarize the report. Include three key risks.") == "Summarize the report"
+    assert _conversation_title_from_prompt("  Compare   these options\nThen explain the tradeoffs") == "Compare these options"
+    assert _conversation_title_from_prompt("Review the complete quarterly performance and provide detailed recommendations") == "Review the complete quarterly performance and…"
 
 
 class FakeMemory:
@@ -369,7 +375,7 @@ class TextOnlyIgnoresRequiredLLM:
         self.calls += 1
         self.tool_choices.append(tool_choice)
         return LLMResponse(
-            content=f"Still narrating without a tool call {self.calls}.",
+            content=f"Still checking the page without a tool call {self.calls}.",
             tool_calls=[],
             finish_reason="stop",
         )
@@ -380,7 +386,7 @@ class TextThenToolLLM:
         self.calls = 0
         self.seen_messages: list[list[dict]] = []
 
-    async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+    async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None, tool_choice=None):  # noqa: ARG002
         self.calls += 1
         self.seen_messages.append(list(messages))
         if self.calls == 1:
@@ -416,7 +422,7 @@ class ToolThenIntentThenToolLLM:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+    async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None, tool_choice=None):  # noqa: ARG002
         self.calls += 1
         if self.calls == 1:
             return LLMResponse(
@@ -542,7 +548,7 @@ class ToolThenDoneButPendingActionLLM:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+    async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None, tool_choice=None):  # noqa: ARG002
         self.calls += 1
         if self.calls == 1:
             return LLMResponse(
@@ -1295,7 +1301,7 @@ def test_turn_loop_trusts_text_final_when_no_tool_call_is_emitted():
     assert memory.added_messages[-1] == ("assistant", "I'm Monaw, your local AI agent.")
 
 
-def test_turn_loop_still_accepts_final_answer_tool_when_model_emits_it():
+def test_turn_loop_accepts_legacy_final_answer_tool_without_advertising_it():
     registry = ToolRegistry(
         [
             {
@@ -1322,8 +1328,8 @@ def test_turn_loop_still_accepts_final_answer_tool_when_model_emits_it():
 
     events = asyncio.run(collect())
 
-    assert any(tool["name"] == "final_answer" for tool in llm.seen_tools[0])
-    assert "call `final_answer`" in llm.seen_system_prompts[0]
+    assert all(tool["name"] != "final_answer" for tool in llm.seen_tools[0])
+    assert "reply to the user directly" in llm.seen_system_prompts[0]
     assert not any(event["event"] == "tool_start" for event in events)
     assert events[-1]["data"]["summary"] == "Finished via final tool."
     assert events[-1]["data"].get("incomplete") is not True
@@ -1353,7 +1359,7 @@ def test_turn_loop_typewrites_final_answer_tool_response():
     assert memory.persisted_turns[-1]["response_duration_ms"] >= 0
 
 
-def test_turn_loop_reprompts_explicit_completion_text_to_call_final_answer():
+def test_turn_loop_completes_explicit_plain_text_without_reprompting():
     registry = ToolRegistry(
         [
             {
@@ -1380,23 +1386,12 @@ def test_turn_loop_reprompts_explicit_completion_text_to_call_final_answer():
 
     events = asyncio.run(collect())
 
-    assert llm.calls == 2
-    assert any(
-        msg.get("role") == "assistant"
-        and "saved the evidence screenshots" in msg.get("content", "")
-        for msg in llm.seen_messages[1]
-    )
-    assert any(
-        msg.get("role") == "user"
-        and "exact previous assistant message" in msg.get("content", "")
-        and "Do not summarize, shorten, rewrite, translate, add to, or remove anything" in msg.get("content", "")
-        for msg in llm.seen_messages[1]
-    )
+    assert llm.calls == 1
     assert not any(event["event"] == "progress" for event in events)
-    assert events[-1]["data"]["summary"] == "Saved the evidence screenshots."
+    assert events[-1]["data"]["summary"] == "Done — saved the evidence screenshots."
 
 
-def test_turn_loop_uses_pending_plain_final_when_final_answer_is_generic():
+def test_turn_loop_completes_substantial_plain_text_without_generic_rewrite():
     registry = ToolRegistry(
         [
             {
@@ -1424,13 +1419,8 @@ def test_turn_loop_uses_pending_plain_final_when_final_answer_is_generic():
     events = asyncio.run(collect())
     progress_events = [event for event in events if event["event"] == "progress"]
 
-    assert llm.calls == 2
-    assert progress_events[0]["data"]["content"] == llm.summary
-    assert any(
-        msg.get("role") == "user"
-        and "exact previous assistant message" in msg.get("content", "")
-        for msg in llm.seen_messages[1]
-    )
+    assert llm.calls == 1
+    assert progress_events == []
     assert not any(event["event"] == "tool_start" for event in events)
     assert events[-1]["data"]["status"] == "complete"
     assert events[-1]["data"]["summary"] == llm.summary
@@ -1473,7 +1463,7 @@ def test_turn_loop_accepts_json_text_matching_final_answer_schema():
     assert memory.added_messages[-1] == ("assistant", "Finished from JSON text.")
 
 
-def test_turn_loop_continues_text_only_progress_until_iteration_budget():
+def test_turn_loop_pauses_after_repeated_progress_without_tool():
     registry = ToolRegistry(
         [
             {
@@ -1506,20 +1496,18 @@ def test_turn_loop_continues_text_only_progress_until_iteration_budget():
 
     events = asyncio.run(collect())
     done_event = next(event for event in events if event["event"] == "done")
-    error_event = next(event for event in events if event["event"] == "error")
     progress_events = [event for event in events if event["event"] == "progress"]
 
-    assert llm.calls == 3
-    assert llm.tool_choices == [None, None, "required"]
-    assert len(progress_events) == 3
-    assert error_event["data"]["code"] == "iteration_budget_exhausted"
+    assert llm.calls == 2
+    assert llm.tool_choices == [None, "required"]
+    assert len(progress_events) == 2
     assert done_event["data"]["status"] == "paused"
     assert done_event["data"]["incomplete"] is True
-    assert done_event["data"]["reason_code"] == "iteration_budget_exhausted"
+    assert done_event["data"]["reason_code"] == "progress_without_tool"
     assert memory.clear_task_progress_calls == 0
 
 
-def test_turn_loop_forces_tool_choice_after_repeated_text_only_progress():
+def test_turn_loop_forces_tool_choice_after_progress_without_tool():
     registry = ToolRegistry(
         [
             {
@@ -1547,11 +1535,10 @@ def test_turn_loop_forces_tool_choice_after_repeated_text_only_progress():
     events = asyncio.run(collect())
     progress_events = [event for event in events if event["event"] == "progress"]
 
-    assert llm.calls == 3
-    assert llm.tool_choices == [None, None, "required"]
+    assert llm.calls == 2
+    assert llm.tool_choices == [None, "required"]
     assert [event["data"]["content"] for event in progress_events] == [
         "Searching without a tool call 1.",
-        "Searching without a tool call 2.",
     ]
     assert events[-1]["event"] == "done"
     assert events[-1]["data"]["status"] == "complete"
@@ -1559,7 +1546,7 @@ def test_turn_loop_forces_tool_choice_after_repeated_text_only_progress():
     assert memory.clear_task_progress_calls == 1
 
 
-def test_turn_loop_circuit_breaks_repeated_text_only_progress():
+def test_turn_loop_bounds_progress_without_a_tool_call():
     registry = ToolRegistry(
         [
             {
@@ -1594,15 +1581,14 @@ def test_turn_loop_circuit_breaks_repeated_text_only_progress():
     progress_events = [event for event in events if event["event"] == "progress"]
     error_events = [event for event in events if event["event"] == "error"]
 
-    assert llm.calls == 4
-    assert llm.tool_choices == [None, None, "required", "required"]
-    assert len(progress_events) == 4
+    assert llm.calls == 2
+    assert llm.tool_choices == [None, "required"]
+    assert len(progress_events) == 2
     assert error_events == []
     assert events[-1]["event"] == "done"
-    assert events[-1]["data"]["status"] == "complete"
-    assert events[-1]["data"].get("incomplete") is not True
-    assert events[-1]["data"]["summary"] == "Still narrating without a tool call 4."
-    assert memory.clear_task_progress_calls == 1
+    assert events[-1]["data"]["status"] == "paused"
+    assert events[-1]["data"]["reason_code"] == "progress_without_tool"
+    assert memory.clear_task_progress_calls == 0
 
 
 def test_turn_loop_reprompts_once_when_model_returns_intent_text_before_tool_call():
@@ -1644,7 +1630,7 @@ def test_turn_loop_reprompts_once_when_model_returns_intent_text_before_tool_cal
     assert events[-1]["data"]["summary"] == "Done."
 
 
-def test_turn_loop_displays_plain_text_before_final_answer_reprompt():
+def test_turn_loop_greeting_finishes_with_one_model_response():
     registry = ToolRegistry(
         [
             {
@@ -1672,13 +1658,13 @@ def test_turn_loop_displays_plain_text_before_final_answer_reprompt():
     events = asyncio.run(collect())
     progress_events = [event for event in events if event["event"] == "progress"]
 
-    assert llm.calls == 2
-    assert [event["data"]["content"] for event in progress_events] == ["I'm doing well, thanks for asking!"]
+    assert llm.calls == 1
+    assert progress_events == []
     assert not any(event["event"] == "thinking" for event in events)
     token_chunks = [event["data"]["content"] for event in events if event["event"] == "token"]
     assert len(token_chunks) > 1
-    assert "".join(token_chunks) == "I'm ready. What's the task?"
-    assert events[-1]["data"]["summary"] == "I'm ready. What's the task?"
+    assert "".join(token_chunks) == "I'm doing well, thanks for asking!"
+    assert events[-1]["data"]["summary"] == "I'm doing well, thanks for asking!"
 
 
 def test_turn_loop_reprompts_when_model_returns_intent_text_after_tool_call():
@@ -1718,7 +1704,7 @@ def test_turn_loop_reprompts_when_model_returns_intent_text_after_tool_call():
     assert events[-1]["data"].get("incomplete") is not True
 
 
-def test_turn_loop_keeps_reprompting_post_tool_progress_until_iteration_budget():
+def test_turn_loop_bounds_post_tool_progress_without_action():
     registry = ToolRegistry(
         [
             {
@@ -1751,16 +1737,14 @@ def test_turn_loop_keeps_reprompting_post_tool_progress_until_iteration_budget()
 
     events = asyncio.run(collect())
     done_event = next(event for event in events if event["event"] == "done")
-    error_event = next(event for event in events if event["event"] == "error")
     progress_events = [event for event in events if event["event"] == "progress"]
 
-    assert llm.calls == 4
-    assert llm.tool_choices == [None, None, None, "required"]
-    assert len(progress_events) == 3
-    assert error_event["data"]["code"] == "iteration_budget_exhausted"
+    assert llm.calls == 3
+    assert llm.tool_choices == [None, None, "required"]
+    assert len(progress_events) == 2
     assert done_event["data"]["status"] == "paused"
     assert done_event["data"]["incomplete"] is True
-    assert done_event["data"]["reason_code"] == "iteration_budget_exhausted"
+    assert done_event["data"]["reason_code"] == "progress_without_tool"
     assert memory.clear_task_progress_calls == 0
 
 
@@ -1793,15 +1777,15 @@ def test_turn_loop_accepts_explicit_done_text_as_final_after_tools():
     progress_events = [event for event in events if event["event"] == "progress"]
     done_event = next(event for event in events if event["event"] == "done")
 
-    assert llm.calls == 3
+    assert llm.calls == 2
     assert progress_events == []
     assert done_event["data"]["status"] == "complete"
     assert done_event["data"].get("incomplete") is not True
-    assert done_event["data"]["summary"] == "Done."
+    assert done_event["data"]["summary"].startswith("Done — I captured")
     assert memory.clear_task_progress_calls == 1
 
 
-def test_turn_loop_accepts_repeated_explicit_done_text_as_loop_breaker():
+def test_turn_loop_accepts_done_text_immediately_after_tool():
     registry = ToolRegistry(
         [
             {
@@ -1829,7 +1813,7 @@ def test_turn_loop_accepts_repeated_explicit_done_text_as_loop_breaker():
     events = asyncio.run(collect())
     done_event = next(event for event in events if event["event"] == "done")
 
-    assert llm.calls == 3
+    assert llm.calls == 2
     assert done_event["data"]["status"] == "complete"
     assert done_event["data"]["summary"].startswith("Done")
 
@@ -2799,11 +2783,11 @@ def test_turn_loop_browser_tool_timeout_returns_structured_error():
 
 def test_turn_loop_emits_reasoning_content_as_thinking_events():
     registry = ToolRegistry([])
-    memory = FakeMemory()
+    memory = PersistingFakeMemory()
 
     class ReasoningLLM:
         async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
-            assert stream_callback is None
+            assert callable(stream_callback)
             return LLMResponse(
                 content="",
                 tool_calls=[
@@ -2827,6 +2811,37 @@ def test_turn_loop_emits_reasoning_content_as_thinking_events():
     thinking_events = [e for e in events if e["event"] == "thinking"]
     assert thinking_events, "Expected at least one 'thinking' event from reasoning_content"
     assert any(e["data"]["content"] == "reasoning delta" for e in thinking_events)
+    assert memory.persisted_turns[-1]["thinking"] == "reasoning delta"
+
+
+def test_turn_loop_streams_openai_summary_before_answer_tokens():
+    class FakeResponses:
+        async def create(self, **kwargs):
+            assert kwargs["stream"] is True
+
+            async def events():
+                yield {"type": "response.reasoning_summary_text.delta", "delta": "Checking context."}
+                yield {"type": "response.output_text.delta", "delta": "Here is the answer."}
+
+            return events()
+
+    class FakeOpenAIClient:
+        responses = FakeResponses()
+
+    llm = LLMClient(provider="openai", model_name="gpt-6-luna", api_key="test-key")
+    llm._openai_client = FakeOpenAIClient()
+    memory = PersistingFakeMemory()
+    loop_obj = TurnLoop(llm_client=llm, registry=ToolRegistry([]), memory=memory)
+
+    async def collect():
+        return [event async for event in loop_obj.run("hello", "conv-live-summary", system_prompt="")]
+
+    events = asyncio.run(collect())
+    thinking_index = next(index for index, event in enumerate(events) if event["event"] == "thinking")
+    answer_index = next(index for index, event in enumerate(events) if event["event"] == "token")
+    assert thinking_index < answer_index
+    assert events[thinking_index]["data"]["content"] == "Checking context."
+    assert memory.persisted_turns[-1]["thinking"] == "Checking context."
 
 
 def test_turn_loop_heartbeat_emitted_on_idle():

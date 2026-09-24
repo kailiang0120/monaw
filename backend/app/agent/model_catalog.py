@@ -17,7 +17,9 @@ class ProviderModelOptions:
 def _provider_label(provider: str) -> str:
     if provider == "gemini":
         return "Google"
-    return "OpenAI"
+    if provider == "codex":
+        return "OpenAI account"
+    return "OpenAI API"
 
 
 def model_options_payload() -> dict:

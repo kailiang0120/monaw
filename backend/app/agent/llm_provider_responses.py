@@ -183,8 +183,6 @@ def openai_response_text_and_reasoning(response: Any) -> tuple[str, str]:
         elif item_type == "reasoning":
             for summary in list(obj_get(item, "summary", []) or []):
                 reasoning_parts.append(str(obj_get(summary, "text", "") or ""))
-            for content in list(obj_get(item, "content", []) or []):
-                reasoning_parts.append(str(obj_get(content, "text", "") or ""))
 
     if not text_parts:
         output_text = str(obj_get(response, "output_text", "") or "")

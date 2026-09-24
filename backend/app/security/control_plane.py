@@ -52,13 +52,30 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(f"{value}{padding}")
 
 
+_captured_control_secret = ""
+
+
+def capture_control_secret() -> str:
+    """Hold the control secret in memory and drop it from ``os.environ``.
+
+    Every child process (MCP servers, launched apps, the managed browser,
+    helper shells) inherits ``os.environ``. Leaving the secret there would let
+    an agent-reachable program mint control tokens and approve its own tickets.
+    """
+    global _captured_control_secret
+    value = os.environ.pop(CONTROL_SECRET_ENV, "").strip()
+    if value:
+        _captured_control_secret = value
+    return _captured_control_secret
+
+
 def _control_secret() -> str:
-    return os.environ.get(CONTROL_SECRET_ENV, "").strip()
+    return os.environ.get(CONTROL_SECRET_ENV, "").strip() or _captured_control_secret
 
 
 def _required_scope(method: str, path: str) -> str:
     method = method.upper()
-    if path.startswith("/api/settings"):
+    if path.startswith("/api/settings") or path.startswith("/api/openai-account"):
         return "settings:read" if method == "GET" else "settings:write"
     if path.startswith("/api/sandbox"):
         return "settings:read"

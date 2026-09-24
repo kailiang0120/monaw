@@ -478,6 +478,9 @@ def _build_managed_launch_args(
     ]
     if headless:
         args.extend(["--headless=new", "--disable-gpu"])
+    else:
+        # Without a size, Chrome reuses its default or last saved placement.
+        args.append("--start-maximized")
     return args
 
 

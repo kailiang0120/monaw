@@ -170,6 +170,12 @@ def test_openai_reasoning_effort_maps_to_responses_contract():
     assert _openai_reasoning_effort("max") == "high"
     assert _openai_reasoning_effort("unknown") == "medium"
 
+    assert _openai_reasoning_effort("none", "gpt-6-luna") == "none"
+    assert _openai_reasoning_effort("minimal", "gpt-6-sol") == "low"
+    assert _openai_reasoning_effort("none", "gpt-6-astra") == "low"
+    assert _openai_reasoning_effort("xhigh", "gpt-6-astra") == "xhigh"
+    assert _openai_reasoning_effort("max", "gpt-6-luna") == "max"
+
 
 def test_gemini_thinking_effort_maps_to_provider_contract():
     from google.genai import types
@@ -563,6 +569,7 @@ def test_gemini_extracts_usage_metadata(monkeypatch):
 
 def test_openai_responses_stream_separates_reasoning_from_answer(monkeypatch):
     streamed: list[str] = []
+    reasoning_streamed: list[str] = []
 
     async def fake_stream():
         yield SimpleNamespace(type="response.reasoning_summary_text.delta", delta="why")
@@ -580,6 +587,9 @@ def test_openai_responses_stream_separates_reasoning_from_answer(monkeypatch):
     async def stream_callback(text: str):
         streamed.append(text)
 
+    async def reasoning_callback(text: str):
+        reasoning_streamed.append(text)
+
     monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
 
     client = LLMClient(
@@ -589,12 +599,57 @@ def test_openai_responses_stream_separates_reasoning_from_answer(monkeypatch):
         reasoning_effort="medium",
     )
     response = asyncio.run(
-        client._openai_chat([{"role": "user", "content": "hello"}], [], "", stream_callback)
+        client._openai_chat(
+            [{"role": "user", "content": "hello"}], [], "", stream_callback,
+            reasoning_callback=reasoning_callback,
+        )
     )
 
     assert streamed == ["answer"]
+    assert reasoning_streamed == ["why"]
     assert response.content == "answer"
     assert response.reasoning_content == "why"
+
+    reasoning_streamed.clear()
+    response_without_answer_stream = asyncio.run(
+        client._openai_chat(
+            [{"role": "user", "content": "hello"}], [], "", None,
+            reasoning_callback=reasoning_callback,
+        )
+    )
+    assert reasoning_streamed == ["why"]
+    assert response_without_answer_stream.content == "answer"
+
+
+def test_openai_stream_marks_reasoning_only_incomplete_response_as_truncated(monkeypatch):
+    async def fake_stream():
+        yield SimpleNamespace(type="response.reasoning_summary_text.delta", delta="Checking.")
+        yield SimpleNamespace(
+            type="response.incomplete",
+            response=SimpleNamespace(
+                status="incomplete",
+                incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                output=[SimpleNamespace(type="reasoning", summary=[SimpleNamespace(text="Checking.")])],
+            ),
+        )
+
+    class FakeResponses:
+        async def create(self, **_kwargs):
+            return fake_stream()
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **_kwargs):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+    client = LLMClient("openai", "gpt-5.6-luna", "openai-key")
+    response = asyncio.run(client._openai_chat(
+        [{"role": "user", "content": "Hello"}], [], "", None,
+        reasoning_callback=lambda _delta: asyncio.sleep(0),
+    ))
+    assert response.finish_reason == "length"
+    assert response.content == ""
+    assert response.reasoning_content == "Checking."
 
 
 def test_openai_tool_results_round_trip_as_responses_function_call_output():

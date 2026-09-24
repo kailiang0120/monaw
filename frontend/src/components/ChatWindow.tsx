@@ -3,7 +3,8 @@ import { Loader2 } from 'lucide-react'
 import { MessageBubble } from './MessageBubble'
 import type { Message } from '../hooks/useChat'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
-import startMascotImg from '../assets/mascots/start.png'
+import startMascotImg from '../assets/mascots/idle.webp'
+import stillMascotImg from '../assets/Logo.png'
 
 const VIRTUALIZE_MESSAGE_THRESHOLD = 40
 const VIRTUAL_OVERSCAN = 6
@@ -12,7 +13,7 @@ const MIN_ESTIMATED_MESSAGE_HEIGHT_PX = 88
 const MAX_ESTIMATED_MESSAGE_HEIGHT_PX = 760
 
 function estimateMessageHeight(message: Message): number {
-  const contentLength = message.content.length + (message.thinking?.length ?? 0)
+  const contentLength = message.content.length
   const attachmentCount = message.attachments?.length ?? 0
   if (message.role === 'user') {
     return Math.min(
@@ -32,24 +33,15 @@ function estimateMessageHeight(message: Message): number {
   )
 }
 
-function LivePulseDot() {
-  return (
-    <span className="relative flex h-2 w-2 shrink-0 items-center justify-center" aria-hidden>
-      <span className="absolute h-2 w-2 animate-ping rounded-full bg-accent-light/55" />
-      <span className="relative h-1.5 w-1.5 rounded-full bg-accent-light shadow-[0_0_8px_rgba(200,240,154,0.6)]" />
-    </span>
-  )
-}
 interface Props {
   messages: Message[]
   isLoadingHistory?: boolean
   isLoadingOlderHistory?: boolean
   hasMoreHistory?: boolean
-  conversationTitle?: string
+  conversationId?: string | null
   isStreaming?: boolean
   agentName?: string
   onLoadOlderMessages?: () => void
-  onRename?: (title: string) => void
   onPromptSelect?: (prompt: string) => void // kept for API compat
 }
 
@@ -58,32 +50,36 @@ export function ChatWindow({
   isLoadingHistory,
   isLoadingOlderHistory = false,
   hasMoreHistory = false,
-  conversationTitle,
-  isStreaming = false,
+  conversationId,
   agentName = DEFAULT_AGENT_NAME,
   onLoadOlderMessages,
-  onRename,
 }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const titleInputRef = useRef<HTMLInputElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
   const scrollFrameRef = useRef<number | null>(null)
-  const [editingTitle, setEditingTitle] = useState(false)
-  const [titleValue, setTitleValue] = useState('')
+  const followLatestRef = useRef(true)
   const [transcriptViewport, setTranscriptViewport] = useState({
     scrollTop: 0,
     height: VIRTUAL_VIEWPORT_FALLBACK_PX,
   })
   const assistantLabel = resolveAgentName(agentName)
-  const latestAssistant = useMemo(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role === 'assistant') return messages[index]
-    }
-    return undefined
-  }, [messages])
   const latestMessage = messages[messages.length - 1]
   const latestMessageId = latestMessage?.id
-  const latestStreamingContentLength = latestMessage?.streaming ? latestMessage.content.length : 0
+  const latestMessageStartsTurn = latestMessage?.role === 'assistant'
+    && latestMessage.streaming === true
+    && messages[messages.length - 2]?.role === 'user'
+  const followLatest = useCallback(() => {
+    const container = scrollContainerRef.current
+    if (!container || !followLatestRef.current) return
+    container.scrollTop = container.scrollHeight
+  }, [])
+  const scheduleFollowLatest = useCallback(() => {
+    if (scrollFrameRef.current !== null) return
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null
+      followLatest()
+    })
+  }, [followLatest])
   const updateTranscriptViewport = useCallback((container: HTMLDivElement | null) => {
     if (!container) return
     const next = {
@@ -96,6 +92,11 @@ export function ChatWindow({
         : next
     ))
   }, [])
+  const handleTranscriptScroll = useCallback((container: HTMLDivElement) => {
+    const distanceToBottom = container.scrollHeight - container.clientHeight - container.scrollTop
+    followLatestRef.current = distanceToBottom <= 80
+    updateTranscriptViewport(container)
+  }, [updateTranscriptViewport])
 
   useLayoutEffect(() => {
     const container = scrollContainerRef.current
@@ -108,80 +109,54 @@ export function ChatWindow({
   }, [updateTranscriptViewport])
 
   useEffect(() => {
-    if (scrollFrameRef.current !== null) {
-      window.cancelAnimationFrame(scrollFrameRef.current)
-    }
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      bottomRef.current?.scrollIntoView({
-        behavior: latestStreamingContentLength > 0 ? 'auto' : 'smooth',
-        block: 'end',
-      })
-      scrollFrameRef.current = null
-    })
+    if (latestMessageStartsTurn) followLatestRef.current = true
+    scheduleFollowLatest()
+  }, [latestMessageId, latestMessageStartsTurn, scheduleFollowLatest])
+
+  useEffect(() => {
+    followLatestRef.current = true
+    scheduleFollowLatest()
+  }, [conversationId, scheduleFollowLatest])
+
+  useEffect(() => {
+    const content = contentRef.current
+    if (!content || typeof ResizeObserver === 'undefined') return
+    const resizeObserver = new ResizeObserver(scheduleFollowLatest)
+    resizeObserver.observe(content)
+    return () => resizeObserver.disconnect()
+  }, [scheduleFollowLatest])
+
+  useEffect(() => {
     return () => {
       if (scrollFrameRef.current !== null) {
         window.cancelAnimationFrame(scrollFrameRef.current)
         scrollFrameRef.current = null
       }
     }
-  }, [latestMessageId, latestStreamingContentLength])
+  }, [])
 
-  const startTitleEdit = () => {
-    if (!conversationTitle || !onRename) return
-    setTitleValue(conversationTitle)
-    setEditingTitle(true)
-    setTimeout(() => titleInputRef.current?.select(), 0)
-  }
-
-  const commitTitleEdit = () => {
-    const trimmed = titleValue.trim()
-    if (trimmed && onRename) onRename(trimmed)
-    setEditingTitle(false)
-  }
-
-  const cancelTitleEdit = () => setEditingTitle(false)
 
   return (
     <section className="relative flex min-h-0 flex-1 flex-col bg-[#11100f]">
-      <header className="chat-title-fade drag-region pointer-events-none absolute inset-x-0 top-0 z-20 px-5 pb-12 pt-4">
-        <div className="no-drag min-w-0">
-          {editingTitle ? (
-            <input
-              ref={titleInputRef}
-              value={titleValue}
-              onChange={(e) => setTitleValue(e.target.value)}
-              onBlur={commitTitleEdit}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') { e.preventDefault(); commitTitleEdit() }
-                if (e.key === 'Escape') { e.preventDefault(); cancelTitleEdit() }
-              }}
-              className="pointer-events-auto w-full max-w-sm rounded-lg bg-white/[0.06] px-2 py-1 text-base font-semibold tracking-tight text-neutral-100 outline-none ring-1 ring-accent/50"
-            />
-          ) : (
-            <h1
-              className={`pointer-events-auto inline-block max-w-full truncate text-base font-semibold tracking-tight text-neutral-100 ${conversationTitle && onRename ? 'cursor-text hover:text-neutral-200' : ''}`}
-              title={conversationTitle && onRename ? 'Click to rename' : undefined}
-              onClick={startTitleEdit}
-            >
-              {conversationTitle || 'New chat'}
-            </h1>
-          )}
-        </div>
-      </header>
+      {/* The title lives in the app bar; this only fades the transcript under it. */}
+      <div className="chat-title-fade pointer-events-none absolute inset-x-0 top-0 z-20 h-8" aria-hidden="true" />
 
       {isLoadingHistory && messages.length === 0 ? (
-        <div className="flex flex-1 select-none flex-col items-center justify-center gap-3 pt-16 text-neutral-500">
+        <div className="flex flex-1 select-none flex-col items-center justify-center gap-3 text-neutral-500">
           <Loader2 size={24} className="animate-spin text-neutral-500" />
           <p className="text-sm font-medium">Loading conversation</p>
         </div>
       ) : messages.length === 0 ? (
-        <div className="flex flex-1 select-none flex-col items-center justify-center gap-5 px-4 pt-16">
-          <img
-            src={startMascotImg}
-            alt={assistantLabel}
-            className="h-28 w-28 animate-idle-float object-contain drop-shadow-[0_8px_24px_rgba(79,122,43,0.18)]"
-            draggable={false}
-          />
+        <div className="flex flex-1 select-none flex-col items-center justify-center gap-5 px-4">
+          <picture>
+            <source media="(prefers-reduced-motion: reduce)" srcSet={stillMascotImg} />
+            <img
+              src={startMascotImg}
+              alt={assistantLabel}
+              className="h-28 w-28 object-contain drop-shadow-[0_8px_24px_rgba(79,122,43,0.18)]"
+              draggable={false}
+            />
+          </picture>
           <div className="text-center">
             <p className="text-base font-medium tracking-tight text-neutral-400">{assistantLabel}</p>
             <p className="mt-0.5 text-[13px] text-neutral-600">Ready.</p>
@@ -191,10 +166,10 @@ export function ChatWindow({
         <div
           ref={scrollContainerRef}
           aria-label="Chat transcript"
-          onScroll={(event) => updateTranscriptViewport(event.currentTarget)}
-          className={`flex-1 overflow-y-auto px-4 pt-24 ${isStreaming ? 'pb-28' : 'pb-6'}`}
+          onScroll={(event) => handleTranscriptScroll(event.currentTarget)}
+          className="flex-1 overflow-y-auto px-4 pb-6 pt-8"
         >
-          <div className="mx-auto max-w-3xl">
+          <div ref={contentRef} className="mx-auto max-w-3xl">
             {hasMoreHistory && (
               <div className="mb-5 flex justify-center">
                 <button
@@ -210,7 +185,6 @@ export function ChatWindow({
             )}
             <MessageList
               agentName={assistantLabel}
-              bottomRef={bottomRef}
               messages={messages}
               scrollContainerRef={scrollContainerRef}
               viewport={transcriptViewport}
@@ -219,13 +193,6 @@ export function ChatWindow({
         </div>
       )}
 
-      {isStreaming && (
-        <div className="pointer-events-none absolute inset-x-4 bottom-4 z-20">
-          <div className="pointer-events-auto mx-auto max-w-3xl">
-            <LiveRunDock message={latestAssistant} />
-          </div>
-        </div>
-      )}
     </section>
   )
 }
@@ -233,13 +200,11 @@ export function ChatWindow({
 function MessageList({
   messages,
   agentName,
-  bottomRef,
   scrollContainerRef,
   viewport,
 }: {
   messages: Message[]
   agentName: string
-  bottomRef: RefObject<HTMLDivElement>
   scrollContainerRef: RefObject<HTMLDivElement>
   viewport: { scrollTop: number; height: number }
 }) {
@@ -249,7 +214,6 @@ function MessageList({
         {messages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} agentName={agentName} />
         ))}
-        <div ref={bottomRef} />
       </>
     )
   }
@@ -257,7 +221,6 @@ function MessageList({
   return (
     <VirtualizedMessageList
       agentName={agentName}
-      bottomRef={bottomRef}
       messages={messages}
       scrollContainerRef={scrollContainerRef}
       viewport={viewport}
@@ -268,13 +231,11 @@ function MessageList({
 function VirtualizedMessageList({
   messages,
   agentName,
-  bottomRef,
   scrollContainerRef,
   viewport,
 }: {
   messages: Message[]
   agentName: string
-  bottomRef: RefObject<HTMLDivElement>
   scrollContainerRef: RefObject<HTMLDivElement>
   viewport: { scrollTop: number; height: number }
 }) {
@@ -366,7 +327,6 @@ function VirtualizedMessageList({
         />
       ))}
       {layout.bottomPadding > 0 && <div aria-hidden style={{ height: layout.bottomPadding }} />}
-      <div ref={bottomRef} />
     </div>
   )
 }
@@ -414,65 +374,6 @@ function MeasuredMessageRow({
   return (
     <div ref={rowRef} className="flow-root">
       <MessageBubble message={message} agentName={agentName} />
-    </div>
-  )
-}
-
-function LiveRunDock({
-  message,
-}: {
-  message?: Message
-}) {
-  const steps = message?.stepProgress ?? []
-  const activeStep = steps.find((step) => step.status === 'active' || step.status === 'retrying')
-  const completedSteps = steps.filter((step) => step.status === 'done').length
-  const runningTool = [...(message?.toolCalls ?? [])].reverse().find((tool) => tool.pending)
-  const hasAnswer = Boolean(message?.content.trim())
-
-  if (!message || hasAnswer) {
-    return null
-  }
-
-  const primary = runningTool
-    ? 'Running tool'
-    : activeStep?.description
-      ? `Step ${(steps.indexOf(activeStep) + 1)}/${steps.length}`
-      : steps.length
-        ? 'Preparing next step'
-        : 'Planning response'
-
-  const secondary = runningTool
-    ? runningTool.tool
-    : activeStep?.description
-
-  return (
-    <div
-      className="live-surface relative flex items-center gap-2.5 overflow-hidden rounded-full py-1.5 pl-3 pr-2 shadow-[0_12px_36px_-12px_rgba(0,0,0,0.45)] backdrop-blur-md"
-      role="status"
-      aria-live="polite"
-    >
-      <LivePulseDot />
-      <span className="shrink-0 text-[11px] font-medium text-neutral-200">{primary}</span>
-      {secondary && (
-        <>
-          <span className="shrink-0 text-neutral-600" aria-hidden>·</span>
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-accent-light">
-            {secondary}
-          </span>
-        </>
-      )}
-      {!secondary && <span className="min-w-0 flex-1" />}
-      {steps.length > 0 && (
-        <span className="shrink-0 rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 font-mono text-[10px] tabular-nums text-accent-light">
-          {completedSteps}/{steps.length}
-        </span>
-      )}
-      <span
-        className="pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden"
-        aria-hidden
-      >
-        <span className="live-shimmer absolute inset-0 animate-progress-shimmer" />
-      </span>
     </div>
   )
 }

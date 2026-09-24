@@ -811,13 +811,16 @@ class Database:
             return None
         return row["grant_type"]
 
-    def consume_once_grant(self, target_type: str, identifier: str) -> None:
+    def consume_once_grant(self, target_type: str, identifier: str) -> bool:
+        """Claim a one-time grant; only the first caller gets True."""
         with self._lock:
-            self.conn.execute(
-                "UPDATE session_grants SET use_count = use_count + 1 WHERE target_type = ? AND identifier = ? AND grant_type = 'once'",
+            cursor = self.conn.execute(
+                "UPDATE session_grants SET use_count = use_count + 1 "
+                "WHERE target_type = ? AND identifier = ? AND grant_type = 'once' AND use_count = 0",
                 (target_type, identifier),
             )
             self.conn.commit()
+            return cursor.rowcount == 1
 
     def clear_session_grants(self) -> None:
         with self._lock:

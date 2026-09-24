@@ -45,6 +45,7 @@ const electronAPI = Object.freeze({
   selectDirectory: (defaultPath) => ipcRenderer.invoke('dialog:select-directory', optionalString(defaultPath, 'default path')),
   setTheme: (value) => ipcRenderer.invoke('theme:set', theme(value)),
   backendBaseUrl,
+  platform: process.platform,
   isElectron: true,
 })
 

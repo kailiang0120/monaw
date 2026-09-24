@@ -55,6 +55,7 @@ class OpenAICompatibleProviderAdapter:
         system_prompt: str = "",
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
         tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> Any:
         return await self._client._openai_chat(
             messages,
@@ -62,6 +63,28 @@ class OpenAICompatibleProviderAdapter:
             system_prompt,
             stream_callback,
             tool_choice,
+            reasoning_callback,
+        )
+
+
+class CodexAccountProviderAdapter:
+    provider = "codex"
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        system_prompt: str = "",
+        stream_callback: Callable[[str], Awaitable[None]] | None = None,
+        tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
+    ) -> Any:
+        return await self._client._codex_chat(
+            messages, tools, system_prompt, stream_callback, tool_choice,
+            reasoning_callback,
         )
 
 
@@ -71,4 +94,6 @@ def create_llm_provider_adapter(provider: str, client: Any) -> LLMProviderAdapte
         return GeminiProviderAdapter(client)
     if provider_name == "openai":
         return OpenAICompatibleProviderAdapter(client, provider=provider_name)
+    if provider_name == "codex":
+        return CodexAccountProviderAdapter(client)
     raise ValueError(f"Unsupported provider adapter: {provider!r}")

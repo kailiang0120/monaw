@@ -468,3 +468,94 @@ class TestUnifiedSettingsPermissions:
         dec = resolve_permission(ActionType.LAUNCH_APP, target_app="notepad")
         assert dec.requires_confirmation
         assert not dec.requires_access_grant
+
+
+class TestProtectedControlState:
+    @pytest.mark.parametrize("action", [ActionType.MUTATE, ActionType.DELETE, ActionType.EXEC])
+    def test_runtime_control_state_is_not_mutable_even_in_full_access(self, tmp_policy, action):
+        import app.agent.controller_policy as cp
+
+        settings_data = AgentSettings()
+        settings_data.permissions.mode = "full_access"
+        settings_data.permissions.allow_delete = True
+        settings_data.permissions.path_rules = [
+            PathRule(path=str(cp.RUNTIME_DIR), read=True, write=True, delete=True, enabled=True)
+        ]
+        save_agent_settings(settings_data, settings_path=cp._settings_json_path())
+
+        for target in (
+            cp._settings_json_path(),
+            cp._POLICY_DIR / "controller_policy.json",
+            cp.RUNTIME_DIR / "settings.json",
+            cp.RUNTIME_DIR / "approvals" / "tickets.jsonl",
+            cp.RUNTIME_DIR / "agent.db",
+            cp._APP_SKILLS_DIR / "evil" / "tools.py",
+        ):
+            dec = resolve_permission(action, target_path=str(target))
+            assert dec.blocked, target
+            assert dec.reason_code == "protected_control_path"
+
+    def test_runtime_control_state_stays_readable(self, tmp_policy):
+        import app.agent.controller_policy as cp
+
+        dec = resolve_permission(ActionType.READ, target_path=str(cp.RUNTIME_DIR / "exec" / "out.txt"))
+        assert not dec.blocked
+
+    def test_carve_out_configured_above_runtime_does_not_unprotect_it(self, tmp_policy, monkeypatch):
+        import app.agent.controller_policy as cp
+
+        monkeypatch.setattr(cp, "WORKSPACE_DIR", cp.RUNTIME_DIR.parent)
+        settings_data = AgentSettings()
+        settings_data.permissions.mode = "full_access"
+        settings_data.browser.downloads_dir = str(cp.RUNTIME_DIR)
+        save_agent_settings(settings_data, settings_path=cp._settings_json_path())
+
+        dec = resolve_permission(ActionType.MUTATE, target_path=str(cp.RUNTIME_DIR / "settings.json"))
+        assert dec.blocked
+        assert dec.reason_code == "protected_control_path"
+
+    def test_workspace_inside_runtime_remains_writable(self, tmp_policy, monkeypatch):
+        import app.agent.controller_policy as cp
+
+        monkeypatch.setattr(cp, "WORKSPACE_DIR", cp.RUNTIME_DIR / "workspace")
+        settings_data = AgentSettings()
+        settings_data.permissions.mode = "full_access"
+        save_agent_settings(settings_data, settings_path=cp._settings_json_path())
+
+        dec = resolve_permission(ActionType.MUTATE, target_path=str(cp.RUNTIME_DIR / "workspace" / "a.txt"))
+        assert not dec.blocked
+
+
+class TestNonInteractiveProfile:
+    @pytest.fixture
+    def unattended(self, tmp_policy):
+        import app.agent.controller_policy as cp
+        from app.agent import run_context
+
+        settings_data = AgentSettings()
+        settings_data.permissions.mode = "full_access"
+        settings_data.permissions.allow_delete = True
+        save_agent_settings(settings_data, settings_path=cp._settings_json_path())
+        token = run_context.set_current_interactive(False)
+        yield cp
+        run_context.reset_current_interactive(token)
+
+    @pytest.mark.parametrize(
+        "action",
+        [ActionType.EXEC, ActionType.LAUNCH_APP, ActionType.DELETE, ActionType.PROCESS_KILL, ActionType.CLICK, ActionType.TYPE],
+    )
+    def test_unattended_runs_cannot_execute_or_control_desktop_even_in_full_access(self, unattended, action):
+        dec = resolve_permission(action, target_path=str(unattended.WORKSPACE_DIR / "x.txt"))
+        assert dec.blocked
+        assert dec.reason_code == "non_interactive_restricted"
+
+    def test_unattended_writes_are_limited_to_workspace(self, unattended, tmp_path):
+        outside = resolve_permission(ActionType.MUTATE, target_path=str(tmp_path / "report.txt"))
+        inside = resolve_permission(ActionType.MUTATE, target_path=str(unattended.WORKSPACE_DIR / "report.txt"))
+
+        assert outside.reason_code == "non_interactive_restricted"
+        assert not inside.blocked
+
+    def test_unattended_reads_follow_normal_rules(self, unattended, tmp_path):
+        dec = resolve_permission(ActionType.READ, target_path=str(tmp_path / "notes.txt"))
+        assert not dec.blocked

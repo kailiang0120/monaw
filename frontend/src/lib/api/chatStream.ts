@@ -22,7 +22,7 @@ const DEBUG_HEADERS = {
 interface ChatStreamHandlers {
   onToken: (token: string) => void
   onToolStart: (data: { tool: string; input: unknown; call_id?: string }) => void
-  onToolEnd: (data: { output: string; call_id?: string }) => void
+  onToolEnd: (data: { output: string; call_id?: string; status?: string }) => void
   onDone: (data: DoneEvent) => void
   onError: (msg: string, data?: StreamErrorEvent) => void
   onApprovalRequired?: (data: ApprovalEvent) => void
@@ -217,7 +217,7 @@ export function chatStream(
   attachments: UploadedAttachment[],
   onToken: (token: string) => void,
   onToolStart: (data: { tool: string; input: unknown; call_id?: string }) => void,
-  onToolEnd: (data: { output: string; call_id?: string }) => void,
+  onToolEnd: (data: { output: string; call_id?: string; status?: string }) => void,
   onDone: (data: DoneEvent) => void,
   onError: (msg: string, data?: StreamErrorEvent) => void,
   onApprovalRequired?: (data: ApprovalEvent) => void,

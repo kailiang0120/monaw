@@ -9,6 +9,7 @@ from app.api.routes.events import router as events_router
 from app.api.routes.files import router as files_router
 from app.api.routes.memories import router as memories_router
 from app.api.routes.observability import router as observability_router
+from app.api.routes.openai_account import router as openai_account_router
 from app.api.routes.privacy import router as privacy_router
 from app.api.routes.sandbox import router as sandbox_router
 from app.api.routes.settings import router as settings_router
@@ -27,6 +28,7 @@ router.include_router(memories_router)
 router.include_router(approvals_router)
 router.include_router(diagnostics_router)
 router.include_router(observability_router)
+router.include_router(openai_account_router)
 router.include_router(privacy_router)
 router.include_router(sandbox_router)
 router.include_router(files_router)

@@ -29,6 +29,7 @@ from app.agent.controller_policy import (
     canonical,
     get_effective_app_rule,
     is_app_allowed,
+    is_blocked_process_alias,
     is_path_permitted,
     is_screen_fallback_allowed,
     load_policy,
@@ -39,6 +40,7 @@ from app.agent.access_grant_broker import create_grant_ticket
 from app.agent.approval_broker import create_ticket as _create_approval_ticket
 from app.agent.execution_resume import register_executor
 from app.skills.computer_use.screen_geometry import get_window_rect, map_precision_coordinates
+from app.skills.computer_use.screen_redaction import redact_capture
 
 _audit = AuditLogger()
 
@@ -676,6 +678,15 @@ def _uia_open_and_select(folder: str, filename: str) -> str:
         return json.dumps({"status": "error", "error": str(e)})
 
 
+def _uia_window_process_name(window: Any) -> str:
+    try:
+        import psutil
+
+        return str(psutil.Process(int(window.process_id())).name() or "")
+    except Exception:
+        return ""
+
+
 def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypass_gate: bool = False) -> str:
     """Interact with an allowlisted application via UIA."""
     if not _bypass_gate:
@@ -761,6 +772,29 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
 
         target = matches[0]
         matched_window = _window_meta(target)
+        # The gate checked the alias, but the window was matched by a
+        # caller-controlled title substring; verify the real owning process.
+        target_process = _uia_window_process_name(target)
+        matched_window["process_name"] = target_process
+        if target_process and is_blocked_process_alias(target_process):
+            return json.dumps({
+                "status": "blocked",
+                "reason": f"Window '{matched_window['title']}' belongs to blocked process '{target_process}'.",
+                "reason_code": "blocked_process",
+                "policy_source": "settings.json",
+                "matched_window": matched_window,
+            })
+        if (
+            action in {"type_element", "set_value", "type_text"}
+            and target_process.lower() in _SHELL_INPUT_PROCESSES
+        ):
+            return json.dumps({
+                "status": "blocked",
+                "reason": f"Text entry into the Windows shell ('{target_process}') can launch programs.",
+                "reason_code": "keyboard_target_blocked",
+                "policy_source": "settings.json",
+                "matched_window": matched_window,
+            })
 
         def _matched_elements() -> tuple[list[Any], int]:
             element_name = str(params.get("element", params.get("name", ""))).strip()
@@ -1301,6 +1335,9 @@ def _screen_type(
                 },
                 ensure_ascii=False,
             )
+        target_error = _keyboard_target_error()
+        if target_error:
+            return _keyboard_blocked_result(target_error)
 
         type_meta = _type_text_via_keyboard(text)
         if type_meta.get("status") == "error" and type_meta.get("reason_code") == "unsupported_keyboard_character":
@@ -1437,6 +1474,79 @@ def _foreground_window_context() -> dict[str, Any]:
         }
     except Exception:
         return {}
+
+
+# Keyboard input to the Windows shell is a command line: the Explorer address
+# bar, Run dialog, and Start/Search boxes launch whatever is typed, bypassing
+# the exec gate and the blocked-process list. Clicks there remain allowed.
+_SHELL_INPUT_PROCESSES = frozenset({
+    "explorer.exe",
+    "searchhost.exe",
+    "searchapp.exe",
+    "searchui.exe",
+    "startmenuexperiencehost.exe",
+    "shellexperiencehost.exe",
+})
+# Chords handled by the shell itself rather than the focused window.
+_SHELL_HOTKEY_MODIFIERS = frozenset({"win", "windows", "lwin", "rwin"})
+_FILE_DIALOG_CHILD_CLASSES = frozenset({"DUIViewWndClassName", "SHELLDLL_DefView", "DirectUIHWND"})
+
+
+def _shell_hotkey_error(keys: str) -> str | None:
+    parts = {part.strip().lower() for part in str(keys or "").split("+") if part.strip()}
+    if parts & _SHELL_HOTKEY_MODIFIERS:
+        return "Windows-key shortcuts are handled by the shell (Run, Start, admin menu) and are not allowed."
+    if {"ctrl", "esc"} <= parts or {"control", "esc"} <= parts or {"ctrl", "escape"} <= parts:
+        return "Ctrl+Esc opens the Start menu and is not allowed."
+    return None
+
+
+def _is_shell_file_dialog(win32gui, hwnd: int) -> bool:
+    """Detect common Open/Save dialogs, where a typed path bypasses path policy."""
+    try:
+        if win32gui.GetClassName(hwnd) != "#32770":
+            return False
+        child_classes: set[str] = set()
+
+        def _collect(child, _):
+            try:
+                child_classes.add(str(win32gui.GetClassName(child) or ""))
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumChildWindows(hwnd, _collect, None)
+        return bool(child_classes & _FILE_DIALOG_CHILD_CLASSES)
+    except Exception:
+        return False
+
+
+def _keyboard_target_error() -> str | None:
+    """Re-check the window that will actually receive keystrokes, right before sending."""
+    try:
+        import win32gui
+    except ImportError:
+        return None
+    context = _foreground_window_context()
+    process_name = str(context.get("target_process_name") or "").lower()
+    if process_name and is_blocked_process_alias(process_name):
+        return f"Keyboard input to blocked process '{process_name}' is not allowed."
+    if process_name in _SHELL_INPUT_PROCESSES:
+        return (
+            f"Keyboard input to the Windows shell ('{process_name}') can launch programs and is not allowed; "
+            "use the filesystem or launch tools instead."
+        )
+    hwnd = int(context.get("target_hwnd") or 0)
+    if hwnd and _is_shell_file_dialog(win32gui, hwnd):
+        return "Typing into a file Open/Save dialog bypasses path permissions and is not allowed."
+    return None
+
+
+def _keyboard_blocked_result(error: str, **extra: Any) -> str:
+    return json.dumps(
+        {"status": "blocked", "reason_code": "keyboard_target_blocked", "error": error, **extra},
+        ensure_ascii=False,
+    )
 
 
 def _focus_target_window(
@@ -1580,7 +1690,10 @@ def _ctrl_hotkey(
     target_process_name: str = "",
     _bypass_gate: bool = False,
 ) -> str:
-    """Send a keyboard shortcut. keys is '+' separated, e.g. 'ctrl+c', 'alt+f4', 'win+e'."""
+    """Send a keyboard shortcut. keys is '+' separated, e.g. 'ctrl+c', 'alt+f4'."""
+    shell_error = _shell_hotkey_error(keys)
+    if shell_error:
+        return _keyboard_blocked_result(shell_error, keys=keys)
     if not _bypass_gate:
         payload_args = {"keys": keys}
         payload_args.update(_foreground_window_context())
@@ -1621,6 +1734,9 @@ def _ctrl_hotkey(
                 },
                 ensure_ascii=False,
             )
+        target_error = _keyboard_target_error()
+        if target_error:
+            return _keyboard_blocked_result(target_error, keys=keys)
 
         parts = [p.strip() for p in keys.split("+") if p.strip()]
         if not parts:
@@ -1877,6 +1993,37 @@ def _ctrl_double_click(x: int, y: int, button: str = "left", *, _bypass_gate: bo
         return json.dumps({"status": "error", "error": str(e)})
 
 
+_SENSITIVE_CLIPBOARD_FORMATS = ("ExcludeClipboardContentFromMonitorProcessing", "Clipboard Viewer Ignore")
+
+
+def _sensitive_clipboard_reason(win32clipboard) -> str:
+    """Refuse clipboard content that password managers or blocked apps put there.
+
+    Password managers mark secrets with these registered formats so clipboard
+    monitors skip them; the clipboard owner catches blocked apps that do not.
+    Caller must have the clipboard open.
+    """
+    for format_name in _SENSITIVE_CLIPBOARD_FORMATS:
+        try:
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.RegisterClipboardFormat(format_name)):
+                return "Clipboard content is marked sensitive by the app that copied it."
+        except Exception:
+            continue
+    try:
+        import psutil
+        import win32process
+
+        owner = win32clipboard.GetClipboardOwner()
+        if owner:
+            _, pid = win32process.GetWindowThreadProcessId(owner)
+            owner_process = psutil.Process(pid).name() if pid else ""
+            if owner_process and is_blocked_process_alias(owner_process):
+                return f"Clipboard content was copied from blocked process '{owner_process}'."
+    except Exception:
+        pass
+    return ""
+
+
 def _ctrl_clipboard(action: str = "read", text: str = "", *, _bypass_gate: bool = False) -> str:
     """Read or write the system clipboard. action: read|write|clear."""
     if action == "read":
@@ -1902,6 +2049,13 @@ def _ctrl_clipboard(action: str = "read", text: str = "", *, _bypass_gate: bool 
         if action == "read":
             win32clipboard.OpenClipboard()
             try:
+                sensitive_reason = _sensitive_clipboard_reason(win32clipboard)
+                if sensitive_reason:
+                    return json.dumps({
+                        "status": "blocked",
+                        "reason_code": "sensitive_clipboard_restricted",
+                        "error": sensitive_reason,
+                    })
                 if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
                     data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
                 elif win32clipboard.IsClipboardFormatAvailable(win32con.CF_TEXT):
@@ -2057,8 +2211,8 @@ def _ctrl_list_processes(filter_name: str = "") -> str:
         return json.dumps({"status": "error", "error": str(e)})
 
 
-def _ctrl_screenshot_region(x: int, y: int, width: int, height: int) -> str:
-    """Capture a specific region of the screen."""
+def _ctrl_screenshot_region(x: int, y: int, width: int, height: int, *, _above_hwnd: int = 0) -> str:
+    """Capture a specific region of the screen, with blocked windows blacked out."""
     dec = _gate(ActionType.READ)
     if dec.blocked:
         return _blocked_result(dec)
@@ -2077,6 +2231,12 @@ def _ctrl_screenshot_region(x: int, y: int, width: int, height: int) -> str:
         with mss.mss() as sct:
             img = sct.grab(monitor)
             mss.tools.to_png(img.rgb, img.size, output=str(filepath))
+        try:
+            redacted = redact_capture(filepath, origin_x=x, origin_y=y, above_hwnd=_above_hwnd)
+        except Exception as exc:
+            # Never hand back a capture that may still show a blocked window.
+            filepath.unlink(missing_ok=True)
+            return json.dumps({"status": "error", "error": f"Could not redact screenshot: {exc}"})
 
         size_kb = round(filepath.stat().st_size / 1024, 1)
         _audit.log("controller.screenshot_region", data={"region": monitor, "path": str(filepath)})
@@ -2085,6 +2245,7 @@ def _ctrl_screenshot_region(x: int, y: int, width: int, height: int) -> str:
             "path": str(filepath),
             "region": {"x": x, "y": y, "width": width, "height": height},
             "size_kb": size_kb,
+            "redacted_windows": redacted,
         })
 
     except ImportError:
@@ -2125,6 +2286,7 @@ def _ctrl_screenshot_window(title: str = "", hwnd: int = 0) -> str:
         int(rect.get("y", 0)),
         width,
         height,
+        _above_hwnd=int(window.get("hwnd") or window.get("handle") or 0),
     )
     try:
         payload = json.loads(raw)

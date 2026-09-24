@@ -25,7 +25,25 @@ TELEGRAM_SAFE_CHUNK_SIZE = 3800
 TELEGRAM_RATE_LIMIT_WINDOW_SECONDS = 60.0
 TELEGRAM_CHAT_RATE_LIMIT = 12
 TELEGRAM_USER_RATE_LIMIT = 8
-REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _efforts_for_model(provider: str, model_name: str) -> tuple[str, ...]:
+    if provider == "codex" and model_name.startswith("gpt-6"):
+        return ("low", "medium", "high", "xhigh", "max") if model_name == "gpt-6-luna" else ("low", "medium", "high", "xhigh", "max", "ultra")
+    if provider == "openai" and model_name.startswith("gpt-6"):
+        efforts = ("none", "low", "medium", "high", "xhigh", "max")
+        return efforts[1:] if model_name == "gpt-6-astra" else efforts
+    return REASONING_EFFORTS
+
+
+def _effort_for_model(effort: str, provider: str, model_name: str) -> str:
+    options = _efforts_for_model(provider, model_name)
+    if effort in options:
+        return effort
+    if effort in {"minimal", "none"} and "low" in options:
+        return "low"
+    return "medium"
 
 EventCallback = Callable[[dict], Awaitable[None] | None]
 AgentRunner = Callable[..., AsyncIterator[dict]]
@@ -398,10 +416,11 @@ class TelegramAgentBridge:
     ) -> TelegramEffortSummary:
         conversation_id = self.current_session(chat_id, thread_id)
         stored = self.session_store.get_effort_selection(conversation_id)
+        model = self.current_model_summary(chat_id, thread_id)
         if stored in REASONING_EFFORTS:
-            return TelegramEffortSummary(effort=stored, is_current=True, is_override=True)
+            return TelegramEffortSummary(effort=_effort_for_model(stored, model.provider, model.model_name), is_current=True, is_override=True)
         return TelegramEffortSummary(
-            effort=self._base_reasoning_effort(),
+            effort=_effort_for_model(self._base_reasoning_effort(), model.provider, model.model_name),
             is_current=True,
             is_override=False,
         )
@@ -412,6 +431,7 @@ class TelegramAgentBridge:
         thread_id: int | str | None = None,
     ) -> list[TelegramEffortSummary]:
         current = self.current_effort_summary(chat_id, thread_id)
+        model = self.current_model_summary(chat_id, thread_id)
         return [
             TelegramEffortSummary(
                 effort=effort,
@@ -419,7 +439,7 @@ class TelegramAgentBridge:
                 is_current=effort == current.effort,
                 is_override=effort == current.effort and current.is_override,
             )
-            for index, effort in enumerate(REASONING_EFFORTS, start=1)
+            for index, effort in enumerate(_efforts_for_model(model.provider, model.model_name), start=1)
         ]
 
     def set_effort_selection(
@@ -432,16 +452,18 @@ class TelegramAgentBridge:
         if not value:
             return None, "Send /effort to list options, then /effort 4 or /effort medium."
 
+        model = self.current_model_summary(chat_id, thread_id)
+        options = _efforts_for_model(model.provider, model.model_name)
         selected = ""
         if value.isdigit():
             number = int(value)
-            if number < 1 or number > len(REASONING_EFFORTS):
+            if number < 1 or number > len(options):
                 return None, f"No effort found for number {number}. Send /effort to see the current list."
-            selected = REASONING_EFFORTS[number - 1]
+            selected = options[number - 1]
         else:
-            matches = [effort for effort in REASONING_EFFORTS if effort == value]
+            matches = [effort for effort in options if effort == value]
             if not matches:
-                matches = [effort for effort in REASONING_EFFORTS if value in effort]
+                matches = [effort for effort in options if value in effort]
             if len(matches) == 1:
                 selected = matches[0]
             elif len(matches) > 1:
@@ -453,7 +475,7 @@ class TelegramAgentBridge:
         self.session_store.set_effort_selection(conversation_id, selected)
         return TelegramEffortSummary(
             effort=selected,
-            index=REASONING_EFFORTS.index(selected) + 1,
+            index=options.index(selected) + 1,
             is_current=True,
             is_override=True,
         ), ""
@@ -465,8 +487,9 @@ class TelegramAgentBridge:
     ) -> TelegramEffortSummary:
         conversation_id = self.current_session(chat_id, thread_id)
         self.session_store.clear_effort_selection(conversation_id)
+        model = self.current_model_summary(chat_id, thread_id)
         return TelegramEffortSummary(
-            effort=self._base_reasoning_effort(),
+            effort=_effort_for_model(self._base_reasoning_effort(), model.provider, model.model_name),
             is_current=True,
             is_override=False,
         )
@@ -503,15 +526,22 @@ class TelegramAgentBridge:
             except Exception:
                 pass
         llm_settings = getattr(runtime_settings, "llm", None)
-        if stored_effort in REASONING_EFFORTS:
+        model_provider = str(getattr(runtime_settings, "model_provider", "openai"))
+        model_name = str(getattr(runtime_settings, "model_name", DEFAULT_OPENAI_CHAT_MODEL))
+        effective_effort = _effort_for_model(
+            stored_effort if stored_effort in REASONING_EFFORTS else str(getattr(runtime_settings, "reasoning_effort", "medium")),
+            model_provider,
+            model_name,
+        )
+        if stored_effort in REASONING_EFFORTS or effective_effort != getattr(runtime_settings, "reasoning_effort", "medium"):
             try:
-                setattr(runtime_settings, "reasoning_effort", stored_effort)
+                setattr(runtime_settings, "reasoning_effort", effective_effort)
             except Exception:
                 pass
             if llm_settings is not None:
                 try:
                     llm_copy = copy.deepcopy(llm_settings)
-                    setattr(llm_copy, "reasoning_effort", stored_effort)
+                    setattr(llm_copy, "reasoning_effort", effective_effort)
                     setattr(runtime_settings, "llm", llm_copy)
                 except Exception:
                     pass

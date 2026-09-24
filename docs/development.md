@@ -7,7 +7,7 @@ This document is for contributors and maintainers. The root README is for end us
 - Frontend: Electron, React, Vite, TypeScript, Tailwind CSS.
 - Backend: FastAPI, Uvicorn, Pydantic.
 - Python environment and dependencies: `uv`, `pyproject.toml`, and `uv.lock`.
-- LLM providers: OpenAI SDK, Google GenAI SDK.
+- LLM providers: OpenAI SDK with API key, Codex SDK with ChatGPT account sign-in, and Google GenAI SDK.
 - Storage: SQLite plus local markdown memory files.
 - Automation: `browser-use`, MCP, and Windows desktop automation packages.
 
@@ -216,7 +216,7 @@ Default backend settings:
 
 ```text
 provider: openai
-model: gpt-5.6-luna
+model: gpt-6-luna
 reasoning_effort: medium
 ```
 
@@ -226,7 +226,7 @@ natively. There is no separate vision model.
 Current curated chat model groups:
 
 ```text
-OpenAI:   gpt-5.6-luna
+OpenAI API or account: gpt-6-luna, gpt-6-sol, gpt-6-astra
 Google:   gemini-3.1-pro-preview, gemini-3.1-flash-lite, gemini-3.1-flash-lite-preview, gemini-3-flash-preview
 ```
 
@@ -249,7 +249,7 @@ Each section is editable through the Settings UI and memory API. The legacy `sty
 
 Browser settings and diagnostics live in Settings -> Browser.
 
-For Chrome DevTools MCP workflows, use one of the MCP templates in Settings -> MCP, or start Chrome manually with remote debugging.
+For direct control of the user's running Chrome, use **Connect to my Chrome** in Settings -> Browser. Chrome 144 or later must have remote debugging enabled at `chrome://inspect/#remote-debugging`, and the user must approve Chrome's connection prompt. The MCP templates in Settings -> MCP also support manual setup.
 
 ## MCP
 

@@ -1,7 +1,7 @@
 # Monaw
 
 <p align="center">
-  <img src="docs/assets/monaw-agent-hero-v2.png" alt="Monaw Agent desktop workspace" width="100%" />
+  <img src="docs/assets/monaw-agent-hero-v3.png" alt="Monaw Agent desktop workspace with the refreshed mascot" width="100%" />
 </p>
 
 **Monaw Agent is a local-first Windows desktop AI agent for people who want an assistant that can work inside their machine, not just answer questions.**
@@ -16,7 +16,7 @@ Monaw currently targets Windows. macOS has not been tested yet.
 
 - **Desktop-first workflow.** Work with files, browser pages, local commands, app windows, and scheduled follow-ups from one agent UI.
 - **Local control.** Runtime data, memory files, logs, browser artifacts, and the default workspace stay under your local Monaw folder.
-- **Bring your own models.** Use OpenAI or Google Gemini through your own API keys.
+- **Choose your model connection.** Sign in with a ChatGPT account through the Codex SDK, or use OpenAI or Google Gemini through your own API keys.
 - **Context discipline.** Memory, context tracking, and compression help keep useful knowledge available without blindly stuffing every conversation.
 - **Tool permissions.** Choose sandbox, approval, and access settings before the agent performs higher-impact actions.
 - **Windows-friendly setup.** The one-click setup prepares Python, Node, backend packages, and frontend packages for normal Windows users.
@@ -30,7 +30,7 @@ Monaw currently targets Windows. macOS has not been tested yet.
       <br />
       <strong>Chat With Your Preferred Models</strong>
       <br />
-      Use OpenAI or Google Gemini through your own API keys, while keeping conversations in one local desktop workspace.
+      Sign in with a ChatGPT account or use OpenAI or Google Gemini API keys, while keeping conversations in one local desktop workspace.
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/desktop-automation.png" alt="Monaw mascot automating browser files and local commands" width="100%" />
@@ -148,11 +148,11 @@ Start Monaw:
 
 Open Settings in Monaw Agent and configure only the services you use:
 
-- OpenAI API key. Recommended.
+- OpenAI account sign-in or an OpenAI API key. In Settings > Connections, choose **Sign in with ChatGPT** for the account route. The API key route remains available separately.
 - Google API key, if using Gemini.
 - Tavily API key, if using web search tools.
 - Telegram bot token and allowlist, if using Telegram.
-- Model provider, model, and reasoning effort.
+- Model provider, model, and reasoning effort in the chat composer.
 - Permission profile and access grants.
 - Sandbox mode.
 - Browser automation mode.

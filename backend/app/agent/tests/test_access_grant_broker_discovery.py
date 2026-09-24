@@ -119,3 +119,70 @@ def test_register_pending_resume_handles_decision_signaled_before_waiter():
         cleanup_resume("grant-race")
 
     asyncio.run(scenario())
+
+
+def _run_in_scope(conversation_id: str, fn):
+    from app.agent.run_context import (
+        reset_current_control_session_id,
+        set_current_control_session_id,
+    )
+
+    session_token = set_current_control_session_id("session-a")
+    conversation_token = set_current_conversation_id(conversation_id)
+    try:
+        return fn()
+    finally:
+        reset_current_conversation_id(conversation_token)
+        reset_current_control_session_id(session_token)
+
+
+@pytest.fixture
+def grant_db(tmp_path, monkeypatch):
+    from app.agent import access_grant_broker
+    from app.agent.database import Database
+
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    monkeypatch.setattr(access_grant_broker, "get_db", lambda: db)
+    return db
+
+
+def test_session_grant_is_scoped_to_the_requesting_run_not_the_resolver(grant_db):
+    from app.agent.access_grant_broker import check_session_grant
+
+    ticket = _run_in_scope(
+        "conv-1",
+        lambda: create_grant_ticket(target_type="path", target_identifier=r"C:\data\a.txt", requested_access="read"),
+    )
+    # The HTTP resolve handler runs with a default (empty) run context.
+    resolve_grant(ticket.id, "session", expected_session_id="session-a")
+
+    assert _run_in_scope("conv-1", lambda: check_session_grant("path", r"C:\data\a.txt", "read"))
+    assert not _run_in_scope("conv-2", lambda: check_session_grant("path", r"C:\data\a.txt", "read"))
+    assert not check_session_grant("path", r"C:\data\a.txt", "read")
+
+
+def test_read_grant_does_not_authorize_write_or_delete(grant_db):
+    from app.agent.access_grant_broker import check_session_grant
+
+    ticket = _run_in_scope(
+        "conv-1",
+        lambda: create_grant_ticket(target_type="path", target_identifier=r"C:\data\a.txt", requested_access="read"),
+    )
+    resolve_grant(ticket.id, "session", expected_session_id="session-a")
+
+    assert not _run_in_scope("conv-1", lambda: check_session_grant("path", r"C:\data\a.txt", "write"))
+    assert not _run_in_scope("conv-1", lambda: check_session_grant("path", r"C:\data\a.txt", "delete"))
+
+
+def test_once_grant_can_only_be_consumed_once(grant_db):
+    from app.agent.access_grant_broker import check_session_grant
+
+    ticket = _run_in_scope(
+        "conv-1",
+        lambda: create_grant_ticket(target_type="path", target_identifier=r"C:\data\a.txt", requested_access="write"),
+    )
+    resolve_grant(ticket.id, "once", expected_session_id="session-a")
+
+    assert _run_in_scope("conv-1", lambda: check_session_grant("path", r"C:\data\a.txt", "read"))
+    assert not _run_in_scope("conv-1", lambda: check_session_grant("path", r"C:\data\a.txt", "write"))

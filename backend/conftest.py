@@ -15,6 +15,7 @@ TEST_GROUPS = {
     },
     "runtime": {
         "test_architecture_boundaries.py",
+        "test_codex_account_provider.py",
         "test_execution_gate.py",
         "test_execution_resume.py",
         "test_iteration_budget.py",
@@ -55,6 +56,7 @@ TEST_GROUPS = {
         "test_mcp_bridge.py",
         "test_skill_creator_hardening.py",
         "test_windows_controller.py",
+        "test_screen_redaction.py",
     },
     "memory": {
         "test_long_term_memory.py",

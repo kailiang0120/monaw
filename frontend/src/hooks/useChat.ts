@@ -127,6 +127,9 @@ export function useChat(conversationId: string | null) {
   const typewriterCleanupRef = useRef<(() => void) | null>(null)
   const conversationIdRef = useRef<string | null>(conversationId)
   const historyCursorRef = useRef<number | null>(null)
+  const skipCompletedTurnReloadRef = useRef<string | null>(null)
+  const preserveUnboundTurnRef = useRef(false)
+  const displayedConversationIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     conversationIdRef.current = conversationId
@@ -135,7 +138,7 @@ export function useChat(conversationId: string | null) {
   // Load saved messages when conversationId changes
   useEffect(() => {
     if (!conversationId) {
-      if (!isStreaming) setMessages([])
+      if (!isStreaming && !preserveUnboundTurnRef.current) setMessages([])
       setHasMoreHistory(false)
       setIsLoadingOlderHistory(false)
       historyCursorRef.current = null
@@ -145,11 +148,18 @@ export function useChat(conversationId: string | null) {
       setIsLoadingHistory(false)
       return
     }
+    if (skipCompletedTurnReloadRef.current === conversationId) {
+      skipCompletedTurnReloadRef.current = null
+      preserveUnboundTurnRef.current = false
+      displayedConversationIdRef.current = conversationId
+      setIsLoadingHistory(false)
+      return
+    }
 
     let cancelled = false
     const controller = new AbortController()
     const timeoutId = window.setTimeout(() => controller.abort(), HISTORY_LOAD_TIMEOUT_MS)
-    setMessages([])
+    if (displayedConversationIdRef.current !== conversationId) setMessages([])
     setHasMoreHistory(false)
     setIsLoadingOlderHistory(false)
     historyCursorRef.current = null
@@ -159,6 +169,7 @@ export function useChat(conversationId: string | null) {
       .then((res) => {
         if (cancelled) return
         const loaded = res.messages.map(savedMessageToMessage)
+        displayedConversationIdRef.current = conversationId
         const nextCursor = Number(res.next_before_id)
         historyCursorRef.current = Number.isFinite(nextCursor) ? nextCursor : null
         setMessages(loaded)
@@ -231,6 +242,7 @@ export function useChat(conversationId: string | null) {
       }
 
       const assistantId = crypto.randomUUID()
+      preserveUnboundTurnRef.current = conversationId === null
       const requestStartedAt = performance.now()
       const requestStartedAtMs = Date.now()
       const assistantMsg: Message = {
@@ -251,7 +263,6 @@ export function useChat(conversationId: string | null) {
       const typewriter = {
         queue: '',
         timer: null as ReturnType<typeof setTimeout> | null,
-        done: null as StreamDonePayload | null,
         stopped: false,
       }
 
@@ -269,7 +280,6 @@ export function useChat(conversationId: string | null) {
         // so a stream that ends via error/timeout/stop doesn't drop the partial answer.
         const pending = typewriter.queue
         typewriter.queue = ''
-        typewriter.done = null
         if (pending) appendAssistantContent(pending)
         if (typewriterCleanupRef.current === cleanupTypewriter) {
           typewriterCleanupRef.current = null
@@ -301,6 +311,7 @@ export function useChat(conversationId: string | null) {
           typewriterCleanupRef.current = null
         }
         clearTypewriterTimer()
+        skipCompletedTurnReloadRef.current = done.conversation_id ?? conversationId
         setIsStreaming(false)
         setMessages((prev) =>
           prev.map((m) =>
@@ -323,17 +334,11 @@ export function useChat(conversationId: string | null) {
         }
       }
 
-      const maybeFinalizeDone = () => {
-        if (!typewriter.done || typewriter.queue || typewriter.timer) return
-        finalizeDone(typewriter.done)
-      }
-
       const flushTypewriter = () => {
         if (typewriter.stopped) return
         const pending = typewriter.queue
         if (!pending) {
           typewriter.timer = null
-          maybeFinalizeDone()
           return
         }
         const chunkSize = Math.min(
@@ -349,7 +354,6 @@ export function useChat(conversationId: string | null) {
           return
         }
         typewriter.timer = null
-        maybeFinalizeDone()
       }
 
       const enqueueToken = (token: string) => {
@@ -362,19 +366,13 @@ export function useChat(conversationId: string | null) {
         }
       }
 
-      const startTypewriter = () => {
-        if (typewriter.stopped || typewriter.timer) return
-        // Kick a flush so a queue already fully drained before `done` arrived
-        // still triggers finalize via maybeFinalizeDone.
-        typewriter.timer = setTimeout(flushTypewriter, 0)
-      }
-
       // Idle timeout: auto-stop if no SSE activity for IDLE_TIMEOUT_MS
       const resetIdleTimer = () => {
         if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
         idleTimerRef.current = setTimeout(() => {
           cleanupTypewriter()
           abortRef.current?.()
+          skipCompletedTurnReloadRef.current = conversationId
           setIsStreaming(false)
           setMessages((prev) =>
             prev.map((m) =>
@@ -538,6 +536,7 @@ export function useChat(conversationId: string | null) {
                   ...tcs[toolIndex],
                   output: data.output,
                   pending: false,
+                  status: data.status,
                 }
               }
               return {
@@ -555,13 +554,19 @@ export function useChat(conversationId: string | null) {
         // onDone
         (done) => {
           clearIdleTimer()
-          typewriter.done = done
-          startTypewriter()
+          if (typewriter.stopped) return
+          clearTypewriterTimer()
+          const pending = typewriter.queue
+          typewriter.queue = ''
+          if (pending) appendAssistantContent(pending)
+          typewriter.stopped = true
+          finalizeDone(done)
         },
         // onError
         (err, data) => {
           cleanupTypewriter()
           clearIdleTimer()
+          skipCompletedTurnReloadRef.current = conversationId
           setIsStreaming(false)
           const isPause = data?.code?.startsWith('iteration_limit_')
             || data?.code === 'iteration_budget_exhausted'
@@ -635,6 +640,7 @@ export function useChat(conversationId: string | null) {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
     typewriterCleanupRef.current?.()
     abortRef.current?.()
+    skipCompletedTurnReloadRef.current = conversationIdRef.current
     setIsStreaming(false)
     setMessages((prev) =>
       prev.map((m) => (m.streaming ? { ...m, streaming: false, runStatus: 'paused' } : m))
@@ -644,6 +650,9 @@ export function useChat(conversationId: string | null) {
   const clearMessages = useCallback(() => {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
     typewriterCleanupRef.current?.()
+    skipCompletedTurnReloadRef.current = null
+    preserveUnboundTurnRef.current = false
+    displayedConversationIdRef.current = null
     setMessages([])
     setIsStreaming(false)
     setHasMoreHistory(false)

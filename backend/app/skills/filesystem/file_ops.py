@@ -230,6 +230,26 @@ def _validate_path_shape(path: str, *, operation: str) -> str | None:
     return None
 
 
+def _validate_glob_pattern(pattern: str, *, operation: str) -> str | None:
+    value = str(pattern or "")
+    normalized = value.replace("\\", "/")
+    if Path(value).is_absolute() or Path(value).drive or normalized.startswith("/"):
+        return _error("glob_pattern_rejected", f"{operation} pattern must be relative to the base path.")
+    if ".." in normalized.split("/"):
+        return _error("path_traversal_rejected", f"{operation} pattern contains parent traversal segments.")
+    return None
+
+
+def _within_base(item: Path, base: Path) -> bool:
+    """Keep glob results inside the gated base, even through symlinks/junctions."""
+    try:
+        resolved_item = os.path.normcase(canonical(str(item)))
+        resolved_base = os.path.normcase(canonical(str(base)))
+        return os.path.commonpath([resolved_item, resolved_base]) == resolved_base
+    except (OSError, ValueError):
+        return False
+
+
 def _validate_write_budget(content: str, encoding: str) -> str | None:
     size = len(str(content or "").encode(encoding or "utf-8", errors="replace"))
     if size > _MAX_WRITE_BYTES:
@@ -286,16 +306,13 @@ def _validate_recursive_budget(path: Path, *, operation: str) -> str | None:
 
 def _revalidate_mutation_target(path: str) -> str | None:
     target = _filesystem_target(path)
+    # Re-check hard blocks against the resolved target right before mutating.
+    # Grants were already settled by the gate (or by the approval that
+    # replays this call), and a one-time grant is consumed there, so asking
+    # again here would re-prompt forever.
     decision = resolve_permission(ActionType.MUTATE, target_path=str(target.parent if not target.exists else target.resolved))
     if decision.blocked:
         return _blocked_result(decision)
-    if decision.requires_access_grant:
-        return _pending_access_grant_result(
-            decision,
-            path=str(target.resolved),
-            action_context="Revalidate filesystem mutation target",
-            requested_access="write",
-        )
     if target.is_symlink:
         return _error("symlink_target_rejected", f"Refusing to mutate a symlink or junction: {target.resolved}")
     return None
@@ -324,7 +341,7 @@ def file_stat(path: str) -> str:
 def file_list(path: str, pattern: str = "*", recursive: bool = False, limit: int = 200) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
-    shape_error = _validate_path_shape(path, operation="filesystem")
+    shape_error = _validate_path_shape(path, operation="filesystem") or _validate_glob_pattern(pattern, operation="list")
     if shape_error:
         return shape_error
     pending = _gate_path(
@@ -350,6 +367,8 @@ def file_list(path: str, pattern: str = "*", recursive: bool = False, limit: int
     for item in iterator:
         if len(entries) >= max_items:
             break
+        if not _within_base(item, base):
+            continue
         try:
             entries.append(_stat_payload(item))
         except OSError:
@@ -527,7 +546,7 @@ def file_search(
         return _json({"status": "error", "error": "path is required"})
     if not query:
         return _json({"status": "error", "error": "query is required"})
-    shape_error = _validate_path_shape(path, operation="filesystem")
+    shape_error = _validate_path_shape(path, operation="filesystem") or _validate_glob_pattern(glob, operation="search")
     if shape_error:
         return shape_error
     pending = _gate_path(
@@ -552,7 +571,11 @@ def file_search(
 
     needle = query if case_sensitive else query.lower()
     limit = _safe_int(max_results, 50, minimum=1, maximum=_MAX_SEARCH_RESULTS)
-    files = [base] if base.is_file() else [item for item in base.glob(glob or "**/*") if item.is_file()]
+    files = (
+        [base]
+        if base.is_file()
+        else [item for item in base.glob(glob or "**/*") if item.is_file() and _within_base(item, base)]
+    )
     matches: list[dict[str, Any]] = []
     for file_path in files:
         if len(matches) >= limit:
@@ -633,7 +656,7 @@ def file_tree(path: str, depth: int = 2, limit: int = 200) -> str:
     base_parts = len(base.parts)
     for item in base.rglob("*"):
         item_depth = len(item.parts) - base_parts
-        if item_depth > max_depth:
+        if item_depth > max_depth or not _within_base(item, base):
             continue
         try:
             payload = _stat_payload(item)
@@ -803,6 +826,31 @@ def _gate_transfer_paths(
     return None
 
 
+def _gate_directory_replacement(
+    *,
+    operation: str,
+    destination: str,
+    overwrite: bool,
+    payload_args: dict[str, Any],
+    bypass_confirmation: bool,
+) -> str | None:
+    """Replacing an existing directory removes its whole tree, so gate it as a delete."""
+    if not overwrite or not _resolve_path(destination).is_dir():
+        return None
+    if not bypass_confirmation:
+        return _gate_path(
+            ActionType.DELETE,
+            path=destination,
+            tool_name=f"fs_{operation}",
+            action_description=f"{operation.title()} replaces existing directory: {destination}",
+            payload_args=payload_args,
+        )
+    decision = resolve_permission(ActionType.DELETE, target_path=_policy_target_path(destination))
+    if decision.blocked or decision.requires_access_grant:
+        return _blocked_result(decision)
+    return None
+
+
 def fs_copy(
     source: str,
     destination: str,
@@ -898,6 +946,15 @@ def fs_move(
         )
         if pending:
             return pending
+    replacement = _gate_directory_replacement(
+        operation="move",
+        destination=destination,
+        overwrite=overwrite,
+        payload_args=payload_args,
+        bypass_confirmation=_bypass_gate,
+    )
+    if replacement:
+        return replacement
     revalidate = _revalidate_mutation_target(source) or _revalidate_mutation_target(destination)
     if revalidate:
         return revalidate
@@ -952,6 +1009,15 @@ def fs_rename(path: str, new_name: str, overwrite: bool = False, dry_run: bool =
         )
         if pending:
             return pending
+    replacement = _gate_directory_replacement(
+        operation="rename",
+        destination=destination_label,
+        overwrite=overwrite,
+        payload_args=payload_args,
+        bypass_confirmation=_bypass_gate,
+    )
+    if replacement:
+        return replacement
     revalidate = _revalidate_mutation_target(path)
     if revalidate:
         return revalidate

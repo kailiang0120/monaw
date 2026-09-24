@@ -54,7 +54,19 @@ export function ContextUsageBar({ usage }: Props) {
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
-  if (!usage) return null
+  if (!usage) {
+    return (
+      <span
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg"
+        aria-label="Context usage available after the first message"
+        title="Context usage available after the first message"
+      >
+        <span className="inline-flex h-[14px] w-[14px] items-center justify-center rounded-full bg-[var(--st-border-strong)]">
+          <span className="h-[8px] w-[8px] rounded-full bg-[var(--st-surface)]" />
+        </span>
+      </span>
+    )
+  }
 
   const percentage = clampPercentage(usage.percentage)
   const color = getBarColor(percentage)
@@ -65,7 +77,7 @@ export function ContextUsageBar({ usage }: Props) {
     .filter((item) => ['runtime_prompt', 'skills', 'memory_retrieval'].includes(item.key))
     .reduce((total, item) => total + item.tokens, 0)
   const tools = usage.breakdown
-    .filter((item) => ['builtin_tools', 'mcp_tools', 'deferred_tools'].includes(item.key))
+    .filter((item) => ['builtin_tools', 'mcp_tools'].includes(item.key))
     .reduce((total, item) => total + item.tokens, 0)
   const summaryRows = [
     { label: 'Messages', value: messages },
@@ -90,7 +102,7 @@ export function ContextUsageBar({ usage }: Props) {
             background: `conic-gradient(${color} ${percentage * 3.6}deg, rgba(130, 147, 112, 0.18) 0deg)`,
           }}
         >
-          <span className="h-[8px] w-[8px] rounded-full bg-[#11100f]" />
+          <span className="h-[8px] w-[8px] rounded-full bg-[var(--st-surface)]" />
         </span>
       </button>
 
@@ -117,7 +129,7 @@ export function ContextUsageBar({ usage }: Props) {
             </div>
             <div className="mt-1 flex items-center justify-between">
               <span className="text-[9px] text-neutral-600">{getStatusLabel(percentage)}</span>
-              <span className="text-[9px] text-neutral-700">cap {formatTokens(usage.compaction_at)}</span>
+              <span className="text-[9px] text-neutral-700">compact at {formatTokens(usage.compaction_at)}</span>
             </div>
           </div>
 

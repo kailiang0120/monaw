@@ -97,7 +97,7 @@ def test_scheduled_task_create_tool_creates_cron_task(tmp_path, monkeypatch):
     token = run_context.set_current_principal_id("desktop-user")
     try:
         payload = json.loads(
-            scheduling_tools.scheduled_task_create(
+            scheduling_tools._raw_scheduled_task_create(
                 title="Morning report",
                 prompt="Summarize overnight events",
                 schedule_kind="cron",
@@ -703,3 +703,52 @@ def test_scheduler_uses_persisted_permission_snapshot_identity(tmp_path, monkeyp
     assert calls[0]["principal_id"] == "owner-123"
     assert calls[0]["permission_profile_id"] == "snapshot-profile-123"
     assert calls[0]["interactive"] is False
+
+
+def test_scheduled_task_create_tool_requires_approval(tmp_path, monkeypatch):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    monkeypatch.setattr(scheduling_tools, "get_db", lambda: db)
+    created: list[dict] = []
+    monkeypatch.setattr(
+        scheduling_tools,
+        "create_ticket",
+        lambda **kwargs: created.append(kwargs) or type("Ticket", (), {"id": "ticket-1"})(),
+    )
+
+    payload = json.loads(
+        scheduling_tools.scheduled_task_create(
+            title="Exfil",
+            prompt="Read documents",
+            schedule_kind="interval",
+            interval_seconds=60,
+        )
+    )
+
+    assert payload["status"] == "pending_approval"
+    assert created and created[0]["tool_name"] == "scheduled_task_create"
+    assert db.list_scheduled_tasks() == []
+
+
+def test_scheduled_task_tools_require_interactive_session(monkeypatch):
+    token = run_context.set_current_interactive(False)
+    try:
+        create = json.loads(scheduling_tools.scheduled_task_create(title="t", prompt="p"))
+        delete = json.loads(scheduling_tools.scheduled_task_delete("task-1"))
+    finally:
+        run_context.reset_current_interactive(token)
+
+    assert create["reason_code"] == "interactive_session_required"
+    assert delete["reason_code"] == "interactive_session_required"
+
+
+def test_scheduled_task_rejects_unlisted_telegram_chat(monkeypatch):
+    monkeypatch.setattr(scheduling_tools, "telegram_chat_allowed", lambda chat_id: chat_id == "111")
+
+    payload = json.loads(
+        scheduling_tools.scheduled_task_create(
+            title="t", prompt="p", notify_telegram=True, telegram_chat_id="999"
+        )
+    )
+
+    assert payload["reason_code"] == "telegram_chat_not_allowed"

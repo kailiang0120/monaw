@@ -7,6 +7,7 @@ import ast
 import json
 import logging
 import mimetypes
+import re
 import time
 from collections import defaultdict
 from typing import Any, AsyncIterator, Callable
@@ -43,11 +44,22 @@ logger = logging.getLogger(__name__)
 
 _SESSION_LOCKS: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+
+def _conversation_title_from_prompt(message: str) -> str:
+    """Make a compact, readable title from the first line or sentence of a prompt."""
+    first_line = " ".join(message.splitlines()[0].split()) if message.splitlines() else ""
+    sentence_end = re.search(r"[.!?](?:\s|$)", first_line)
+    if sentence_end:
+        first_line = first_line[: sentence_end.start()]
+    first_line = first_line.strip(" .!?\t")
+    if len(first_line) <= 48:
+        return first_line or "New Conversation"
+    shortened = first_line[:48].rsplit(" ", 1)[0].rstrip(" ,:;-")
+    return f"{shortened or first_line[:48].rstrip()}…"
+
 HEARTBEAT_INTERVAL_S = 10.0
 RECOVERY_RESULT_LIMIT = 1400
 FINAL_RESPONSE_TYPEWRITER_CHARS = 8
-FINAL_RESPONSE_TYPEWRITER_DELAY_S = 0.03
-FINAL_RESPONSE_TYPEWRITER_MAX_SECONDS = 6.0
 FINAL_RESPONSE_TYPEWRITER_MAX_CHUNKS = 240
 
 _BROWSER_MUTATING_TOOLS = {
@@ -73,94 +85,30 @@ _BROWSER_OBSERVATION_TOOLS = {
 }
 
 FINAL_ANSWER_TOOL_NAME = "final_answer"
-FINAL_ANSWER_TOOL = {
-    "name": FINAL_ANSWER_TOOL_NAME,
-    "description": (
-        "Complete the current user request. Use this only when no more tool calls "
-        "are needed and the response is ready for the user."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "answer": {
-                "type": "string",
-                "description": "The final response to show to the user.",
-            },
-            "attachment_paths": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Optional exact local file paths from prior tool outputs that should "
-                    "be sent as user-visible attachments. Use only for final deliverables, "
-                    "not intermediate progress artifacts."
-                ),
-            },
-        },
-        "required": ["answer"],
-    },
-}
 
 
 def _is_browser_tool(tool_name: str) -> bool:
     return tool_name.startswith("browser_")
 
 
-def _requires_structured_final_tool(llm_client: LLMClient) -> bool:
-    return True
-
-
-def _tools_with_final_answer(tools: list[dict], *, enabled: bool) -> list[dict]:
-    if not enabled:
-        return tools
-    if any(str(tool.get("name") or "") == FINAL_ANSWER_TOOL_NAME for tool in tools):
-        return tools
-    return [*tools, dict(FINAL_ANSWER_TOOL)]
-
-
-def _completion_protocol_prompt(system_prompt: str, *, enabled: bool) -> str:
+def _completion_protocol_prompt(system_prompt: str) -> str:
     protocol_lines = [
         "## Completion Protocol",
-        "- Use the same decision rule for every provider and model.",
-        "- Progress updates are allowed, but progress text does not finish the turn.",
-        "- If more work is needed, call the next real tool.",
-        "- If no tools are available and the request can be answered directly, answer directly and finish the turn.",
-        "- Do not rely on plain text alone to continue a tool-capable turn; the runtime will keep asking for the next action.",
+        "- When the task is complete, reply to the user directly. A normal assistant answer finishes the turn.",
+        "- If more work is needed, call the next real tool. You may include a short progress update with that tool call.",
+        "- Do not send a separate text-only progress message saying you will act later; call the tool now.",
+        "- When delivering a file created by a tool, include its exact local path in the final answer.",
         "- Do not try to inspect, expand, collapse, click, or control the chat UI, reasoning trace, progress messages, message bubbles, or tool cards. Those are frontend display surfaces, not part of the task.",
         "- Do not claim that you already answered a fresh user question unless the persisted conversation history shows that exact answer.",
     ]
-    if enabled:
-        protocol_lines.insert(
-            1,
-            f"- To finish the turn, call `{FINAL_ANSWER_TOOL_NAME}` with the final answer.",
-        )
-        protocol_lines.insert(
-            2,
-            "- If you need to keep working, call the next real tool. You may include one short progress update before the tool call.",
-        )
-        protocol_lines.insert(
-            3,
-            "- When files from tool outputs should be delivered to the user, include their exact local paths in `attachment_paths` on the final answer tool call.",
-        )
     protocol = "\n".join(protocol_lines)
     return f"{system_prompt}\n\n{protocol}" if system_prompt else protocol
 
 
 _TOOL_REPROMPT_MESSAGE = (
-    f"Choose the next action using the tool protocol. If the task is complete, call "
-    f"`{FINAL_ANSWER_TOOL_NAME}` with the final answer. If more work is needed, call the "
-    "next real task tool. Do not respond with plain text only, and do not try to control "
-    "the chat UI or reasoning trace."
+    "Your last message described an action you intend to take, but did not call a tool. "
+    "Call the next real task tool now. If no action is needed, give the user your final answer directly."
 )
-
-_TOOL_FORCE_MESSAGE = (
-    "You have responded with text multiple times without calling any tool. "
-    "You MUST call a tool now. Either call the next task tool to make progress, "
-    f"or call `{FINAL_ANSWER_TOOL_NAME}` to finish. "
-    "Do not respond with plain text."
-)
-
-_TEXT_ONLY_FORCE_AFTER = 2
-_TEXT_ONLY_CIRCUIT_BREAK_AFTER = 4
 
 
 def _compact_for_recovery(value: object, *, limit: int = RECOVERY_RESULT_LIMIT) -> str:
@@ -191,19 +139,19 @@ def _build_repeat_recovery_prompt(
             "For the next step, use a browser observation or finish the turn: "
             "`browser_snapshot`, `browser_tabs(action=\"list\")`, "
             "`browser_session(action=\"status\")`, `browser_session(action=\"doctor\")`, "
-            "or `final_answer`. After inspection, only act again if the target or arguments change."
+            "or answer the user directly. After inspection, only act again if the target or arguments change."
         )
     elif reason_code == "repeated_blocked_tool_result":
         next_steps = (
             "Do not call the same tool with the same arguments again in this turn. "
             "Ask for permission or access changes if needed, choose a different permitted action, "
-            "or call `final_answer` with the blocker."
+            "or answer the user with the blocker."
         )
     else:
         next_steps = (
             "Do not call this exact tool with these exact arguments again in this turn. "
             "Use the prior result, inspect current state, choose a different action, "
-            "or call `final_answer`."
+            "or answer the user directly."
         )
     return (
         "Loop recovery checkpoint: the last tool request repeated a blocked or stalled action.\n\n"
@@ -214,18 +162,11 @@ def _build_repeat_recovery_prompt(
         f"{next_steps}"
     )
 
-_FINAL_ANSWER_REPROMPT_MESSAGE = (
-    f"Your previous message appears to be the final answer. Complete the turn now by calling "
-    f"`{FINAL_ANSWER_TOOL_NAME}` with the exact previous assistant message as the `answer` value. "
-    "Do not summarize, shorten, rewrite, translate, add to, or remove anything from that message. "
-    "Do not repeat the answer as plain text."
-)
-
 _WEB_SEARCH_RESULT_REPROMPT_MESSAGE = (
     "Your final answer did not include the actual web_search results. Use the web_search "
     "tool output above and provide a concrete answer with the result titles, source URLs, "
     "and key snippets. Do not just say the result is ready or visible above; include the "
-    f"results in the `{FINAL_ANSWER_TOOL_NAME}` answer."
+    "results in your answer."
 )
 
 
@@ -333,16 +274,10 @@ async def _emit_typewriter_tokens(emit: Callable[[dict], None], text: str) -> No
     chunks = _typewriter_chunks(text)
     if not chunks:
         return
-    delay = 0.0
-    if len(chunks) > 1:
-        delay = min(
-            FINAL_RESPONSE_TYPEWRITER_DELAY_S,
-            FINAL_RESPONSE_TYPEWRITER_MAX_SECONDS / (len(chunks) - 1),
-        )
-    for index, chunk in enumerate(chunks):
+    # The client already paces rendering. Delaying these SSE events adds a
+    # second playback stage between reasoning and the first visible answer.
+    for chunk in chunks:
         emit({"event": "token", "data": {"content": chunk}})
-        if delay > 0 and index < len(chunks) - 1:
-            await asyncio.sleep(delay)
 
 
 def _final_answer_text(arguments: dict, fallback_content: str) -> str:
@@ -422,18 +357,6 @@ def _json_text_as_final_answer(text: str) -> str | None:
     return None
 
 
-_FINAL_TEXT_PREFIXES = (
-    "done",
-    "complete",
-    "completed",
-    "task complete",
-    "task is complete",
-    "the task is complete",
-    "i completed",
-    "i have completed",
-    "i've completed",
-)
-
 _PENDING_ACTION_PHRASES = (
     "let me ",
     "i'll ",
@@ -448,62 +371,26 @@ _PENDING_ACTION_PHRASES = (
     "continue to ",
 )
 
-_PENDING_FINAL_MIN_CHARS = 160
-_PENDING_FINAL_MIN_LINES = 3
+_PROGRESS_OPENERS = (
+    "searching ",
+    "checking ",
+    "opening ",
+    "inspecting ",
+    "running ",
+    "fetching ",
+    "taking ",
+    "still checking ",
+    "still searching ",
+)
 
 
-def _plain_text_as_completion(text: str) -> str | None:
-    """Accept explicit completion text without letting it become a progress loop."""
+def _plain_text_describes_next_action(text: str) -> bool:
+    """Distinguish a short tool intent from a completed natural-language answer."""
     content = str(text or "").strip()
-    if not content:
-        return None
-    normalized = content.lower().lstrip(" \t\r\n-:—–")
-    if not any(normalized.startswith(prefix) for prefix in _FINAL_TEXT_PREFIXES):
-        return None
-
-    # "Done typing. Let me send it." is not complete; it is a pending action.
-    # Conditional offers after a real completion are fine: "If you want, I can..."
-    actionable_text = normalized
-    for marker in ("if you want", "if you'd like", "if you would like"):
-        index = actionable_text.find(marker)
-        if index >= 0:
-            actionable_text = actionable_text[:index]
-            break
-    if any(phrase in actionable_text for phrase in _PENDING_ACTION_PHRASES):
-        return None
-    return content
-
-
-def _is_substantial_plain_text(text: str) -> bool:
-    content = str(text or "").strip()
-    if len(content) >= _PENDING_FINAL_MIN_CHARS:
-        return True
-    meaningful_lines = [line.strip() for line in content.splitlines() if line.strip()]
-    if len(meaningful_lines) >= _PENDING_FINAL_MIN_LINES:
-        return True
-    return content.startswith(("#", "##", "- ", "* ", "1. "))
-
-
-def _plain_text_as_pending_final(text: str) -> str | None:
-    """Remember substantial answer-like text while enforcing final_answer."""
-    content = str(text or "").strip()
-    if not content or not _is_substantial_plain_text(content):
-        return None
-    return content
-
-
-def _should_use_pending_final_text(final_text: str, pending_final_text: str) -> bool:
-    final_content = str(final_text or "").strip()
-    pending_content = str(pending_final_text or "").strip()
-    if not final_content or not pending_content:
+    if not content or len(content) > 320 or len(content.splitlines()) > 2:
         return False
-    if not _is_substantial_plain_text(pending_content):
-        return False
-    if _is_substantial_plain_text(final_content):
-        return False
-    if len(final_content) > max(240, int(len(pending_content) * 0.35)):
-        return False
-    return True
+    last_sentence = re.split(r"(?<=[.!?])\s+", content)[-1].lower().lstrip(" \t-:—–")
+    return last_sentence.startswith((*_PENDING_ACTION_PHRASES, *_PROGRESS_OPENERS))
 
 
 def _is_browser_repeat_guarded(tool_name: str, arguments: dict) -> bool:
@@ -940,6 +827,7 @@ class TurnLoop:
         persisted_tool_calls: list[dict] = []
         last_tool_name = ""
         latest_progress_text = ""
+        turn_thinking_parts: list[str] = []
         # Calls are prepared in model order, but a safe contiguous batch may
         # have several invocations in flight at once.  Keep every started call
         # until its ordered result has been persisted so cancellation can
@@ -1077,7 +965,7 @@ class TurnLoop:
                     message,
                     assistant_message,
                     tool_calls=_tool_calls_for_persist(),
-                    thinking="",
+                    thinking="\n\n".join(turn_thinking_parts),
                     status=status,
                     response_duration_ms=response_duration_ms,
                     response_attachments=response_attachments or [],
@@ -1103,10 +991,11 @@ class TurnLoop:
             obs_context_token = set_current_run_id(obs_run_id)
             budget = self._new_turn_budget()
             self.policy.begin_turn()
-            self.memory.get_or_create(conversation_id, title=message[:60] + ("..." if len(message) > 60 else ""))
+            self.memory.get_or_create(
+                conversation_id, title=_conversation_title_from_prompt(message)
+            )
             self.memory.set_task_goal(conversation_id, message)
             self.memory.set_active_task(conversation_id, None)
-            structured_final_required = _requires_structured_final_tool(self.llm_client)
             build_long_term_context = getattr(self.memory, "build_long_term_memory_context", None)
             long_term_context = (
                 build_long_term_context(message)
@@ -1118,7 +1007,7 @@ class TurnLoop:
                 base_prompt = system_prompt() if callable(system_prompt) else system_prompt
                 if long_term_context:
                     base_prompt = f"{base_prompt}\n\n{long_term_context}" if base_prompt else long_term_context
-                return _completion_protocol_prompt(base_prompt, enabled=structured_final_required)
+                return _completion_protocol_prompt(base_prompt)
 
             initial_visible_tools = self.registry.get_all_tools(visible_only=True)
             await self.memory.ensure_context_fits(
@@ -1147,11 +1036,9 @@ class TurnLoop:
             browser_repeat_recoveries: set[str] = set()
             blocked_tool_recoveries: set[str] = set()
             stop_requested = False
-            plain_completion_reprompts = 0
-            pending_final_reprompts = 0
-            pending_final_text = ""
             consecutive_text_only = 0
             force_tool_choice_next = False
+            web_search_reprompted = False
             parallel_semaphore = asyncio.Semaphore(self.max_parallel_tool_calls)
 
             async def _cancel_active_tool_tasks() -> None:
@@ -1678,24 +1565,30 @@ class TurnLoop:
                     break
 
                 streamed_answer_text = ""
+                streamed_reasoning_content = ""
 
                 async def _answer_token_cb(delta: str, _put=_put) -> None:
                     nonlocal streamed_answer_text
                     streamed_answer_text += str(delta or "")
                     _emit_response_token(delta)
 
+                async def _reasoning_cb(delta: str) -> None:
+                    nonlocal streamed_reasoning_content
+                    streamed_reasoning_content += delta
+                    _put({"event": "thinking", "data": {"content": delta}})
+
                 llm_call_started_at = time.perf_counter()
                 try:
                     _transition(run_state.model_call)
                     visible_tools = self.registry.get_all_tools(visible_only=True)
-                    model_tools = _tools_with_final_answer(
-                        visible_tools,
-                        enabled=structured_final_required,
-                    )
-                    stream_callback = (
-                        None
-                        if structured_final_required
-                        else _answer_token_cb
+                    model_tools = visible_tools
+                    # When tools are available, wait for the full model response
+                    # before deciding whether its text is progress or the answer.
+                    stream_callback = None if visible_tools else _answer_token_cb
+                    reasoning_kwargs = (
+                        {"reasoning_callback": _reasoning_cb}
+                        if isinstance(self.llm_client, LLMClient)
+                        else {}
                     )
                     _obs_event(
                         "llm_call_started",
@@ -1720,6 +1613,7 @@ class TurnLoop:
                             system_prompt=_current_system_prompt(),
                             stream_callback=stream_callback,
                             tool_choice="required",
+                            **reasoning_kwargs,
                         )
                     else:
                         llm_call = self.llm_client.chat_with_tools(
@@ -1727,6 +1621,7 @@ class TurnLoop:
                             model_tools,
                             system_prompt=_current_system_prompt(),
                             stream_callback=stream_callback,
+                            **reasoning_kwargs,
                         )
                     force_tool_choice_next = False
                     llm_response = await asyncio.wait_for(
@@ -1806,7 +1701,15 @@ class TurnLoop:
                 assistant_content = llm_response.content or ""
                 reasoning_content = str(getattr(llm_response, "reasoning_content", "") or "")
                 if reasoning_content:
-                    _put({"event": "thinking", "data": {"content": reasoning_content}})
+                    turn_thinking_parts.append(reasoning_content)
+                    remaining_reasoning = (
+                        reasoning_content[len(streamed_reasoning_content):]
+                        if streamed_reasoning_content
+                        and reasoning_content.startswith(streamed_reasoning_content)
+                        else "" if streamed_reasoning_content else reasoning_content
+                    )
+                    if remaining_reasoning:
+                        _put({"event": "thinking", "data": {"content": remaining_reasoning}})
 
                 if not llm_response.tool_calls:
                     final_text = assistant_content.strip() or "Done."
@@ -1841,135 +1744,51 @@ class TurnLoop:
                             metadata={"limit": budget.max_iterations, "consumed": budget.consumed},
                         )
                     else:
-                        final_tool_missing = structured_final_required and visible_tools
-                        if final_tool_missing:
-                            json_final_text = _json_text_as_final_answer(assistant_content)
-                            if json_final_text is not None:
-                                final_text = json_final_text
-                                messages.append({"role": "assistant", "content": assistant_content})
-                                completed_normally = True
-                                logger.info(
-                                    "turn_loop completed from plain JSON final_answer content "
-                                    "conversation_id=%s consumed=%s tool_calls=%s finish_reason=%s",
-                                    conversation_id,
-                                    budget.consumed,
-                                    len(persisted_tool_calls),
-                                    llm_response.finish_reason,
-                                )
-                                break
-                            plain_completion_text = _plain_text_as_completion(assistant_content)
-                            if plain_completion_text is not None:
-                                messages.append({"role": "assistant", "content": assistant_content})
-                                if plain_completion_reprompts == 0 and budget.remaining > 0:
-                                    pending_final_text = plain_completion_text
-                                    plain_completion_reprompts += 1
-                                    logger.info(
-                                        "turn_loop reprompting after explicit plain-text completion "
-                                        "conversation_id=%s consumed=%s remaining=%s finish_reason=%s content=%r",
-                                        conversation_id,
-                                        budget.consumed,
-                                        budget.remaining,
-                                        llm_response.finish_reason,
-                                        assistant_content[:160],
-                                    )
-                                    messages.append({"role": "user", "content": _FINAL_ANSWER_REPROMPT_MESSAGE})
-                                    continue
-                                final_text = plain_completion_text
-                                completed_normally = True
-                                logger.info(
-                                    "turn_loop completed from repeated explicit plain-text completion "
-                                    "conversation_id=%s consumed=%s tool_calls=%s finish_reason=%s",
-                                    conversation_id,
-                                    budget.consumed,
-                                    len(persisted_tool_calls),
-                                    llm_response.finish_reason,
-                                )
-                                break
-                            pending_plain_final_text = _plain_text_as_pending_final(assistant_content)
-                            if pending_plain_final_text is not None:
-                                pending_final_text = pending_plain_final_text
-                                pending_final_reprompts += 1
-                                _emit_agent_progress(assistant_content)
-                                messages.append({"role": "assistant", "content": assistant_content})
-                                if pending_final_reprompts == 1 and budget.remaining > 0:
-                                    logger.info(
-                                        "turn_loop reprompting after pending plain-text final answer "
-                                        "conversation_id=%s consumed=%s remaining=%s finish_reason=%s content=%r",
-                                        conversation_id,
-                                        budget.consumed,
-                                        budget.remaining,
-                                        llm_response.finish_reason,
-                                        assistant_content[:160],
-                                    )
-                                    messages.append({"role": "user", "content": _FINAL_ANSWER_REPROMPT_MESSAGE})
-                                    continue
-                                final_text = pending_final_text
-                                completed_normally = True
-                                logger.warning(
-                                    "turn_loop completing from pending plain-text final after repeated text-only "
-                                    "conversation_id=%s consumed=%s tool_calls=%s finish_reason=%s",
-                                    conversation_id,
-                                    budget.consumed,
-                                    len(persisted_tool_calls),
-                                    llm_response.finish_reason,
-                                )
-                                break
+                        json_final_text = _json_text_as_final_answer(assistant_content)
+                        if json_final_text is not None:
+                            final_text = json_final_text
+                        elif visible_tools and _plain_text_describes_next_action(assistant_content):
                             consecutive_text_only += 1
                             _emit_agent_progress(assistant_content)
-                            if assistant_content:
-                                messages.append({"role": "assistant", "content": assistant_content})
-                            if consecutive_text_only >= _TEXT_ONLY_CIRCUIT_BREAK_AFTER:
-                                completed_normally = True
+                            messages.append({"role": "assistant", "content": assistant_content})
+                            if consecutive_text_only >= 2 or budget.remaining <= 0:
+                                terminal_error = True
+                                incomplete_reason_code = "progress_without_tool"
+                                final_text = (
+                                    "Paused: the model described a next action but did not call a tool. "
+                                    "Continue to retry the task."
+                                )
                                 logger.warning(
-                                    "turn_loop force-completing after repeated text-only responses "
-                                    "conversation_id=%s consecutive_text_only=%s consumed=%s "
-                                    "tool_calls=%s finish_reason=%s",
+                                    "turn_loop paused after repeated progress without tool "
+                                    "conversation_id=%s consumed=%s",
                                     conversation_id,
-                                    consecutive_text_only,
                                     budget.consumed,
-                                    len(persisted_tool_calls),
-                                    llm_response.finish_reason,
                                 )
                                 break
-                            if consecutive_text_only >= _TEXT_ONLY_FORCE_AFTER:
-                                force_tool_choice_next = True
-                                logger.info(
-                                    "turn_loop escalating text-only response to required tool choice "
-                                    "conversation_id=%s consecutive_text_only=%s consumed=%s "
-                                    "remaining=%s finish_reason=%s content=%r",
-                                    conversation_id,
-                                    consecutive_text_only,
-                                    budget.consumed,
-                                    budget.remaining,
-                                    llm_response.finish_reason,
-                                    assistant_content[:160],
-                                )
-                                messages.append({"role": "user", "content": _TOOL_FORCE_MESSAGE})
-                                continue
-                            logger.info(
-                                "turn_loop continuing after progress text without tool call "
-                                "conversation_id=%s consecutive_text_only=%s consumed=%s "
-                                "remaining=%s finish_reason=%s content=%r",
-                                conversation_id,
-                                consecutive_text_only,
-                                budget.consumed,
-                                budget.remaining,
-                                llm_response.finish_reason,
-                                assistant_content[:160],
-                            )
+                            force_tool_choice_next = True
                             messages.append({"role": "user", "content": _TOOL_REPROMPT_MESSAGE})
                             continue
-                        else:
-                            if assistant_content:
-                                messages.append({"role": "assistant", "content": assistant_content})
-                            completed_normally = True
-                            logger.info(
-                                "turn_loop completed normally conversation_id=%s consumed=%s tool_calls=%s finish_reason=%s",
-                                conversation_id,
-                                budget.consumed,
-                                len(persisted_tool_calls),
-                                llm_response.finish_reason,
-                            )
+                        if not _final_answer_includes_web_search_results(final_text, persisted_tool_calls):
+                            if web_search_reprompted or budget.remaining <= 0:
+                                terminal_error = True
+                                incomplete_reason_code = "web_search_results_missing"
+                                final_text = "Paused: I could not include the web search results in the answer."
+                                break
+                            web_search_reprompted = True
+                            messages.append({"role": "assistant", "content": assistant_content})
+                            messages.append({"role": "user", "content": _WEB_SEARCH_RESULT_REPROMPT_MESSAGE})
+                            continue
+                        if assistant_content:
+                            messages.append({"role": "assistant", "content": assistant_content})
+                        completed_normally = True
+                        logger.info(
+                            "turn_loop completed from assistant answer conversation_id=%s "
+                            "consumed=%s tool_calls=%s finish_reason=%s",
+                            conversation_id,
+                            budget.consumed,
+                            len(persisted_tool_calls),
+                            llm_response.finish_reason,
+                        )
                     break
 
                 consecutive_text_only = 0
@@ -1999,21 +1818,14 @@ class TurnLoop:
                 if final_answer_call is not None and not call_dicts:
                     final_args = final_answer_call.arguments if isinstance(final_answer_call.arguments, dict) else {}
                     final_text = _final_answer_text(final_args, llm_response.content)
-                    if _should_use_pending_final_text(final_text, pending_final_text):
-                        logger.warning(
-                            "turn_loop replacing generic final_answer with pending plain-text final "
-                            "conversation_id=%s consumed=%s final_len=%s pending_len=%s",
-                            conversation_id,
-                            budget.consumed,
-                            len(final_text),
-                            len(pending_final_text),
-                        )
-                        final_text = pending_final_text
                     candidate_attachment_paths = _final_answer_attachment_paths(final_args)
-                    if (
-                        budget.remaining > 0
-                        and not _final_answer_includes_web_search_results(final_text, persisted_tool_calls)
-                    ):
+                    if not _final_answer_includes_web_search_results(final_text, persisted_tool_calls):
+                        if web_search_reprompted or budget.remaining <= 0:
+                            terminal_error = True
+                            incomplete_reason_code = "web_search_results_missing"
+                            final_text = "Paused: I could not include the web search results in the answer."
+                            break
+                        web_search_reprompted = True
                         logger.info(
                             "turn_loop reprompting generic web_search final answer "
                             "conversation_id=%s consumed=%s remaining=%s",
@@ -2023,11 +1835,9 @@ class TurnLoop:
                         )
                         messages.append({"role": "user", "content": _WEB_SEARCH_RESULT_REPROMPT_MESSAGE})
                         final_text = ""
-                        pending_final_text = ""
                         final_attachment_paths = []
                         continue
                     final_attachment_paths = candidate_attachment_paths
-                    pending_final_text = ""
                     completed_normally = True
                     logger.info(
                         "turn_loop completed via final_answer conversation_id=%s consumed=%s tool_calls=%s",
@@ -2042,8 +1852,6 @@ class TurnLoop:
                         conversation_id,
                         [str(call.get("name") or "") for call in call_dicts],
                     )
-                if call_dicts:
-                    pending_final_text = ""
                 if budget.remaining <= 0:
                     iteration_limit_hit = True
                     budget_exhausted = True
@@ -2486,7 +2294,7 @@ class TurnLoop:
                         "The task may be incomplete. Continue to resume from the current state."
                     )
                 else:
-                    incomplete_reason_code = "iteration_limit_reached_without_final_answer"
+                    incomplete_reason_code = "iteration_limit_reached_without_response"
                     final_text = (
                         "Paused: iteration limit reached before the agent produced a final answer. "
                         "Continue to resume from the current state."

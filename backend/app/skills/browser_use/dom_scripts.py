@@ -552,11 +552,80 @@ _MATCH_REF_SCRIPT = """
 }
 """.strip()
 
-_ELEMENT_METADATA_SCRIPT = """
+# Defines opensFileInput(el): true when activating el reaches a file input,
+# directly, through a <label>, or because el wraps one (custom upload buttons).
+_OPENS_FILE_INPUT_JS = r"""
+const opensFileInput = (node) => {
+  const isFile = (candidate) => !!candidate && candidate.tagName === 'INPUT'
+    && String(candidate.type || '').toLowerCase() === 'file';
+  if (!node) return false;
+  if (isFile(node)) return true;
+  if (node.tagName === 'LABEL' && isFile(node.control)) return true;
+  const label = node.closest ? node.closest('label') : null;
+  if (label && isFile(label.control)) return true;
+  return !!(node.querySelector && node.querySelector('input[type="file" i]'));
+};
+""".strip()
+
+# Armed only while an agent click/keypress runs. Pages commonly open the chooser
+# from a button handler (input.click(), showPicker, File System Access API);
+# block those and record it so the tool can ask the user instead.
+_FILE_CHOOSER_GUARD_ARM_SCRIPT = r"""
+() => {
+  const w = window;
+  if (!w.__monawFileChooserPatched) {
+    w.__monawFileChooserPatched = true;
+    const isFile = (node) => !!node && node.tagName === 'INPUT' && String(node.type || '').toLowerCase() === 'file';
+    const block = () => { w.__monawFileChooserBlocked = true; };
+    const wrap = (owner, name, test) => {
+      const original = owner && owner[name];
+      if (typeof original !== 'function') return;
+      owner[name] = function (...args) {
+        if (w.__monawFileChooserGuard && test(this)) {
+          block();
+          return name.startsWith('show') && owner === w
+            ? Promise.reject(new DOMException('File picker blocked pending approval', 'AbortError'))
+            : undefined;
+        }
+        return original.apply(this, args);
+      };
+    };
+    wrap(HTMLInputElement.prototype, 'click', isFile);
+    wrap(HTMLInputElement.prototype, 'showPicker', isFile);
+    wrap(w, 'showOpenFilePicker', () => true);
+    wrap(w, 'showDirectoryPicker', () => true);
+    document.addEventListener('click', (event) => {
+      if (!w.__monawFileChooserGuard) return;
+      const target = event.target;
+      const label = target && target.closest ? target.closest('label') : null;
+      if (isFile(target) || (label && isFile(label.control))) {
+        event.preventDefault();
+        block();
+      }
+    }, true);
+  }
+  w.__monawFileChooserGuard = true;
+  w.__monawFileChooserBlocked = false;
+  return true;
+}
+""".strip()
+
+_FILE_CHOOSER_GUARD_READ_SCRIPT = r"""
+() => {
+  const blocked = !!window.__monawFileChooserBlocked;
+  window.__monawFileChooserGuard = false;
+  window.__monawFileChooserBlocked = false;
+  return blocked;
+}
+""".strip()
+
+
+_ELEMENT_METADATA_SCRIPT = ("""
 (selector) => {
   const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
   const el = document.querySelector(selector);
   if (!el) return null;
+  """ + _OPENS_FILE_INPUT_JS + """
   const rect = el.getBoundingClientRect();
   return {
     ref: el.getAttribute('data-agent-ref') || '',
@@ -567,6 +636,7 @@ _ELEMENT_METADATA_SCRIPT = """
     name: el.getAttribute('name') || '',
     href: el instanceof HTMLAnchorElement ? (el.href || el.getAttribute('href') || '') : '',
     download: el.getAttribute('download') || '',
+    opens_file_input: opensFileInput(el),
     aria_label: el.getAttribute('aria-label') || '',
     placeholder: el.getAttribute('placeholder') || '',
     text: normalize(el.innerText || el.textContent || ''),
@@ -578,5 +648,5 @@ _ELEMENT_METADATA_SCRIPT = """
     height: Math.round(rect.height),
   };
 }
-""".strip()
+""").strip()
 

@@ -62,6 +62,7 @@ def register_browser_tools(registry, settings) -> None:
                 expect_new_tab=bool(args.get("expect_new_tab", False)),
                 timeout_seconds=float(args.get("timeout_seconds", 10) or 10),
                 _bypass_gate=True,
+                _expected_target=args.get("expected_target") if isinstance(args.get("expected_target"), dict) else None,
             )
         )
 
@@ -96,6 +97,20 @@ def register_browser_tools(registry, settings) -> None:
             )
         )
 
+    def _resume_browser_evaluate(input_str: str) -> str:
+        args = json.loads(input_str or "{}")
+        return _run_resume(
+            browser_evaluate(
+                manager,
+                script=str(args.get("script", "")),
+                args=args.get("args") if isinstance(args.get("args"), list) else [],
+                tab_target_id=str(args.get("tab_target_id", "")),
+                tab_index=int(args.get("tab_index", -1) or -1),
+                _bypass_gate=True,
+            )
+        )
+
+    register_executor("browser_evaluate", _resume_browser_evaluate)
     register_executor("browser_click", _resume_browser_click)
     register_executor("browser_type", _resume_browser_type)
     register_executor("browser_downloads", _resume_browser_downloads)

@@ -13,8 +13,16 @@ from app.agent.approval_broker import create_ticket
 from app.agent.execution_resume import register_executor
 from app.agent.output_workspace import configured_screenshots_dir
 from app.skills.computer_use.screen_geometry import get_screen_layout
+from app.skills.computer_use.screen_redaction import redact_capture
 
 _UNSAFE_ARG_CHARS = {"&", "|", ";", "\n", "\r", "`", "$", "(", ")"}
+# Launching or passing these hands execution to an interpreter or the shell,
+# which would sidestep the exec tool's approval gate and the blocked-process list.
+_SCRIPT_EXTENSIONS = frozenset({
+    ".bat", ".cmd", ".com", ".cpl", ".hta", ".js", ".jse", ".lnk", ".msc", ".msi",
+    ".pif", ".ps1", ".psm1", ".reg", ".scr", ".url", ".vbe", ".vbs", ".wsf", ".wsh",
+})
+_ARGLESS_LAUNCHERS = frozenset({"explorer", "explorer.exe"})
 _audit = AuditLogger()
 
 
@@ -88,6 +96,16 @@ def _resolve_glob_path(pattern: str) -> str | None:
 
     matches = glob.glob(pattern)
     return matches[0] if matches else None
+
+
+def _is_script_path(value: str) -> bool:
+    text = str(value or "").strip().strip('"').strip("'")
+    if not text or "://" in text:
+        return False
+    if os.path.splitext(text.lower())[1] not in _SCRIPT_EXTENSIONS:
+        return False
+    # A bare "example.com" is a hostname; only path-shaped or existing files count.
+    return bool(os.path.dirname(text)) or os.path.isfile(text)
 
 
 def _validated_launch_url(url: str) -> str:
@@ -392,8 +410,42 @@ def launch_app(alias: str, url: str = "", args: str = "", *, _bypass_gate: bool 
             return json.dumps(
                 {"status": "error", "error": f"argument '{token}' contains unsafe characters."}
             )
+        # Arguments can name a second program for the launched one to run
+        # (conhost cmd.exe, explorer x.bat, --renderer-cmd-prefix=...).
+        value = token.split("=", 1)[-1].strip().strip('"').strip("'")
+        program = value.split()[0] if value.split() else ""
+        if (
+            is_blocked_process_alias(token)
+            or is_blocked_process_alias(value)
+            or is_blocked_process_alias(program)
+            or _is_script_path(value)
+        ):
+            return json.dumps(
+                {
+                    "status": "blocked",
+                    "reason_code": "blocked_launch_argument",
+                    "error": f"argument '{token}' would start a blocked process or script.",
+                }
+            )
+    if extra_args and os.path.basename(alias) in _ARGLESS_LAUNCHERS:
+        return json.dumps(
+            {
+                "status": "blocked",
+                "reason_code": "blocked_launch_argument",
+                "error": f"'{alias}' cannot be launched with arguments; it would open or run the argument.",
+            }
+        )
+    if _is_script_path(alias):
+        return json.dumps(
+            {
+                "status": "blocked",
+                "reason_code": "blocked_launch_target",
+                "error": f"'{alias}' is a script or shortcut; use the exec tool so it goes through command approval.",
+            }
+        )
 
     if not _bypass_gate:
+        action_desc = f"Launch app: {alias}" + (f" with args: {args}" if extra_args else "")
         decision = resolve_permission(ActionType.LAUNCH_APP, target_app=alias)
         if decision.blocked:
             return _blocked_result(decision)
@@ -401,12 +453,18 @@ def launch_app(alias: str, url: str = "", args: str = "", *, _bypass_gate: bool 
             return _pending_access_grant_result(
                 decision,
                 alias=alias,
-                action_desc=f"Launch app: {alias}",
+                action_desc=action_desc,
             )
+        if not decision.requires_confirmation and extra_args:
+            # Arbitrary arguments can turn an allowlisted app into a command
+            # runner, so they need the same approval as exec in this mode.
+            exec_decision = resolve_permission(ActionType.EXEC)
+            if exec_decision.requires_confirmation:
+                decision = exec_decision
         if decision.requires_confirmation:
             return _pending_approval_result(
                 decision,
-                f"Launch app: {alias}",
+                action_desc,
                 tool_name="computer_functions_launch_app",
                 action_type="launch_app",
                 target_app=alias,
@@ -432,6 +490,14 @@ def launch_app(alias: str, url: str = "", args: str = "", *, _bypass_gate: bool 
     if is_blocked_process_alias(target_path):
         return json.dumps(
             {"status": "error", "error": f"'{alias}' resolves to a blocked process."}
+        )
+    if target.get("kind") != "shortcut" and _is_script_path(target_path):
+        return json.dumps(
+            {
+                "status": "blocked",
+                "reason_code": "blocked_launch_target",
+                "error": f"'{alias}' resolves to a script; use the exec tool so it goes through command approval.",
+            }
         )
 
     try:
@@ -522,6 +588,16 @@ def capture_full_screenshot(monitor: int = 0) -> str:
             selected_monitor = sct.monitors[monitor]
             image = sct.grab(selected_monitor)
             mss.tools.to_png(image.rgb, image.size, output=str(filepath))
+        try:
+            redacted = redact_capture(
+                filepath,
+                origin_x=int(selected_monitor["left"]),
+                origin_y=int(selected_monitor["top"]),
+            )
+        except Exception as exc:
+            # Never hand back a capture that may still show a blocked window.
+            filepath.unlink(missing_ok=True)
+            return json.dumps({"status": "error", "error": f"Could not redact screenshot: {exc}"})
         size_kb = filepath.stat().st_size / 1024
         monitor_info = {
             "index": monitor,
@@ -538,6 +614,7 @@ def capture_full_screenshot(monitor: int = 0) -> str:
                 "size_kb": round(size_kb, 1),
                 "resolution": f"{image.width}x{image.height}",
                 "monitor": monitor_info,
+                "redacted_windows": redacted,
                 "region": {
                     "x": monitor_info["x"],
                     "y": monitor_info["y"],

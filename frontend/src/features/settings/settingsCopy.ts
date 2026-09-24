@@ -17,13 +17,13 @@ export interface SettingsPageCopy {
 
 export const PAGE_COPY = {
   model: {
-    label: 'Model',
-    blurb: 'Pick the AI model that powers the agent, and cap how long a single request may run.',
-    keywords: 'provider openai gpt google gemini reasoning effort vision images speech voice whisper timeout limits',
+    label: 'Voice & limits',
+    blurb: 'Configure speech input and cap how long a request may run.',
+    keywords: 'speech voice whisper timeout limits',
   },
   apiKeys: {
     label: 'Connections',
-    blurb: 'Store the API keys and tokens the agent needs to reach outside services.',
+    blurb: 'Connect a ChatGPT account or save API keys and tokens for outside services.',
     keywords: 'api key token secret credential openai google tavily telegram search',
   },
   identity: {
@@ -73,7 +73,7 @@ export type SettingsPageId = keyof typeof PAGE_COPY
 /* ------------------------------------------------------------------ model --- */
 
 export const MODEL_COPY = {
-  provider: 'The company whose models the agent uses. Each provider needs its own API key, set up under Connections.',
+  provider: 'Choose OpenAI account, OpenAI API, or Google. Connect the selected provider under Connections.',
   model: 'Bigger models reason better and cost more per message. Smaller "mini"/"flash" models are faster and cheaper.',
   reasoningEffort: 'How long the model is allowed to think before it answers. Higher settings give better results on hard problems but are slower and cost more.',
   vision: 'Screenshots and image attachments go straight to the model you picked above, which reads them natively. No separate vision model is needed.',
@@ -106,8 +106,8 @@ export const SKILLS_COPY = {
 /* ---------------------------------------------------------------- browser --- */
 
 export const BROWSER_COPY = {
-  mode: 'Managed uses a clean browser Monaw controls — safest, but not signed in to anything. System uses your own Chrome, so the agent inherits your logins.',
-  systemConnection: 'How to reach your own Chrome. Attach only connects to a Chrome you already started with remote debugging enabled.',
+  mode: 'These built-in tools use an isolated browser by default. System mode connects to the debugging address below. Use Connect to my Chrome above for your running browser.',
+  systemConnection: 'How the built-in tools reach a Chrome debugging address. Use Connect to my Chrome above for your running browser.',
   cdpUrl: 'The debugging address of your Chrome. Only change this if you started Chrome on a non-default port.',
   chromeProfile: 'Which of your Chrome profiles to use when driving your own browser.',
   allowedDomains: 'If set, the agent may only visit these domains. Leave empty to allow any site.',

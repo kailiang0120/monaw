@@ -416,11 +416,11 @@ def test_telegram_bridge_lists_models_and_selects_by_number_or_name():
         ]
         assert first_three == [
             (1, "openai", OPENAI_CHAT_MODELS[0], True),
-            (2, "gemini", GEMINI_CHAT_MODELS[0], False),
-            (3, "gemini", GEMINI_CHAT_MODELS[1], False),
+            (2, "openai", OPENAI_CHAT_MODELS[1], False),
+            (3, "openai", OPENAI_CHAT_MODELS[2], False),
         ]
 
-        selected, error = bridge.set_model_selection(12345, "2")
+        selected, error = bridge.set_model_selection(12345, "4")
         assert error == ""
         assert selected is not None
         assert selected.model_name == GEMINI_CHAT_MODELS[0]
@@ -475,9 +475,9 @@ def test_telegram_bridge_sets_and_clears_reasoning_effort():
         options = bridge.list_effort_options(12345)
         assert [(option.index, option.effort, option.is_current) for option in options[:4]] == [
             (1, "none", False),
-            (2, "minimal", False),
-            (3, "low", False),
-            (4, "medium", True),
+            (2, "low", False),
+            (3, "medium", True),
+            (4, "high", False),
         ]
 
         selected, error = bridge.set_effort_selection(12345, "high")
@@ -692,6 +692,7 @@ def test_telegram_permission_callback_resumes_approval(monkeypatch):
         async def edit_message_text(self, text):
             calls.append(("edit", text))
 
+    monkeypatch.setattr(telegram_bridge, "_telegram_ticket_error", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(
         telegram_bridge,
         "approve_ticket",
@@ -739,6 +740,7 @@ def test_telegram_permission_callback_resumes_access_grant(monkeypatch):
         async def edit_message_text(self, text):
             calls.append(("edit", text))
 
+    monkeypatch.setattr(telegram_bridge, "_telegram_ticket_error", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(
         telegram_bridge,
         "resolve_grant",
@@ -772,6 +774,51 @@ def test_telegram_permission_callback_resumes_access_grant(monkeypatch):
     assert ("signal", "grant-1", "session") in calls
     assert ("answer", "Granted session") in calls
     assert any(call[0] == "edit" and "Granted session for ticket grant-1" in call[1] for call in calls)
+
+
+
+def test_telegram_permission_callback_refuses_desktop_ticket(monkeypatch):
+    from app.agent.approval_broker import create_ticket, get_ticket, TicketStatus
+
+    ticket = create_ticket(
+        tool_name="fs_write",
+        action_type="mutate",
+        execution_source="desktop",
+        control_session_id="desktop-session",
+        payload={"args": {"path": "x"}},
+    )
+    calls = []
+
+    class Query:
+        data = f"{TELEGRAM_PERMISSION_CALLBACK_PREFIX}:approve:{ticket.id}"
+
+        async def answer(self, text):
+            calls.append(("answer", text))
+
+        async def edit_message_text(self, text):
+            calls.append(("edit", text))
+
+    update = SimpleNamespace(
+        callback_query=Query(),
+        effective_chat=SimpleNamespace(id=222),
+        effective_user=SimpleNamespace(id=111),
+    )
+    context = SimpleNamespace(
+        application=SimpleNamespace(
+            bot_data={
+                TELEGRAM_AUTH_CONFIG_KEY: TelegramAuthorization(
+                    allowed_user_ids=frozenset({111}),
+                    allowed_chat_ids=frozenset(),
+                )
+            }
+        ),
+        bot=SimpleNamespace(send_message=lambda **_kwargs: None),
+    )
+
+    asyncio.run(permission_callback(update, context))
+
+    assert ("answer", "Not allowed.") in calls
+    assert get_ticket(ticket.id).status == TicketStatus.PENDING
 
 
 def test_collect_response_attachments_from_tool_output(monkeypatch):

@@ -81,6 +81,17 @@ def test_route_scope_is_enforced():
     assert write_response.json()["request_id"]
 
 
+def test_openai_account_login_requires_settings_write_scope():
+    secret = os.environ["MONAW_CONTROL_SECRET"]
+    token = mint_control_token(secret, scopes={"settings:read"})
+    response = TestClient(app).post(
+        "/api/openai-account/login",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "Missing required scope: settings:write"
+
+
 def test_request_size_limit_rejects_before_route_processing():
     client = TestClient(app)
 
@@ -204,7 +215,10 @@ def test_api_pagination_limits_cannot_be_bypassed():
 
 
 def test_control_plane_fails_closed_without_secret(monkeypatch):
+    from app.security import control_plane
+
     monkeypatch.delenv("MONAW_CONTROL_SECRET", raising=False)
+    monkeypatch.setattr(control_plane, "_captured_control_secret", "")
     client = TestClient(app)
 
     response = client.get("/api/settings", headers={"Authorization": "Bearer anything"})
