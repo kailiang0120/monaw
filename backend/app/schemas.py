@@ -272,7 +272,7 @@ class SkillDescriptorPayload(BaseModel):
 
 
 class PermissionSettingsPayload(BaseModel):
-    mode: str = Field("default", pattern="^(default|full_access|custom|user_config)$")
+    mode: str = Field("default", pattern="^(default|full_access|auto_review|custom|user_config)$")
     confirmations: ConfirmationSettingsPayload = Field(default_factory=ConfirmationSettingsPayload)
     blocked_roots: list[str] = Field(default_factory=list)
     path_rules: list[PathRulePayload] = Field(default_factory=list)
@@ -341,6 +341,7 @@ class ApiKeyStatusPayload(BaseModel):
 
 
 class AgentSettingsPayload(BaseModel):
+    permissions_config_path: str = ""
     llm: LLMSettingsPayload
     speech_to_text: SpeechToTextSettingsPayload
     mcp: MCPSettingsPayload
@@ -416,7 +417,7 @@ class SettingsUpdate(BaseModel):
     model_name: Optional[str] = None
     reasoning_effort: Optional[str] = Field(None, pattern="^(none|minimal|low|medium|high|xhigh|max)$")
     controller_permission_mode: Optional[str] = Field(
-        None, pattern="^(default|full_access|custom|user_config)$"
+        None, pattern="^(default|full_access|auto_review|custom|user_config)$"
     )
 
 
@@ -449,7 +450,7 @@ class ControllerPolicyOut(BaseModel):
 class ControllerPolicyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Optional[str] = Field(None, pattern="^(default|full_access|custom|user_config)$")
+    mode: Optional[str] = Field(None, pattern="^(default|full_access|auto_review|custom|user_config)$")
     permitted_roots: Optional[list[str]] = None
     blocked_roots: Optional[list[str]] = None
     allow_delete: Optional[bool] = None

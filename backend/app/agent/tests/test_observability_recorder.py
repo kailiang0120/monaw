@@ -41,6 +41,8 @@ def test_observability_recorder_writes_jsonl_sqlite_and_redacts_secrets(tmp_path
     detail = recorder.get_run(run_id, include_sensitive=True)
     assert detail is not None
     assert detail["status"] == "complete"
+    assert detail["total_tokens"] == 15
+    assert recorder.list_runs()[0]["input_tokens"] == 10
     assert detail["events"][1]["input"]["api_key"] == "[REDACTED]"
     assert detail["events"][1]["input"]["password"] == "[REDACTED]"
     assert detail["events"][1]["output"]["authorization"] == "[REDACTED]"

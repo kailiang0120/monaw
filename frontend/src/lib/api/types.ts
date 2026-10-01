@@ -618,6 +618,7 @@ export interface MemoryEpisode {
 }
 
 export interface AgentSettings {
+  permissions_config_path?: string
   llm: {
     provider: 'openai' | 'gemini' | 'codex'
     model_name: string
@@ -671,7 +672,7 @@ export interface AgentSettings {
     skills: Record<string, boolean>
   }
   permissions: {
-    mode: 'default' | 'full_access' | 'custom'
+    mode: 'default' | 'full_access' | 'auto_review' | 'custom'
     confirmations: ConfirmationSettings
     blocked_roots: string[]
     path_rules: PathRule[]

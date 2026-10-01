@@ -4,6 +4,7 @@ import shlex
 import sys
 import threading
 import time
+import pytest
 from types import SimpleNamespace
 
 from app.agent.sandbox.backends.local_direct import LocalDirectRunner
@@ -11,28 +12,91 @@ from app.agent.sandbox.backends.local_restricted import LocalRestrictedRunner
 from app.agent.sandbox.environment import build_exec_environment
 from app.agent.sandbox.manager import SandboxManager
 from app.agent.sandbox.models import (
+    SandboxRunRequest,
     SandboxBackendCapability,
     SandboxCapabilities,
     SandboxExecutionRequest,
     SandboxExecutionResult,
 )
 from app.agent.settings_store import AgentSettings
+from app.agent.sandbox.policy import SandboxPolicy
 from app.skills.exec import tools as exec_tools
 
 
-def _allow_exec(monkeypatch):
+def _allow_exec(monkeypatch, *, confirmation=False):
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",
         lambda *_args, **_kwargs: SimpleNamespace(
             blocked=False,
             requires_access_grant=False,
-            requires_confirmation=False,
+            requires_confirmation=confirmation,
             reason="",
             reason_code="allowed",
             policy_source="settings.json",
         ),
     )
+
+
+def test_caller_profile_cannot_hide_a_blocked_command():
+    settings = AgentSettings().sandbox
+    decision = SandboxPolicy(settings, capabilities=_capabilities()).decide(
+        SandboxRunRequest(command=r"reg delete HKCU\Software\Thing", profile="standard"))
+    assert not decision.allowed
+    assert decision.reason_code == "command_blocked"
+
+
+def test_manager_revalidates_command_instead_of_trusting_preview():
+    settings = AgentSettings().sandbox
+    policy = SandboxPolicy(settings, capabilities=_capabilities())
+    preview = policy.decide(SandboxRunRequest(command="echo safe"))
+    request = _request(r"reg delete HKCU\Software\Thing")
+    result = SandboxManager(settings, capabilities=_capabilities()).run(request, decision=preview)
+    assert result.status == "blocked"
+    assert result.reason_code == "command_blocked"
+
+
+def test_network_request_cannot_override_configured_deny():
+    decision = SandboxPolicy(AgentSettings().sandbox, capabilities=_capabilities(docker=True)).decide(
+        SandboxRunRequest(command="echo safe", network="allow"))
+    assert not decision.allowed
+    assert decision.reason_code == "network_access_disabled"
+
+
+def test_manager_bounds_resources_from_actual_settings(monkeypatch):
+    settings = AgentSettings().sandbox
+    settings.mode = "host"
+    settings.resources.timeout_seconds = 10
+    request = _request()
+    request.timeout = 500
+    request.resources = {"memory_mb": 999999, "timeout_seconds": 500}
+    manager = SandboxManager(settings, capabilities=_capabilities(local=False))
+    captured = []
+    monkeypatch.setattr(manager.local_direct, "run", lambda req: captured.append(req) or SandboxExecutionResult(status="ok"))
+    assert manager.run(request).status == "ok"
+    assert captured[0].timeout == 10
+    assert captured[0].resources == settings.resources.model_dump()
+
+
+@pytest.mark.parametrize("mode,confirmation", [("default", True), ("full_access", False), ("auto_review", True)])
+def test_host_routing_follows_permission_mode(mode, confirmation):
+    from app.agent.settings_store import merge_agent_settings
+    settings = merge_agent_settings(AgentSettings(), {"permissions": {"mode": mode}})
+    settings.sandbox.mode = "host"
+    decision = SandboxPolicy(settings.sandbox, capabilities=_capabilities(), permissions=settings.permissions).decide(
+        SandboxRunRequest(command="echo safe"))
+    assert decision.allowed
+    assert decision.explicit_approval_required is confirmation
+
+
+def test_strict_sandbox_stays_blocked_in_full_access_without_docker():
+    settings = AgentSettings()
+    settings.permissions.mode = "full_access"
+    settings.sandbox.mode = "enforce"
+    decision = SandboxPolicy(settings.sandbox, capabilities=_capabilities(), permissions=settings.permissions).decide(
+        SandboxRunRequest(command="echo safe"))
+    assert not decision.allowed
+    assert decision.backend == "none"
 
 
 def _settings_with_sandbox(**patch):
@@ -171,7 +235,7 @@ def test_exec_tool_blocks_blocked_policy_before_runner(monkeypatch, tmp_path):
 
 
 def test_exec_tool_offers_approval_for_untrusted_when_strong_backend_unavailable(monkeypatch, tmp_path):
-    _allow_exec(monkeypatch)
+    _allow_exec(monkeypatch, confirmation=True)
     settings = AgentSettings()
     settings.sandbox.docker.enabled = False
     monkeypatch.setattr(exec_tools, "_ACTIVE_SETTINGS", SimpleNamespace(sandbox=settings.sandbox))

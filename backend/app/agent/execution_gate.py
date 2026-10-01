@@ -18,6 +18,8 @@ from app.agent.access_grant_broker import (
     signal_resume as signal_grant_resume,
 )
 from app.agent.approval_broker import (
+    approve_ticket,
+    ticket_validation_error,
     cleanup_resume as cleanup_approval_resume,
     get_resume_decision as get_approval_resume_decision,
     get_ticket as get_approval_ticket,
@@ -25,6 +27,8 @@ from app.agent.approval_broker import (
     reject_ticket,
     signal_resume as signal_approval_resume,
 )
+from app.agent.approval_review import review_action
+from app.agent.settings_store import load_agent_settings
 from app.agent.execution_resume import resume_approved_ticket
 from app.agent.iteration_budget import IterationBudget
 from app.agent.run_context import (
@@ -64,6 +68,8 @@ class ExecutionGateService:
         budget: IterationBudget,
         execute_tool: ToolExecute,
         emit: Callable[[dict[str, Any]], None],
+        review_client=None,
+        user_request: str = "",
     ) -> str:
         """Wait on each gate the output raises and return the final tool output.
 
@@ -74,7 +80,33 @@ class ExecutionGateService:
             pending_event = self.check_pending_status(tool_output)
             if pending_event is None:
                 return tool_output
-            emit(pending_event)
+            auto_approved = False
+            if pending_event["event"] == "approval_required":
+                ticket = get_approval_ticket(pending_event["data"]["ticket_id"])
+                if (ticket is not None and ticket.interactive and review_client is not None
+                        and load_agent_settings().permissions.mode == "auto_review"
+                        and not ticket_validation_error(ticket,
+                            expected_session_id=current_control_session_id(),
+                            expected_conversation_id=current_conversation_id(),
+                            expected_execution_source=current_execution_source())):
+                    original_hash = ticket.payload_hash
+                    review = await review_action(review_client, ticket, user_request)
+                    # A profile change, rejected ticket, or altered payload during
+                    # review must never turn into automatic authorization.
+                    if (review["decision"] == "approve"
+                            and load_agent_settings().permissions.mode == "auto_review"
+                            and ticket.compute_hash() == original_hash
+                            and not ticket_validation_error(ticket)):
+                        approved = approve_ticket(ticket.id, resolved_by="auto_review")
+                        if approved is not None:
+                            signal_approval_resume(ticket.id, "approved")
+                            auto_approved = True
+                    pending_event["data"]["review_reason"] = review["reason"]
+                    pending_event["data"]["reason"] = review["reason"]
+            # Do not offer human Approve/Reject buttons for an action that
+            # the reviewer has already approved. The resume gate remains the
+            # original approval gate, not an access-grant gate.
+            emit({"event": "approval_resolved", "data": pending_event["data"]} if auto_approved else pending_event)
             resolved_output: str | None = None
             async for resolution_event in self.await_ticket_resolution(
                 budget=budget,

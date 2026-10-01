@@ -83,11 +83,12 @@ def test_watcher_leaves_existing_and_ambiguous_prompts_and_accepts_one_new_promp
 ):
     clicks = []
     button = SimpleNamespace(
+        element_info=SimpleNamespace(runtime_id=[42, 1]),
         click_input=lambda: clicks.append("Allow"),
         top_level_parent=lambda: SimpleNamespace(set_focus=lambda: None),
         is_visible=lambda: True, is_enabled=lambda: True,
     )
-    scans = iter([[button] if existing else [], [button] * appearing])
+    scans = iter([[button] if existing else [], [button] * appearing, []])
     monkeypatch.setattr(module, "_endpoint_chrome_pid", lambda endpoint: 123)
     monkeypatch.setattr(module, "_approval_candidates", lambda desktop, pid: next(scans))
     monkeypatch.setitem(sys.modules, "pythoncom", SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=lambda: None))
@@ -98,6 +99,27 @@ def test_watcher_leaves_existing_and_ambiguous_prompts_and_accepts_one_new_promp
     module._watch_approval("local", threading.Event(), ready)
     assert ready.is_set()
     assert len(clicks) == expected
+
+
+def test_watcher_retries_same_prompt_when_first_click_is_ignored(monkeypatch):
+    clicks = []
+    button = SimpleNamespace(
+        element_info=SimpleNamespace(runtime_id=[42, 1]),
+        click_input=lambda: clicks.append("Allow"),
+        top_level_parent=lambda: SimpleNamespace(set_focus=lambda: None),
+        is_visible=lambda: True, is_enabled=lambda: True,
+    )
+    scans = iter([[], [button], [button], []])
+    times = iter(range(0, 1000, 2))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(module, "_endpoint_chrome_pid", lambda endpoint: 123)
+    monkeypatch.setattr(module, "_approval_candidates", lambda desktop, pid: next(scans))
+    monkeypatch.setitem(sys.modules, "pythoncom", SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=lambda: None))
+    monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(Desktop=lambda **kwargs: object()))
+    monkeypatch.setitem(sys.modules, "win32gui", SimpleNamespace(GetForegroundWindow=lambda: 456))
+    monkeypatch.setitem(sys.modules, "win32process", SimpleNamespace(GetWindowThreadProcessId=lambda hwnd: (1, 123)))
+    module._watch_approval("local", threading.Event(), threading.Event())
+    assert clicks == ["Allow", "Allow"]
 
 
 def test_watcher_stops_when_connection_attempt_is_cancelled(monkeypatch):

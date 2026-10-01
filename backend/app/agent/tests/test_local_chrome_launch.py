@@ -93,6 +93,7 @@ def test_prepares_debugging_and_opens_normal_browser_not_setup_page(monkeypatch,
     assert error.value.reason_code == "system_debugging_not_enabled"
     assert launches[0][-1] == "about:blank"
     assert "--enable-features=DevToolsAcceptDebuggingConnections" in launches[0]
+    assert "--start-maximized" in launches[0]
     state = json.loads((tmp_path / "Local State").read_text(encoding="utf-8"))
     assert state["devtools"]["remote_debugging"]["user-enabled"] is True
 

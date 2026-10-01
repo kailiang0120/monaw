@@ -303,7 +303,7 @@ class TestUnifiedSettingsPermissions:
         target.write_text("secret", encoding="utf-8")
 
         settings_data = AgentSettings()
-        settings_data.permissions.mode = "default"
+        settings_data.permissions.mode = "custom"
         settings_data.permissions.blocked_roots = []
         settings_data.permissions.path_rules = []
         save_agent_settings(settings_data, settings_path=cp._POLICY_DIR.parent / "settings.json")
@@ -345,7 +345,7 @@ class TestUnifiedSettingsPermissions:
         assert dec.blocked
         assert dec.reason_code == "launch_not_allowed"
 
-    def test_settings_json_delete_blocked_by_default(self, tmp_policy, tmp_path):
+    def test_settings_json_custom_can_block_deletion(self, tmp_policy, tmp_path):
         import app.agent.controller_policy as cp
 
         target = tmp_path / "allowed" / "file.txt"
@@ -353,7 +353,7 @@ class TestUnifiedSettingsPermissions:
         target.write_text("x")
 
         settings_data = AgentSettings()
-        settings_data.permissions.mode = "full_access"
+        settings_data.permissions.mode = "custom"
         settings_data.permissions.blocked_roots = []
         save_agent_settings(settings_data, settings_path=cp._POLICY_DIR.parent / "settings.json")
 
@@ -413,7 +413,7 @@ class TestUnifiedSettingsPermissions:
         assert dec.allowed
         assert not dec.blocked
 
-    def test_settings_json_unknown_app_requires_access_grant_in_default(self, tmp_policy):
+    def test_settings_json_unknown_app_runs_automatically_in_default(self, tmp_policy):
         import app.agent.controller_policy as cp
 
         settings_data = AgentSettings()
@@ -421,7 +421,7 @@ class TestUnifiedSettingsPermissions:
         save_agent_settings(settings_data, settings_path=cp._POLICY_DIR.parent / "settings.json")
 
         dec = resolve_permission(ActionType.LAUNCH_APP, target_app="random_unknown_app_xyz")
-        assert dec.requires_access_grant
+        assert not dec.requires_access_grant
         assert not dec.requires_confirmation
 
     def test_settings_json_unknown_app_allowed_in_full_access(self, tmp_policy):
@@ -436,7 +436,7 @@ class TestUnifiedSettingsPermissions:
         assert not dec.requires_confirmation
         assert not dec.requires_access_grant
 
-    def test_settings_json_allowlisted_app_skips_default_confirmation(self, tmp_policy):
+    def test_settings_json_allowlisted_app_runs_automatically(self, tmp_policy):
         import app.agent.controller_policy as cp
 
         settings_data = AgentSettings()
@@ -561,3 +561,23 @@ class TestNonInteractiveProfile:
     def test_unattended_reads_follow_normal_rules(self, unattended, tmp_path):
         dec = resolve_permission(ActionType.READ, target_path=str(tmp_path / "notes.txt"))
         assert not dec.blocked
+
+
+@pytest.mark.parametrize("mode,action,confirmation", [
+    ("default", ActionType.READ, False), ("default", ActionType.CLICK, False),
+    ("default", ActionType.TYPE, False), ("default", ActionType.LAUNCH_APP, False),
+    ("default", ActionType.MUTATE, True), ("default", ActionType.EXEC, True),
+    ("default", ActionType.DELETE, True),
+    ("full_access", ActionType.MUTATE, False), ("full_access", ActionType.EXEC, False),
+    ("full_access", ActionType.PROCESS_KILL, False),
+    ("full_access", ActionType.DELETE, False),
+    ("auto_review", ActionType.CLICK, False), ("auto_review", ActionType.MUTATE, True),
+    ("auto_review", ActionType.EXEC, True),
+    ("auto_review", ActionType.DELETE, True),
+])
+def test_four_modes_share_one_action_policy(tmp_policy, mode, action, confirmation):
+    from app.agent.settings_store import merge_agent_settings
+    settings = merge_agent_settings(AgentSettings(), {"permissions": {"mode": mode}})
+    decision = resolve_permission(action, settings_data=settings)
+    assert not decision.blocked
+    assert decision.requires_confirmation is confirmation

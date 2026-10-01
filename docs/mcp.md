@@ -133,10 +133,10 @@ Names are sanitized and shortened deterministically when needed. Use `mcp_list_t
 | --- | --- |
 | `mcp_status` | Shows configured and active server status. |
 | `mcp_list_tools` | Lists reflected tools and original mappings. |
-| `mcp_refresh_tools` | Re-lists tools from one or all enabled servers. Requires approval. |
-| `mcp_reconnect_server` | Restarts one configured server and refreshes tools. Requires approval. |
+| `mcp_refresh_tools` | Re-lists tools from one or all enabled servers. Follows app-startup permissions. |
+| `mcp_reconnect_server` | Restarts one configured server and refreshes tools. Follows app-startup permissions. |
 
-Reflected tools require approval by default, including read-like tools. A tool can bypass that prompt only when its original remote tool name is explicitly listed in `trusted_tools`; that explicit exception also applies to a tool the user knowingly trusts despite its risk. Risk overrides alone never bypass approval.
+Reflected tools follow the selected permission mode. Routine reads and browsing run automatically in Default; changes and commands ask for approval. Full Access removes action approval prompts, Auto Review reviews pending actions, and Custom follows the config file. `trusted_tools` suppresses the additional server risk prompt; it cannot override the selected mode's action confirmations or hard blocks. Risk overrides only change labels.
 
 ## Approval Behavior
 
@@ -144,7 +144,7 @@ MCP tool annotations are treated as hints, not proof.
 
 Monaw labels a reflected tool as low risk when it has a read-like name such as `get`, `list`, `read`, `search`, `query`, `find`, `inspect`, `status`, or `describe`, or when MCP annotations indicate read-only.
 
-Monaw requires approval for tools that appear destructive, mutating, open-world, or unknown-risk. Keywords such as `delete`, `remove`, `edit`, `patch`, `upload`, `send`, `execute`, `run`, `browser`, `web`, `url`, `request`, and `email` raise the risk.
+Names, descriptions and annotations produce risk labels. The shared action policy then determines whether to execute, ask, review or block. Delete and execution classifications take precedence over read-only hints; unknown actions ask in Default and Auto Review.
 
 ## Troubleshooting
 
@@ -165,4 +165,8 @@ MCP servers can expose powerful tools. Keep the allow list narrow when using ser
 
 Do not put permanent secrets in plain `env` fields unless you accept that they are stored in local runtime settings. Prefer short-lived local credentials where possible.
 
-Remote MCP tools can request external network or file actions. Approval prompts are the final safety boundary for mutating and unknown-risk tools.
+Remote MCP tools can request external network or file actions. Their own filesystem and network capabilities are not contained by Monaw's shell sandbox. Approval behavior follows the selected mode.
+
+## Shared permission modes
+
+MCP tool approvals use the same four modes as built-in tools: Default, Full Access, Auto Review, and Custom. Routine browsing, reads and app startup run automatically in the presets; Default asks before unknown mutating actions and execution. Full Access permits MCP calls without an extra server-specific approval; Auto Review checks pending changes against the user's current request. Custom follows `permissions.custom_profile` in the runtime config. Blocked actions remain blocked, and risk overrides only change labels. Exact approval payloads and schemas are validated again on resume.

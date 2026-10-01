@@ -67,7 +67,7 @@ def test_host_tool_approval_preserves_sandbox_reason(monkeypatch, tmp_path):
         lambda *_args, **_kwargs: SimpleNamespace(
             blocked=False,
             requires_access_grant=False,
-            requires_confirmation=False,
+            requires_confirmation=True,
             reason="",
             reason_code="allowed",
             policy_source="settings.json",
@@ -128,6 +128,14 @@ def test_exec_approval_ticket_redacts_env_values(monkeypatch):
 
 
 def test_exec_tool_runs_command(monkeypatch, tmp_path):
+    from app.agent.settings_store import AgentSettings
+    from app.agent.sandbox.models import SandboxCapabilities, SandboxBackendCapability
+    settings = AgentSettings()
+    settings.sandbox.mode = "host"
+    monkeypatch.setattr(exec_tools, "_ACTIVE_SETTINGS", settings)
+    monkeypatch.setattr("app.agent.sandbox.manager.probe_capabilities", lambda _settings: SandboxCapabilities(
+        docker=SandboxBackendCapability(backend="docker", enabled=False, available=False, security_label="strong", network_enforcement="enforced"),
+        local_restricted=SandboxBackendCapability(backend="local_restricted", enabled=False, available=False, security_label="advisory", network_enforcement="advisory")))
     monkeypatch.setattr(
         exec_tools,
         "build_sandbox_decision",

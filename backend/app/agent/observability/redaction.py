@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 MAX_TEXT_CHARS = 200_000
+TOKEN_COUNT_KEYS = {
+    "input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens",
+    "image_tokens", "total_tokens", "token_delta",
+}
 
 SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|token|secret|password|authorization|cookie|session|bearer)",
@@ -57,7 +61,9 @@ def redact(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
-            if SECRET_KEY_RE.search(key_text):
+            if key_text in TOKEN_COUNT_KEYS and type(item) is int:
+                redacted[key_text] = item
+            elif SECRET_KEY_RE.search(key_text):
                 redacted[key_text] = "[REDACTED]"
             else:
                 redacted[key_text] = redact(item)

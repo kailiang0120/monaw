@@ -477,13 +477,13 @@ def _validate_recursive_budget(path: Path, *, operation: str) -> str | None:
     return None
 
 
-def _revalidate_mutation_target(path: str) -> str | None:
+def _revalidate_mutation_target(path: str, action: ActionType = ActionType.MUTATE) -> str | None:
     target = _filesystem_target(path)
     # Re-check hard blocks against the resolved target right before mutating.
     # Grants were already settled by the gate (or by the approval that
     # replays this call), and a one-time grant is consumed there, so asking
     # again here would re-prompt forever.
-    decision = resolve_permission(ActionType.MUTATE, target_path=str(target.parent if not target.exists else target.resolved))
+    decision = resolve_permission(action, target_path=str(target.parent if not target.exists else target.resolved))
     if decision.blocked:
         return _blocked_result(decision)
     if target.is_symlink:
@@ -1229,7 +1229,7 @@ def fs_delete(path: str, recursive: bool = True, dry_run: bool = False, *, _bypa
         )
         if pending:
             return pending
-    revalidate = _revalidate_mutation_target(path)
+    revalidate = _revalidate_mutation_target(path, ActionType.DELETE)
     if revalidate:
         return revalidate
     resolved = _resolve_path(path)

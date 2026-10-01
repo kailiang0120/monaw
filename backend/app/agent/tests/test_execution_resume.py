@@ -41,6 +41,21 @@ class TestRegisterExecutor:
 
 
 class TestResumeApprovedTicket:
+    def test_approval_does_not_override_a_revoked_delete_permission(self, monkeypatch):
+        from app.agent import controller_policy
+        from app.agent.settings_store import AgentSettings
+        settings = AgentSettings()
+        settings.permissions.mode = "full_access"
+        settings.permissions.allow_delete = False
+        monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: settings)
+        calls = []
+        register_executor("ctrl_delete", lambda payload: calls.append(payload) or '{"status":"ok"}')
+        ticket = create_ticket(tool_name="ctrl_delete", action_type="delete", payload={"input_str":"{}"})
+        approve_ticket(ticket.id)
+        resume_approved_ticket(ticket)
+        assert ticket.status == TicketStatus.FAILED
+        assert not calls
+        assert "disabled" in ticket.execution_result.lower()
     def test_executes_on_approved(self):
         register_executor("ctrl_delete", lambda s: '{"status": "ok", "deleted": "f.txt"}')
         t = create_ticket(

@@ -131,7 +131,7 @@ def test_exec_write_stdin_blocks_policy_backend_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(
         exec_tools,
         "SandboxPolicy",
-        lambda _settings: SimpleNamespace(
+        lambda _settings, **_kwargs: SimpleNamespace(
             decide=lambda _request: SimpleNamespace(
                 allowed=True,
                 backend="docker",

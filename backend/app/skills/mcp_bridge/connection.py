@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import threading
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -87,14 +88,28 @@ class _TailBuffer:
         self._text = ""
         self._temp_dir = None
         self._file = None
+        self._finalizer = None
+
+    @staticmethod
+    def _dispose(file, directory) -> None:
+        file.close()
+        directory.cleanup()
 
     def fileno(self) -> int:
         # The MCP SDK passes errlog directly to subprocess stderr on Windows.
         # A write-only Python buffer is not a valid subprocess file descriptor.
         with self._lock:
             if self._file is None:
-                self._temp_dir = tempfile.TemporaryDirectory(prefix="monaw-mcp-stderr-")
+                # A shutting-down child can still hold its inherited stderr
+                # handle on Windows. Preserve that diagnostic file rather
+                # than raising from interpreter shutdown during cleanup.
+                self._temp_dir = tempfile.TemporaryDirectory(
+                    prefix="monaw-mcp-stderr-", ignore_cleanup_errors=True,
+                )
                 self._file = (Path(self._temp_dir.name) / "stderr.log").open("ab", buffering=0)
+                # Registered after TemporaryDirectory's finalizer so the open
+                # Windows file handle closes before its folder is removed.
+                self._finalizer = weakref.finalize(self, self._dispose, self._file, self._temp_dir)
             return self._file.fileno()
 
     def write(self, chunk: Any) -> int:
@@ -136,6 +151,9 @@ class _TailBuffer:
             if self._temp_dir is not None:
                 self._temp_dir.cleanup()
                 self._temp_dir = None
+            if self._finalizer is not None:
+                self._finalizer.detach()
+                self._finalizer = None
 
 
 class ServerManager:

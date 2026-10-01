@@ -16,7 +16,7 @@ from app.agent.sandbox.models import (
     SandboxRunRequest,
     SandboxStatus,
 )
-from app.agent.settings_store import SandboxSettings
+from app.agent.settings_store import PermissionSettings, SandboxSettings
 
 
 def _run_probe(command: list[str], *, timeout: float = 3.0) -> tuple[bool, str, str]:
@@ -153,7 +153,7 @@ _PYTHON_IMPORT_SUPPORT_DETAIL = {
     ),
     "unavailable": (
         "No module inventory for this image, so Python imports are routed to the "
-        "approval-required host runner. Use Resolve & pull to probe the image."
+        "host runner under the selected permission mode. Use Resolve & pull to probe the image."
     ),
 }
 
@@ -162,11 +162,12 @@ def get_sandbox_status(
     settings: SandboxSettings,
     *,
     capabilities: SandboxCapabilities | None = None,
+    permissions: PermissionSettings | None = None,
 ) -> dict[str, Any]:
     probed = capabilities or probe_capabilities(settings)
     from app.agent.sandbox.policy import SandboxPolicy
 
-    policy = SandboxPolicy(settings, capabilities=probed)
+    policy = SandboxPolicy(settings, capabilities=probed, permissions=permissions)
     probe_workdir = (settings.allowed_bind_roots or [""])[0]
     representative = policy.decide(
         SandboxRunRequest(
@@ -220,7 +221,7 @@ def get_sandbox_status(
                 "security_label": "none",
                 "network_enforcement": "none",
                 "version": "",
-                "reason": "explicit_approval_required",
+                "reason": "Approvals follow the selected permission mode.",
             },
         },
     )

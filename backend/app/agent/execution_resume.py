@@ -52,6 +52,19 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
         mark_failed(ticket.id, error=f"Approval invalidated: {validation_error}")
         return ticket
 
+    # Approval authorizes this payload, never a permission that has since been
+    # revoked. Access grants have already been consumed; recheck hard blocks.
+    from app.agent.controller_policy import ActionType, resolve_permission
+    try:
+        action = ActionType(ticket.action_type)
+    except ValueError:
+        action = None  # External adapters revalidate their own actions.
+    if action is not None:
+        permission = resolve_permission(action, target_path=ticket.target_path, target_app=ticket.target_app)
+        if permission.blocked:
+            mark_failed(ticket.id, error=permission.reason)
+            return ticket
+
     executor = _EXECUTORS.get(ticket.tool_name)
     if not executor:
         mark_failed(ticket.id, error=f"No executor registered for '{ticket.tool_name}'")

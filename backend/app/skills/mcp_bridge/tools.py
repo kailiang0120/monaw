@@ -13,7 +13,12 @@ from .connection import (
     get_mcp_runtime_diagnostics,
     reconnect_mcp_server as reconnect_runtime_mcp_server,
 )
-from .registry import build_tool_entries, clear_reflected_tools_for_server, get_reflected_tool_map
+from .registry import (
+    _runtime_approval_decision,
+    build_tool_entries,
+    clear_reflected_tools_for_server,
+    get_reflected_tool_map,
+)
 
 
 def _json(payload: dict[str, Any]) -> str:
@@ -127,6 +132,15 @@ def _mcp_status(settings) -> str:
 
 def register_tools(registry, settings) -> None:
     def _control_approval(tool_name: str, action: str, reason: str, args: dict[str, Any]) -> str:
+        decision = _runtime_approval_decision(
+            {"requires_approval": True, "risk": "medium", "reason": reason}, "launch_mcp_server",
+        )
+        if decision.get("blocked"):
+            return _json({"status": "blocked", "reason": decision["reason"], "reason_code": decision["reason_code"]})
+        if not decision["requires_approval"]:
+            if tool_name == "mcp_refresh_tools":
+                return _raw_mcp_refresh_tools(**args)
+            return _raw_mcp_reconnect_server(**args)
         target = str(args.get("server_name", "") or "all")
         payload = {"input_str": json.dumps(args, ensure_ascii=False, sort_keys=True), "args": args}
         ticket = create_ticket(

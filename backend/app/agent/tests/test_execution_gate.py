@@ -70,6 +70,65 @@ async def _fake_execute_tool(_budget, tool_dict, arguments):
     )
 
 
+@pytest.mark.parametrize("response,should_run", [
+    ('{"decision":"approve","reason":"Creates the requested report."}', True),
+    ('{"decision":"ask","reason":"The destination is unclear."}', False),
+    ('not json', False),
+    ('{"decision":"approve"}', False),
+])
+def test_auto_review_only_runs_exact_validated_approved_actions(monkeypatch, response, should_run):
+    import app.agent.execution_gate as gate
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "auto_review"
+    monkeypatch.setattr(gate, "load_agent_settings", lambda: settings)
+    calls = []
+    register_executor("write_report", lambda payload: calls.append(json.loads(payload)) or '{"status":"ok"}')
+    ticket = create_ticket(tool_name="write_report", interactive=True,
+                           payload={"input_str": '{"path":"report.txt"}'})
+    class Reviewer:
+        async def chat(self, **kwargs):
+            assert "report.txt" in kwargs["messages"][0]["content"]
+            return response
+    service = ExecutionGateService(default_timeout_seconds=0.01)
+    events = []
+    result = asyncio.run(service.resolve_pending_output(
+        tool_output=json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
+        tool_dict={"name": "write_report"}, arguments={}, budget=IterationBudget(max_iterations=1),
+        execute_tool=_fake_execute_tool, emit=events.append, review_client=Reviewer(),
+        user_request="Create report.txt with my report."))
+    assert bool(calls) is should_run
+    if should_run:
+        assert calls == [{"path": "report.txt"}]
+        assert ticket.resolved_by == "auto_review"
+        assert ticket.status == TicketStatus.APPLIED
+        assert json.loads(result)["status"] == "ok"
+    else:
+        assert ticket.status == TicketStatus.PENDING
+    assert events[0]["data"]["review_reason"]
+    assert events[0]["event"] == ("approval_resolved" if should_run else "approval_required")
+
+
+def test_auto_review_cannot_approve_a_changed_payload(monkeypatch):
+    import app.agent.execution_gate as gate
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "auto_review"
+    monkeypatch.setattr(gate, "load_agent_settings", lambda: settings)
+    ticket = create_ticket(tool_name="write_report", interactive=True, payload={"input_str": "{}"})
+    class Reviewer:
+        async def chat(self, **_kwargs):
+            ticket.payload["input_str"] = '{"path":"different.txt"}'
+            ticket.payload_hash = ticket.compute_hash()
+            return '{"decision":"approve","reason":"Requested."}'
+    result = asyncio.run(ExecutionGateService(default_timeout_seconds=0).resolve_pending_output(
+        tool_output=json.dumps({"status":"pending_approval", "ticket_id":ticket.id}),
+        tool_dict={"name":"write_report"}, arguments={}, budget=IterationBudget(max_iterations=1),
+        execute_tool=_fake_execute_tool, emit=lambda _event: None, review_client=Reviewer(), user_request="Create a report."))
+    assert ticket.status == TicketStatus.PENDING
+    assert json.loads(result)["status"] == "error"
+
+
 def test_check_pending_status_parses_approval_and_access_grant():
     approval = ExecutionGateService.check_pending_status(
         json.dumps({"status": "pending_approval", "ticket_id": "t1", "action": "delete", "reason": "r"})

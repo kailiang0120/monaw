@@ -14,6 +14,7 @@ type ModelSelection = Pick<AgentSettings['llm'], 'provider' | 'model_name' | 're
 const APPROVAL_OPTIONS: Array<{ value: ApprovalMode; label: string }> = [
   { value: 'default', label: 'Default' },
   { value: 'full_access', label: 'Full Access' },
+  { value: 'auto_review', label: 'Auto Review' },
   { value: 'custom', label: 'Custom' },
 ]
 const VOICE_AUTO_STOP_MS = 60000

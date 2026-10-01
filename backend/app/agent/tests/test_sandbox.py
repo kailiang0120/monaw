@@ -870,7 +870,7 @@ def test_sandbox_status_reports_where_the_python_import_allowlist_came_from():
     assert unknown_status["selected_backend"] == "docker"
     assert unknown_status["isolation"] == "strong"
     assert unknown_status["python_import_support"] == "unavailable"
-    assert "approval-required host runner" in unknown_status["python_import_detail"]
+    assert "host runner under the selected permission mode" in unknown_status["python_import_detail"]
 
     store_python_module_inventory(
         settings.sandbox.docker.image, {"builtins", "os", "sys", "json"}

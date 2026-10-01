@@ -8,6 +8,8 @@ import threading
 from typing import Any
 
 from app.agent.approval_broker import create_ticket
+from app.agent.controller_policy import resolve_external_tool_permission
+from app.agent.permission_actions import external_tool_action
 from app.agent.execution_resume import register_executor
 from app.agent.settings_store import MCPServerConfig
 
@@ -210,6 +212,21 @@ def _approval_decision(cfg: MCPServerConfig, tool_name: str, description: str, a
     return {"requires_approval": True, "risk": risk, "reason": "unknown_tool_risk"}
 
 
+def _runtime_approval_decision(decision: dict[str, Any], tool_name: str) -> dict[str, Any]:
+    """Apply the current desktop profile at call time, after MCP risk classification."""
+    action = external_tool_action(tool_name, read_only=decision["reason"] == "untrusted_read_tool")
+    permission = resolve_external_tool_permission(
+        action, default_confirmation=decision["requires_approval"], reason=decision["reason"],
+    )
+    return {
+        **decision,
+        "requires_approval": permission.requires_confirmation,
+        "blocked": permission.blocked or not permission.allowed,
+        "reason": permission.reason if permission.blocked or decision["requires_approval"] else decision["reason"],
+        "reason_code": permission.reason_code,
+    }
+
+
 def _pending_mcp_approval(
     *,
     reflected_name: str,
@@ -264,6 +281,11 @@ def _call_mcp_tool(manager, reflected_name: str, tool_name: str, arguments: dict
     if validation_error:
         return json.dumps({"status": "error", "error": validation_error, "reason_code": validation_error})
     current = get_reflected_tool_map().get(reflected_name, {})
+    permission = _runtime_approval_decision(current.get("approval", {"requires_approval": True,
+        "reason": "untrusted_tool", "risk": "medium"}), tool_name)
+    if permission.get("blocked"):
+        return json.dumps({"status": "blocked", "reason": permission["reason"],
+                           "reason_code": permission["reason_code"]})
     if current.get("schema_hash") != schema_hash:
         return json.dumps(
             {
@@ -342,13 +364,17 @@ def build_tool_entries(cfg: MCPServerConfig, manager, mcp_tools: list[Any]) -> l
             _schema_hash: str = schema_digest,
             **arguments,
         ):
-            if _decision["requires_approval"]:
+            effective = _runtime_approval_decision(_decision, _tool_name)
+            if effective.get("blocked"):
+                return json.dumps({"status": "blocked", "reason": effective["reason"],
+                                   "reason_code": effective["reason_code"]})
+            if effective["requires_approval"]:
                 return _pending_mcp_approval(
                     reflected_name=_reflected_name,
                     server_name=cfg.name,
                     original_tool_name=_tool_name,
                     arguments=arguments,
-                    decision=_decision,
+                    decision=effective,
                     schema_hash=_schema_hash,
                 )
             return _call_mcp_tool(manager, _reflected_name, _tool_name, arguments, _schema_hash)

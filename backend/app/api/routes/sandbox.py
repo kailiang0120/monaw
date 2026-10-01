@@ -23,7 +23,7 @@ router = APIRouter()
 @router.get("/sandbox/status", response_model=SandboxStatusPayload)
 async def sandbox_status():
     runtime_settings = load_agent_settings(settings)
-    return get_sandbox_status(runtime_settings.sandbox)
+    return get_sandbox_status(runtime_settings.sandbox, permissions=runtime_settings.permissions)
 
 
 @router.post("/sandbox/docker/resolve-image", response_model=SandboxResolveImageResponse)

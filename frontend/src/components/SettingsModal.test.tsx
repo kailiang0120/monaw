@@ -827,10 +827,10 @@ describe('SettingsModal', () => {
     fireEvent.click((await screen.findAllByRole('button', { name: /Permissions/i }))[0])
 
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
-    const info = screen.getByRole('button', { name: 'About Auto approve' })
+    const info = screen.getByRole('button', { name: 'About Full Access' })
     fireEvent.focus(info)
-    expect(screen.getByRole('tooltip')).toHaveTextContent('without stopping')
-    expect(screen.getByRole('button', { name: 'Ask first' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('tooltip')).toHaveTextContent('without approval prompts')
+    expect(screen.getByRole('button', { name: 'Default' })).toHaveAttribute('aria-pressed', 'true')
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
     expect(onClose).not.toHaveBeenCalled()
@@ -842,43 +842,20 @@ describe('SettingsModal', () => {
     expect(updateSettings).not.toHaveBeenCalled()
   })
 
-  it('switches preset permissions to custom when a preset toggle changes', async () => {
-    const fullAccessSettings = buildSettings({
-      permissions: {
-        ...(buildSettings().permissions as any),
-        mode: 'full_access',
-        confirmations: {
-          mutate: false,
-          delete: true,
-          launch_app: false,
-          click: false,
-          type: false,
-        },
-        dangerous_actions_require_confirm: false,
-        allow_screen_fallback: true,
-      },
-    })
-    vi.mocked(fetchSettings).mockResolvedValue(fullAccessSettings as any)
-    vi.mocked(updateSettings).mockImplementation(async (payload: any) => ({
-      ...fullAccessSettings,
-      ...payload,
-      permissions: payload.permissions ?? fullAccessSettings.permissions,
-    }) as any)
-
+  it('offers exactly four modes without per-action switches', async () => {
     render(<SettingsModal onClose={() => {}} />)
-
     fireEvent.click((await screen.findAllByRole('button', { name: /Permissions/i }))[0])
-    fireEvent.click(await screen.findByLabelText('Allow clicks by screen coordinates'))
+    for (const mode of ['Default', 'Full Access', 'Auto Review', 'Custom']) {
+      expect(screen.getByRole('button', { name: mode })).toBeInTheDocument()
+    }
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Full Access' })).toHaveAttribute('data-tone', 'danger')
+    fireEvent.click(screen.getByRole('button', { name: 'Auto Review' }))
+    expect(screen.getByRole('heading', { name: 'Auto Review allows' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
-
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        permissions: expect.objectContaining({
-          mode: 'custom',
-          allow_screen_fallback: false,
-        }),
-      }))
-    })
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      permissions: expect.objectContaining({ mode: 'auto_review' }),
+    })))
   })
 
   it('restores the saved custom profile after switching through full access', async () => {
@@ -906,7 +883,7 @@ describe('SettingsModal', () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click((await screen.findAllByRole('button', { name: /Permissions/i }))[0])
-    fireEvent.click(screen.getByRole('button', { name: 'Auto approve' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Full Access' }))
     fireEvent.click(screen.getByRole('button', { name: 'Custom' }))
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
@@ -921,36 +898,15 @@ describe('SettingsModal', () => {
     })
   })
 
-  it('keeps app override alias input focused while typing', async () => {
-    vi.mocked(fetchSettings).mockResolvedValue(buildSettings({
-      permissions: {
-        ...(buildSettings().permissions as any),
-        app_rules: [
-          {
-            alias: '',
-            display_name: '',
-            exe_paths: [],
-            launch_allowed: true,
-            uia_allowed: true,
-            screen_fallback_allowed: false,
-            require_confirmation: false,
-            enabled: true,
-          },
-        ],
-      },
-    }) as any)
-
+  it('shows Custom rules in a config file instead of setup controls', async () => {
+    const customSettings = buildSettings({ permissions_config_path: 'C:/monaw/settings.json' } as any)
+    vi.mocked(fetchSettings).mockResolvedValue(customSettings as any)
     render(<SettingsModal onClose={() => {}} />)
-
     fireEvent.click((await screen.findAllByRole('button', { name: /Permissions/i }))[0])
-    const aliasInput = await screen.findByPlaceholderText('Alias')
-    aliasInput.focus()
-    fireEvent.change(aliasInput, { target: { value: 't' } })
-    fireEvent.change(aliasInput, { target: { value: 'te' } })
-    fireEvent.change(aliasInput, { target: { value: 'tes' } })
-    fireEvent.change(aliasInput, { target: { value: 'test' } })
-
-    expect(screen.getByPlaceholderText('Alias')).toHaveValue('test')
-    expect(document.activeElement).toBe(screen.getByPlaceholderText('Alias'))
+    fireEvent.click(screen.getByRole('button', { name: 'Custom' }))
+    expect(screen.getByRole('heading', { name: 'Custom config' })).toBeInTheDocument()
+    expect(screen.getByText('C:/monaw/settings.json')).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('Alias')).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument()
   })
 })

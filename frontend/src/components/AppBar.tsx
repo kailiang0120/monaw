@@ -28,7 +28,8 @@ const STATUS_LABEL: Record<AgentStatus, string> = {
 // The permission level is always on screen so a user never has to wonder how
 // much the agent may do without asking.
 const MODE_META: Record<ApprovalMode, { label: string; hint: string; Icon: typeof ShieldCheck }> = {
-  default: { label: 'Ask first', hint: 'Default: the agent asks before changing anything.', Icon: ShieldCheck },
+  default: { label: 'Default', hint: 'Routine actions run automatically; file changes and commands ask.', Icon: ShieldCheck },
+  auto_review: { label: 'Auto Review', hint: 'AI reviews changes; uncertain actions ask you.', Icon: ShieldHalf },
   custom: { label: 'Custom', hint: 'Custom: your permission rules decide what needs approval.', Icon: ShieldHalf },
   full_access: { label: 'Full access', hint: 'Full access: most actions run without asking.', Icon: ShieldAlert },
 }

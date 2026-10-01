@@ -176,7 +176,7 @@ def test_filesystem_blocks_configured_blocked_roots(policy_env):
 
 def test_filesystem_unknown_path_requires_access_grant(policy_env):
     settings_data = AgentSettings()
-    settings_data.permissions.mode = "default"
+    settings_data.permissions.mode = "custom"
     settings_data.permissions.blocked_roots = []
     settings_data.permissions.path_rules = []
     policy_env.save_settings(settings_data)
@@ -320,8 +320,9 @@ def test_filesystem_search_skips_links_that_leave_gated_base(policy_env, tmp_pat
 
 @pytest.mark.parametrize("operation", ["move", "rename"])
 def test_filesystem_overwrite_of_directory_respects_delete_disabled(policy_env, operation):
-    settings_data = _settings_for_root(policy_env.root)
+    settings_data = _settings_for_root(policy_env.root, mode="custom")
     settings_data.permissions.allow_delete = False
+    settings_data.permissions.confirmations.mutate = False
     policy_env.save_settings(settings_data)
     source = policy_env.root / "source"
     source.mkdir()

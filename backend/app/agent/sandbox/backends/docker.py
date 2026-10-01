@@ -161,7 +161,12 @@ class DockerRunner:
             if mount_read_only:
                 mount += ",readonly"
             command.extend(["--mount", mount])
-        for key in sorted(request.env.keys(), key=str.upper):
+        # Host PATH and Windows shell variables are not a container environment.
+        # Only explicitly supplied values may replace the image's defaults.
+        inherited = {key.upper() for key in request.env_metadata.get("inherited_env_keys", [])}
+        explicit = {key.upper() for key in request.env_metadata.get("explicit_env_keys", [])}
+        container_keys = [key for key in request.env if key.upper() not in inherited or key.upper() in explicit]
+        for key in sorted(container_keys, key=str.upper):
             command.extend(["--env", f"{key}={request.env[key]}"])
         command.extend([image, "bash", "-lc", request.command])
         return command
@@ -214,7 +219,7 @@ class DockerRunner:
             required_isolation=str(request.env_metadata.get("required_isolation", "strong")),
             network_enforcement=str(request.env_metadata.get("network_enforcement", "enforced")),
             filesystem_policy=str(request.env_metadata.get("filesystem_policy", "container")),
-            write_strategy=str(request.env_metadata.get("write_strategy", "discard")),
+            write_strategy=str(request.copy_policy.get("write_strategy") or request.env_metadata.get("write_strategy") or self.settings.default_write_strategy),
             reason=str(request.env_metadata.get("reason", "")),
             reason_code=str(request.env_metadata.get("reason_code", "allowed")),
         ).model_dump()
@@ -222,7 +227,7 @@ class DockerRunner:
             "strategy": metadata["write_strategy"],
             "container_changes_ephemeral": metadata["write_strategy"] != "direct_rw",
             "changed_or_new_files_only": metadata["write_strategy"] == "copy_out",
-            "deletions_propagated": False,
+            "deletions_propagated": metadata["write_strategy"] == "direct_rw",
             "symlinks_copied": False,
         }
         if metadata["write_strategy"] == "discard":

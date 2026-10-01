@@ -11,6 +11,7 @@ from app.agent.audit import AuditLogger
 from app.agent.controller_policy import ActionType, resolve_permission
 from app.agent.execution_resume import register_executor
 from app.agent.runtime_paths import WORKSPACE_DIR
+from app.agent.settings_store import load_agent_settings
 from app.agent.sandbox.artifacts import write_artifact as _write_artifact
 from app.agent.sandbox.environment import SanitizedEnvironment, build_exec_environment
 from app.agent.sandbox.manager import SandboxManager, coerce_sandbox_settings
@@ -56,7 +57,7 @@ def build_sandbox_decision(
     elevated: bool,
 ) -> SandboxDecision:
     sandbox_settings = coerce_sandbox_settings(getattr(_ACTIVE_SETTINGS, "sandbox", None))
-    return SandboxPolicy(sandbox_settings).decide(
+    return SandboxPolicy(sandbox_settings, permissions=load_agent_settings().permissions).decide(
         SandboxRunRequest(
             command=command,
             shell=shell,  # type: ignore[arg-type]
@@ -234,7 +235,10 @@ def _permission_check(
         )
     if decision.requires_access_grant:
         return _pending_access_grant(workdir)
-    if (decision.requires_confirmation or host_approval_required) and not bypass_confirmation:
+    # Permission mode owns consent; choosing a host backend must not add a
+    # second, unconditional prompt after Full Access already authorized exec.
+    sandbox["explicit_approval_required"] = bool(decision.requires_confirmation)
+    if decision.requires_confirmation and not bypass_confirmation:
         if host_approval_required:
             decision = SimpleNamespace(
                 reason=str(
@@ -555,7 +559,8 @@ def exec_write_stdin(command_id: str, text: str, _bypass_gate: bool = False) -> 
 
     profile = classify_command(text)
     decision = SandboxPolicy(
-        coerce_sandbox_settings(getattr(_ACTIVE_SETTINGS, "sandbox", None))
+        coerce_sandbox_settings(getattr(_ACTIVE_SETTINGS, "sandbox", None)),
+        permissions=load_agent_settings().permissions,
     ).decide(
         SandboxRunRequest(
             command=text,

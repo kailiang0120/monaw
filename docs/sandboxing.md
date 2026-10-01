@@ -5,11 +5,11 @@ Monaw classifies each shell command before starting a process. The decision reco
 ## Modes
 
 - `off` / `disabled`: shell execution is disabled.
-- `auto`: Docker is used for the narrow set of allowlisted local-inspection commands, self-contained Python snippets, and dangerous untrusted shapes that are safer when contained. Normal developer tooling, project scripts/imports, state-changing package commands, and PowerShell/cmd syntax use the advisory host runner only after explicit approval.
+- `auto`: Docker is used for the narrow set of allowlisted local-inspection commands, self-contained Python snippets, and dangerous untrusted shapes that are safer when contained. Normal developer tooling, project scripts/imports, state-changing package commands, and PowerShell/cmd syntax use the advisory host runner under the selected permission mode.
 - `enforce`: Docker is required for Docker-compatible commands; an unavailable or unpinned image returns `sandbox_backend_unavailable` or `docker_image_not_pinned`. Incompatible shells and commands outside the image allowlist fail closed with an actionable blocked decision; there is no host fallback.
-- `host`: use the host runner with an explicit approval and no-isolation warning.
+- `host`: use the host runner under the selected permission mode, without filesystem or network isolation.
 - `docker`: require Docker explicitly; incompatible shells and commands outside the image allowlist fail closed instead of falling back to the host.
-- `local_restricted`: use the advisory host runner with process-group cleanup and an explicit approval.
+- `local_restricted`: use the advisory host runner with process-group cleanup and approvals from the selected permission mode.
 
 There is no WSL backend. Long-running sessions use the local host runners and are capped at a maximum lifetime; Docker sessions are not supported.
 
@@ -17,11 +17,11 @@ There is no WSL backend. Long-running sessions use the local host runners and ar
 
 - `strong`: Docker container isolation with `--network none` when network denial is requested, dropped capabilities, PID/memory/CPU limits, and a read-only root filesystem by default.
 - `advisory`: `local_restricted` host execution with process-tree cleanup and resource/output limits. It does not isolate the filesystem or network.
-- `none`: `local_direct` host execution. It is selected only as a compatibility fallback and requires approval.
+- `none`: `local_direct` host execution. It is selected only as a compatibility fallback and follows the selected permission mode.
 
 The shipped Docker image is pinned as `python:3.12-slim@sha256:<64-hex-digest>`. Settings can pull a tag and resolve it to an immutable digest. Resolution also probes which standard-library modules are actually importable in that exact image and caches the inventory under the immutable reference. The probe runs without network access, capabilities, or a writable root; each import uses a separate isolated interpreter. Cached inventories are bounded to the eight most recently probed images, so repinning does not accumulate them; an evicted image fails closed until it is probed again. If the image is unpinned, capability status reports `docker_image_not_pinned` and the Docker runner will not start.
 
-Docker runs use the pinned Python image, not the host's toolchain. Auto routing is fail-safe: a command is sent to Docker only when every shell segment uses a known-safe image executable and any Python `-c` code is self-contained or uses imports verified against the exact image inventory. The shipped 3.12-slim image has a static offline fallback; it excludes removed modules, Windows-only modules, and Tk modules omitted by the slim image. An unsupported image without a matching probe fails closed to the approval-required host runner rather than borrowing the host interpreter's inventory. Because the representative status probe uses an allowlisted coreutil, Docker can look healthy while Python imports are not usable there; capability status therefore reports `python_import_support` as `probed`, `builtin_fallback`, or `unavailable` with a matching explanation. Explicit `shell=bash` does not bypass this compatibility check. Unknown tools, project scripts/imports, process-spawning Python code, and state-changing package commands are routed to the approval-required host runner in auto mode and blocked in `docker`/`enforce` modes. Process detection covers the `os.exec*` and `os.spawn*` families plus `os.popen`, `os.posix_spawn*`, and subprocess convenience APIs. A self-contained `python -c` snippet and contained dangerous pipeline can remain in Docker. Docker denies network access by default; a requested allow mode uses Docker's normal bridge network and is not a network-isolated run. `direct_rw` writes through the allowed workspace bind, `copy_out` copies changed/new regular files back from a temporary workspace, and `discard` leaves container changes ephemeral.
+Docker runs use the pinned Python image, not the host's toolchain. Auto routing is fail-safe: a command is sent to Docker only when every shell segment uses a known-safe image executable and any Python `-c` code is self-contained or uses imports verified against the exact image inventory. The shipped 3.12-slim image has a static offline fallback; it excludes removed modules, Windows-only modules, and Tk modules omitted by the slim image. An unsupported image without a matching probe fails closed to the host runner under the selected permission mode rather than borrowing the host interpreter's inventory. Because the representative status probe uses an allowlisted coreutil, Docker can look healthy while Python imports are not usable there; capability status therefore reports `python_import_support` as `probed`, `builtin_fallback`, or `unavailable` with a matching explanation. Explicit `shell=bash` does not bypass this compatibility check. Unknown tools, project scripts/imports, process-spawning Python code, and state-changing package commands are routed to the host runner under the selected permission mode in auto mode and blocked in `docker`/`enforce` modes. Process detection covers the `os.exec*` and `os.spawn*` families plus `os.popen`, `os.posix_spawn*`, and subprocess convenience APIs. A self-contained `python -c` snippet and contained dangerous pipeline can remain in Docker. Docker denies network access by default; a requested allow mode uses Docker's normal bridge network and is not a network-isolated run. `direct_rw` writes through the allowed workspace bind, `copy_out` copies changed/new regular files back from a temporary workspace, and `discard` leaves container changes ephemeral.
 
 ## Workspace and writes
 
@@ -35,7 +35,13 @@ The agent workspace is an allowed bind root by default. `direct_rw` mounts the e
 
 Subprocesses receive a minimal environment allowlist. Secret-looking explicit variables are rejected with `secret_env_not_supported`. All runners clamp execution time and captured output; Docker also applies container resource limits.
 
-- `sandbox_backend_unavailable`: install/start Docker, resolve a pinned image, or choose host mode and approve the run.
+- `sandbox_backend_unavailable`: install/start Docker, resolve a pinned image, or choose auto/host mode.
 - `docker_image_not_pinned`: use **Resolve & pull** in Settings or enter an immutable `name@sha256:<digest>` reference.
 - `shell_execution_disabled`: change the mode from `off` only if shell execution is intended.
-- `unsupported_shell_for_backend`: Docker supports bash commands only; `auto` reports an approval-required host fallback for incompatible shell syntax, while `docker`/`enforce` block it.
+- `unsupported_shell_for_backend`: Docker supports bash commands only; `auto` reports a host fallback under the selected permission mode for incompatible shell syntax, while `docker`/`enforce` block it.
+
+## Permission and execution boundaries
+
+Permission mode controls approval; sandbox mode controls where a permitted command runs. Full Access does not add another host-runner approval. Default asks once; Auto Review checks the same pending ticket. Docker/enforce stay fail-closed when Docker is unavailable or a command is incompatible.
+
+The manager reclassifies the actual command rather than trusting a caller's preview or profile, enforces configured resource ceilings, and rejects backend mismatch. A requested network allowance cannot override configured container network denial. `allow_with_approval` permits container network for commands authorized by the selected permission mode. Host execution has no network or filesystem isolation; container network and copy-out settings do not impose those guarantees on host commands. Docker keeps its image environment rather than inheriting Windows PATH and shell variables.

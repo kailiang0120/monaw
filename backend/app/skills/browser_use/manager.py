@@ -223,7 +223,7 @@ async def launch_local_chrome(profile_directory: str = "") -> tuple[str, str]:
     if existing and await asyncio.to_thread(_local_debugging_endpoint_alive, existing):
         return existing, selected_profile
     args = [executable, f"--user-data-dir={user_data_dir}", f"--profile-directory={selected_profile}",
-            "--enable-features=DevToolsAcceptDebuggingConnections", "--new-window", "about:blank"]
+            "--enable-features=DevToolsAcceptDebuggingConnections", "--start-maximized", "--new-window", "about:blank"]
     await asyncio.to_thread(_launch_personal_chrome, args)
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:

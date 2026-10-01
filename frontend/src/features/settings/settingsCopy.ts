@@ -153,22 +153,32 @@ export const MCP_COPY = {
 
 export const PERMISSION_MODE_COPY = {
   default: {
-    title: 'Ask first',
-    summary: 'Approve changes.',
-    description: 'The agent can read freely, but stops for your approval before it writes, deletes, or launches anything.',
+    title: 'Default',
+    summary: 'Ask for changes.',
+    description: 'Reading, browsing, clicks, typing and opening apps run automatically. File changes and commands ask for approval.',
     recommendation: 'Recommended',
+    rules: ['Automatic: read files, browse, click, type and open apps.', 'Ask you: create, edit or delete files, run commands or stop processes.', 'Protected targets stay blocked.'],
   },
   full_access: {
-    title: 'Auto approve',
-    summary: 'Allow changes.',
-    description: 'The agent reads and writes without stopping. It will not interrupt you, and it will not warn you before changing files. Deletion stays off unless you enable it below.',
+    title: 'Full Access',
+    summary: 'Run automatically.',
+    description: 'File changes and deletion, browser actions, apps, integrations and commands run without approval prompts. Protected targets remain blocked.',
     recommendation: 'Higher risk',
+    rules: ['Automatic: file changes and deletion, browser actions, apps, integrations and commands.', 'No action approval prompts.', 'Protected targets stay blocked.'],
+  },
+  auto_review: {
+    title: 'Auto Review',
+    summary: 'Review changes for me.',
+    description: 'Routine actions run automatically. A separate AI review checks file changes and commands against your request, and asks you when uncertain or unavailable.',
+    recommendation: 'AI review',
+    rules: ['Automatic: read files, browse, click, type and open apps.', 'AI reviews: file changes and deletion, commands and stopping processes.', 'Ask you: review is uncertain or unavailable.'],
   },
   custom: {
     title: 'Custom',
-    summary: 'Choose your rules.',
-    description: 'You decide exactly which actions need approval, and set per-folder and per-app exceptions below.',
+    summary: 'Use my config file.',
+    description: 'Edit permissions.custom_profile in the config file for action approvals, folder rules and app rules. There are no setup switches here.',
     recommendation: 'Advanced',
+    rules: ['Uses the rules in permissions.custom_profile.', 'Edit approvals, folder access and app access in the config file.', 'Save the file; subsequent tool calls use the new rules.'],
   },
 } as const
 
@@ -239,17 +249,17 @@ export const SANDBOX_COPY = {
   mode: 'How strictly commands are isolated.',
   modeHelp: {
     off: 'The agent cannot run shell commands at all.',
-    auto: 'Uses Docker for supported commands. Other commands run on your machine with approval.',
+    auto: 'Uses Docker for supported commands; otherwise runs on your machine. Approvals follow your permission mode.',
     enforce: 'Requires Docker. Commands that need your machine directly are blocked.',
-    host: 'Run directly on your machine, asking for approval first.',
+    host: 'Runs on your machine. Approvals follow your permission mode; files and network are not isolated.',
     docker: 'Requires Docker. Unsupported commands are blocked.',
     local_restricted: 'Run on your machine with limits that are best-effort only.',
   },
-  network: 'Whether commands running in the sandbox can reach the internet.',
+  network: 'Applies to Docker containers. Host commands use your machine’s network.',
   networkHelp: {
-    deny: 'No network access. Safest default.',
-    allow_with_approval: 'Network access only after you approve it.',
-    allow: 'Unrestricted network access.',
+    deny: 'Docker containers cannot access the network. Host commands are not isolated.',
+    allow_with_approval: 'Allows container network when the command is permitted by your approval mode.',
+    allow: 'Docker containers can access the network.',
   },
   writeStrategy: 'What happens to files a sandboxed command creates.',
   writeStrategyHelp: {
@@ -260,7 +270,7 @@ export const SANDBOX_COPY = {
   backends: 'Isolation engines detected on this computer. Docker gives the strongest guarantees.',
   dockerImage: 'Pin a digest to keep the image version fixed.',
   dockerReadOnly: 'The workspace remains writable.',
-  resources: 'Hard ceilings for a single sandboxed command, so a runaway process cannot exhaust your machine.',
+  resources: 'Docker enforces these limits. Host execution enforces timeout and output limits; CPU, memory and process limits require Docker.',
   resourceHelp: {
     timeout_seconds: 'Kill the command after this many seconds.',
     memory_mb: 'Maximum memory the command may use.',

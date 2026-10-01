@@ -14,29 +14,30 @@ Monaw uses multiple safety layers before local actions run.
 
 These layers are additive. Sandbox mode does not replace approvals. Full access does not make blocked roots or blocked processes safe.
 
-## Permission Modes
+## Four permission modes
 
-| Mode | Behavior |
-| --- | --- |
-| `default` | Ask before mutating actions, clicks, typing, and high-risk execution. Deletes are disabled unless enabled. |
-| `full_access` | Fewer confirmations for non-destructive actions. Deletes still require confirmation when enabled. |
-| `custom` | Uses the custom permission profile from Settings. |
+Settings and the chat dropdown show only four choices. Short cards have an info button for details; the selected mode has a clear list of behavior. There are no per-action switches or folder/app setup forms.
+
+| Mode | Automatic | Approval behavior |
+| --- | --- | --- |
+| `default` | Read files, browse, open apps, click and type. | File changes, unknown mutating integration tools, commands and stopping processes ask the user. |
+| `full_access` | File changes, browser actions, app control, MCP integrations, commands and stopping processes. | No action approval prompt, except an explicitly configured folder/app confirmation or private-path access grant. |
+| `auto_review` | The same routine actions as Default. | A separate tool-free AI call reviews pending changes against the current user request. Clearly authorized actions resume; uncertain, malformed, timed-out or unavailable reviews ask the user. |
+| `custom` | Defined in `permissions.custom_profile`. | Defined in the config file. |
+
+Default asks before file deletion, Auto Review reviews it, and Full Access permits it without an action approval prompt. Custom can disable deletion entirely. Blocked processes, protected control files, blocked roots and unattended-run restrictions apply in every mode. Full Access never disables the sandbox or turns a strict container failure into host execution. Browser pages and arbitrary shell commands may have effects that action names cannot establish; the permission system is an approval policy, not semantic verification of every click or command.
+
+MCP adapters resolve the active mode on every call, including after registry construction. Read-only hints and tool-name conventions classify actions; unknown tools require approval in Default and Auto Review. Delete and execution classifications take precedence over a read-only hint. Tool risk labels remain visible even when Full Access permits execution. Refreshing or reconnecting an enabled MCP server is routine app startup.
+
+Auto Review receives the user's current request and the exact pending ticket payload in a fresh call with no tools. It cannot grant private-path/app access or override hard blocks. The ticket hash, context, expiry, pending status and selected mode are validated before automatic approval. Human or AI approval resumes the same stored action; changed permissions and MCP schemas are checked again before execution.
+
+## Custom config
+
+The Custom page shows the actual runtime `settings.json` path. Edit `permissions.custom_profile`, including `confirmations`, `path_rules`, `blocked_roots`, `app_rules`, `allow_delete`, `dangerous_actions_require_confirm` and `allow_screen_fallback`. Save the file, then reload Settings before making UI changes; tool permission checks read saved rules on subsequent calls. Preset switches preserve the saved Custom profile.
+
+For example, within an existing `permissions.custom_profile`, set `confirmations.mutate` to `true` to ask before file changes. Set `dangerous_actions_require_confirm` to `true` to ask before shell commands. To permit deletion, set `allow_delete` to `true`; `confirmations.delete` controls whether it also asks. These are JSON booleans. Keep the surrounding existing config fields.
 
 The legacy name `user_config` maps to `custom`.
-
-## Confirmation Settings
-
-Confirmations can apply to:
-
-| Confirmation | Action Type |
-| --- | --- |
-| `mutate` | File or state mutation. |
-| `delete` | Delete actions. |
-| `launch_app` | Launching apps. |
-| `click` | UI clicks. |
-| `type` | UI typing. |
-
-High-risk shell execution and process-kill actions can require confirmation depending on mode. Process-kill actions always require confirmation.
 
 ## Blocked Roots
 
@@ -111,7 +112,7 @@ App rules define what Monaw may do with applications.
 | `require_confirmation` | Forces confirmation for matching app actions. |
 | `enabled` | Enables or disables the rule. |
 
-Unknown app launches require an access grant unless permission mode is `full_access`.
+Unknown app launches require an access grant in Custom. Presets allow routine app launches while enforcing sensitive-process and configured app blocks.
 
 ## Access Grants
 

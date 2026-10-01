@@ -497,9 +497,9 @@ def test_load_settings_normalizes_preset_mode_risk_gates():
 
         assert loaded.permissions.mode == "default"
         assert loaded.permissions.confirmations.model_dump() == confirmation_settings_for_mode("default").model_dump()
-        assert loaded.permissions.allow_delete is False
+        assert loaded.permissions.allow_delete is True
         assert loaded.permissions.dangerous_actions_require_confirm is True
-        assert loaded.permissions.allow_screen_fallback is False
+        assert loaded.permissions.allow_screen_fallback is True
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

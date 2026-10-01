@@ -48,21 +48,25 @@ class SandboxManager:
         *,
         decision: SandboxDecision | None = None,
     ) -> SandboxExecutionResult:
-        if decision is None:
-            decision = SandboxPolicy(self.settings, capabilities=self.capabilities).decide(
-                SandboxRunRequest(
-                    command=request.command,
-                    shell=request.shell,
-                    workdir=request.workdir,
-                    env=request.env,
-                    timeout=request.timeout,
-                    profile=request.profile,
-                    requested_backend=None,
-                    network=request.network,
-                    write_strategy=str(request.copy_policy.get("write_strategy") or "") or None,
-                )
+        # Recheck the actual request under current settings. A supplied preview
+        # is not authorization to bypass a changed mode or a different command.
+        decision = SandboxPolicy(self.settings, capabilities=self.capabilities).decide(
+            SandboxRunRequest(
+                command=request.command,
+                shell=request.shell,
+                workdir=request.workdir,
+                env=request.env,
+                timeout=request.timeout,
+                profile=request.profile,
+                requested_backend=None,
+                network=request.network,
+                write_strategy=str(request.copy_policy.get("write_strategy") or "") or None,
             )
+        )
         selected_backend = decision.backend if decision.allowed else "none"
+        if not decision.allowed:
+            return self._blocked_result(request, backend=selected_backend,
+                reason=decision.reason, reason_code=decision.reason_code)
         if request.backend and request.backend != selected_backend:
             return self._blocked_result(
                 request,
@@ -73,13 +77,10 @@ class SandboxManager:
                 ),
                 reason_code="sandbox_backend_mismatch",
             )
-        if not decision.allowed:
-            return self._blocked_result(
-                request,
-                backend=selected_backend,
-                reason=decision.reason,
-                reason_code=decision.reason_code,
-            )
+        request.timeout = min(max(1, request.timeout), self.settings.resources.timeout_seconds)
+        request.resources = self.settings.resources.model_dump()
+        request.network = decision.network
+        request.profile = decision.profile
         if selected_backend == "local_direct":
             return self.local_direct.run(request)
         if selected_backend == "docker":
@@ -88,7 +89,7 @@ class SandboxManager:
             return self._blocked_result(
                 request,
                 backend=selected_backend,
-                reason="Docker sandbox backend is unavailable. Install and start Docker, or choose auto/disabled mode.",
+                reason="Docker sandbox backend is unavailable. Start Docker, or choose auto/host mode.",
                 reason_code="sandbox_backend_unavailable",
             )
         if selected_backend == "local_restricted":
@@ -105,7 +106,7 @@ class SandboxManager:
             backend=selected_backend,
             reason=(
                 "No implemented strong sandbox backend is available for this command. "
-                "Use disabled/auto mode for compatibility or enable a supported strong backend when available."
+                "Use auto/host mode for compatibility or enable a supported strong backend when available."
             ),
             reason_code="sandbox_backend_unavailable",
         )

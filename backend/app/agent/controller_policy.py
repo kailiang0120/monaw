@@ -26,6 +26,7 @@ from app.agent.settings_store import (
 )
 from app.agent.runtime_paths import RUNTIME_DIR, WORKSPACE_DIR
 from app.agent.run_context import current_interactive
+from app.agent.permission_actions import ActionType, requires_confirmation
 
 _USER_HOME = Path(os.path.expanduser("~"))
 _POLICY_DIR = RUNTIME_DIR / "policy"
@@ -91,18 +92,8 @@ DEFAULT_PERMITTED_ROOTS: list[str] = []
 class PermissionMode(str, Enum):
     DEFAULT = "default"
     FULL_ACCESS = "full_access"
+    AUTO_REVIEW = "auto_review"
     USER_CONFIG = "user_config"
-
-
-class ActionType(str, Enum):
-    READ = "read"
-    MUTATE = "mutate"
-    DELETE = "delete"
-    LAUNCH_APP = "launch_app"
-    CLICK = "click"
-    TYPE = "type"
-    EXEC = "exec"
-    PROCESS_KILL = "process_kill"
 
 
 class AppEntry(BaseModel):
@@ -172,6 +163,8 @@ def _now_iso() -> str:
 
 
 def _settings_mode_to_compat(mode: str) -> PermissionMode:
+    if mode == "auto_review":
+        return PermissionMode.AUTO_REVIEW
     if mode == "full_access":
         return PermissionMode.FULL_ACCESS
     if mode == "custom":
@@ -180,6 +173,8 @@ def _settings_mode_to_compat(mode: str) -> PermissionMode:
 
 
 def _compat_mode_to_settings(mode: PermissionMode) -> str:
+    if mode == PermissionMode.AUTO_REVIEW:
+        return "auto_review"
     if mode == PermissionMode.FULL_ACCESS:
         return "full_access"
     if mode == PermissionMode.USER_CONFIG:
@@ -290,9 +285,10 @@ def _write_policy_md(state: ControllerPolicyState) -> None:
 
 **{state.mode.value}**
 
-- `default` - ask before each mutating action
-- `full_access` - no prompt for non-destructive; still confirm deletes
-- `user_config` - follow user-configured rules
+- `default` - routine actions run automatically; ask before file changes and commands
+- `full_access` - actions run without approval prompts; protected targets stay blocked
+- `auto_review` - AI reviews pending changes; ask when uncertain or unavailable
+- `user_config` - follow permissions.custom_profile in the config file
 
 ## Permitted Roots
 
@@ -776,6 +772,7 @@ def resolve_permission(
     target_path: str = "",
     target_app: str = "",
     state: ControllerPolicyState | None = None,
+    settings_data: AgentSettings | None = None,
 ) -> PermissionDecision:
     restricted = _non_interactive_decision(action, target_path)
     if restricted is not None:
@@ -898,7 +895,7 @@ def resolve_permission(
 
         return PermissionDecision(allowed=True, reason="Action permitted.", policy_source="compat_state")
 
-    settings_data = _load_runtime_settings()
+    settings_data = settings_data or _load_runtime_settings()
     perms = settings_data.permissions
     canon_path = canonical(target_path) if target_path else ""
     normalized_target_app = normalize_app_alias(target_app)
@@ -955,7 +952,7 @@ def resolve_permission(
 
     if (
         canon_path
-        and perms.mode != "full_access"
+        and perms.mode == "custom"
         and matched_path_rule is None
         and not trusted_runtime_path
         and not path_session_granted
@@ -967,7 +964,7 @@ def resolve_permission(
         action == ActionType.LAUNCH_APP
         and normalized_target_app
         and app_rule is None
-        and perms.mode != "full_access"
+        and perms.mode == "custom"
         and not _check_session_grant("app", normalized_target_app, action)
     ):
         return PermissionDecision(
@@ -993,11 +990,7 @@ def resolve_permission(
             reason_code="uia_not_allowed",
         )
 
-    if _requires_confirmation_for_high_risk_action(
-        action,
-        mode_str=perms.mode,
-        dangerous_actions_require_confirm=perms.dangerous_actions_require_confirm,
-    ):
+    if action in {ActionType.EXEC, ActionType.PROCESS_KILL} and requires_confirmation(action, perms):
         return PermissionDecision(
             allowed=True,
             requires_confirmation=True,
@@ -1005,47 +998,43 @@ def resolve_permission(
             reason_code="confirmation_required",
         )
 
-    confirmations = perms.confirmations
-    requires_confirmation = False
+    needs_confirmation = requires_confirmation(action, perms)
     reason = "Action permitted."
+    if needs_confirmation:
+        reason = f"{perms.mode.replace('_', ' ').capitalize()} mode: confirmation required for this action."
 
-    if perms.mode == "default":
-        requires_confirmation = bool(
-            (action == ActionType.MUTATE and confirmations.mutate)
-            or (action == ActionType.DELETE and confirmations.delete and perms.allow_delete)
-            or (action == ActionType.CLICK and confirmations.click)
-            or (action == ActionType.TYPE and confirmations.type)
-        )
-        if requires_confirmation:
-            reason = "Default mode: confirmation required for this action."
-    elif perms.mode == "full_access":
-        requires_confirmation = bool(action == ActionType.DELETE and confirmations.delete and perms.allow_delete)
-        if requires_confirmation:
-            reason = "Full-access mode: delete operations still require confirmation."
-    else:
-        requires_confirmation = bool(
-            (action == ActionType.MUTATE and confirmations.mutate)
-            or (action == ActionType.DELETE and confirmations.delete and perms.allow_delete)
-            or (action == ActionType.LAUNCH_APP and confirmations.launch_app)
-            or (action == ActionType.CLICK and confirmations.click)
-            or (action == ActionType.TYPE and confirmations.type)
-        )
-        if requires_confirmation:
-            reason = "Custom mode: confirmation required by settings."
-
-    if not requires_confirmation and matched_path_rule and matched_path_rule.require_confirmation:
-        requires_confirmation = True
+    if not needs_confirmation and matched_path_rule and matched_path_rule.require_confirmation:
+        needs_confirmation = True
         reason = f"Path rule for '{matched_path_rule.path}' requires confirmation."
-    if not requires_confirmation and app_rule and app_rule.require_confirmation:
-        requires_confirmation = True
+    if not needs_confirmation and app_rule and app_rule.require_confirmation:
+        needs_confirmation = True
         reason = f"App rule for '{app_rule.alias}' requires confirmation."
 
     return PermissionDecision(
         allowed=True,
-        requires_confirmation=requires_confirmation,
+        requires_confirmation=needs_confirmation,
         reason=reason,
-        reason_code="confirmation_required" if requires_confirmation else "allowed",
+        reason_code="confirmation_required" if needs_confirmation else "allowed",
     )
+
+
+def resolve_external_tool_permission(
+    action: ActionType, *, default_confirmation: bool, reason: str,
+) -> PermissionDecision:
+    """Use the same profile as local tools, retaining default MCP trust prompts."""
+    settings_data = _load_runtime_settings()
+    permission = resolve_permission(action, settings_data=settings_data)
+    if permission.blocked or permission.requires_access_grant:
+        return permission
+    if default_confirmation and (
+        (settings_data.permissions.mode in {"default", "auto_review"} and action not in {
+            ActionType.READ, ActionType.CLICK, ActionType.TYPE, ActionType.LAUNCH_APP,
+        }) or not current_interactive()
+    ):
+        return permission.model_copy(update={
+            "requires_confirmation": True, "reason": reason, "reason_code": "confirmation_required",
+        })
+    return permission
 
 
 if not _settings_json_path().exists():

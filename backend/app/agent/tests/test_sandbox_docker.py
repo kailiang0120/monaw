@@ -1,5 +1,6 @@
 import subprocess
 import json
+import shlex
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -65,6 +66,15 @@ def test_docker_command_does_not_mount_host_paths_by_default():
     assert "-v" not in command
     assert "--volume" not in command
     assert "--mount" not in command
+
+
+def test_docker_preserves_image_path_instead_of_inheriting_windows_path():
+    request = _request("echo ok")
+    request.env = {"PATH": r"C:\Windows;C:\tools", "MONAW_DATA": "ok"}
+    request.env_metadata = {"inherited_env_keys": ["PATH"], "explicit_env_keys": ["MONAW_DATA"]}
+    command = DockerRunner(AgentSettings().sandbox).docker_command(request)
+    assert "MONAW_DATA=ok" in command
+    assert not any(value.startswith("PATH=") for value in command)
 
 
 def test_docker_command_honors_configured_pull_and_hardening_flags():
@@ -424,6 +434,7 @@ def test_docker_integration_executes_simple_command_when_available(tmp_path):
     settings = AgentSettings()
     workdir = Path(tmp_path)
     settings.sandbox.allowed_bind_roots = [str(workdir)]
+    settings.sandbox.blocked_bind_roots = []  # pytest's isolated temp folder sits under AppData on Windows.
     workdir.mkdir(parents=True, exist_ok=True)
     (workdir / "input.txt").write_text("mounted", encoding="utf-8")
     runner = DockerRunner(settings.sandbox)
@@ -438,3 +449,35 @@ def test_docker_integration_executes_simple_command_when_available(tmp_path):
     assert (workdir / "output.txt").read_text(encoding="utf-8") == "ok"
     assert result.sandbox["backend"] == "docker"
     assert result.sandbox["security_label"] == "strong"
+
+
+@pytest.mark.skipif(
+    not _docker_image_available(AgentSettings().sandbox.docker.image),
+    reason="Docker daemon or configured sandbox image is unavailable",
+)
+def test_docker_integration_enforces_network_and_root_isolation(tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
+    code = """import errno, socket
+from pathlib import Path
+assert {p.name for p in Path('/sys/class/net').iterdir()} == {'lo'}
+connection = socket.socket()
+connection.settimeout(0.5)
+assert connection.connect_ex(('1.1.1.1', 443)) != 0
+connection.close()
+try:
+    Path('/monaw-root-write-check').write_text('blocked')
+except OSError as error:
+    assert error.errno == errno.EROFS
+else:
+    raise AssertionError('Container root was writable')
+print('NETWORK_DENIED ROOT_READ_ONLY')
+"""
+    request = _request("python -c " + shlex.quote(code))
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.network = "deny"
+    result = DockerRunner(settings.sandbox).run(request)
+    assert result.status == "ok", result.stderr
+    assert result.stdout.strip() == "NETWORK_DENIED ROOT_READ_ONLY"

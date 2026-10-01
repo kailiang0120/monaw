@@ -99,22 +99,29 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
 
 export const PERMISSION_PROFILES = {
   default: {
-    confirmations: { mutate: true, delete: true, launch_app: true, click: true, type: true },
-    allow_delete: false,
+    confirmations: { mutate: true, delete: true, launch_app: false, click: false, type: false },
+    allow_delete: true,
     dangerous_actions_require_confirm: true,
-    allow_screen_fallback: false,
+    allow_screen_fallback: true,
   },
   full_access: {
-    confirmations: { mutate: false, delete: true, launch_app: false, click: false, type: false },
-    allow_delete: false,
+    confirmations: { mutate: false, delete: false, launch_app: false, click: false, type: false },
+    allow_delete: true,
     dangerous_actions_require_confirm: false,
+    allow_screen_fallback: true,
+  },
+  auto_review: {
+    confirmations: { mutate: true, delete: true, launch_app: false, click: false, type: false },
+    allow_delete: true,
+    dangerous_actions_require_confirm: true,
     allow_screen_fallback: true,
   },
 } as const
 
 export const PERMISSION_MODE_HELP = {
-  default: 'Reads any non-blocked path. Mutating actions still ask for approval.',
-  full_access: 'Reads and writes any non-blocked path. Delete stays off until you enable it below.',
+  default: 'Routine actions run automatically; file changes and commands ask.',
+  full_access: 'Actions run automatically; protected targets remain blocked.',
+  auto_review: 'AI reviews changes and commands; asks when uncertain.',
   custom: 'Uses your custom confirmation, path override, and app override settings.',
 } as const
 

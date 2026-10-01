@@ -76,9 +76,9 @@ def _default_path_rules() -> list["PathRule"]:
 class ConfirmationSettings(BaseModel):
     mutate: bool = True
     delete: bool = True
-    launch_app: bool = True
-    click: bool = True
-    type: bool = True
+    launch_app: bool = False
+    click: bool = False
+    type: bool = False
 
 
 class PathRule(BaseModel):
@@ -239,7 +239,7 @@ class ToolSettings(BaseModel):
 
 
 class PermissionSettings(BaseModel):
-    mode: Literal["default", "full_access", "custom"] = "default"
+    mode: Literal["default", "full_access", "auto_review", "custom"] = "default"
     confirmations: ConfirmationSettings = Field(default_factory=ConfirmationSettings)
     blocked_roots: list[str] = Field(default_factory=lambda: list(DEFAULT_BLOCKED_ROOTS))
     path_rules: list[PathRule] = Field(default_factory=_default_path_rules)
@@ -329,14 +329,14 @@ class AgentSettings(BaseModel):
 
 
 def confirmation_settings_for_mode(
-    mode: Literal["default", "full_access", "custom"],
+    mode: Literal["default", "full_access", "auto_review", "custom"],
     *,
     dangerous_actions_require_confirm: bool = True,
 ) -> ConfirmationSettings:
-    if mode == "default":
-        return ConfirmationSettings(mutate=True, delete=True, launch_app=True, click=True, type=True)
+    if mode in {"default", "auto_review"}:
+        return ConfirmationSettings(mutate=True, delete=True, launch_app=False, click=False, type=False)
     if mode == "full_access":
-        return ConfirmationSettings(mutate=False, delete=True, launch_app=False, click=False, type=False)
+        return ConfirmationSettings(mutate=False, delete=False, launch_app=False, click=False, type=False)
     return ConfirmationSettings(
         mutate=False,
         delete=dangerous_actions_require_confirm,
@@ -346,10 +346,10 @@ def confirmation_settings_for_mode(
     )
 
 
-def _normalize_mode(value: str | None) -> Literal["default", "full_access", "custom"]:
+def _normalize_mode(value: str | None) -> Literal["default", "full_access", "auto_review", "custom"]:
     if value == "user_config":
         return "custom"
-    if value in {"default", "full_access", "custom"}:
+    if value in {"default", "full_access", "auto_review", "custom"}:
         return value
     return "default"
 
@@ -583,12 +583,11 @@ def _normalize_loaded_payload(data: dict[str, Any]) -> dict[str, Any]:
         permissions["custom_profile"] = custom_profile
         if mode != "custom":
             permissions["confirmations"] = confirmation_settings_for_mode(mode).model_dump()
-            if mode == "default":
-                permissions["allow_delete"] = False
+            permissions["allow_delete"] = True
+            if mode in {"default", "auto_review"}:
                 permissions["dangerous_actions_require_confirm"] = True
-                permissions["allow_screen_fallback"] = False
+                permissions["allow_screen_fallback"] = True
             else:
-                permissions["allow_delete"] = bool(permissions.get("allow_delete", False))
                 permissions["dangerous_actions_require_confirm"] = False
                 permissions["allow_screen_fallback"] = True
         else:
@@ -632,13 +631,14 @@ def save_agent_settings(settings_data: AgentSettings, *, settings_path: Path | N
         )
     elif settings_data.permissions.mode == "full_access":
         settings_data.permissions.confirmations = confirmation_settings_for_mode("full_access")
+        settings_data.permissions.allow_delete = True
         settings_data.permissions.dangerous_actions_require_confirm = False
         settings_data.permissions.allow_screen_fallback = True
     else:
-        settings_data.permissions.confirmations = confirmation_settings_for_mode("default")
-        settings_data.permissions.allow_delete = False
+        settings_data.permissions.confirmations = confirmation_settings_for_mode(settings_data.permissions.mode)
+        settings_data.permissions.allow_delete = True
         settings_data.permissions.dangerous_actions_require_confirm = True
-        settings_data.permissions.allow_screen_fallback = False
+        settings_data.permissions.allow_screen_fallback = True
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(settings_data.model_dump_json(indent=2), encoding="utf-8")
     try:
@@ -685,9 +685,9 @@ def merge_agent_settings(current: AgentSettings, patch: dict[str, Any]) -> Agent
     if new_mode and new_mode != "custom":
         preset = {
             "confirmations": confirmation_settings_for_mode(new_mode).model_dump(),
-            "allow_delete": False,
-            "dangerous_actions_require_confirm": new_mode == "default",
-            "allow_screen_fallback": new_mode == "full_access",
+            "allow_delete": True,
+            "dangerous_actions_require_confirm": new_mode in {"default", "auto_review"},
+            "allow_screen_fallback": True,
         }
         edited_preset = False
         if sent_confirmations and merged["permissions"].get("confirmations") != preset["confirmations"]:
@@ -748,6 +748,7 @@ def api_settings_payload(base_settings, agent_settings: AgentSettings) -> dict[s
     runtime_settings = build_runtime_namespace(base_settings, agent_settings)
     return {
         **agent_settings.model_dump(),
+        "permissions_config_path": str(_SETTINGS_FILE),
         "settings_version": settings_version(agent_settings),
         "available_skills": available_skill_payload(runtime_settings),
         "api_keys": {

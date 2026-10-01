@@ -17,7 +17,8 @@ from app.agent.sandbox.models import (
     SandboxRunRequest,
     SandboxWriteStrategy,
 )
-from app.agent.settings_store import SandboxSettings
+from app.agent.settings_store import PermissionSettings, SandboxSettings
+from app.agent.permission_actions import ActionType, requires_confirmation
 
 _UNTRUSTED_PATTERNS = [
     r"\bcurl\b.*\|\s*(sh|bash|cmd|powershell|pwsh)\b",
@@ -468,17 +469,22 @@ class SandboxPolicy:
         settings: SandboxSettings,
         *,
         capabilities: SandboxCapabilities | None = None,
+        permissions: PermissionSettings | None = None,
     ) -> None:
         self.settings = settings
         self.capabilities = capabilities or probe_capabilities(settings)
+        self.permissions = permissions or PermissionSettings()
         self._python_stdlib_modules = _python_stdlib_modules_for_image(settings.docker.image)
         self.python_import_support = _python_import_support(self._python_stdlib_modules)
 
     def decide(self, request: SandboxRunRequest) -> SandboxDecision:
-        profile = request.profile or classify_command(
+        classified = classify_command(
             request.command,
             default_profile=self.settings.default_profile,
         )
+        # Caller-supplied profiles may strengthen policy, never hide a blocked
+        # or untrusted command found by the classifier.
+        profile = classified if classified in {"blocked", "untrusted", "host_required"} else request.profile or classified
         network = self._network_mode(request.network)
         write_strategy = request.write_strategy or self.settings.default_write_strategy
         trust_class = "untrusted" if profile == "untrusted" else "trusted"
@@ -507,6 +513,9 @@ class SandboxPolicy:
                 "Shell execution is disabled by sandbox policy",
                 "shell_execution_disabled",
             )
+        if request.network == "allow" and self.settings.network.default == "deny":
+            return self._blocked(profile, network, write_strategy,
+                                 "Container network access is disabled in settings", "network_access_disabled")
 
         backend_mode = (
             self.settings.mode
@@ -548,7 +557,7 @@ class SandboxPolicy:
                         (
                             f"Docker mode requires bash, but the requested command resolves to shell "
                             f"'{effective_shell}'. Use shell='bash' with a Docker-compatible command, "
-                            "or switch to auto or host for approval-required host execution."
+                            "or switch to auto or host for host execution under the selected permission mode."
                         ),
                         "unsupported_shell_for_backend",
                         requested_shell=request.shell,
@@ -592,12 +601,12 @@ class SandboxPolicy:
                 requested_shell=request.shell,
                 effective_shell=effective_shell,
                 filesystem_policy="host",
-                explicit_approval_required=True,
+                explicit_approval_required=requires_confirmation(ActionType.EXEC, self.permissions),
                 reason=(
                     self._host_fallback_reason(request.command, runner="direct")
                     + self._host_fallback_shell_note(request, requested_host_shell, effective_shell)
                     if host_tool_fallback
-                    else "Docker supports bash only; this command will run directly on the host after explicit approval"
+                    else "Docker supports bash only; this command will run directly on the host under the selected permission mode"
                     if shell_fallback
                     else "This command will run directly on the host without isolation"
                 ),
@@ -643,13 +652,13 @@ class SandboxPolicy:
                 requested_shell=request.shell,
                 effective_shell=effective_shell,
                 filesystem_policy="host",
-                explicit_approval_required=True,
+                explicit_approval_required=requires_confirmation(ActionType.EXEC, self.permissions),
                 reason=(
                     self._host_fallback_reason(request.command, runner="advisory")
                     + self._host_fallback_shell_note(request, requested_host_shell, effective_shell)
                     if host_tool_fallback
                     else "Docker supports bash only; this command will use the advisory host runner "
-                    "after explicit approval"
+                    "under the selected permission mode"
                     if shell_fallback
                     else "This command will use the advisory host runner"
                 ),
@@ -785,53 +794,53 @@ class SandboxPolicy:
             requirement = self._python_host_requirement(segment) if executable in _PYTHON_EXECUTABLES else None
             if requirement == "script":
                 if blocked:
-                    return "Python script execution needs the host interpreter and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
+                    return "Python script execution needs the host interpreter and is not compatible with the pinned Docker image. Use auto or host mode for host execution under the selected permission mode."
                 return (
-                    f"Python script execution uses the host interpreter; this command {suffix} after explicit approval"
+                    f"Python script execution uses the host interpreter; this command {suffix} under the selected permission mode"
                 )
             if requirement == "module":
                 if blocked:
-                    return "Python module execution needs the host interpreter and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
+                    return "Python module execution needs the host interpreter and is not compatible with the pinned Docker image. Use auto or host mode for host execution under the selected permission mode."
                 return (
-                    f"Python module execution uses the host interpreter; this command {suffix} after explicit approval"
+                    f"Python module execution uses the host interpreter; this command {suffix} under the selected permission mode"
                 )
             if requirement == "dependency":
                 if blocked:
-                    return "Python code uses host dependencies (project or non-standard-library imports) and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
-                return f"Python code uses host dependencies; this command {suffix} after explicit approval"
+                    return "Python code uses host dependencies (project or non-standard-library imports) and is not compatible with the pinned Docker image. Use auto or host mode for host execution under the selected permission mode."
+                return f"Python code uses host dependencies; this command {suffix} under the selected permission mode"
             if requirement == "project_path":
                 if blocked:
-                    return "Python code uses a project-specific import path and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
-                return f"Python code uses a project-specific import path; this command {suffix} after explicit approval"
+                    return "Python code uses a project-specific import path and is not compatible with the pinned Docker image. Use auto or host mode for host execution under the selected permission mode."
+                return f"Python code uses a project-specific import path; this command {suffix} under the selected permission mode"
             if requirement == "process":
                 if blocked:
-                    return "Python code can spawn processes and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
-                return f"Python code can spawn processes; this command {suffix} after explicit approval"
+                    return "Python code can spawn processes and is not compatible with the pinned Docker image. Use auto or host mode for host execution under the selected permission mode."
+                return f"Python code can spawn processes; this command {suffix} under the selected permission mode"
             if requirement == "unverifiable":
                 if blocked:
-                    return "Python code could not be safely verified for Docker execution. Use auto or host mode for approval-required host execution."
-                return f"Python code could not be safely verified for Docker execution; this command {suffix} after explicit approval"
+                    return "Python code could not be safely verified for Docker execution. Use auto or host mode for host execution under the selected permission mode."
+                return f"Python code could not be safely verified for Docker execution; this command {suffix} under the selected permission mode"
             if executable in _PIP_EXECUTABLES and self._pip_state_changing(segment):
                 if blocked:
-                    return "This pip subcommand changes the environment or writes package artifacts and is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
-                return f"This pip subcommand changes the environment or writes package artifacts; this command {suffix} after explicit approval"
+                    return "This pip subcommand changes the environment or writes package artifacts and is not compatible with the pinned Docker image. Use auto or host mode for host execution under the selected permission mode."
+                return f"This pip subcommand changes the environment or writes package artifacts; this command {suffix} under the selected permission mode"
         if re.search(
             r"\b(?:pip|pip3)\s+(?:download|install|lock|uninstall|wheel)\b|\b(?:pip|pip3)\s+(?:cache\s+(?:purge|remove)|config\s+(?:rename|set|unset))\b|\b(?:uv\s+pip|poetry)\s+(?:download|install|lock|uninstall|wheel)\b",
             str(command or ""),
             re.IGNORECASE,
         ):
             if blocked:
-                return "This package-management command is not compatible with the pinned Docker image. Use auto or host mode for approval-required host execution."
-            return f"This package-management command is host-specific; this command {suffix} after explicit approval"
+                return "This package-management command is not compatible with the pinned Docker image. Use auto or host mode for host execution under the selected permission mode."
+            return f"This package-management command is host-specific; this command {suffix} under the selected permission mode"
         tool = self._host_tool_name(command)
         if blocked:
             return (
                 f"The command uses '{tool}', which is not in the pinned Docker image's safe command allowlist. "
-                "Use an allowlisted command, or switch to auto or host for approval-required host execution."
+                "Use an allowlisted command, or switch to auto or host for host execution under the selected permission mode."
             )
         return (
             f"The command uses '{tool}', which is not in the pinned Docker image's safe command allowlist; "
-            f"this command {suffix} after explicit approval"
+            f"this command {suffix} under the selected permission mode"
         )
 
     @staticmethod
@@ -1107,7 +1116,7 @@ class SandboxPolicy:
     def _network_mode(self, requested: SandboxNetworkMode | None) -> SandboxNetworkMode:
         if requested is not None:
             return requested
-        return "allow" if self.settings.network.default == "allow" else "deny"
+        return "allow" if self.settings.network.default in {"allow", "allow_with_approval"} else "deny"
 
     def _blocked(
         self,

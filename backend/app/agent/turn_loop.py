@@ -1079,6 +1079,8 @@ class TurnLoop:
                             budget=budget,
                             execute_tool=_rerun_after_grant,
                             emit=_emit_gate_event,
+                            review_client=self.llm_client,
+                            user_request=message,
                         )
                     result = ToolCallResult.from_output(call_id=call_id, name=tool_name, output=output)
                     _record_call_result(prepared, result, timed=False)

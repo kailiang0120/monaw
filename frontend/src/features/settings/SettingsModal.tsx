@@ -37,7 +37,6 @@ import { Dropdown } from '../../components/Dropdown'
 import {
   Badge,
   ChoiceCard,
-  FlagToggle,
   Note,
   NumberRow,
   PageHeader,
@@ -50,15 +49,12 @@ import {
 } from '../../components/ui/Panel'
 import {
   BROWSER_COPY,
-  CONFIRMATION_COPY,
   FOOTER_COPY,
   IDENTITY_COPY,
   MCP_COPY,
   MODEL_COPY,
-  OVERRIDE_COPY,
   PAGE_COPY,
   PERMISSION_MODE_COPY,
-  RISK_COPY,
   SANDBOX_COPY,
   SKILLS_COPY,
   type SettingsPageId,
@@ -102,8 +98,6 @@ import {
   SKILL_GROUP_COPY,
   applyPermissionProfile,
   duplicateMcpServerNames,
-  emptyAppRule,
-  emptyPathRule,
   FALLBACK_MODEL_OPTIONS,
   formatUnavailableReason,
   normalizeDraft,
@@ -232,7 +226,6 @@ export function SettingsModal({
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [loadError, setLoadError] = useState('')
-  const [blockedRootInput, setBlockedRootInput] = useState('')
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null)
   const [diagOpen, setDiagOpen] = useState(false)
   const [browserAdvancedOpen, setBrowserAdvancedOpen] = useState(false)
@@ -728,34 +721,6 @@ export function SettingsModal({
     })
   }
 
-  const updateCustomPermissionDraft = (updater: (current: AgentSettings) => AgentSettings) => {
-    updateDraft((current) => {
-      const base = current.permissions.mode === 'custom'
-        ? current
-        : {
-            ...current,
-            permissions: {
-              ...current.permissions,
-              confirmations: { ...PERMISSION_PROFILES[current.permissions.mode].confirmations },
-              allow_delete: PERMISSION_PROFILES[current.permissions.mode].allow_delete,
-              dangerous_actions_require_confirm:
-                PERMISSION_PROFILES[current.permissions.mode].dangerous_actions_require_confirm,
-              allow_screen_fallback: PERMISSION_PROFILES[current.permissions.mode].allow_screen_fallback,
-            },
-          }
-      const next = updater(base)
-      const customProfile = permissionProfileFromPermissions(next.permissions)
-      return {
-        ...next,
-        permissions: {
-          ...next.permissions,
-          mode: 'custom',
-          custom_profile: customProfile,
-        },
-      }
-    })
-  }
-
   const isDirty = useMemo(() => {
     if (!draft) return false
     if (dirtySecrets.size > 0) return true
@@ -810,12 +775,6 @@ export function SettingsModal({
   }
 
   const browserSkill = draft.available_skills.find((skill) => skill.name === 'browser-use')
-  const displayedPermissions = draft.permissions.mode === 'custom'
-    ? draft.permissions
-    : {
-        ...draft.permissions,
-        ...PERMISSION_PROFILES[draft.permissions.mode],
-      }
   const skillGroups = {
     recommended: draft.available_skills.filter((skill) => !skill.hidden && skill.tier === 'recommended'),
     optional: draft.available_skills.filter((skill) => !skill.hidden && skill.tier === 'optional'),
@@ -856,6 +815,7 @@ export function SettingsModal({
             : downloadingSpeechToText
               ? 'Downloading Whisper base…'
               : 'Download once before voice input.'
+
 
   const getSkillHealth = (skill: AgentSettings['available_skills'][number]) => {
     if (!skill.available || skill.load_error) {
@@ -1749,8 +1709,8 @@ export function SettingsModal({
                   <PageHeader title={PAGE_COPY.permissions.label} />
                   <div className="space-y-4">
                     <SettingsCard title="Approval profile">
-                      <div className="grid gap-2 p-4 sm:grid-cols-3">
-                        {(['default', 'full_access', 'custom'] as const).map((mode) => (
+                      <div className="grid gap-2 p-4 sm:grid-cols-2">
+                        {(['default', 'full_access', 'auto_review', 'custom'] as const).map((mode) => (
                           <ChoiceCard
                             key={mode}
                             ariaLabel={PERMISSION_MODE_COPY[mode].title}
@@ -1764,75 +1724,27 @@ export function SettingsModal({
                           />
                         ))}
                       </div>
-                      {draft.permissions.mode === 'full_access' && (
-                        <div className="px-4 pb-4">
-                          <Note tone="danger" icon={AlertCircle}>
-                            File changes are auto-approved. Deletion must be enabled separately.
-                          </Note>
+                    </SettingsCard>
+                    <SettingsCard title={`${PERMISSION_MODE_COPY[draft.permissions.mode].title} allows`}>
+                      <ul className="space-y-2 p-4 text-sm text-[var(--text-primary)]">
+                        {PERMISSION_MODE_COPY[draft.permissions.mode].rules.map((rule) => (
+                          <li key={rule} className="flex gap-2"><CheckCircle2 size={14} className="mt-0.5 shrink-0" />{rule}</li>
+                        ))}
+                      </ul>
+                      <div className="px-4 pb-4 st-desc">Folder and app restrictions apply in every mode. Sandbox isolation is configured separately.</div>
+                    </SettingsCard>
+                    {draft.permissions.mode === 'custom' && (
+                      <SettingsCard title="Custom config">
+                        <div className="space-y-3 p-4">
+                          <p className="st-desc">Edit <code>permissions.custom_profile</code> in this file. Save it, then reload settings to see your changes.</p>
+                          <ReadOnlyValue label="Config file" value={draft.permissions_config_path || 'Runtime settings.json'} />
+                          <details>
+                            <summary className="st-desc cursor-pointer">View current config</summary>
+                            <pre className="mt-3 overflow-x-auto rounded-lg bg-[var(--bg-secondary)] p-3 text-xs">{JSON.stringify({ permissions: { mode: 'custom', custom_profile: draft.permissions.custom_profile } }, null, 2)}</pre>
+                          </details>
                         </div>
-                      )}
-                    </SettingsCard>
-
-                    <SettingsCard
-                      title="Stop and ask me before…"
-                      description="Turning any of these off switches the profile to Custom."
-                    >
-                      {(Object.entries(displayedPermissions.confirmations) as Array<[keyof AgentSettings['permissions']['confirmations'], boolean]>).map(([key, value]) => {
-                        const copy = CONFIRMATION_COPY[key] ?? { label: key, description: '' }
-                        return (
-                          <SwitchRow
-                            key={key}
-                            label={copy.label}
-                            checked={value}
-                            onChange={(checked) => updateCustomPermissionDraft((current) => ({
-                              ...current,
-                              permissions: {
-                                ...current.permissions,
-                                confirmations: { ...current.permissions.confirmations, [key]: checked },
-                              },
-                            }))}
-                          />
-                        )
-                      })}
-                    </SettingsCard>
-
-                    <SettingsCard title="High-risk actions">
-                      <SwitchRow
-                        label="Allow delete actions"
-                        description={RISK_COPY.allowDelete.description}
-                        checked={displayedPermissions.allow_delete}
-                        onChange={(checked) => updateCustomPermissionDraft((current) => ({
-                          ...current,
-                          permissions: { ...current.permissions, allow_delete: checked },
-                        }))}
-                      />
-                      <SwitchRow
-                        label="Always confirm high-risk actions"
-                        description={RISK_COPY.dangerous.description}
-                        checked={displayedPermissions.dangerous_actions_require_confirm}
-                        onChange={(checked) => updateCustomPermissionDraft((current) => ({
-                          ...current,
-                          permissions: { ...current.permissions, dangerous_actions_require_confirm: checked },
-                        }))}
-                      />
-                      <SwitchRow
-                        label="Allow clicks by screen coordinates"
-                        description={RISK_COPY.screenFallback.description}
-                        checked={displayedPermissions.allow_screen_fallback}
-                        onChange={(checked) => updateCustomPermissionDraft((current) => ({
-                          ...current,
-                          permissions: { ...current.permissions, allow_screen_fallback: checked },
-                        }))}
-                      />
-                    </SettingsCard>
-
-                    <PathOverrides
-                      draft={draft}
-                      updateDraft={updateCustomPermissionDraft}
-                      blockedRootInput={blockedRootInput}
-                      setBlockedRootInput={setBlockedRootInput}
-                    />
-                    <AppOverrides draft={draft} updateDraft={updateCustomPermissionDraft} />
+                      </SettingsCard>
+                    )}
                   </div>
                 </>
               )}
@@ -1876,15 +1788,15 @@ export function SettingsModal({
                         />
                       </SettingRow>
                       <SettingRow
-                        label="Network access"
+                        label="Container network"
                         description={SANDBOX_COPY.networkHelp[draft.sandbox.network.default as keyof typeof SANDBOX_COPY.networkHelp] ?? SANDBOX_COPY.network}
                       >
                         <Dropdown
-                          ariaLabel="Network access"
+                          ariaLabel="Container network"
                           value={draft.sandbox.network.default}
                           options={[
                             { value: 'deny', label: 'Blocked' },
-                            { value: 'allow_with_approval', label: 'Ask first' },
+                            { value: 'allow_with_approval', label: 'Follow approval mode' },
                             { value: 'allow', label: 'Allowed' },
                           ]}
                           onChange={(defaultNetwork) => updateDraft((current) => ({
@@ -1897,11 +1809,11 @@ export function SettingsModal({
                         />
                       </SettingRow>
                       <SettingRow
-                        label="Files created by commands"
+                        label="Container files"
                         description={SANDBOX_COPY.writeStrategyHelp[draft.sandbox.default_write_strategy as keyof typeof SANDBOX_COPY.writeStrategyHelp] ?? SANDBOX_COPY.writeStrategy}
                       >
                         <Dropdown
-                          ariaLabel="Files created by commands"
+                          ariaLabel="Container files"
                           value={draft.sandbox.default_write_strategy}
                           options={[
                             { value: 'discard', label: 'Discard them' },
@@ -2214,7 +2126,6 @@ function OutputFolderInput({
     </div>
   )
 }
-
 function BrowserDiagnosticsCard({
   diagnostics,
   draft,
@@ -2715,260 +2626,5 @@ function McpDiagnostics({ diagnostic }: { diagnostic: MCPServerDiagnostics }) {
         <pre className="st-code max-h-32 overflow-auto whitespace-pre-wrap">{diagnostic.stderr_tail}</pre>
       )}
     </div>
-  )
-}
-
-function PathOverrides({
-  draft,
-  updateDraft,
-  blockedRootInput,
-  setBlockedRootInput,
-}: {
-  draft: AgentSettings
-  updateDraft: (updater: (current: AgentSettings) => AgentSettings) => void
-  blockedRootInput: string
-  setBlockedRootInput: (value: string) => void
-}) {
-  return (
-    <SettingsCard
-      title="Folder rules"
-      description={OVERRIDE_COPY.paths}
-      action={
-        <button
-          type="button"
-          onClick={() => updateDraft((current) => ({
-            ...current,
-            permissions: {
-              ...current.permissions,
-              path_rules: [...current.permissions.path_rules, emptyPathRule()],
-            },
-          }))}
-          className="st-btn st-btn-secondary"
-        >
-          <Plus size={13} />
-          Add folder
-        </button>
-      }
-    >
-      {draft.permissions.path_rules.length === 0 ? (
-        <p className="st-hint p-4">No folder rules. The profile above applies everywhere.</p>
-      ) : (
-        draft.permissions.path_rules.map((rule, index) => (
-          <div key={`path-rule-${index}`} className="st-row-stacked">
-            <div className="flex gap-2">
-              <input
-                value={rule.path}
-                aria-label={`Folder path ${index + 1}`}
-                onChange={(e) => updateDraft((current) => {
-                  const pathRules = [...current.permissions.path_rules]
-                  pathRules[index] = { ...pathRules[index], path: e.target.value }
-                  return { ...current, permissions: { ...current.permissions, path_rules: pathRules } }
-                })}
-                placeholder="C:\Users\you\Projects"
-                className="st-input min-w-0 flex-1 font-mono text-xs"
-              />
-              <button
-                type="button"
-                onClick={() => updateDraft((current) => ({
-                  ...current,
-                  permissions: {
-                    ...current.permissions,
-                    path_rules: current.permissions.path_rules.filter((_, pathIndex) => pathIndex !== index),
-                  },
-                }))}
-                className="st-btn st-btn-ghost st-btn-icon shrink-0"
-                aria-label={`Remove path override ${index + 1}`}
-              >
-                <Trash2 size={13} />
-              </button>
-            </div>
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              {(Object.keys(OVERRIDE_COPY.pathFlags) as Array<keyof typeof OVERRIDE_COPY.pathFlags>).map((key) => (
-                <FlagToggle
-                  key={key}
-                  label={OVERRIDE_COPY.pathFlags[key]}
-                  ariaLabel={`${OVERRIDE_COPY.pathFlags[key]} for folder ${index + 1}`}
-                  checked={rule[key]}
-                  onChange={(checked) => updateDraft((current) => {
-                    const pathRules = [...current.permissions.path_rules]
-                    pathRules[index] = { ...pathRules[index], [key]: checked }
-                    return { ...current, permissions: { ...current.permissions, path_rules: pathRules } }
-                  })}
-                />
-              ))}
-            </div>
-          </div>
-        ))
-      )}
-
-      <div className="st-row-stacked">
-        <p className="st-label">Blocked folders</p>
-        <p className="st-desc mt-1">{OVERRIDE_COPY.blockedRoots}</p>
-        <div className="mt-2 space-y-2">
-          {draft.permissions.blocked_roots.map((root, index) => (
-            <div key={`blocked-root-${index}`} className="flex gap-2">
-              <input
-                value={root}
-                aria-label={`Blocked folder ${index + 1}`}
-                onChange={(e) => updateDraft((current) => {
-                  const blockedRoots = [...current.permissions.blocked_roots]
-                  blockedRoots[index] = e.target.value
-                  return { ...current, permissions: { ...current.permissions, blocked_roots: blockedRoots } }
-                })}
-                className="st-input min-w-0 flex-1 font-mono text-xs"
-              />
-              <button
-                type="button"
-                onClick={() => updateDraft((current) => ({
-                  ...current,
-                  permissions: {
-                    ...current.permissions,
-                    blocked_roots: current.permissions.blocked_roots.filter((_, rootIndex) => rootIndex !== index),
-                  },
-                }))}
-                className="st-btn st-btn-ghost st-btn-icon shrink-0"
-                aria-label={`Remove blocked root ${index + 1}`}
-              >
-                <Trash2 size={13} />
-              </button>
-            </div>
-          ))}
-          <div className="flex gap-2">
-            <input
-              value={blockedRootInput}
-              aria-label="New blocked folder"
-              onChange={(e) => setBlockedRootInput(e.target.value)}
-              placeholder="Add a folder the agent must never touch"
-              className="st-input min-w-0 flex-1 font-mono text-xs"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                if (!blockedRootInput.trim()) return
-                updateDraft((current) => ({
-                  ...current,
-                  permissions: {
-                    ...current.permissions,
-                    blocked_roots: [...current.permissions.blocked_roots, blockedRootInput.trim()],
-                  },
-                }))
-                setBlockedRootInput('')
-              }}
-              className="st-btn st-btn-primary st-btn-icon shrink-0"
-              aria-label="Add blocked root"
-            >
-              <Plus size={14} />
-            </button>
-          </div>
-        </div>
-      </div>
-    </SettingsCard>
-  )
-}
-
-function AppOverrides({
-  draft,
-  updateDraft,
-}: {
-  draft: AgentSettings
-  updateDraft: (updater: (current: AgentSettings) => AgentSettings) => void
-}) {
-  return (
-    <SettingsCard
-      title="Application rules"
-      description={OVERRIDE_COPY.apps}
-      action={
-        <button
-          type="button"
-          onClick={() => updateDraft((current) => ({
-            ...current,
-            permissions: {
-              ...current.permissions,
-              app_rules: [...current.permissions.app_rules, emptyAppRule()],
-            },
-          }))}
-          className="st-btn st-btn-secondary"
-        >
-          <Plus size={13} />
-          Add app
-        </button>
-      }
-    >
-      {draft.permissions.app_rules.length === 0 ? (
-        <p className="st-hint p-4">No application rules. The profile above applies to every app.</p>
-      ) : (
-        draft.permissions.app_rules.map((rule, index) => (
-          <div key={`app-rule-${index}`} className="st-row-stacked">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <input
-                value={rule.alias}
-                aria-label={`App alias ${index + 1}`}
-                onChange={(e) => updateDraft((current) => {
-                  const appRules = [...current.permissions.app_rules]
-                  appRules[index] = { ...appRules[index], alias: e.target.value }
-                  return { ...current, permissions: { ...current.permissions, app_rules: appRules } }
-                })}
-                placeholder="Alias"
-                className="st-input"
-              />
-              <input
-                value={rule.display_name}
-                aria-label={`App display name ${index + 1}`}
-                onChange={(e) => updateDraft((current) => {
-                  const appRules = [...current.permissions.app_rules]
-                  appRules[index] = { ...appRules[index], display_name: e.target.value }
-                  return { ...current, permissions: { ...current.permissions, app_rules: appRules } }
-                })}
-                placeholder="Display name"
-                className="st-input"
-              />
-            </div>
-            <input
-              value={rule.exe_paths.join(', ')}
-              aria-label={`App executable paths ${index + 1}`}
-              onChange={(e) => updateDraft((current) => {
-                const appRules = [...current.permissions.app_rules]
-                appRules[index] = {
-                  ...appRules[index],
-                  exe_paths: e.target.value.split(',').map((path) => path.trim()).filter(Boolean),
-                }
-                return { ...current, permissions: { ...current.permissions, app_rules: appRules } }
-              })}
-              placeholder="Executable paths, separated by commas"
-              className="st-input mt-2 font-mono text-xs"
-            />
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              {(Object.keys(OVERRIDE_COPY.appFlags) as Array<keyof typeof OVERRIDE_COPY.appFlags>).map((key) => (
-                <FlagToggle
-                  key={key}
-                  label={OVERRIDE_COPY.appFlags[key]}
-                  ariaLabel={`${OVERRIDE_COPY.appFlags[key]} for app ${index + 1}`}
-                  checked={rule[key]}
-                  onChange={(checked) => updateDraft((current) => {
-                    const appRules = [...current.permissions.app_rules]
-                    appRules[index] = { ...appRules[index], [key]: checked }
-                    return { ...current, permissions: { ...current.permissions, app_rules: appRules } }
-                  })}
-                />
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={() => updateDraft((current) => ({
-                ...current,
-                permissions: {
-                  ...current.permissions,
-                  app_rules: current.permissions.app_rules.filter((_, appIndex) => appIndex !== index),
-                },
-              }))}
-              className="st-btn st-btn-danger mt-3"
-            >
-              <Trash2 size={12} />
-              Remove this app rule
-            </button>
-          </div>
-        ))
-      )}
-    </SettingsCard>
   )
 }

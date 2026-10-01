@@ -120,8 +120,14 @@ def _watch_approval(endpoint: str, stopped: threading.Event, ready: threading.Ev
         ready.set()
         deadline = time.monotonic() + 60
         diagnosed = False
+        clicked_id = None
+        attempts = 0
+        next_click_at = 0.0
         while not stopped.wait(0.2) and time.monotonic() < deadline:
             candidates = _approval_candidates(desktop, pid)
+            if clicked_id is not None and not candidates:
+                logger.info("Chrome approval: native Allow accepted during local connection")
+                return
             if not candidates and not diagnosed and time.monotonic() > deadline - 57:
                 _diagnose_missing_prompt(desktop, pid)
                 diagnosed = True
@@ -129,6 +135,15 @@ def _watch_approval(endpoint: str, stopped: threading.Event, ready: threading.Ev
                 logger.warning("Chrome automatic approval: multiple prompts require manual approval")
                 return
             if candidates:
+                runtime_id = tuple(candidates[0].element_info.runtime_id or ())
+                if clicked_id is not None and runtime_id != clicked_id:
+                    logger.warning("Chrome automatic approval: dialog changed; manual approval required")
+                    return
+                if time.monotonic() < next_click_at:
+                    continue
+                if attempts >= 3:
+                    logger.warning("Chrome automatic approval: Allow did not dismiss the native dialog")
+                    return
                 if not stopped.is_set():
                     button = candidates[0]
                     # Chrome's consent button ignores the UIA Invoke pattern.
@@ -142,8 +157,9 @@ def _watch_approval(endpoint: str, stopped: threading.Event, ready: threading.Ev
                         logger.warning("Chrome automatic approval: native dialog could not receive focus")
                         return
                     button.click_input()
-                    logger.info("Chrome approval: clicked native Allow during local connection")
-                return
+                    clicked_id = runtime_id
+                    attempts += 1
+                    next_click_at = time.monotonic() + 1.0
     except Exception as exc:
         logger.warning("Chrome automatic approval unavailable; use manual approval: %s", exc)
     finally:
