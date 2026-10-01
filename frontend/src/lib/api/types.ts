@@ -653,6 +653,7 @@ export interface AgentSettings {
     screenshots_dir: string
     traces_dir: string
     system_profile_directory: string
+    auto_approve_local_debugging?: boolean
     allowed_domains: string[]
   }
   memory: {

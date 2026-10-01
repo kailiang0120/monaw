@@ -233,6 +233,7 @@ class BrowserUseSettingsPayload(BaseModel):
     screenshots_dir: str = ""
     traces_dir: str = ""
     system_profile_directory: str = ""
+    auto_approve_local_debugging: bool = True
     allowed_domains: list[str] = Field(default_factory=list)
 
 

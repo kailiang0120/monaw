@@ -527,6 +527,18 @@ describe('SettingsModal', () => {
     })
   })
 
+  it('defaults Chrome approval on and saves the manual approval choice', async () => {
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    const approval = screen.getByRole('checkbox', { name: 'Auto-approve Chrome connections' })
+    expect(approval).toBeChecked()
+    fireEvent.click(approval)
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      browser: expect.objectContaining({ auto_approve_local_debugging: false }),
+    })))
+  })
+
   it('renders skill display metadata and hides internal skills', async () => {
     render(<SettingsModal onClose={() => {}} />)
 

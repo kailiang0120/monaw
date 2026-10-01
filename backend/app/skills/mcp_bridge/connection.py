@@ -341,15 +341,21 @@ class ServerManager:
         return self.restart()
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]):
-        if not self._local_chrome_launched and "--autoConnect" in self.cfg.args and any(
+        if "--autoConnect" in self.cfg.args and any(
             "chrome-devtools-mcp" in arg for arg in self.cfg.args
         ):
             from app.agent.settings_store import load_agent_settings
             from app.skills.browser_use.manager import launch_local_chrome
+            from app.skills.browser_use.chrome_approval import approve_chrome_connection
 
             browser_settings = load_agent_settings().browser
-            await launch_local_chrome(browser_settings.system_profile_directory)
-            self._local_chrome_launched = True
+            if not self._local_chrome_launched:
+                self._local_chrome_endpoint, _ = await launch_local_chrome(browser_settings.system_profile_directory)
+                self._local_chrome_launched = True
+            async with approve_chrome_connection(
+                self._local_chrome_endpoint, enabled=browser_settings.auto_approve_local_debugging,
+            ):
+                return await self._session.call_tool(tool_name, arguments=arguments)
         return await self._session.call_tool(tool_name, arguments=arguments)
 
     def _prepare_start_locked(self) -> None:

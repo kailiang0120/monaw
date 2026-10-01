@@ -1028,7 +1028,9 @@ class BrowserUseManager:
         )
         connection = LocalChromeConnection()
         try:
-            local_endpoint = await connection.start(endpoint)
+            local_endpoint = await connection.start(
+                endpoint, auto_approve=self.config.get("auto_approve_local_debugging", True),
+            )
             browser = await self._attach_system_locked(local_endpoint, selected_profile)
         except asyncio.CancelledError:
             await connection.close()

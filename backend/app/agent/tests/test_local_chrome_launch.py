@@ -51,7 +51,7 @@ def configure_launch(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "_local_debugging_endpoint_alive", lambda endpoint: True)
     monkeypatch.setattr(module, "_kill_existing_chrome_processes", lambda *args: pytest.fail("Launch must never kill Chrome"))
     monkeypatch.setattr(local_chrome_connection, "LocalChromeConnection", lambda: SimpleNamespace(
-        start=AsyncMock(side_effect=lambda endpoint: endpoint), close=AsyncMock()))
+        start=AsyncMock(side_effect=lambda endpoint, **kwargs: endpoint), close=AsyncMock()))
     manager = module.BrowserUseManager({"system_profile_directory": "Profile 1"})
     return manager, launches
 

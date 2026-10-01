@@ -62,6 +62,7 @@ System mode discovers Chrome's approved connection from `DevToolsActivePort` in 
 | `screenshots_dir` | Screenshot output directory. |
 | `traces_dir` | Trace output directory. |
 | `system_profile_directory` | Optional Chrome profile directory name for system-profile workflows. |
+| `auto_approve_local_debugging` | On Windows, click Chrome's native Allow button during Monaw's local connection attempt. Default on; disable for manual approval. |
 | `allowed_domains` | Optional domain allow list. Empty means no domain restriction. |
 
 ## Automatic Local Chrome Launch
@@ -69,6 +70,8 @@ System mode discovers Chrome's approved connection from `DevToolsActivePort` in 
 Monaw locates Chrome's user-data folder and uses the saved profile selection or Chrome's last-used profile. While Chrome is closed, it enables the supported remote-debugging preference in `Local State`, preserving unrelated settings. It launches the real profile with `--enable-features=DevToolsAcceptDebuggingConnections` and discovers the local connection automatically. A live endpoint is reused without opening another window for every tool call.
 
 Chrome 136+ rejects `--remote-debugging-port` and `--remote-debugging-pipe` on the default user-data folder. Monaw therefore uses Chrome 144+'s approved connection for your personal profile. Separate managed profiles continue to use a dedicated debugging port.
+
+On Windows, **Auto-approve Chrome connections** defaults to on. Monaw checks that the local debugging port belongs to the installed Chrome executable, then focuses and clicks the native Allow button during the connection attempt. It does not approve website buttons, existing prompts, or multiple ambiguous dialogs. The watcher stops when the attempt finishes. Unsupported systems, translated prompts, or unavailable accessibility fall back to manual approval. Chrome has no remembered approval setting.
 
 If a restart is needed, `browser_close_chrome` can close Chrome and its background processes after explicit approval. It can lose unsaved work, so Monaw never runs it as an automatic launch step.
 

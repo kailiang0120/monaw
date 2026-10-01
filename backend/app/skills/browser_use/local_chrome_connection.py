@@ -14,6 +14,8 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
+from .chrome_approval import approve_chrome_connection
+
 _MAX_FRAME_SIZE = 200 * 1024 * 1024
 
 
@@ -25,13 +27,14 @@ class LocalChromeConnection:
         self._server = None
         self._client = None
 
-    async def start(self, chrome_endpoint: str) -> str:
+    async def start(self, chrome_endpoint: str, *, auto_approve: bool = True) -> str:
         try:
             # Chrome holds the handshake until the user chooses Allow/Cancel.
-            self._upstream = await connect(
-                chrome_endpoint, open_timeout=60, close_timeout=2,
-                max_size=_MAX_FRAME_SIZE, proxy=None,
-            )
+            async with approve_chrome_connection(chrome_endpoint, enabled=auto_approve):
+                self._upstream = await connect(
+                    chrome_endpoint, open_timeout=60, close_timeout=2,
+                    max_size=_MAX_FRAME_SIZE, proxy=None,
+                )
             self._server = await serve(
                 self._relay, "127.0.0.1", 0, process_request=self._authorize,
                 origins=[None], max_size=_MAX_FRAME_SIZE, close_timeout=2,

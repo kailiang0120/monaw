@@ -211,6 +211,7 @@ class BrowserUseSettings(BaseModel):
         default_factory=lambda: _default_browser_path(_BROWSER_TRACES_DIR)
     )
     system_profile_directory: str = ""
+    auto_approve_local_debugging: bool = True
     allowed_domains: list[str] = Field(default_factory=list)
 
 

@@ -49,20 +49,29 @@ def test_stderr_buffer_accepts_real_subprocess_output_and_keeps_bounded_tail():
 
 
 def test_chrome_mcp_launches_local_profile_before_first_tool_only(monkeypatch):
+    from contextlib import asynccontextmanager
     from unittest.mock import AsyncMock
     from app.skills.browser_use import manager as browser_module
+    from app.skills.browser_use import chrome_approval
     from app.agent import settings_store
 
     launcher = AsyncMock(return_value=("ws://127.0.0.1:1234/devtools/browser/test", "Profile 1"))
     monkeypatch.setattr(browser_module, "launch_local_chrome", launcher)
     monkeypatch.setattr(settings_store, "load_agent_settings", lambda: SimpleNamespace(
-        browser=SimpleNamespace(system_profile_directory="Profile 1")))
+        browser=SimpleNamespace(system_profile_directory="Profile 1", auto_approve_local_debugging=True)))
+    approvals = []
+    @asynccontextmanager
+    async def approve(endpoint, *, enabled):
+        approvals.append((endpoint, enabled))
+        yield
+    monkeypatch.setattr(chrome_approval, "approve_chrome_connection", approve)
     manager = ServerManager(MCPServerConfig(name="Chrome-dev-tools", command="npx",
         args=["-y", "chrome-devtools-mcp@latest", "--autoConnect"]))
     manager._session = _FakeSession()
     asyncio.run(manager._call_tool("take_snapshot", {}))
     asyncio.run(manager._call_tool("take_snapshot", {}))
     launcher.assert_awaited_once_with("Profile 1")
+    assert approvals == [(launcher.return_value[0], True)] * 2
 
 
 class _SlowSession:

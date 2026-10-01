@@ -45,7 +45,7 @@ Preferred workflow:
 Session behavior:
 - The `mode` for browser tools is driven by user Settings. Always call tools with the default `mode="auto"` so the user's preferred mode is used; do NOT pass `mode="managed"` or `mode="system"` unless the user explicitly requests an override for one call.
 - Managed mode launches an isolated profile Chrome with a dedicated CDP port and no user data.
-- System mode automatically prepares and launches the selected local Chrome profile, or Chrome's last-used profile. Chrome 144+ requires its native Allow prompt when connecting; setup pages and port entry are unnecessary. Default-profile debugging-port flags are blocked in Chrome 136+. Disconnecting Monaw preserves personal Chrome and its tabs.
+- System mode automatically prepares and launches the selected local Chrome profile, or Chrome's last-used profile. On Windows, Monaw automatically clicks Chrome's native Allow prompt during its connection attempt unless disabled in Settings. Unsupported or ambiguous prompts require manual approval. Setup pages and port entry are unnecessary. Default-profile debugging-port flags are blocked in Chrome 136+. Disconnecting Monaw preserves personal Chrome and its tabs.
 - `browser_close_chrome` explicitly closes all Chrome/Chromium windows and background processes, force-killing survivors after approval. Never call it automatically or to bypass Chrome's debugging restrictions. Unsaved work may be lost.
 - `browser_session(action="use_system")` and `browser_session(action="use_managed")` are one-off switches; they do not change the saved user preference.
 - Inspect Chrome profiles with `browser_session(action="list_profiles")` and switch with `profile_directory`.

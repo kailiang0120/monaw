@@ -1473,7 +1473,16 @@ export function SettingsModal({
                       />
                     </SettingsCard>
 
-                    <SettingsCard title="My Chrome" description="Monaw opens your profile and prepares the browser automatically. Allow Chrome’s connection prompt when shown.">
+                    <SettingsCard title="My Chrome" description="Monaw opens your profile and prepares the browser automatically.">
+                      <SwitchRow
+                        label="Auto-approve Chrome connections"
+                        description="On Windows, clicks Allow while Monaw connects to Chrome."
+                        checked={draft.browser.auto_approve_local_debugging ?? true}
+                        onChange={(auto_approve_local_debugging) => updateDraft((current) => ({
+                          ...current,
+                          browser: { ...current.browser, auto_approve_local_debugging },
+                        }))}
+                      />
                       <SettingRow label="Chrome profile" description={BROWSER_COPY.chromeProfile}>
                         <Dropdown
                           ariaLabel="Chrome profile"
