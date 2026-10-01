@@ -420,7 +420,8 @@ def test_telegram_bridge_lists_models_and_selects_by_number_or_name():
             (3, "openai", OPENAI_CHAT_MODELS[2], False),
         ]
 
-        selected, error = bridge.set_model_selection(12345, "4")
+        gemini_option = next(option for option in options if option.provider == "gemini")
+        selected, error = bridge.set_model_selection(12345, str(gemini_option.index))
         assert error == ""
         assert selected is not None
         assert selected.model_name == GEMINI_CHAT_MODELS[0]

@@ -7,6 +7,8 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.skills.browser_use import manager as browser_manager_module
 from app.skills.browser_use import tools as browser_tools_module
 from app.skills.browser_use.dom_inspection import normalize_serialized_state
@@ -442,6 +444,21 @@ def test_browser_click_file_input_requires_approval(monkeypatch):
     assert created[0]["action_type"] == "browser_file_upload"
 
 
+@pytest.mark.parametrize("value,expected", [(False, False), ("False", False), ("false", False), (True, True), ("True", True), ("true", True)])
+def test_file_chooser_guard_decodes_actor_boolean_strings(monkeypatch, value, expected):
+    async def no_sleep(*_args):
+        pass
+
+    monkeypatch.setattr(browser_tools_module, "_sleep_after_action", no_sleep)
+
+    class FakePage:
+        async def evaluate(self, _script):
+            return value
+
+    assert asyncio.run(browser_tools_module._arm_file_chooser_guard(FakePage())) is expected
+    assert asyncio.run(browser_tools_module._file_chooser_guard_tripped(FakePage())) is expected
+
+
 def test_browser_click_download_link_requires_approval(monkeypatch):
     created = []
 
@@ -546,6 +563,49 @@ def test_browser_downloads_clear_requires_approval(monkeypatch, tmp_path):
     assert result["reason_code"] == "browser_downloads_clear_approval_required"
     assert kept.exists()
     assert created[0]["tool_name"] == "browser_downloads"
+
+
+@pytest.mark.parametrize("selection,expected", [
+    ({"status": "ok", "values": ["blue"]}, "ok"),
+    ({"status": "error", "reason_code": "option_unavailable"}, "error"),
+    ({"status": "error", "reason_code": "select_disabled"}, "error"),
+    ({"status": "error", "reason_code": "selection_verification", "values": ["red"]}, "error"),
+])
+def test_browser_select_option_reports_actual_selection_instead_of_actor_click_success(monkeypatch, selection, expected):
+    class FakeElement:
+        async def select_option(self, _values):
+            raise AssertionError("The actor option click does not reliably select native options")
+
+    class FakePage:
+        async def get_elements_by_css_selector(self, _selector):
+            return [FakeElement()]
+
+        async def evaluate(self, _script, selector, values):
+            assert selector == "#colour"
+            assert values == ["blue"]
+            return json.dumps(selection)
+
+    class FakeManager:
+        async def ensure_browser(self, *_args):
+            pass
+
+        async def get_page(self, **_kwargs):
+            return FakePage()
+
+        async def page_metadata(self, _page):
+            return {"url": "http://localhost/test"}
+
+    async def no_sleep(*_args):
+        pass
+
+    monkeypatch.setattr(browser_tools_module, "_sleep_after_action", no_sleep)
+    result = json.loads(asyncio.run(browser_tools_module.browser_select_option(
+        FakeManager(), selector="#colour", values=["blue"])))
+    assert result["status"] == expected
+    if expected == "ok":
+        assert result["values"] == ["blue"]
+    else:
+        assert result["selection"] == selection
 
 
 def test_browser_scroll_awaits_async_page_mouse_property():
@@ -668,6 +728,25 @@ class _FakeRegistry:
 
     def extend(self, tools):
         self.tools.extend(tools)
+
+
+@pytest.mark.parametrize("matched", [True, "True", "true", False, "False", "false"])
+def test_browser_verifies_plain_status_text_and_decodes_boolean_results(matched):
+    class FakePage:
+        async def evaluate(self, script, text):
+            assert "document.body?.innerText" in script
+            assert text == "PASS: form submitted"
+            return matched
+
+    result = asyncio.run(browser_tools_module._verify_browser_condition(
+        FakePage(), text="PASS: form submitted", timeout_seconds=0.2,
+    ))
+
+    expected = str(matched).lower() == "true"
+    assert result["verified"] is expected
+    assert result["status"] == ("ok" if expected else "error")
+    if not expected:
+        assert result["reason_code"] == "verification_timeout"
 
 
 def test_browser_tool_schemas_accept_common_alias_arguments():

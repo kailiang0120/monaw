@@ -251,6 +251,8 @@
 /* ------------------------------------------------------- select / menu --- */
 
 .st-select {
+  height: var(--control-height);
+  line-height: 1.25;
   display: inline-flex;
   width: 100%;
   align-items: center;
@@ -282,6 +284,7 @@
 }
 
 .st-select-sm {
+  height: var(--control-height-sm);
   padding: 0.25rem 0.5rem;
   font-size: 0.75rem;
 }
@@ -325,6 +328,8 @@
 /* -------------------------------------------------------------- buttons --- */
 
 .st-btn {
+  height: var(--control-height);
+  line-height: 1.25;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -389,8 +394,22 @@
 
 .st-btn-icon {
   padding: 0;
-  height: 1.875rem;
-  width: 1.875rem;
+  height: var(--control-height);
+  width: var(--control-height);
+}
+
+input.st-input {
+  height: var(--control-height);
+}
+
+.st-btn-sm {
+  height: var(--control-height-sm);
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.st-btn-icon.st-btn-sm {
+  width: var(--control-height-sm);
 }
 
 /* --------------------------------------------------------------- switch --- */
@@ -459,6 +478,45 @@
 .st-choice[aria-pressed='true'] {
   border-color: var(--st-accent-border);
   background: var(--st-accent-soft);
+}
+
+.st-choice[data-tone='danger'][aria-pressed='true'] {
+  border-color: var(--st-danger-border);
+  background: var(--st-danger-soft);
+}
+
+.st-choice:focus-visible,
+.st-info-button:focus-visible {
+  outline: 2px solid var(--st-accent-border);
+  outline-offset: 2px;
+}
+
+.st-info-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.375rem;
+  color: var(--st-text-muted);
+}
+
+.st-info-button:hover {
+  color: var(--st-text);
+  background: var(--st-surface-hover);
+}
+
+.st-info-tip {
+  position: fixed;
+  z-index: 100;
+  border: 1px solid var(--st-border-strong);
+  border-radius: 0.5rem;
+  background: var(--st-surface);
+  color: var(--st-text-muted);
+  padding: 0.625rem 0.75rem;
+  box-shadow: var(--st-shadow);
+  font-size: 0.75rem;
+  line-height: 1.6;
 }
 
 .st-badge {

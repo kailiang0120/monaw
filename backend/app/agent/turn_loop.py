@@ -63,6 +63,7 @@ FINAL_RESPONSE_TYPEWRITER_CHARS = 8
 FINAL_RESPONSE_TYPEWRITER_MAX_CHUNKS = 240
 
 _BROWSER_MUTATING_TOOLS = {
+    "browser_close_chrome",
     "browser_open",
     "browser_navigate",
     "browser_back",
@@ -601,7 +602,7 @@ async def _heartbeat_pump(
 
 
 class TurnLoop:
-    MAX_ITERATIONS = 40
+    MAX_ITERATIONS = 200
 
     def __init__(
         self,
@@ -610,8 +611,8 @@ class TurnLoop:
         memory: MemoryManager,
         budget: IterationBudget | None = None,
         max_iterations: int | None = None,
-        max_turn_seconds: float = 1800.0,
-        max_llm_call_seconds: float = 300.0,
+        max_turn_seconds: float = 7200.0,
+        max_llm_call_seconds: float = 600.0,
         observability: ObservabilityPort | None = None,
         max_parallel_tool_calls: int = 4,
     ) -> None:
@@ -652,10 +653,6 @@ class TurnLoop:
             budget=budget,
             call_id=call_id,
         )
-
-    async def _execute_tool(self, budget: IterationBudget, tool_dict: dict, arguments: dict) -> str:
-        result = await self._execute_tool_result(budget, tool_dict, arguments)
-        return result.output
 
     def _build_tool_result_message(
         self,
@@ -726,65 +723,6 @@ class TurnLoop:
         if status in {"error", "blocked", "denied", "failed"}:
             return "error"
         return fallback
-
-    async def execute_tool_call(
-        self,
-        tool_name: str,
-        arguments: dict,
-        *,
-        budget: IterationBudget | None = None,
-    ) -> str:
-        dispatched = self.registry.dispatch(tool_name, arguments)
-        if dispatched is None:
-            return json.dumps(
-                {"status": "error", "error": f"Unknown tool '{tool_name}'"}
-            )
-        return await self._execute_tool(
-            budget or self._new_turn_budget(),
-            dispatched["tool"],
-            dispatched["arguments"],
-        )
-
-    async def resolve_pending_tool_output(
-        self,
-        tool_name: str,
-        arguments: dict,
-        tool_output: str,
-        *,
-        budget: IterationBudget | None = None,
-    ) -> tuple[str, list[dict]]:
-        return await self.execution_gate.handle_pending_tool_output(
-            tool_output=tool_output,
-            tool_name=tool_name,
-            arguments=arguments,
-            registry=self.registry,
-            budget=budget or self._new_turn_budget(),
-            execute_tool=self._execute_tool,
-        )
-
-    @staticmethod
-    def _check_pending_status(tool_output: str) -> dict | None:
-        return ExecutionGateService.check_pending_status(tool_output)
-
-    async def _await_ticket_resolution(
-        self,
-        budget: IterationBudget,
-        ticket_id: str,
-        event_kind: str,
-        tool_dict: dict,
-        arguments: dict,
-        timeout: float = 600.0,
-    ):
-        async for event in self.execution_gate.await_ticket_resolution(
-            budget=budget,
-            ticket_id=ticket_id,
-            event_kind=event_kind,
-            tool_dict=tool_dict,
-            arguments=arguments,
-            execute_tool=self._execute_tool,
-            timeout=timeout,
-        ):
-            yield event
 
     async def _react_worker(
         self,
@@ -1040,6 +978,9 @@ class TurnLoop:
             force_tool_choice_next = False
             web_search_reprompted = False
             parallel_semaphore = asyncio.Semaphore(self.max_parallel_tool_calls)
+            # The UI shows one permission prompt at a time, so parallel calls
+            # take turns waiting on their gates.
+            gate_lock = asyncio.Lock()
 
             async def _cancel_active_tool_tasks() -> None:
                 """Cancel and drain invocation tasks created for this turn."""
@@ -1086,40 +1027,65 @@ class TurnLoop:
                     )
                     active_call["observability_finished"] = True
 
+            def _record_call_result(prepared: dict, result: ToolCallResult, *, timed: bool = True) -> None:
+                """Mirror a call's latest result into the active-call ledger used on cancellation."""
+                active_call = active_tool_calls.get(prepared["active_key"])
+                if active_call is None:
+                    return
+                update: dict[str, Any] = {
+                    "output": result.output,
+                    "status": "complete" if result.status == "ok" else result.status,
+                    "completed": result.status not in {"pending_approval", "pending_access_grant"},
+                }
+                if timed:
+                    completed_at = time.perf_counter()
+                    started_at = float(active_call.get("obs_tool_started_at") or completed_at)
+                    update["duration_ms"] = round((completed_at - started_at) * 1000)
+                active_call.update(update)
+
+            def _emit_gate_event(event: dict) -> None:
+                if event.get("event") in {"approval_required", "access_grant_required"}:
+                    _transition(run_state.waiting_for, str(event["event"]))
+                _put(event)
+
             async def _invoke_prepared_tool(prepared: dict) -> ToolCallResult:
-                """Invoke one preflighted tool, converting ordinary failures to results."""
+                """Invoke one preflighted tool and wait on any gate it raises.
+
+                Waiting here instead of after the whole batch shows the prompt
+                as soon as this call needs it, while sibling calls keep running.
+                """
                 tool_name = str(prepared["tool_name"])
                 call_id = str(prepared["call_id"])
-                try:
+
+                async def _execute(tool_dict: dict, arguments: dict) -> ToolCallResult:
                     async with parallel_semaphore:
                         _transition(run_state.tool_execution)
-                        result = await self._execute_tool_result(
-                            budget,
-                            prepared["tool_dict"],
-                            prepared["arguments"],
-                            call_id=call_id,
-                        )
-                        completed_at = time.perf_counter()
-                        active_call = active_tool_calls.get(prepared["active_key"])
-                        if active_call is not None:
-                            active_call.update(
-                                {
-                                    "output": result.output,
-                                    "status": "complete" if result.status == "ok" else result.status,
-                                    "completed": result.status not in {"pending_approval", "pending_access_grant"},
-                                    "duration_ms": round(
-                                        (completed_at - float(active_call.get("obs_tool_started_at") or completed_at))
-                                        * 1000
-                                    ),
-                                }
-                            )
+                        return await self._execute_tool_result(budget, tool_dict, arguments, call_id=call_id)
+
+                async def _rerun_after_grant(_budget: IterationBudget, tool_dict: dict, arguments: dict) -> str:
+                    # Keep the original call_id so Stop and timeouts still reach the re-run.
+                    return (await _execute(tool_dict, arguments)).output
+
+                try:
+                    result = await _execute(prepared["tool_dict"], prepared["arguments"])
+                    _record_call_result(prepared, result)
+                    if ExecutionGateService.check_pending_status(result.output) is None:
                         return result
+                    async with gate_lock:
+                        output = await self.execution_gate.resolve_pending_output(
+                            tool_output=result.output,
+                            tool_dict=prepared["tool_dict"],
+                            arguments=prepared["arguments"],
+                            budget=budget,
+                            execute_tool=_rerun_after_grant,
+                            emit=_emit_gate_event,
+                        )
+                    result = ToolCallResult.from_output(call_id=call_id, name=tool_name, output=output)
+                    _record_call_result(prepared, result, timed=False)
+                    return result
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    tool_output = json.dumps(
-                        {"status": "error", "error": str(exc)}
-                    )
                     _obs_error(
                         str(exc),
                         error_type=type(exc).__name__,
@@ -1128,23 +1094,10 @@ class TurnLoop:
                     result = ToolCallResult.from_output(
                         call_id=call_id,
                         name=tool_name,
-                        output=tool_output,
+                        output=json.dumps({"status": "error", "error": str(exc)}),
                         fallback_status="error",
                     )
-                    active_call = active_tool_calls.get(prepared["active_key"])
-                    if active_call is not None:
-                        completed_at = time.perf_counter()
-                        active_call.update(
-                            {
-                                "output": result.output,
-                                "status": "error",
-                                "completed": result.status not in {"pending_approval", "pending_access_grant"},
-                                "duration_ms": round(
-                                    (completed_at - float(active_call.get("obs_tool_started_at") or completed_at))
-                                    * 1000
-                                ),
-                            }
-                        )
+                    _record_call_result(prepared, result)
                     return result
 
             async def _run_prepared_batch(prepared_calls: list[dict], *, parallel: bool) -> list[ToolCallResult]:
@@ -1192,24 +1145,12 @@ class TurnLoop:
                             output=output,
                             fallback_status="error",
                         )
-                        active_call = active_tool_calls.get(prepared["active_key"])
-                        if active_call is not None:
-                            active_call.update(
-                                {
-                                    "output": output,
-                                    "status": "error",
-                                    "completed": True,
-                                    "duration_ms": round(
-                                        (time.perf_counter() - float(active_call.get("obs_tool_started_at") or time.perf_counter()))
-                                        * 1000
-                                    ),
-                                }
-                            )
+                        _record_call_result(prepared, value)
                     results.append(value)
                 return results
 
             async def _process_tool_result(prepared: dict, tool_result: ToolCallResult) -> None:
-                """Apply gate handling and all existing ordered result guards."""
+                """Apply the ordered result guards and publish the call's final result."""
                 nonlocal final_text, stop_requested, terminal_error, incomplete_reason_code
 
                 call_id = str(prepared["call_id"])
@@ -1218,32 +1159,8 @@ class TurnLoop:
                 tool_name = str(prepared["tool_name"])
                 arguments = prepared["arguments"]
                 policy_decision = prepared["policy_decision"]
-                tool_dict = prepared["tool_dict"]
                 status = "ok" if tool_result.status == "ok" else "error"
                 tool_output = tool_result.output
-
-                for _gate_hop in range(self.execution_gate.MAX_GATE_HOPS):
-                    pending_event = self._check_pending_status(tool_output)
-                    if pending_event is None:
-                        break
-                    _transition(run_state.waiting_for, str(pending_event.get("event") or ""))
-                    _put(pending_event)
-                    ticket_id = pending_event["data"]["ticket_id"]
-                    resolved_output: str | None = None
-                    async for resolution_event in self._await_ticket_resolution(
-                        budget,
-                        ticket_id,
-                        pending_event["event"],
-                        tool_dict,
-                        arguments,
-                    ):
-                        if "_result" in resolution_event:
-                            resolved_output = resolution_event["_result"]
-                        else:
-                            _put(resolution_event)
-                    tool_output = resolved_output or json.dumps(
-                        {"status": "error", "error": "Resolution lost."}
-                    )
 
                 status = self._tool_output_status(tool_output, status)
                 recovery_prompt = ""

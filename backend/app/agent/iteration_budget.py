@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 class IterationBudget:
     """Thread-safe bounded iteration counter."""
 
-    max_iterations: int = 40
+    max_iterations: int = 200
     _remaining: int = field(init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _consumed: int = field(init=False, default=0)

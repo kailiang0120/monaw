@@ -5,13 +5,14 @@ const test = require('node:test')
 const {
   CONTROL_SCOPES,
   generateControlSecret,
+  generateControlSessionId,
   mintControlSession,
   normalizeBackendHost,
 } = require('./control-auth')
 
 test('mints a short-lived signed renderer session', () => {
   const secret = generateControlSecret()
-  const session = mintControlSession(secret, 1_000)
+  const session = mintControlSession(secret, 'session-1', 1_000)
   const [encodedPayload, encodedSignature] = session.token.split('.')
   const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'))
   const expectedSignature = crypto
@@ -23,6 +24,17 @@ test('mints a short-lived signed renderer session', () => {
   assert.equal(payload.exp, 1_300)
   assert.deepEqual(payload.scopes, [...CONTROL_SCOPES].sort())
   assert.equal(session.expiresAt, 1_300_000)
+  assert.equal(payload.jti, 'session-1')
+})
+
+test('keeps the session id stable across token refreshes', () => {
+  const secret = generateControlSecret()
+  const sessionId = generateControlSessionId()
+  const jti = (session) => JSON.parse(Buffer.from(session.token.split('.')[0], 'base64url').toString('utf8')).jti
+
+  assert.equal(jti(mintControlSession(secret, sessionId, 1_000)), sessionId)
+  assert.equal(jti(mintControlSession(secret, sessionId, 2_000)), sessionId)
+  assert.throws(() => mintControlSession(secret, ''), /session id is required/)
 })
 
 test('rejects non-loopback backend hosts by default', () => {

@@ -1,6 +1,6 @@
 ---
 name: browser-use
-description: Managed browser automation with snapshot, tabs, navigation, clicking, typing, screenshots, and system-profile fallback.
+description: Automatic local Chrome profile launch and browser automation with snapshots, tabs, navigation, clicking, typing, and screenshots.
 display_name: Browser automation
 summary: Browse, inspect, and interact with websites using managed or system Chrome.
 version: 1.0.0
@@ -16,7 +16,7 @@ metadata:
 Use these tools for website fetching and browser automation tasks.
 
 Preferred workflow:
-- When `mcp__Chrome-dev-tools__list_pages` is available, use Chrome DevTools MCP to control the user's open Chrome tabs. Start with `list_pages` and `take_snapshot`, then act on snapshot element IDs. This connection provides hover, drag, dialog, upload, and other actions in addition to clicking and typing. Keep using that connection for the task instead of opening a separate managed browser.
+- When `mcp__Chrome-dev-tools__list_pages` is available, use Chrome DevTools MCP. The first action automatically prepares and launches the user's local Chrome profile if needed. Start with `list_pages` and `take_snapshot`, then act on snapshot element IDs. Keep using that connection for the task instead of also opening a built-in browser connection.
 - For read-only URL retrieval, extraction, or summarization, use `browser_fetch` before opening a browser tab. It uses local HTTP plus Scrapling parsing first, with optional rendering through Monaw's browser session.
 - Start with `browser_open` to create or reuse the browser session.
 - Always use `observe -> decide -> act -> verify`: inspect state, choose one safe next action, execute it, then verify before continuing.
@@ -38,14 +38,15 @@ Preferred workflow:
 - Do not repeat the same browser action with the same arguments after an unchanged result. Inspect status/tabs/snapshot, use screenshot evidence, or report the blocker.
 - If a browser tool returns `status: error`, do not retry the same call first. Call `browser_session(action="doctor")` to inspect `last_error`, `cdp_endpoint_alive`, and `recent_launches`.
 - For `reason_code: managed_cdp_timeout` or `managed_chrome_exited`, call `browser_session(action="reset")` once, then retry the original intent. Do not loop more than once.
-- For `reason_code: chrome_executable_missing` or `system_launch_disabled`, stop and report the blocker because user action is needed.
+- For `chrome_executable_missing`, `system_debugging_not_enabled`, `system_debugging_approval_required`, `chrome_profile_missing`, or `chrome_profile_setup_failed`, stop and report the required user action. For `chrome_setup_requires_restart`, explain that Chrome needs to close once; offer `browser_close_chrome` with its approval step, then retry after the approved close. Never tell the user to configure debugging ports or launch Chrome manually for normal local-profile use.
 - For `reason_code: tool_timeout`, do not retry identically. Narrow the action, for example with a smaller `limit` on `browser_snapshot`, or call `doctor` first.
-- The first `browser_open` of a session can take up to 60 seconds on a cold Windows machine; treat first-launch latency as expected.
+- The first `browser_open` has a two-minute budget, including up to one minute to choose Allow in Chrome. It continues automatically after consent; later actions reuse the connection.
 
 Session behavior:
 - The `mode` for browser tools is driven by user Settings. Always call tools with the default `mode="auto"` so the user's preferred mode is used; do NOT pass `mode="managed"` or `mode="system"` unless the user explicitly requests an override for one call.
 - Managed mode launches an isolated profile Chrome with a dedicated CDP port and no user data.
-- System mode attaches only to an already-running Chrome DevTools endpoint. It does not close or relaunch the user's real Chrome profile.
+- System mode automatically prepares and launches the selected local Chrome profile, or Chrome's last-used profile. Chrome 144+ requires its native Allow prompt when connecting; setup pages and port entry are unnecessary. Default-profile debugging-port flags are blocked in Chrome 136+. Disconnecting Monaw preserves personal Chrome and its tabs.
+- `browser_close_chrome` explicitly closes all Chrome/Chromium windows and background processes, force-killing survivors after approval. Never call it automatically or to bypass Chrome's debugging restrictions. Unsaved work may be lost.
 - `browser_session(action="use_system")` and `browser_session(action="use_managed")` are one-off switches; they do not change the saved user preference.
 - Inspect Chrome profiles with `browser_session(action="list_profiles")` and switch with `profile_directory`.
 
@@ -63,8 +64,8 @@ Rules:
 - For forms, match fields using `target_hint`, `field_candidates`, labels, role, placeholder, name, and current value. After typing into any field, inspect returned `target_after` metadata or take a fresh snapshot before continuing.
 - In email compose UIs, confirm recipient, subject, and message body refs separately before typing. Commit autocomplete recipients with Enter or the exact suggestion, then verify a recipient chip/token before filling subject or body.
 - The browser `mode` is configured by the user in Settings. Call tools with `mode="auto"` by default so the saved preference is honored; only pass `managed` or `system` for a requested one-off override.
-- If a browser tool returns `status: error`, call `browser_session(action="doctor")` before retrying. For `managed_cdp_timeout` or `managed_chrome_exited`, call `browser_session(action="reset")` once, then retry the intent once. Stop for `chrome_executable_missing` or `system_launch_disabled`; user action is required.
-- For `tool_timeout`, narrow the action rather than retrying identically. The first `browser_open` of a session can take up to 60 seconds on a cold Windows machine.
+- If a browser tool returns `status: error`, call `browser_session(action="doctor")` before retrying. For `managed_cdp_timeout` or `managed_chrome_exited`, call `browser_session(action="reset")` once, then retry the intent once. Stop for `chrome_executable_missing`, `system_debugging_not_enabled`, `system_debugging_approval_required`, or `chrome_profile_missing`; report the required user action.
+- For `tool_timeout`, narrow the action rather than retrying identically. The first `browser_open` has a two-minute budget including Chrome consent.
 - When the Chrome DevTools MCP tools are available, use `mcp__Chrome-dev-tools__take_snapshot` for webpage inspection.
 - Use `mcp__Chrome-dev-tools__evaluate_script` only for DOM details the accessibility snapshot cannot provide.
 - Do not use generic screenshot-style tools to read webpage content when `mcp__Chrome-dev-tools__take_snapshot` is available.

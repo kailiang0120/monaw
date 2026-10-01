@@ -11,6 +11,11 @@
    ========================================================================== */
 
 @layer base {
+  :root {
+    --control-height: 2.125rem;
+    --control-height-sm: 1.75rem;
+  }
+
   .theme-dark {
     --st-bg: #262624;
     --st-bg-nav: #1e1d1b;

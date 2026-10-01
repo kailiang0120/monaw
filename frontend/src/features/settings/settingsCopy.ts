@@ -17,9 +17,9 @@ export interface SettingsPageCopy {
 
 export const PAGE_COPY = {
   model: {
-    label: 'Voice & limits',
-    blurb: 'Configure speech input and cap how long a request may run.',
-    keywords: 'speech voice whisper timeout limits',
+    label: 'Voice',
+    blurb: 'Configure voice input.',
+    keywords: 'speech voice whisper transcription',
   },
   apiKeys: {
     label: 'Connections',
@@ -77,7 +77,7 @@ export const MODEL_COPY = {
   model: 'Bigger models reason better and cost more per message. Smaller "mini"/"flash" models are faster and cheaper.',
   reasoningEffort: 'How long the model is allowed to think before it answers. Higher settings give better results on hard problems but are slower and cost more.',
   vision: 'Screenshots and image attachments go straight to the model you picked above, which reads them natively. No separate vision model is needed.',
-  speechEngine: 'Local runs on this computer and works offline after a one-time download. Cloud sends your audio to Google and needs a Google API key.',
+  speechEngine: 'Local needs a one-time download. Cloud sends audio to Google and requires an API key.',
   speechLocalIntro: 'Voice input needs the Whisper model downloaded once (about 142 MB). It then runs entirely on this machine.',
   runtimeLimits: 'Safety brakes for a single request. If the agent gets stuck in a loop, these stop it instead of letting it run forever.',
   maxIterations: 'How many tool calls the agent may make while answering one message.',
@@ -92,8 +92,8 @@ export const IDENTITY_COPY = {
   userName: 'What the agent should call you.',
   userIdentity: 'Background the agent should keep in mind every conversation: your role, what you are working on, tools you use.',
   communicationStyle: 'How you want replies written: length, tone, language, formatting, how blunt to be.',
-  customInstructions: 'Standing instructions applied to every conversation, stored as a file in your workspace. Good for project conventions and things you keep repeating.',
-  customInstructionsLimit: 'These guide behaviour. They cannot override safety rules or permission checks.',
+  customInstructions: 'Applied to every conversation and saved in your workspace.',
+  customInstructionsLimit: 'Permission checks still apply.',
 } as const
 
 /* ----------------------------------------------------------------- skills --- */
@@ -106,18 +106,22 @@ export const SKILLS_COPY = {
 /* ---------------------------------------------------------------- browser --- */
 
 export const BROWSER_COPY = {
-  mode: 'These built-in tools use an isolated browser by default. System mode connects to the debugging address below. Use Connect to my Chrome above for your running browser.',
-  systemConnection: 'How the built-in tools reach a Chrome debugging address. Use Connect to my Chrome above for your running browser.',
-  cdpUrl: 'The debugging address of your Chrome. Only change this if you started Chrome on a non-default port.',
-  chromeProfile: 'Which of your Chrome profiles to use when driving your own browser.',
-  allowedDomains: 'If set, the agent may only visit these domains. Leave empty to allow any site.',
+  modeHelp: {
+    auto: 'Starts a separate Chrome profile; falls back to your Chrome if launch fails.',
+    managed: 'Uses a separate profile with its own logins and tabs.',
+    system: 'Uses your Chrome profile, with your saved logins and tabs.',
+  },
+  systemConnection: 'Launch your Chrome profile or connect to an explicit debugging endpoint.',
+  cdpUrl: 'Address of Chrome’s remote debugging connection.',
+  chromeProfile: 'The profile Monaw opens when launching your Chrome.',
+  allowedDomains: 'Leave empty to allow all sites.',
   systemFallback: 'If the managed browser fails to start, fall back to your own Chrome instead of giving up.',
   headless: 'Run the browser invisibly. Faster, but you cannot watch what the agent is doing.',
   keepAlive: 'Leave the browser open between requests so logins and tabs survive. Turn off to start clean every time.',
   advanced: 'These affect how the agent reads a page. The defaults are right for almost everyone — change them only if pages are being misread.',
-  domEngine: 'How the page structure is analysed. Auto picks the best available engine.',
+  domEngine: 'Automatic uses enhanced page inspection when available.',
   paintOrder: 'Ignore elements that are visually covered by something else, so the agent does not click hidden buttons.',
-  crossOrigin: 'Let the agent look inside embedded frames from other sites, such as payment or sign-in widgets.',
+  crossOrigin: 'Includes embedded payment and sign-in widgets from other sites.',
   maxIframes: 'How many embedded frames to read per page. Higher is slower.',
   frameDepth: 'How deep to follow frames nested inside other frames.',
   outputWorkspace: 'Where files the agent produces end up, so you can find them in Explorer.',
@@ -129,7 +133,7 @@ export const BROWSER_COPY = {
 /* -------------------------------------------------------------------- mcp --- */
 
 export const MCP_COPY = {
-  intro: 'MCP servers are small programs that expose extra tools to the agent — a file system, a database, a browser, your own scripts.',
+  intro: 'Add a server to give the agent more tools.',
   bridge: 'Master switch. When off, no MCP server is contacted and none of their tools are available.',
   transportStdio: 'Monaw starts the server as a local program and talks to it over its input and output.',
   transportHttp: 'Monaw connects to a server that is already running at a URL.',
@@ -139,28 +143,31 @@ export const MCP_COPY = {
   startupTimeout: 'How long to wait for the server to come up before treating it as failed.',
   callTimeout: 'How long to wait for one tool call to finish.',
   reconnect: 'Automatically restart the connection if the server stops responding.',
-  allowList: 'Only expose these tools to the agent. Leave empty to expose everything the server offers.',
-  trustedTools: 'Tools in this list bypass the reflected-tool approval prompt. Add only tools you fully trust.',
-  riskOverrides: 'Override the inferred risk for a remote tool. This changes its risk label, but does not bypass approval.',
-  plaintextWarning: 'Environment variables and HTTP headers for MCP servers are stored as plain text in the settings file. Do not put high-value secrets here.',
+  allowList: 'Leave empty to expose all server tools.',
+  trustedTools: 'These tools run without an approval prompt.',
+  riskOverrides: 'Changes risk labels; approval rules still apply.',
+  plaintextWarning: 'Headers and environment variables are saved as plain text.',
 } as const
 
 /* ------------------------------------------------------------ permissions --- */
 
 export const PERMISSION_MODE_COPY = {
   default: {
-    title: 'Ask before changing things',
-    summary: 'The agent can read freely, but stops for your approval before it writes, deletes, or launches anything.',
+    title: 'Ask first',
+    summary: 'Approve changes.',
+    description: 'The agent can read freely, but stops for your approval before it writes, deletes, or launches anything.',
     recommendation: 'Recommended',
   },
   full_access: {
-    title: 'Act without asking',
-    summary: 'The agent reads and writes without stopping. It will not interrupt you, and it will not warn you before changing files.',
+    title: 'Auto approve',
+    summary: 'Allow changes.',
+    description: 'The agent reads and writes without stopping. It will not interrupt you, and it will not warn you before changing files. Deletion stays off unless you enable it below.',
     recommendation: 'Higher risk',
   },
   custom: {
-    title: 'Custom rules',
-    summary: 'You decide exactly which actions need approval, and set per-folder and per-app exceptions below.',
+    title: 'Custom',
+    summary: 'Choose your rules.',
+    description: 'You decide exactly which actions need approval, and set per-folder and per-app exceptions below.',
     recommendation: 'Advanced',
   },
 } as const
@@ -191,22 +198,22 @@ export const CONFIRMATION_COPY: Record<string, { label: string; description: str
 export const RISK_COPY = {
   allowDelete: {
     label: 'Allow deleting files at all',
-    description: 'When off, the agent refuses every delete, even one you approve. Leave off unless you genuinely need it.',
+    description: 'When off, all deletion is blocked, even with approval.',
   },
   dangerous: {
     label: 'Always confirm high-risk actions',
-    description: 'Keeps a confirmation prompt on things like wiping a folder or changing system settings, whatever the other switches say.',
+    description: 'Overrides other rules for actions such as wiping folders or changing system settings.',
   },
   screenFallback: {
     label: 'Allow screen-pixel control',
-    description: 'Lets the agent click by looking at raw pixels when it cannot read an app’s controls properly. More capable, but it can click the wrong thing.',
+    description: 'Used when app controls cannot be read. Coordinates can be less reliable.',
   },
 } as const
 
 export const OVERRIDE_COPY = {
-  paths: 'Grant or restrict the agent on specific folders. Rules here override the profile above.',
-  blockedRoots: 'Folders the agent may never touch, no matter what any other rule says.',
-  apps: 'Grant or restrict the agent on specific applications, matched by their executable path.',
+  paths: 'Overrides the approval profile for these folders.',
+  blockedRoots: 'Always blocked, regardless of other rules.',
+  apps: 'Matches apps by executable path.',
   pathFlags: {
     read: 'Read files in this folder',
     write: 'Create and edit files here',
@@ -232,10 +239,10 @@ export const SANDBOX_COPY = {
   mode: 'How strictly commands are isolated.',
   modeHelp: {
     off: 'The agent cannot run shell commands at all.',
-    auto: 'Use Docker for allowlisted local inspection and contained dangerous shapes; normal developer tooling uses the approval-required host runner.',
-    enforce: 'Require Docker for Docker-compatible commands; incompatible shells and host-only tools are blocked instead of falling back to the host.',
+    auto: 'Uses Docker for supported commands. Other commands run on your machine with approval.',
+    enforce: 'Requires Docker. Commands that need your machine directly are blocked.',
     host: 'Run directly on your machine, asking for approval first.',
-    docker: 'Require Docker; incompatible shells and host-only tools are blocked.',
+    docker: 'Requires Docker. Unsupported commands are blocked.',
     local_restricted: 'Run on your machine with limits that are best-effort only.',
   },
   network: 'Whether commands running in the sandbox can reach the internet.',
@@ -251,8 +258,8 @@ export const SANDBOX_COPY = {
     direct_rw: 'Write straight into your real folders. Least isolated.',
   },
   backends: 'Isolation engines detected on this computer. Docker gives the strongest guarantees.',
-  dockerImage: 'The container image commands run in. Pin it with a digest for reproducible results.',
-  dockerReadOnly: 'Make the container file system read-only except for the workspace, so a command cannot alter the image.',
+  dockerImage: 'Pin a digest to keep the image version fixed.',
+  dockerReadOnly: 'The workspace remains writable.',
   resources: 'Hard ceilings for a single sandboxed command, so a runaway process cannot exhaust your machine.',
   resourceHelp: {
     timeout_seconds: 'Kill the command after this many seconds.',

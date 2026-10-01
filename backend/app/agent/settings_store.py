@@ -116,9 +116,9 @@ class LLMSettings(BaseModel):
     provider: Literal["openai", "gemini", "codex"] = "openai"
     model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] = "medium"
-    max_iterations_per_turn: int = Field(40, ge=1, le=500)
-    max_turn_seconds: int = Field(1800, ge=30, le=14400)
-    max_llm_call_seconds: int = Field(300, ge=30, le=1800)
+    max_iterations_per_turn: int = Field(200, ge=1, le=500)
+    max_turn_seconds: int = Field(7200, ge=30, le=14400)
+    max_llm_call_seconds: int = Field(600, ge=30, le=1800)
 
     @model_validator(mode="after")
     def normalize_provider_models(self) -> "LLMSettings":
@@ -187,7 +187,7 @@ class MCPSettings(BaseModel):
 
 
 class BrowserUseSettings(BaseModel):
-    mode: Literal["auto", "managed", "system"] = "auto"
+    mode: Literal["auto", "managed", "system"] = "system"
     enable_system_fallback: bool = True
     headless: bool = False
     keep_alive: bool = True
@@ -196,7 +196,7 @@ class BrowserUseSettings(BaseModel):
     cross_origin_iframes: bool = False
     max_iframes: int = Field(5, ge=0, le=20)
     max_iframe_depth: int = Field(2, ge=0, le=5)
-    system_connection_strategy: Literal["auto", "attach", "launch"] = "auto"
+    system_connection_strategy: Literal["auto", "attach", "launch"] = "launch"
     system_cdp_url: str = "http://127.0.0.1:9222"
     managed_profile_dir: str = Field(
         default_factory=lambda: _default_browser_path(_BROWSER_MANAGED_PROFILE_DIR)
@@ -518,6 +518,10 @@ def _normalize_llm_payload(raw_llm: Any) -> Any:
         for key, value in raw_llm.items()
         if not key.startswith("vision_fallback_")
     }
+    # Raise the former default limits while preserving explicitly tuned budgets.
+    old_limits = {"max_iterations_per_turn": 40, "max_turn_seconds": 1800, "max_llm_call_seconds": 300}
+    if all(llm.get(key, value) == value for key, value in old_limits.items()):
+        llm.update(max_iterations_per_turn=200, max_turn_seconds=7200, max_llm_call_seconds=600)
     provider = str(llm.get("provider") or "").strip().lower()
     if provider not in CHAT_MODELS_BY_PROVIDER:
         llm["provider"] = "openai"

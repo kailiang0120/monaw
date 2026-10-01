@@ -4,7 +4,7 @@ import { Sidebar } from './components/Sidebar'
 import { ChatWindow } from './components/ChatWindow'
 import { InputBar } from './components/InputBar'
 import { ApprovalToast } from './components/ApprovalToast'
-import { AccessGrantDialog } from './components/AccessGrantDialog'
+import { AccessGrantCard } from './components/AccessGrantCard'
 import { useChat } from './hooks/useChat'
 import { deleteConversation, fetchConversations, renameConversation } from './lib/api/conversations'
 import {
@@ -173,15 +173,14 @@ export default function App() {
     try {
       const pending = await fetchPendingAccessGrants(activeConvIdRef.current ?? undefined, 1)
       const ticket = pending[0]
-      if (!ticket) return
-      setPendingAccessGrant({
+      setPendingAccessGrant(ticket ? {
         ticket_id: ticket.id,
         target_type: ticket.target_type,
         target_identifier: ticket.target_identifier,
         display_name: ticket.display_name,
         action_context: ticket.action_context,
         requested_access: ticket.requested_access,
-      })
+      } : null)
     } catch {
       // Event-driven refresh should never interrupt the chat UI.
     }
@@ -245,12 +244,9 @@ export default function App() {
         setApprovalRefreshKey((value) => value + 1)
         return
       }
-      if (event.event === 'access_grant.created') {
+      if (event.event === 'access_grant.created' || event.event === 'access_grant.changed') {
+        // Reload rather than clear so a second waiting grant takes the card's place.
         if (affectsActiveConversation) void loadPendingAccessGrant()
-        return
-      }
-      if (event.event === 'access_grant.changed') {
-        if (affectsActiveConversation) setPendingAccessGrant(null)
         return
       }
       if (event.event === 'usage.changed') {
@@ -285,7 +281,6 @@ export default function App() {
     loadScheduledTasks,
     loadVisibleSettings,
     refreshMessages,
-    setPendingAccessGrant,
   ])
 
   useEffect(() => {
@@ -504,6 +499,16 @@ export default function App() {
               onLoadOlderMessages={loadOlderMessages}
               onPromptSelect={handleSend}
             />
+            {pendingAccessGrant && (
+              <AccessGrantCard
+                key={pendingAccessGrant.ticket_id}
+                ticket={pendingAccessGrant}
+                onResolved={() => {
+                  setPendingAccessGrant(null)
+                  void loadPendingAccessGrant()
+                }}
+              />
+            )}
             <InputBar
               onSend={handleSend}
               onStop={stopStreaming}
@@ -533,13 +538,6 @@ export default function App() {
         isStreaming={isStreaming}
         refreshKey={approvalRefreshKey}
       />
-
-      {pendingAccessGrant && (
-        <AccessGrantDialog
-          ticket={pendingAccessGrant}
-          onResolved={() => setPendingAccessGrant(null)}
-        />
-      )}
 
       {showSettings && (
         <Suspense fallback={null}>

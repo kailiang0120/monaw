@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import shutil
+import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -100,19 +102,141 @@ _CHROME_SESSION_RESTORE_PATHS = (
     "Session Storage",
     "Sessions",
 )
-_SYSTEM_LAUNCH_DISABLED_MESSAGE = (
-    "System Chrome mode can only attach to an already-running DevTools endpoint. "
-    "Chrome no longer exposes --remote-debugging-port for the default user-data-dir, "
-    "so this app will not launch your real Chrome profile and wait on a port that will never bind. "
-    "Start Chrome yourself with a non-default --user-data-dir and set system_cdp_url, "
-    "or use managed mode."
-)
+
+
+def _system_chrome_running(user_data_dir: str) -> bool:
+    import psutil
+
+    for process in psutil.process_iter(attrs=["name", "cmdline"]):
+        try:
+            if str(process.info.get("name") or "").lower() not in _CHROME_PROCESS_NAMES:
+                continue
+            command = process.info.get("cmdline") or []
+            if any(str(arg).startswith("--type=") for arg in command):
+                continue
+            root = _extract_user_data_dir_from_cmdline(command)
+            if not root or Path(root).resolve() == Path(user_data_dir).resolve():
+                return True
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+    return False
+
+
+def _prepare_local_chrome_debugging(user_data_dir: str) -> None:
+    """Configure Chrome's supported bridge while its preferences are not in use."""
+    state_path = Path(user_data_dir) / "Local State"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        if state.get("devtools", {}).get("remote_debugging", {}).get("user-enabled") is True:
+            return
+        if _system_chrome_running(user_data_dir):
+            raise BrowserLaunchError(
+                "Close Chrome once so Monaw can finish automatic browser setup, then retry. "
+                "Your profile and logins are preserved.", reason_code="chrome_setup_requires_restart",
+            )
+        state.setdefault("devtools", {}).setdefault("remote_debugging", {})["user-enabled"] = True
+        temporary = state_path.with_name("Local State.monaw.tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(state_path)
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        raise BrowserLaunchError("Could not prepare your Chrome profile for automation.",
+                                 reason_code="chrome_profile_setup_failed") from exc
+
+
+def _read_system_cdp_url(user_data_dir: str) -> str:
+    """Discover Chrome's user-approved debugging endpoint (Chrome 144+)."""
+    try:
+        lines = (Path(user_data_dir) / "DevToolsActivePort").read_text(encoding="utf-8").splitlines()
+        port = int(lines[0].strip())
+        endpoint = lines[1].strip()
+        if 0 < port <= 65535 and endpoint.startswith("/devtools/browser/") and not any(
+            char in endpoint for char in ("?", "#", " ", "\\")
+        ):
+            return f"ws://127.0.0.1:{port}{endpoint}"
+    except (OSError, ValueError, IndexError, UnicodeError):
+        pass
+    return ""
 
 
 class BrowserLaunchError(RuntimeError):
     def __init__(self, message: str, *, reason_code: str) -> None:
         super().__init__(message)
         self.reason_code = reason_code
+
+
+def _local_debugging_endpoint_alive(endpoint: str) -> bool:
+    try:
+        parsed = urlparse(endpoint)
+        with socket.create_connection(("127.0.0.1", parsed.port), timeout=0.5):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def _launch_personal_chrome(args: list[str]) -> None:
+    if os.name == "nt":
+        # Electron terminates the backend's process tree on exit. A short-lived
+        # launcher keeps the user's Chrome outside that tree once it exits.
+        bootstrap = (
+            "import subprocess,sys; "
+            "subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, "
+            "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, "
+            "creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP)"
+        )
+        subprocess.run(
+            [sys.executable, "-c", bootstrap, *args], check=True, timeout=10,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    else:
+        subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+async def launch_local_chrome(profile_directory: str = "") -> tuple[str, str]:
+    """Launch the real profile and discover user-approved CDP, without owning it."""
+    from browser_use.skill_cli.utils import find_chrome_executable
+
+    executable = find_chrome_executable()
+    user_data_dir = _system_chrome_user_data_dir()
+    if not executable:
+        raise BrowserLaunchError("Chrome executable not found.", reason_code="chrome_executable_missing")
+    if not user_data_dir:
+        raise BrowserLaunchError("Chrome profile folder not found.", reason_code="chrome_profile_missing")
+    selected_profile = profile_directory
+    if not selected_profile:
+        try:
+            state = json.loads((Path(user_data_dir) / "Local State").read_text(encoding="utf-8"))
+            selected_profile = str(state.get("profile", {}).get("last_used") or "")
+        except (OSError, ValueError, UnicodeError, AttributeError):
+            pass
+    selected_profile = selected_profile or "Default"
+    if selected_profile not in {profile["directory"] for profile in _list_local_chrome_profiles()}:
+        raise BrowserLaunchError("Choose an existing Chrome profile.", reason_code="chrome_profile_missing")
+
+    await asyncio.to_thread(_prepare_local_chrome_debugging, user_data_dir)
+
+    # Chrome 136+ blocks debugging-port flags on the default data folder. Use
+    # the Chrome 144+ approved endpoint, shared with chrome-devtools-mcp.
+    existing = _read_system_cdp_url(user_data_dir)
+    # Reuse a live local session rather than opening another window per tool.
+    if existing and await asyncio.to_thread(_local_debugging_endpoint_alive, existing):
+        return existing, selected_profile
+    args = [executable, f"--user-data-dir={user_data_dir}", f"--profile-directory={selected_profile}",
+            "--enable-features=DevToolsAcceptDebuggingConnections", "--new-window", "about:blank"]
+    await asyncio.to_thread(_launch_personal_chrome, args)
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        endpoint = await asyncio.to_thread(_read_system_cdp_url, user_data_dir)
+        if endpoint and await asyncio.to_thread(_local_debugging_endpoint_alive, endpoint):
+            return endpoint, selected_profile
+        await asyncio.sleep(0.25)
+    raise BrowserLaunchError(
+        "Chrome opened with your profile, but the automation connection is not ready. "
+        "If Chrome was already running, close it once and retry so Monaw's launch settings can take effect. "
+        "Chrome 144+ is required; its connection prompt still needs your approval.",
+        reason_code="system_debugging_not_enabled",
+    )
 
 
 def _now_utc_iso() -> str:
@@ -499,6 +623,7 @@ class BrowserUseManager:
         self._current_system_connection = ""
         self._current_profile_directory = ""
         self._current_cdp_url = ""
+        self._local_chrome_connection = None
         self._last_error = ""
         self._chrome_executable = ""
         self._launched_chrome_proc: subprocess.Popen[bytes] | None = None
@@ -559,9 +684,11 @@ class BrowserUseManager:
 
     async def _stop_locked(self) -> None:
         browser = self._browser
+        connection = self._local_chrome_connection
         proc = self._launched_chrome_proc
         previous_mode = self._current_mode
         self._browser = None
+        self._local_chrome_connection = None
         self._launched_chrome_proc = None
         self._current_mode = ""
         self._current_system_connection = ""
@@ -573,6 +700,8 @@ class BrowserUseManager:
                 await browser.stop()
             except Exception as exc:
                 logger.warning("browser-use stop failed: %s", exc)
+        if connection is not None:
+            await connection.close()
         if proc is not None:
             returncode = _terminate_subprocess(proc)
             if returncode is None:
@@ -581,7 +710,9 @@ class BrowserUseManager:
             _clear_chrome_singleton_locks(str(self.config.get("managed_profile_dir", "")))
 
     async def _existing_browser_or_start_default(self):
-        return await self.ensure_browser("auto")
+        # Honor a one-off session switch for subsequent snapshot/page tools.
+        # Resolving auto here would undo use_managed/use_system immediately.
+        return await self.ensure_browser(self._current_mode or "auto")
 
     def _browser_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -775,12 +906,23 @@ class BrowserUseManager:
         from browser_use.skill_cli.utils import find_chrome_executable
 
         kwargs = self._browser_kwargs()
+        # Disconnecting Monaw must never close the user's personal browser.
+        kwargs["keep_alive"] = True
         browser = Browser(
             cdp_url=cdp_url,
             is_local=True,
             **kwargs,
         )
-        await browser.start()
+        try:
+            await browser.start()
+        except BaseException:
+            # A declined or timed-out handshake still creates watchdogs. Drop
+            # that handle before a retry, while preserving personal Chrome.
+            try:
+                await browser.stop()
+            except Exception:
+                logger.debug("browser-use failed connection cleanup", exc_info=True)
+            raise
         self._browser = browser
         self._current_mode = "system"
         self._current_system_connection = "attach"
@@ -803,6 +945,15 @@ class BrowserUseManager:
         in-memory browser-use object becomes stale. Reattaching to the same CDP
         endpoint preserves in-progress pages such as a Gmail compose draft.
         """
+        if self._current_mode == "system" and self._current_system_connection == "launch":
+            profile = self._current_profile_directory
+            await self._stop_locked()
+            try:
+                return await self._launch_system_locked(profile)
+            except Exception as exc:
+                self._last_error = f"{reason}; Chrome reconnect failed: {exc}"
+                return None
+
         cdp_url = str(self._current_cdp_url or "").strip()
         if not cdp_url:
             return None
@@ -814,7 +965,10 @@ class BrowserUseManager:
         from browser_use import Browser
 
         try:
-            browser = Browser(cdp_url=resolved_cdp_url, is_local=True, **self._browser_kwargs())
+            kwargs = self._browser_kwargs()
+            if self._current_mode == "system":
+                kwargs["keep_alive"] = True
+            browser = Browser(cdp_url=resolved_cdp_url, is_local=True, **kwargs)
             await browser.start()
         except Exception as exc:
             self._last_error = f"{reason}; browser reattach failed: {exc}".strip("; ")
@@ -867,45 +1021,33 @@ class BrowserUseManager:
         return True
 
     async def _launch_system_locked(self, profile_directory: str = ""):
-        from browser_use.skill_cli.utils import find_chrome_executable
+        from app.skills.browser_use.local_chrome_connection import LocalChromeConnection
 
-        selected_profile = (
-            profile_directory
-            or str(self.config.get("system_profile_directory", "")).strip()
-            or "Default"
+        endpoint, selected_profile = await launch_local_chrome(
+            profile_directory or str(self.config.get("system_profile_directory", "")).strip()
         )
-        chrome_executable = find_chrome_executable()
-        user_data_dir = _system_chrome_user_data_dir()
-        configured_cdp_url = (
-            str(self.config.get("system_cdp_url", "") or "").strip()
-            or "http://127.0.0.1:9222"
-        )
-        parsed_cdp = urlparse(configured_cdp_url)
-        cdp_port = parsed_cdp.port or 9222
-        cdp_base_url = f"http://127.0.0.1:{cdp_port}"
-
-        if not chrome_executable:
+        connection = LocalChromeConnection()
+        try:
+            local_endpoint = await connection.start(endpoint)
+            browser = await self._attach_system_locked(local_endpoint, selected_profile)
+        except asyncio.CancelledError:
+            await connection.close()
+            raise
+        except Exception as exc:
+            await connection.close()
+            message = str(exc).lower()
+            awaiting_approval = isinstance(exc, TimeoutError) or any(part in message for part in (
+                "opening handshake", "http 403", "remote debugging approval", "connection rejected",
+            ))
             raise BrowserLaunchError(
-                "System Chrome executable not found. Install Chrome or set the path.",
-                reason_code="chrome_executable_missing",
-            )
-        if not user_data_dir:
-            raise BrowserLaunchError(
-                "Could not locate the real Chrome user-data-dir. "
-                "System mode requires a real Chrome install.",
-                reason_code="system_attach_failed",
-            )
-
-        logger.warning(
-            "browser-use: refusing system Chrome launch for profile '%s' on %s "
-            "(chrome=%s, user-data-dir=%s). %s",
-            selected_profile,
-            cdp_base_url,
-            chrome_executable,
-            user_data_dir,
-            _SYSTEM_LAUNCH_DISABLED_MESSAGE,
-        )
-        raise BrowserLaunchError(_SYSTEM_LAUNCH_DISABLED_MESSAGE, reason_code="system_launch_disabled")
+                "Chrome opened. Approve its remote debugging prompt, then retry." if awaiting_approval
+                else f"Chrome opened, but its automation connection failed: {exc}",
+                reason_code="system_debugging_approval_required" if awaiting_approval else "system_attach_failed",
+            ) from exc
+        self._local_chrome_connection = connection
+        self._current_cdp_url = endpoint
+        self._current_system_connection = "launch"
+        return browser
 
     async def _start_system_locked(self, profile_directory: str = ""):
         selected_profile = profile_directory or str(self.config.get("system_profile_directory", "")).strip()
@@ -937,7 +1079,7 @@ class BrowserUseManager:
             try:
                 return await self._launch_system_locked(selected_profile)
             except Exception as exc:
-                reason_code = str(getattr(exc, "reason_code", "system_launch_disabled") or "system_launch_disabled")
+                reason_code = str(getattr(exc, "reason_code", "system_attach_failed") or "system_attach_failed")
                 errors.append((f"system launch failed: {exc}", reason_code))
                 logger.warning("browser-use system launch failed: %s", exc)
                 await self._stop_locked()
@@ -951,7 +1093,7 @@ class BrowserUseManager:
             browser = await attempt_launch()
             if browser is not None:
                 return browser
-        else:  # auto - prefer attaching if a live CDP already exists, else fail fast.
+        else:  # auto - reuse an explicit endpoint, otherwise launch the local profile.
             browser = await attempt_attach()
             if browser is not None:
                 return browser

@@ -272,7 +272,7 @@ function PlanActivity({ steps }: { steps: NonNullable<Message['stepProgress']> }
         type="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 py-1 text-left text-neutral-400 hover:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-accent/20"
+        className="flex w-full min-w-0 items-center gap-2 rounded-md py-1 text-left text-neutral-400 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/30"
       >
         <CircleDashed size={14} className="shrink-0" aria-hidden />
         <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -480,7 +480,7 @@ function ToolActivityGroup({
         type="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 py-1 text-left text-neutral-400 hover:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-accent/20"
+        className="flex w-full min-w-0 items-center gap-2 rounded-md py-1 text-left text-neutral-400 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/30"
       >
         {allCommands ? <SquareTerminal size={14} className="shrink-0" aria-hidden />
           : <Wrench size={14} className="shrink-0" aria-hidden />}
@@ -636,12 +636,15 @@ function ToolCallScroller({
         const label = toolCallActivityLabel(toolCall)
 
         return (
-            <li key={key} className="min-w-0">
+            <li
+              key={key}
+              className={`min-w-0 overflow-hidden rounded-lg border ${isExpanded ? 'mb-2 border-white/[0.06] bg-black/15' : 'border-transparent'}`}
+            >
               <button
                 type="button"
                 aria-expanded={isExpanded}
                 onClick={() => setExpandedId(isExpanded ? null : key)}
-                className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1.5 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus:ring-2 focus:ring-accent/20"
+                className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/30"
                 title={label}
               >
                 {/^(?:exec|exec_)/.test(toolCall.tool)
@@ -654,7 +657,7 @@ function ToolCallScroller({
                 </span>
               </button>
               {isExpanded && (
-                <div className="mb-2 space-y-3 rounded-lg bg-black/15 px-2 py-2.5">
+                <div className="space-y-3 border-t border-white/[0.06] px-2.5 py-2.5">
                   {toolCall.previewOnly && loadingDetails && (
                     <p className="text-[11px] italic text-neutral-500">Loading full tool details...</p>
                   )}

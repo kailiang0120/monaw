@@ -173,9 +173,9 @@ class LLMSettingsPayload(BaseModel):
     provider: str = Field("openai", pattern="^(openai|gemini|codex)$")
     model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: str = Field("medium", pattern="^(none|minimal|low|medium|high|xhigh|max)$")
-    max_iterations_per_turn: int = Field(40, ge=1, le=500)
-    max_turn_seconds: int = Field(1800, ge=30, le=14400)
-    max_llm_call_seconds: int = Field(300, ge=30, le=1800)
+    max_iterations_per_turn: int = Field(200, ge=1, le=500)
+    max_turn_seconds: int = Field(7200, ge=30, le=14400)
+    max_llm_call_seconds: int = Field(600, ge=30, le=1800)
 
 
 class SpeechToTextSettingsPayload(BaseModel):

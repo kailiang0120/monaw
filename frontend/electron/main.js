@@ -8,6 +8,7 @@ const { fileURLToPath } = require('url')
 const runtimeConfig = require('../config/runtime.json')
 const {
   generateControlSecret,
+  generateControlSessionId,
   mintControlSession,
   normalizeBackendHost,
 } = require('./control-auth')
@@ -22,6 +23,7 @@ const BACKEND_HOST = normalizeBackendHost(
 const BACKEND_PORT = runtimeConfig.backendPort || 8420
 const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`
 const CONTROL_SECRET = generateControlSecret()
+const CONTROL_SESSION_ID = generateControlSessionId()
 const BACKEND_RESTART_EXIT_CODE = 78
 const isDev = !app.isPackaged
 const APP_USER_MODEL_ID = 'com.monaw.agent'
@@ -304,7 +306,7 @@ function isTrustedRenderer(webContents, value) {
 function updateBackendSettings(payload) {
   return new Promise((resolve, reject) => {
     const body = Buffer.from(JSON.stringify(payload), 'utf8')
-    const session = mintControlSession(CONTROL_SECRET)
+    const session = mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID)
     const request = http.request(
       `${BACKEND_BASE_URL}/api/settings`,
       {
@@ -585,7 +587,7 @@ async function applyStoredCredentialsToBackend() {
 
 ipcMain.handle('control:get-session', async (event) => {
   assertTrustedIpcSender(event)
-  return mintControlSession(CONTROL_SECRET)
+  return mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID)
 })
 
 ipcMain.handle('credentials:status', async (event) => {

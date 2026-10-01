@@ -14,6 +14,7 @@ from app.agent.access_grant_broker import (
     grant_validation_error,
     register_pending_resume as register_grant_resume,
     resolve_grant,
+    retire_grant,
     signal_resume as signal_grant_resume,
 )
 from app.agent.approval_broker import (
@@ -31,7 +32,6 @@ from app.agent.run_context import (
     current_conversation_id,
     current_execution_source,
 )
-from app.agent.tool_registry import ToolRegistry
 
 ToolExecute = Callable[[IterationBudget, dict[str, Any], dict[str, Any]], Awaitable[str]]
 
@@ -55,54 +55,51 @@ class ExecutionGateService:
     def __init__(self, *, default_timeout_seconds: float = 600.0) -> None:
         self.default_timeout_seconds = default_timeout_seconds
 
-    async def handle_pending_tool_output(
+    async def resolve_pending_output(
         self,
         *,
         tool_output: str,
-        tool_name: str,
+        tool_dict: dict[str, Any],
         arguments: dict[str, Any],
-        registry: ToolRegistry,
         budget: IterationBudget,
         execute_tool: ToolExecute,
-    ) -> tuple[str, list[dict[str, Any]]]:
-        resolved_output = tool_output
-        emitted_events: list[dict[str, Any]] = []
-        for hop in range(self.MAX_GATE_HOPS):
-            pending_event = self.check_pending_status(resolved_output)
+        emit: Callable[[dict[str, Any]], None],
+    ) -> str:
+        """Wait on each gate the output raises and return the final tool output.
+
+        Gate events are emitted as they happen so the user sees the prompt
+        before the wait starts.
+        """
+        for _hop in range(self.MAX_GATE_HOPS):
+            pending_event = self.check_pending_status(tool_output)
             if pending_event is None:
-                return resolved_output, emitted_events
-            emitted_events.append(pending_event)
-            dispatched = registry.dispatch(tool_name, arguments)
-            if dispatched is None:
-                return resolved_output, emitted_events
-            next_output = resolved_output
+                return tool_output
+            emit(pending_event)
+            resolved_output: str | None = None
             async for resolution_event in self.await_ticket_resolution(
                 budget=budget,
                 ticket_id=pending_event["data"]["ticket_id"],
                 event_kind=pending_event["event"],
-                tool_dict=dispatched["tool"],
-                arguments=dispatched["arguments"],
+                tool_dict=tool_dict,
+                arguments=arguments,
                 execute_tool=execute_tool,
             ):
                 if "_result" in resolution_event:
-                    next_output = resolution_event["_result"]
+                    resolved_output = resolution_event["_result"]
                 else:
-                    emitted_events.append(resolution_event)
-            resolved_output = next_output
-        trailing_pending_event = self.check_pending_status(resolved_output)
+                    emit(resolution_event)
+            tool_output = resolved_output or json.dumps({"status": "error", "error": "Resolution lost."})
+        trailing_pending_event = self.check_pending_status(tool_output)
         if trailing_pending_event is not None:
             self._reject_pending_ticket(trailing_pending_event)
-            return (
-                json.dumps(
-                    {
-                        "status": "error",
-                        "reason_code": "gate_hop_limit_exceeded",
-                        "error": "Permission resolution exceeded the maximum gate hop limit.",
-                    }
-                ),
-                emitted_events,
+            return json.dumps(
+                {
+                    "status": "error",
+                    "reason_code": "gate_hop_limit_exceeded",
+                    "error": "Permission resolution exceeded the maximum gate hop limit.",
+                }
             )
-        return resolved_output, emitted_events
+        return tool_output
 
     @staticmethod
     def _reject_pending_ticket(pending_event: dict[str, Any] | None) -> None:
@@ -246,6 +243,10 @@ class ExecutionGateService:
             yield {"_result": resumed_output}
         finally:
             cleanup()
+            if event_kind == "access_grant_required":
+                # After a timeout or Stop nobody waits on the ticket; drop it so
+                # the UI stops offering a prompt that can no longer be answered.
+                retire_grant(ticket_id)
 
     async def _resume_approved_ticket(self, ticket_id: str) -> str:
         ticket = get_approval_ticket(ticket_id)

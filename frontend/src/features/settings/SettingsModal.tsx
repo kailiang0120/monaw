@@ -88,7 +88,7 @@ import {
   updateWorkspaceInstructions,
 } from '../../lib/api/settings'
 import { syncStoredApiKeysToBackend } from '../../lib/apiKeySync'
-import { DEFAULT_AGENT_NAME, resolveAgentName } from '../../lib/identity'
+import { DEFAULT_AGENT_NAME } from '../../lib/identity'
 import type {
   AgentSettings,
   BrowserUseDiagnostics,
@@ -121,12 +121,6 @@ interface Props {
 
 type SettingsTab = SettingsPageId
 
-const PERMISSION_MODE_LABEL: Record<AgentSettings['permissions']['mode'], string> = {
-  default: 'Default',
-  full_access: 'Full Access',
-  custom: 'Custom',
-}
-
 const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
   identity: UserRound,
   apiKeys: KeyRound,
@@ -146,7 +140,7 @@ const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
  */
 const NAV_GROUPS: Array<{ id: string; label: string; items: SettingsTab[] }> = [
   { id: 'general', label: 'General', items: ['identity', 'apiKeys'] },
-  { id: 'intelligence', label: 'Intelligence', items: ['model', 'memory'] },
+  { id: 'intelligence', label: 'Intelligence', items: ['model'] },
   { id: 'capabilities', label: 'Capabilities', items: ['skills', 'browser', 'mcp'] },
   { id: 'safety', label: 'Safety', items: ['permissions', 'sandbox'] },
   { id: 'inspect', label: 'Inspect', items: ['observability'] },
@@ -154,9 +148,6 @@ const NAV_GROUPS: Array<{ id: string; label: string; items: SettingsTab[] }> = [
 
 const ALL_TABS: SettingsTab[] = NAV_GROUPS.flatMap((group) => group.items)
 
-const MemorySettingsPanel = lazy(() =>
-  import('./MemorySettingsPanel').then((module) => ({ default: module.MemorySettingsPanel })),
-)
 const ObservabilityPanel = lazy(() =>
   import('./ObservabilityPanel').then((module) => ({ default: module.ObservabilityPanel })),
 )
@@ -198,7 +189,6 @@ function accountResetTime(timestamp: number | null): string {
 export function SettingsModal({
   onClose,
   diagnosticsRefreshKey = 0,
-  memoryRefreshKey = 0,
   observabilityRefreshKey = 0,
 }: Props) {
   const [draft, setDraft] = useState<AgentSettings | null>(null)
@@ -470,22 +460,6 @@ export function SettingsModal({
 
   const updateDraft = (updater: (current: AgentSettings) => AgentSettings) => {
     setDraft((current) => (current ? updater(current) : current))
-  }
-
-  const updateLlmNumber = (
-    key: 'max_iterations_per_turn' | 'max_turn_seconds' | 'max_llm_call_seconds',
-    value: string,
-    min: number,
-    max: number,
-  ) => {
-    const parsed = Number(value)
-    const nextValue = Number.isFinite(parsed)
-      ? Math.min(max, Math.max(min, Math.trunc(parsed)))
-      : min
-    updateDraft((current) => ({
-      ...current,
-      llm: { ...current.llm, [key]: nextValue },
-    }))
   }
 
   const updateMcpServer = (
@@ -848,8 +822,6 @@ export function SettingsModal({
   }
   const browserSkillEnabled = !!draft.tools.skills['browser-use'] && (browserSkill?.available ?? true)
   const mcpFeatureEnabled = !!draft.mcp.enabled
-  const directChromeServer = draft.mcp.servers.find((server) => server.name === 'Chrome-dev-tools')
-  const directChromeEnabled = Boolean(draft.mcp.enabled && directChromeServer?.enabled && directChromeServer.args.includes('--autoConnect'))
   const mcpFeatureDiagnostics = Object.values(mcpDiagnostics)
   const mcpFeatureAvailable = mcpFeatureDiagnostics[0]?.feature_available ?? true
   const mcpFeatureUnavailableReason = mcpFeatureDiagnostics[0]?.feature_unavailable_reason ?? ''
@@ -1020,11 +992,10 @@ export function SettingsModal({
             <div className="mx-auto w-full max-w-[46rem]">
               {activeTab === 'model' && (
                 <>
-                  <PageHeader title={PAGE_COPY.model.label} description={PAGE_COPY.model.blurb} />
+                  <PageHeader title={PAGE_COPY.model.label} />
                   <div className="space-y-4">
                     <SettingsCard
                       title="Voice input"
-                      description={MODEL_COPY.speechLocalIntro}
                       action={
                         <Badge tone={speechToTextReady ? 'ok' : 'warn'}>
                           {speechToTextIsCloud
@@ -1033,9 +1004,9 @@ export function SettingsModal({
                         </Badge>
                       }
                     >
-                      <SettingRow label="Transcription engine" description={MODEL_COPY.speechEngine}>
+                      <SettingRow label="Speech recognition" description={MODEL_COPY.speechEngine}>
                         <Dropdown<AgentSettings['speech_to_text']['engine']>
-                          ariaLabel="Transcription engine"
+                          ariaLabel="Speech recognition"
                           value={draft.speech_to_text.engine}
                           options={[
                             { value: 'local', label: 'Local (offline)' },
@@ -1098,49 +1069,17 @@ export function SettingsModal({
                       )}
                     </SettingsCard>
 
-                    <SettingsCard title="Limits for a single request" description={MODEL_COPY.runtimeLimits}>
-                      <NumberRow
-                        label="Maximum tool calls"
-                        description={MODEL_COPY.maxIterations}
-                        ariaLabel="Tool iteration limit"
-                        unit="calls"
-                        min={1}
-                        max={500}
-                        value={draft.llm.max_iterations_per_turn}
-                        onChange={(value) => updateLlmNumber('max_iterations_per_turn', value, 1, 500)}
-                      />
-                      <NumberRow
-                        label="Time budget per message"
-                        description={MODEL_COPY.maxTurnSeconds}
-                        ariaLabel="Turn timeout seconds"
-                        unit="seconds"
-                        min={30}
-                        max={14400}
-                        value={draft.llm.max_turn_seconds}
-                        onChange={(value) => updateLlmNumber('max_turn_seconds', value, 30, 14400)}
-                      />
-                      <NumberRow
-                        label="Timeout per model reply"
-                        description={MODEL_COPY.maxLlmCallSeconds}
-                        ariaLabel="LLM call timeout seconds"
-                        unit="seconds"
-                        min={30}
-                        max={1800}
-                        value={draft.llm.max_llm_call_seconds}
-                        onChange={(value) => updateLlmNumber('max_llm_call_seconds', value, 30, 1800)}
-                      />
-                    </SettingsCard>
                   </div>
                 </>
               )}
 
               {activeTab === 'apiKeys' && (
                 <>
-                  <PageHeader title={PAGE_COPY.apiKeys.label} description={PAGE_COPY.apiKeys.blurb} />
+                  <PageHeader title={PAGE_COPY.apiKeys.label} />
                   <div className="space-y-4">
                     <SettingsCard
                       title="OpenAI account"
-                      description="Use your ChatGPT account through the Codex SDK. The OpenAI API key connection below remains available."
+                      description="Sign in with ChatGPT."
                       action={
                         <Badge tone={openaiAccount?.connected ? 'ok' : 'warn'}>
                           {openaiAccount?.connected ? `Connected${openaiAccount.plan ? ` · ${openaiAccount.plan}` : ''}` : 'Not connected'}
@@ -1220,7 +1159,7 @@ export function SettingsModal({
                     {activeConnectionPortal === 'telegram' && (
                       <SettingsCard
                         title="Who may talk to the agent on Telegram"
-                        description="Only the accounts and groups listed here can send the agent messages. Leave both empty and nobody gets through."
+                        description="Leave both lists empty to block all messages."
                         action={
                           <Badge tone={telegramAllowlistConfigured ? 'ok' : 'warn'}>
                             {telegramAllowlistConfigured ? 'Configured' : 'Required'}
@@ -1229,7 +1168,7 @@ export function SettingsModal({
                       >
                         <StackedRow
                           label="Allowed user IDs"
-                          description="Your Telegram account's numeric ID. Separate several with commas."
+                          description="Numeric IDs, separated by commas."
                         >
                           <input
                             value={telegramAllowedUserIds}
@@ -1241,7 +1180,7 @@ export function SettingsModal({
                         </StackedRow>
                         <StackedRow
                           label="Allowed chat IDs"
-                          description="Group chat IDs, usually a negative number starting with -100."
+                          description="Group IDs usually start with -100."
                         >
                           <input
                             value={telegramAllowedChatIds}
@@ -1259,13 +1198,13 @@ export function SettingsModal({
 
               {activeTab === 'identity' && (
                 <>
-                  <PageHeader title={PAGE_COPY.identity.label} description={PAGE_COPY.identity.blurb} />
+                  <PageHeader title={PAGE_COPY.identity.label} />
                   <div className="space-y-4">
                     <SettingsCard title="Names">
-                      <SettingRow label="Agent nickname" description={IDENTITY_COPY.agentName}>
+                      <SettingRow label="Agent name">
                         <input
                           value={draft.identity.agent_name}
-                          aria-label="Agent nickname"
+                          aria-label="Agent name"
                           maxLength={80}
                           onChange={(e) => updateDraft((current) => ({
                             ...current,
@@ -1275,10 +1214,10 @@ export function SettingsModal({
                           className="st-input"
                         />
                       </SettingRow>
-                      <SettingRow label="Call me" description={IDENTITY_COPY.userName}>
+                      <SettingRow label="Your name">
                         <input
                           value={draft.identity.user_name}
-                          aria-label="Call me"
+                          aria-label="Your name"
                           maxLength={80}
                           onChange={(e) => updateDraft((current) => ({
                             ...current,
@@ -1290,11 +1229,11 @@ export function SettingsModal({
                       </SettingRow>
                     </SettingsCard>
 
-                    <SettingsCard title="How the agent should treat you">
-                      <StackedRow label="User identity" description={IDENTITY_COPY.userIdentity}>
+                    <SettingsCard title="Personalization">
+                      <StackedRow label="About you">
                         <textarea
                           value={draft.identity.user_identity}
-                          aria-label="User identity"
+                          aria-label="About you"
                           maxLength={1000}
                           rows={4}
                           onChange={(e) => updateDraft((current) => ({
@@ -1305,10 +1244,10 @@ export function SettingsModal({
                           className="st-input resize-none leading-relaxed"
                         />
                       </StackedRow>
-                      <StackedRow label="Communication style" description={IDENTITY_COPY.communicationStyle}>
+                      <StackedRow label="Reply style">
                         <textarea
                           value={draft.identity.communication_style}
-                          aria-label="Communication style"
+                          aria-label="Reply style"
                           maxLength={1000}
                           rows={4}
                           onChange={(e) => updateDraft((current) => ({
@@ -1373,31 +1312,19 @@ export function SettingsModal({
                       </div>
                     </SettingsCard>
 
-                    <SettingsCard title="What the agent will use">
-                      <div className="grid gap-3 p-4 sm:grid-cols-2">
-                        <ReadOnlyValue label="Agent name" value={resolveAgentName(draft.identity.agent_name)} />
-                        <ReadOnlyValue label="Your name" value={draft.identity.user_name.trim()} />
-                        <ReadOnlyValue label="Instructions file" value={customInstructionsPath} />
-                        <ReadOnlyValue
-                          label="Style"
-                          value={draft.identity.communication_style.trim() || 'Default'}
-                        />
-                      </div>
-                    </SettingsCard>
                   </div>
                 </>
               )}
 
               {activeTab === 'skills' && (
                 <>
-                  <PageHeader title={PAGE_COPY.skills.label} description={PAGE_COPY.skills.blurb} />
+                  <PageHeader title={PAGE_COPY.skills.label} />
                   <div className="space-y-4">
                     <Note tone="info">{SKILLS_COPY.intro}</Note>
                     {(['recommended', 'optional'] as const).map((tier) => (
                       <SettingsCard
                         key={tier}
                         title={SKILL_GROUP_COPY[tier].title}
-                        description={SKILL_GROUP_COPY[tier].description}
                         action={<Badge>{skillGroups[tier].length}</Badge>}
                       >
                         {skillGroups[tier].length === 0 ? (
@@ -1459,24 +1386,11 @@ export function SettingsModal({
                 </>
               )}
 
-              {activeTab === 'memory' && (
-                <>
-                  <PageHeader title={PAGE_COPY.memory.label} description={PAGE_COPY.memory.blurb} />
-                  <Suspense fallback={null}>
-                    <MemorySettingsPanel
-                      draft={draft}
-                      updateDraft={updateDraft}
-                      refreshKey={memoryRefreshKey}
-                    />
-                  </Suspense>
-                </>
-              )}
 
               {activeTab === 'browser' && (
                 <>
                   <PageHeader
                     title={PAGE_COPY.browser.label}
-                    description={PAGE_COPY.browser.blurb}
                     action={
                       <button
                         type="button"
@@ -1498,48 +1412,6 @@ export function SettingsModal({
                       </Note>
                     )}
 
-                    <SettingsCard title="Control your open Chrome">
-                      <SwitchRow
-                        label="Connect to my Chrome"
-                        description="Let the agent inspect and interact with tabs in your running Chrome through Chrome DevTools."
-                        checked={directChromeEnabled}
-                        onChange={(checked) => updateDraft((current) => {
-                          const template = MCP_SERVER_TEMPLATES.chromeDevToolsAutoConnect.build()
-                          const existingIndex = current.mcp.servers.findIndex((server) => server.name === template.name)
-                          if (!checked) {
-                            return {
-                              ...current,
-                              mcp: {
-                                ...current.mcp,
-                                servers: current.mcp.servers.filter((server) =>
-                                  server.name !== template.name || !server.args.includes('--autoConnect')),
-                              },
-                            }
-                          }
-                          const servers = [...current.mcp.servers]
-                          if (existingIndex >= 0) {
-                            servers[existingIndex] = {
-                              ...servers[existingIndex],
-                              enabled: true,
-                              transport: template.transport,
-                              command: template.command,
-                              args: template.args,
-                              startup_timeout_ms: template.startup_timeout_ms,
-                              call_timeout_ms: template.call_timeout_ms,
-                              description: template.description,
-                            }
-                          } else {
-                            servers.push(template)
-                          }
-                          return { ...current, mcp: { ...current.mcp, enabled: true, servers } }
-                        })}
-                      />
-                      <div className="px-4 pb-4 text-xs text-[var(--st-text-muted)]">
-                        In Chrome 144 or later, open <code>chrome://inspect/#remote-debugging</code>, enable remote
-                        debugging, and approve Chrome’s connection prompt. Save these settings to connect Monaw.
-                      </div>
-                    </SettingsCard>
-
                     <SettingsCard title="Status">
                       <div className="grid grid-cols-3">
                         <StatusCell label="Skill" value={browserSkillEnabled ? 'On' : 'Off'} />
@@ -1559,25 +1431,24 @@ export function SettingsModal({
                       </div>
                     </SettingsCard>
 
-                    <SettingsCard title="Which browser to drive">
-                      <SettingRow label="Launch mode" description={BROWSER_COPY.mode}>
+                    <SettingsCard title="Browser session">
+                      <SettingRow label="Browser mode" description={BROWSER_COPY.modeHelp[draft.browser.mode]}>
                         <Dropdown<AgentSettings['browser']['mode']>
-                          ariaLabel="Launch mode"
+                          ariaLabel="Browser mode"
                           value={draft.browser.mode}
                           options={[
-                            { value: 'auto', label: 'Managed, then yours' },
-                            { value: 'managed', label: 'Managed only' },
-                            { value: 'system', label: 'Your Chrome only' },
+                            { value: 'auto', label: 'Automatic' },
+                            { value: 'managed', label: 'Separate Chrome profile' },
+                            { value: 'system', label: 'My Chrome profile' },
                           ]}
                           onChange={(mode) => updateDraft((current) => ({
                             ...current,
-                            browser: { ...current.browser, mode },
+                            browser: { ...current.browser, mode, system_connection_strategy: mode === 'system' ? 'launch' : current.browser.system_connection_strategy },
                           }))}
                         />
                       </SettingRow>
                       <SwitchRow
                         label="Fall back to your Chrome"
-                        description={BROWSER_COPY.systemFallback}
                         checked={draft.browser.enable_system_fallback}
                         onChange={(checked) => updateDraft((current) => ({
                           ...current,
@@ -1585,8 +1456,7 @@ export function SettingsModal({
                         }))}
                       />
                       <SwitchRow
-                        label="Run invisibly"
-                        description={BROWSER_COPY.headless}
+                        label="Hide browser window"
                         checked={draft.browser.headless}
                         onChange={(checked) => updateDraft((current) => ({
                           ...current,
@@ -1594,8 +1464,7 @@ export function SettingsModal({
                         }))}
                       />
                       <SwitchRow
-                        label="Keep the session open"
-                        description={BROWSER_COPY.keepAlive}
+                        label="Keep browser open between requests"
                         checked={draft.browser.keep_alive}
                         onChange={(checked) => updateDraft((current) => ({
                           ...current,
@@ -1604,33 +1473,7 @@ export function SettingsModal({
                       />
                     </SettingsCard>
 
-                    <SettingsCard title="Connecting to your own Chrome">
-                      <SettingRow label="Connection strategy" description={BROWSER_COPY.systemConnection}>
-                        <Dropdown<'auto' | 'attach'>
-                          ariaLabel="Connection strategy"
-                          value={draft.browser.system_connection_strategy === 'launch' ? 'auto' : draft.browser.system_connection_strategy}
-                          options={[
-                            { value: 'auto', label: 'Attach if available' },
-                            { value: 'attach', label: 'Attach only' },
-                          ]}
-                          onChange={(system_connection_strategy) => updateDraft((current) => ({
-                            ...current,
-                            browser: { ...current.browser, system_connection_strategy },
-                          }))}
-                        />
-                      </SettingRow>
-                      <SettingRow label="Debugging address" description={BROWSER_COPY.cdpUrl} wide>
-                        <input
-                          value={draft.browser.system_cdp_url}
-                          aria-label="Debugging address"
-                          onChange={(e) => updateDraft((current) => ({
-                            ...current,
-                            browser: { ...current.browser, system_cdp_url: e.target.value },
-                          }))}
-                          placeholder="http://127.0.0.1:9222"
-                          className="st-input font-mono text-xs"
-                        />
-                      </SettingRow>
+                    <SettingsCard title="My Chrome" description="Monaw opens your profile and prepares the browser automatically. Allow Chrome’s connection prompt when shown.">
                       <SettingRow label="Chrome profile" description={BROWSER_COPY.chromeProfile}>
                         <Dropdown
                           ariaLabel="Chrome profile"
@@ -1666,8 +1509,7 @@ export function SettingsModal({
                     </SettingsCard>
 
                     <SettingsCard
-                      title="Where files are saved"
-                      description={BROWSER_COPY.outputWorkspace}
+                      title="Browser folders"
                       action={window.electronAPI?.selectDirectory ? (
                         <button type="button" onClick={setOutputRoot} className="st-btn st-btn-secondary">
                           <Folder size={13} />
@@ -1698,8 +1540,8 @@ export function SettingsModal({
                         />
                       </StackedRow>
                       <div className="st-row-stacked grid gap-3 sm:grid-cols-2">
-                        <ReadOnlyValue label={`Managed profile — ${BROWSER_COPY.managedProfile}`} value={draft.browser.managed_profile_dir} />
-                        <ReadOnlyValue label={`Traces — ${BROWSER_COPY.traces}`} value={draft.browser.traces_dir} />
+                        <ReadOnlyValue label="Managed profile folder" value={draft.browser.managed_profile_dir} />
+                        <ReadOnlyValue label="Browser trace folder" value={draft.browser.traces_dir} />
                       </div>
                     </SettingsCard>
 
@@ -1707,9 +1549,8 @@ export function SettingsModal({
                       open={browserAdvancedOpen}
                       onToggle={() => setBrowserAdvancedOpen((v) => !v)}
                       title="Advanced page reading"
-                      description={BROWSER_COPY.advanced}
                     >
-                      <SettingRow label="Page analysis engine" description={BROWSER_COPY.domEngine}>
+                      <SettingRow label="Page inspection engine" description={BROWSER_COPY.domEngine}>
                         <Dropdown<AgentSettings['browser']['dom_inspection_engine']>
                           ariaLabel="Page analysis engine"
                           value={draft.browser.dom_inspection_engine}
@@ -1726,7 +1567,6 @@ export function SettingsModal({
                       </SettingRow>
                       <SwitchRow
                         label="Skip covered elements"
-                        description={BROWSER_COPY.paintOrder}
                         checked={draft.browser.paint_order_filtering}
                         onChange={(paint_order_filtering) => updateDraft((current) => ({
                           ...current,
@@ -1743,8 +1583,7 @@ export function SettingsModal({
                         }))}
                       />
                       <NumberRow
-                        label="Frames per page"
-                        description={BROWSER_COPY.maxIframes}
+                        label="Maximum frames per page"
                         ariaLabel="Maximum frames per page"
                         min={0}
                         max={20}
@@ -1755,8 +1594,7 @@ export function SettingsModal({
                         }))}
                       />
                       <NumberRow
-                        label="Frame nesting depth"
-                        description={BROWSER_COPY.frameDepth}
+                        label="Maximum frame nesting depth"
                         ariaLabel="Maximum frame depth"
                         min={0}
                         max={5}
@@ -1772,7 +1610,6 @@ export function SettingsModal({
                       open={diagOpen}
                       onToggle={() => setDiagOpen((v) => !v)}
                       title="Diagnostics"
-                      description="Raw connection details, useful when reporting a problem."
                     >
                       <BrowserDiagnosticsCard diagnostics={browserDiagnostics} draft={draft} />
                     </Disclosure>
@@ -1784,7 +1621,6 @@ export function SettingsModal({
                 <>
                   <PageHeader
                     title={PAGE_COPY.mcp.label}
-                    description={PAGE_COPY.mcp.blurb}
                     action={
                       <div className="flex flex-wrap items-center gap-2">
                         <Dropdown<MCPServerTemplateKey>
@@ -1806,7 +1642,7 @@ export function SettingsModal({
                               servers: [...current.mcp.servers, MCP_SERVER_TEMPLATES[mcpTemplate].build()],
                             },
                           }))}
-                          className="st-btn st-btn-primary"
+                          className="st-btn st-btn-primary st-btn-sm"
                         >
                           <Plus size={13} />
                           Add server
@@ -1817,8 +1653,7 @@ export function SettingsModal({
                   <div className="space-y-4">
                     <SettingsCard>
                       <SwitchRow
-                        label="MCP bridge"
-                        description={MCP_COPY.bridge}
+                        label="Enable MCP servers"
                         checked={mcpFeatureEnabled}
                         onChange={(checked) => updateDraft((current) => ({
                           ...current,
@@ -1893,7 +1728,7 @@ export function SettingsModal({
 
               {activeTab === 'observability' && (
                 <>
-                  <PageHeader title={PAGE_COPY.observability.label} description={PAGE_COPY.observability.blurb} />
+                  <PageHeader title={PAGE_COPY.observability.label} />
                   <Suspense fallback={null}>
                     <ObservabilityPanel refreshKey={observabilityRefreshKey} />
                   </Suspense>
@@ -1902,18 +1737,19 @@ export function SettingsModal({
 
               {activeTab === 'permissions' && (
                 <>
-                  <PageHeader title={PAGE_COPY.permissions.label} description={PAGE_COPY.permissions.blurb} />
+                  <PageHeader title={PAGE_COPY.permissions.label} />
                   <div className="space-y-4">
-                    <SettingsCard title="Approval profile" description="Start here. The switches below follow whichever profile you pick.">
+                    <SettingsCard title="Approval profile">
                       <div className="grid gap-2 p-4 sm:grid-cols-3">
                         {(['default', 'full_access', 'custom'] as const).map((mode) => (
                           <ChoiceCard
                             key={mode}
-                            ariaLabel={PERMISSION_MODE_LABEL[mode]}
+                            ariaLabel={PERMISSION_MODE_COPY[mode].title}
                             title={PERMISSION_MODE_COPY[mode].title}
                             summary={PERMISSION_MODE_COPY[mode].summary}
+                            description={PERMISSION_MODE_COPY[mode].description}
                             hint={PERMISSION_MODE_COPY[mode].recommendation}
-                            tone={mode === 'default' ? 'ok' : mode === 'full_access' ? 'warn' : 'neutral'}
+                            tone={mode === 'default' ? 'ok' : mode === 'full_access' ? 'danger' : 'neutral'}
                             selected={draft.permissions.mode === mode}
                             onSelect={() => updatePermissionMode(mode)}
                           />
@@ -1921,9 +1757,8 @@ export function SettingsModal({
                       </div>
                       {draft.permissions.mode === 'full_access' && (
                         <div className="px-4 pb-4">
-                          <Note tone="warn" icon={AlertCircle}>
-                            The agent will edit and create files without asking. Deleting still stays off unless you
-                            turn it on below.
+                          <Note tone="danger" icon={AlertCircle}>
+                            File changes are auto-approved. Deletion must be enabled separately.
                           </Note>
                         </div>
                       )}
@@ -1939,7 +1774,6 @@ export function SettingsModal({
                           <SwitchRow
                             key={key}
                             label={copy.label}
-                            description={copy.description}
                             checked={value}
                             onChange={(checked) => updateCustomPermissionDraft((current) => ({
                               ...current,
@@ -1964,7 +1798,7 @@ export function SettingsModal({
                         }))}
                       />
                       <SwitchRow
-                        label="Dangerous actions require confirm"
+                        label="Always confirm high-risk actions"
                         description={RISK_COPY.dangerous.description}
                         checked={displayedPermissions.dangerous_actions_require_confirm}
                         onChange={(checked) => updateCustomPermissionDraft((current) => ({
@@ -1973,7 +1807,7 @@ export function SettingsModal({
                         }))}
                       />
                       <SwitchRow
-                        label="Allow screen fallback"
+                        label="Allow clicks by screen coordinates"
                         description={RISK_COPY.screenFallback.description}
                         checked={displayedPermissions.allow_screen_fallback}
                         onChange={(checked) => updateCustomPermissionDraft((current) => ({
@@ -1998,12 +1832,10 @@ export function SettingsModal({
                 <>
                   <PageHeader title={PAGE_COPY.sandbox.label} description={PAGE_COPY.sandbox.blurb} />
                   <div className="space-y-4">
-                    <Note tone="info">{SANDBOX_COPY.intro}</Note>
 
                     <SettingsCard>
                       <SwitchRow
-                        label="Sandbox commands"
-                        description={SANDBOX_COPY.enabled}
+                        label="Allow shell commands"
                         checked={draft.sandbox.enabled}
                         onChange={(checked) => updateDraft((current) => ({
                           ...current,
@@ -2111,7 +1943,7 @@ export function SettingsModal({
                       </div>
                     </SettingsCard>
 
-                    <SettingsCard title="Available on this computer" description={SANDBOX_COPY.backends}>
+                    <SettingsCard title="Available sandbox engines">
                       {['docker', 'local_restricted', 'host'].map((backend) => {
                         const status = sandboxStatus?.backends?.[backend]
                         return (
@@ -2135,7 +1967,6 @@ export function SettingsModal({
                     <SettingsCard title="Docker">
                       <SwitchRow
                         label="Use Docker when available"
-                        description="Docker gives the strongest isolation. Turn off only if it conflicts with something else on this machine."
                         checked={draft.sandbox.docker.enabled}
                         onChange={(checked) => updateDraft((current) => ({
                           ...current,
@@ -2156,7 +1987,7 @@ export function SettingsModal({
                           />
                           <button
                             type="button"
-                            className="st-button"
+                            className="st-btn st-btn-secondary"
                             disabled={resolvingDockerImage}
                             onClick={async () => {
                               setResolvingDockerImage(true)
@@ -2192,17 +2023,16 @@ export function SettingsModal({
                       />
                     </SettingsCard>
 
-                    <SettingsCard title="Resource ceilings" description={SANDBOX_COPY.resources}>
+                    <SettingsCard title="Per-command limits">
                       {([
                         { key: 'timeout_seconds' as const, label: 'Time limit', unit: 'seconds' },
-                        { key: 'memory_mb' as const, label: 'Memory', unit: 'MB' },
-                        { key: 'cpus' as const, label: 'CPU cores', unit: 'cores' },
-                        { key: 'pids' as const, label: 'Process limit', unit: '' },
+                        { key: 'memory_mb' as const, label: 'Memory limit', unit: 'MB' },
+                        { key: 'cpus' as const, label: 'CPU limit', unit: 'cores' },
+                        { key: 'pids' as const, label: 'Process limit', unit: 'processes' },
                       ]).map(({ key, label, unit }) => (
                         <NumberRow
                           key={key}
                           label={label}
-                          description={SANDBOX_COPY.resourceHelp[key]}
                           ariaLabel={`Sandbox ${label.toLowerCase()}`}
                           unit={unit}
                           value={draft.sandbox.resources[key]}
@@ -2465,8 +2295,7 @@ function McpServerCard({
       </header>
 
       <SettingRow
-        label="How Monaw connects"
-        description={isHttp ? MCP_COPY.transportHttp : MCP_COPY.transportStdio}
+        label="Connection type"
       >
         <Dropdown<AgentSettings['mcp']['servers'][number]['transport']>
           ariaLabel={`Transport for server ${index + 1}`}
@@ -2481,7 +2310,6 @@ function McpServerCard({
 
       <StackedRow
         label={isHttp ? 'Server URL' : 'Command'}
-        description={isHttp ? MCP_COPY.url : MCP_COPY.command}
       >
         <input
           value={isHttp ? server.url : server.command}
@@ -2516,7 +2344,7 @@ function McpServerCard({
       )}
 
       {!isHttp && (
-        <SettingRow label="Working directory" description={MCP_COPY.workingDir} wide>
+      <SettingRow label="Working folder" wide>
           <input
             value={server.cwd}
             aria-label={`Working directory ${index + 1}`}
@@ -2527,7 +2355,7 @@ function McpServerCard({
         </SettingRow>
       )}
 
-      <SettingRow label="Description" description="A note for yourself. Not sent to the agent." wide>
+      <SettingRow label="Personal note" wide>
         <input
           value={server.description}
           aria-label={`Server description ${index + 1}`}
@@ -2570,7 +2398,6 @@ function McpServerCard({
         <div className="st-divider-t">
           <NumberRow
             label="Startup timeout"
-            description={MCP_COPY.startupTimeout}
             ariaLabel={`Startup timeout for server ${index + 1}`}
             unit="ms"
             min={1000}
@@ -2579,7 +2406,6 @@ function McpServerCard({
           />
           <NumberRow
             label="Call timeout"
-            description={MCP_COPY.callTimeout}
             ariaLabel={`Call timeout for server ${index + 1}`}
             unit="ms"
             min={1000}
@@ -2588,7 +2414,6 @@ function McpServerCard({
           />
           <SwitchRow
             label="Reconnect automatically"
-            description={MCP_COPY.reconnect}
             checked={server.reconnect_on_unhealthy}
             onChange={(checked) => onUpdate((current) => ({ ...current, reconnect_on_unhealthy: checked }))}
           />
@@ -2968,7 +2793,7 @@ function PathOverrides({
       )}
 
       <div className="st-row-stacked">
-        <p className="st-label">Never allowed</p>
+        <p className="st-label">Blocked folders</p>
         <p className="st-desc mt-1">{OVERRIDE_COPY.blockedRoots}</p>
         <div className="mt-2 space-y-2">
           {draft.permissions.blocked_roots.map((root, index) => (

@@ -7,6 +7,17 @@ from app.agent.settings_store import AgentSettings, MCPServerConfig
 from app.main import app
 
 
+def test_browser_diagnostics_preserves_public_boolean_and_profile_identifiers():
+    from app.api.routes.diagnostics import _safe_browser_diagnostics
+    safe = _safe_browser_diagnostics({"session_active": True, "system_cdp_url": "http://127.0.0.1:9222",
+        "available_system_profiles": [{"name": "Work", "directory": "Profile 1"},
+                                      {"name": "Invalid", "directory": "C:/private/profile"}]})
+    assert safe["session_active"] is True
+    assert safe["system_cdp_url"] == ""
+    assert safe["available_system_profiles"][0]["directory"] == "Profile 1"
+    assert safe["available_system_profiles"][1]["directory"] == ""
+
+
 def test_reset_runtime_cache_calls_mcp_reset(monkeypatch):
     calls: list[str] = []
 

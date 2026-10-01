@@ -18,11 +18,12 @@ from app.agent.tool_cancellation import (
 from app.agent.harness.tool_protocol import ToolCallResult, ToolStatus
 
 _BROWSER_TOOL_TIMEOUTS: dict[str, float] = {
-    "browser_session": 45.0,
-    "browser_open": 60.0,
-    "browser_snapshot": 35.0,
+    "browser_session": 120.0,
+    "browser_open": 120.0,
+    # These inspections can be the first browser action and launch Chrome too.
+    "browser_snapshot": 120.0,
     "browser_screenshot": 35.0,
-    "browser_tabs": 20.0,
+    "browser_tabs": 120.0,
 }
 
 

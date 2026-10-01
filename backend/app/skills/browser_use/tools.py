@@ -24,7 +24,7 @@ from app.agent.response_attachments import (
     get_image_dimensions,
 )
 
-from .manager import _clear_chrome_session_restore_state
+from .manager import _clear_chrome_session_restore_state, _kill_existing_chrome_processes
 from .url_policy import (
     allowed_domains as _allowed_domains,
     assert_fetch_host_public as _assert_fetch_host_public,
@@ -229,7 +229,8 @@ def _click_transfer_approval(
 
 async def _arm_file_chooser_guard(page) -> bool:
     try:
-        return bool(await page.evaluate(_FILE_CHOOSER_GUARD_ARM_SCRIPT))
+        result = await page.evaluate(_FILE_CHOOSER_GUARD_ARM_SCRIPT)
+        return result is True or str(result).strip().lower() == "true"
     except Exception:
         return False
 
@@ -237,7 +238,8 @@ async def _arm_file_chooser_guard(page) -> bool:
 async def _file_chooser_guard_tripped(page) -> bool:
     await _sleep_after_action(0.15)
     try:
-        return bool(await page.evaluate(_FILE_CHOOSER_GUARD_READ_SCRIPT))
+        result = await page.evaluate(_FILE_CHOOSER_GUARD_READ_SCRIPT)
+        return result is True or str(result).strip().lower() == "true"
     except Exception:
         # The click navigated away; a new document has no pending chooser.
         return False
@@ -1312,15 +1314,17 @@ async def _verify_browser_condition(
             if str(exists).lower() == "true":
                 return {"status": "ok", "verified": True, "selector": selector}
         if text:
-            matched_ref = await page.evaluate(
-                _MATCH_REF_SCRIPT,
-                _INTERACTIVE_SELECTOR,
+            # Confirmation messages are often plain text, outside the set of
+            # interactive elements used to find click targets.
+            matched = await page.evaluate(
+                r"""(text) => {
+                    const normalize = value => String(value).replace(/\\s+/g, ' ').trim().toLowerCase();
+                    return normalize(document.body?.innerText || '').includes(normalize(text));
+                }""",
                 text,
-                False,
-                False,
             )
-            if str(matched_ref or "").strip():
-                return {"status": "ok", "verified": True, "text": text, "ref": str(matched_ref).strip()}
+            if matched is True or str(matched).strip().lower() == "true":
+                return {"status": "ok", "verified": True, "text": text}
         if url_contains:
             current_url = await page.get_url()
             if url_contains in current_url:
@@ -1480,6 +1484,27 @@ def _verify_typed_value(
     }
 
 
+async def browser_close_chrome(manager, _bypass_gate: bool = False) -> str:
+    """Explicit recovery action; never called automatically during launch."""
+    if not _bypass_gate:
+        decision = resolve_permission(ActionType.PROCESS_KILL)
+        if decision.blocked or not current_interactive():
+            return _json_output({"status": "blocked", "reason": decision.reason or "Closing Chrome requires interactive approval."})
+        if decision.requires_confirmation:
+            ticket = create_ticket(
+                action_type="browser_close_chrome", tool_name="browser_close_chrome",
+                risk_level="high", reason=decision.reason,
+                action_description="Close all Chrome/Chromium windows and background processes. Unsaved work may be lost.",
+                payload={"input_str": "{}", "args": {}},
+            )
+            return _json_output({"status": "pending_approval", "ticket_id": ticket.id,
+                                 "action": ticket.action_description, "reason": decision.reason})
+    await manager.stop()
+    count = await asyncio.to_thread(_kill_existing_chrome_processes)
+    return _json_output({"status": "ok", "processes_targeted": count,
+                         "message": "Requested termination of Chrome/Chromium, including background processes."})
+
+
 async def browser_session(
     manager,
     action: str = "status",
@@ -1500,12 +1525,12 @@ async def browser_session(
         elif latest_reason in {"managed_cdp_timeout", "managed_chrome_exited"}:
             next_steps.append("Call browser_session(action=\"reset\") once, then retry the original browser intent.")
             next_steps.append(f"Review Chrome subprocess output at {diagnostics.get('chrome_log_path')}.")
-        elif latest_reason in {"chrome_executable_missing", "system_launch_disabled"}:
+        elif latest_reason in {"chrome_executable_missing", "system_debugging_not_enabled", "system_debugging_approval_required", "chrome_profile_missing", "chrome_setup_requires_restart", "chrome_profile_setup_failed"}:
             next_steps.append("Stop and report the browser launch blocker; user action is required.")
         elif diagnostics.get("session_active") and diagnostics.get("cdp_endpoint_alive") is False:
             next_steps.append("Stop/reset the browser session because the current CDP endpoint is not reachable.")
         elif diagnostics.get("last_error"):
-            next_steps.append("Review last_error and use managed mode unless you have started Chrome with a non-default DevTools user-data-dir.")
+            next_steps.append("Review last_error. For your local profile, enable Chrome remote debugging and approve the connection prompt.")
         else:
             next_steps.append("Browser diagnostics look healthy.")
         return _json_output({"status": "ok", **diagnostics, "next_steps": next_steps})
@@ -2051,18 +2076,45 @@ async def browser_select_option(
         target_id=tab_target_id,
         index=None if tab_index < 0 else tab_index,
     )
-    element, resolved_selector = await _resolve_element(manager, page, ref=ref, selector=selector)
+    _element, resolved_selector = await _resolve_element(manager, page, ref=ref, selector=selector)
     chosen_values: list[str] = [value for value in values if str(value).strip()]
     if not chosen_values:
         raise ValueError("Provide at least one option value.")
-    await element.select_option(chosen_values)
+    # The actor's option.click() can open the native picker without selecting
+    # anything. Set native options and emit the same input/change events used
+    # by browser automation libraries, then verify the resulting selection.
+    selection = _decode_json_string(await page.evaluate(
+        """(selector, values) => {
+          const el = document.querySelector(selector);
+          if (!el || el.tagName !== 'SELECT') return {status:'error', reason_code:'not_select_element'};
+          if (el.disabled) return {status:'error', reason_code:'select_disabled'};
+          const options = [...el.options];
+          const matches = values.map(value => options.find(option => option.value === value)
+            || options.find(option => option.label === value));
+          if (matches.some(option => !option || option.disabled || option.parentElement.disabled))
+            return {status:'error', reason_code:'option_unavailable'};
+          const unique = [...new Set(matches)];
+          if (!el.multiple && unique.length > 1) return {status:'error', reason_code:'select_requires_single_value'};
+          for (const option of options) option.selected = unique.includes(option);
+          el.dispatchEvent(new Event('input', {bubbles:true}));
+          el.dispatchEvent(new Event('change', {bubbles:true}));
+          const selected = [...el.selectedOptions].map(option => option.value);
+          const expected = unique.map(option => option.value);
+          return {status: selected.length === expected.length && expected.every(value => selected.includes(value))
+            ? 'ok' : 'error', reason_code:'selection_verification', values:selected};
+        }""",
+        resolved_selector, chosen_values,
+    ))
+    if not isinstance(selection, dict) or selection.get("status") != "ok":
+        return _json_output({"status": "error", "error": "Could not select the requested options.",
+                             "selection": selection, "selector": resolved_selector})
     await _sleep_after_action(0.2)
     _invalidate_dom_cache(manager, "browser_select_option")
     return _json_output(
         {
             "status": "ok",
             "selector": resolved_selector,
-            "values": chosen_values,
+            "values": selection["values"],
             "page": await manager.page_metadata(page),
             "cache_invalidated": True,
         }

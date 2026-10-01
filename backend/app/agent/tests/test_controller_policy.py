@@ -174,6 +174,8 @@ class TestPermissionResolver:
 
 class TestPolicyPersistence:
     def test_save_and_read(self, tmp_policy):
+        import json
+
         import app.agent.controller_policy as cp
         state = ControllerPolicyState(
             mode=PermissionMode.FULL_ACCESS,
@@ -185,7 +187,7 @@ class TestPolicyPersistence:
         )
         cp._write_policy_json(state)
 
-        loaded = cp._read_policy_json()
+        loaded = json.loads(cp._policy_json_path().read_text(encoding="utf-8"))
         assert loaded["mode"] == "full_access"
         assert len(loaded["allowlisted_apps"]) == 1
         assert loaded["allowlisted_apps"][0]["alias"] == "myapp"

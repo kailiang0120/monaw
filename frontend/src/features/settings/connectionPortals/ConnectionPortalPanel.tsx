@@ -35,17 +35,13 @@ export function ConnectionPortalPanel({
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
-        <span className="section-label">Portal</span>
+        <span className="section-label">Service</span>
         <Dropdown<ConnectionPortalId>
           value={portal.id}
           options={CONNECTION_PORTAL_OPTIONS}
           onChange={onPortalChange}
           ariaLabel="Portal"
         />
-      </div>
-
-      <div className="rounded-lg border border-accent/20 bg-accent/10 px-3 py-2 text-xs leading-relaxed text-neutral-400">
-        {portal.description}
       </div>
 
       {portal.secretIds.map((secret) => {
@@ -67,7 +63,7 @@ export function ConnectionPortalPanel({
       })}
 
       <p className="text-xs leading-relaxed text-neutral-600">
-        Saved credentials are encrypted by the operating system through Electron. Existing values are write-only and are never returned to this page.
+        Credentials are encrypted. Saved values stay hidden.
       </p>
     </div>
   )

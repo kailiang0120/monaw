@@ -16,15 +16,24 @@ function generateControlSecret() {
   return crypto.randomBytes(32).toString('base64url')
 }
 
-function mintControlSession(secret, nowSeconds = Math.floor(Date.now() / 1000)) {
+function generateControlSessionId() {
+  return crypto.randomBytes(18).toString('base64url')
+}
+
+function mintControlSession(secret, sessionId, nowSeconds = Math.floor(Date.now() / 1000)) {
   if (typeof secret !== 'string' || secret.length < 32) {
     throw new Error('Control-plane secret is not configured')
+  }
+  if (typeof sessionId !== 'string' || !sessionId) {
+    throw new Error('Control-plane session id is required')
   }
   const payload = {
     exp: nowSeconds + CONTROL_TOKEN_LIFETIME_SECONDS,
     iat: nowSeconds,
     iss: CONTROL_TOKEN_ISSUER,
-    jti: crypto.randomBytes(18).toString('base64url'),
+    // The backend binds approval tickets and "this session" grants to this id,
+    // so it stays fixed across token refreshes for the app's lifetime.
+    jti: sessionId,
     scopes: [...CONTROL_SCOPES].sort(),
   }
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url')
@@ -48,6 +57,7 @@ function normalizeBackendHost(value, allowUnsafe = false) {
 module.exports = {
   CONTROL_SCOPES,
   generateControlSecret,
+  generateControlSessionId,
   mintControlSession,
   normalizeBackendHost,
 }

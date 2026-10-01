@@ -51,6 +51,7 @@ TEST_GROUPS = {
     },
     "skills": {
         "test_browser_tools.py",
+        "test_local_chrome_launch.py",
         "test_exec_tool.py",
         "test_filesystem_tools.py",
         "test_mcp_bridge.py",

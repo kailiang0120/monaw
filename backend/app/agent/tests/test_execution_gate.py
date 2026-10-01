@@ -11,6 +11,7 @@ from app.agent.access_grant_broker import (
     _resume_decisions as _grant_resume_decisions,
     _resume_events as _grant_resume_events,
     create_grant_ticket,
+    get_pending_grants,
     signal_resume as signal_grant_resume,
 )
 from app.agent.approval_broker import (
@@ -26,7 +27,6 @@ from app.agent.approval_broker import (
 from app.agent.execution_gate import ExecutionGateService, _format_timeout
 from app.agent.execution_resume import _EXECUTORS, register_executor
 from app.agent.iteration_budget import IterationBudget
-from app.agent.tool_registry import ToolRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -94,101 +94,82 @@ def test_check_pending_status_parses_approval_and_access_grant():
     assert ExecutionGateService.check_pending_status("not json") is None
 
 
-def test_handle_pending_tool_output_returns_pending_event_for_unknown_tool():
-    service = ExecutionGateService()
-    pending_output = json.dumps({"status": "pending_approval", "ticket_id": "missing"})
-
-    resolved_output, events = asyncio.run(
-        service.handle_pending_tool_output(
-            tool_output=pending_output,
-            tool_name="unknown_tool",
+def _resolve_pending(service: ExecutionGateService, tool_output: str, emitted: list[dict] | None = None) -> str:
+    return asyncio.run(
+        service.resolve_pending_output(
+            tool_output=tool_output,
+            tool_dict={"name": "looping_tool"},
             arguments={},
-            registry=ToolRegistry(),
             budget=IterationBudget(max_iterations=1),
             execute_tool=_fake_execute_tool,
+            emit=(emitted if emitted is not None else []).append,
         )
     )
 
-    assert resolved_output == pending_output
-    assert events == [{"event": "approval_required", "data": {"ticket_id": "missing", "action": "", "reason": ""}}]
 
-
-def test_handle_pending_tool_output_errors_when_gate_hops_are_exhausted():
+def test_resolve_pending_output_emits_prompt_before_waiting():
     service = ExecutionGateService()
-    registry = ToolRegistry()
-    registry.register({"name": "looping_tool", "callable": lambda **_kwargs: json.dumps({"status": "pending_approval", "ticket_id": "loop"})})
+    emitted: list[dict] = []
+    seen_at_wait: list[list[dict]] = []
+
+    async def resolves_after_prompt(**_kwargs):
+        seen_at_wait.append(list(emitted))
+        yield {"event": "tool_resumed", "data": {}}
+        yield {"_result": json.dumps({"status": "ok"})}
+
+    service.await_ticket_resolution = resolves_after_prompt  # type: ignore[method-assign]
+
+    output = _resolve_pending(service, json.dumps({"status": "pending_approval", "ticket_id": "t1"}), emitted)
+
+    assert json.loads(output) == {"status": "ok"}
+    assert seen_at_wait == [[{"event": "approval_required", "data": {"ticket_id": "t1", "action": "", "reason": ""}}]]
+    assert [event["event"] for event in emitted] == ["approval_required", "tool_resumed"]
+
+
+def test_resolve_pending_output_passes_through_non_pending_output():
+    output = json.dumps({"status": "ok", "value": 1})
+
+    assert _resolve_pending(ExecutionGateService(), output) == output
+
+
+def test_resolve_pending_output_errors_when_gate_hops_are_exhausted():
+    service = ExecutionGateService()
 
     async def always_pending(**_kwargs):
         yield {"_result": json.dumps({"status": "pending_approval", "ticket_id": "loop"})}
 
     service.await_ticket_resolution = always_pending  # type: ignore[method-assign]
 
-    resolved_output, _events = asyncio.run(
-        service.handle_pending_tool_output(
-            tool_output=json.dumps({"status": "pending_approval", "ticket_id": "loop"}),
-            tool_name="looping_tool",
-            arguments={},
-            registry=registry,
-            budget=IterationBudget(max_iterations=1),
-            execute_tool=_fake_execute_tool,
-        )
-    )
+    result = json.loads(_resolve_pending(service, json.dumps({"status": "pending_approval", "ticket_id": "loop"})))
 
-    result = json.loads(resolved_output)
     assert result["status"] == "error"
     assert result["reason_code"] == "gate_hop_limit_exceeded"
 
 
 def test_gate_hop_exhaustion_rejects_trailing_approval_ticket():
     service = ExecutionGateService()
-    registry = ToolRegistry()
     ticket = create_ticket(tool_name="looping_tool")
-    registry.register({"name": "looping_tool", "callable": lambda **_kwargs: "unused"})
 
     async def always_pending(**_kwargs):
         yield {"_result": json.dumps({"status": "pending_approval", "ticket_id": ticket.id})}
 
     service.await_ticket_resolution = always_pending  # type: ignore[method-assign]
 
-    asyncio.run(
-        service.handle_pending_tool_output(
-            tool_output=json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
-            tool_name="looping_tool",
-            arguments={},
-            registry=registry,
-            budget=IterationBudget(max_iterations=1),
-            execute_tool=_fake_execute_tool,
-        )
-    )
+    _resolve_pending(service, json.dumps({"status": "pending_approval", "ticket_id": ticket.id}))
 
     assert ticket.status == TicketStatus.REJECTED
 
 
 def test_gate_hop_exhaustion_denies_trailing_access_grant():
     service = ExecutionGateService()
-    registry = ToolRegistry()
     ticket = create_grant_ticket(target_type="path", target_identifier="C:/private")
-    registry.register({"name": "looping_tool", "callable": lambda **_kwargs: "unused"})
 
     async def always_pending(**_kwargs):
-        yield {
-            "_result": json.dumps(
-                {"status": "pending_access_grant", "ticket_id": ticket.id}
-            )
-        }
+        yield {"_result": json.dumps({"status": "pending_access_grant", "ticket_id": ticket.id})}
 
     service.await_ticket_resolution = always_pending  # type: ignore[method-assign]
 
-    asyncio.run(
-        service.handle_pending_tool_output(
-            tool_output=json.dumps({"status": "pending_access_grant", "ticket_id": ticket.id}),
-            tool_name="looping_tool",
-            arguments={},
-            registry=registry,
-            budget=IterationBudget(max_iterations=1),
-            execute_tool=_fake_execute_tool,
-        )
-    )
+    _resolve_pending(service, json.dumps({"status": "pending_access_grant", "ticket_id": ticket.id}))
 
     assert ticket.status == "denied"
 
@@ -345,3 +326,34 @@ def test_await_ticket_resolution_reruns_tool_after_access_grant():
         "arguments": {"path": "C:/tmp/file.txt"},
     }
     assert events[0]["event"] == "tool_resumed"
+
+
+def test_timed_out_access_grant_wait_retires_the_ticket():
+    service = ExecutionGateService(default_timeout_seconds=0)
+    ticket = create_grant_ticket(target_type="path", target_identifier="C:/private", interactive=True)
+
+    asyncio.run(
+        _collect_events(
+            service.await_ticket_resolution(
+                budget=IterationBudget(max_iterations=1),
+                ticket_id=ticket.id,
+                event_kind="access_grant_required",
+                tool_dict={"name": "read_tool"},
+                arguments={},
+                execute_tool=_fake_execute_tool,
+            )
+        )
+    )
+
+    assert ticket.status == "expired"
+    assert get_pending_grants() == []
+
+
+def test_pending_grants_only_lists_live_tickets_for_the_requesting_session():
+    mine = create_grant_ticket(target_type="path", target_identifier="C:/mine", control_session_id="session-a")
+    stale = create_grant_ticket(target_type="path", target_identifier="C:/stale", control_session_id="session-a")
+    stale.expires_at = "2000-01-01T00:00:00+00:00"
+    create_grant_ticket(target_type="path", target_identifier="C:/theirs", control_session_id="session-b")
+
+    assert [ticket.id for ticket in get_pending_grants(control_session_id="session-a")] == [mine.id]
+    assert stale.status == "expired"

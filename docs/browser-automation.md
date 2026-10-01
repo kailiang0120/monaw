@@ -6,7 +6,13 @@ Monaw uses the `browser-use` skill for browser automation. It can fetch known UR
 
 Open Settings -> Browser.
 
-To let Monaw control tabs in your everyday running Chrome, enable **Connect to my Chrome** there. In Chrome 144 or later, open `chrome://inspect/#remote-debugging`, turn on remote debugging, and approve Chrome's connection prompt. Save Monaw's settings. This adds the Chrome DevTools MCP connection and gives the agent page snapshots, clicks, typing, hover, drag, dialogs, uploads, and other browser actions in those tabs. Chrome may ask again when the connection restarts.
+**My Chrome profile** is the default. Ask Monaw to open a website: it detects Chrome and your last-used profile, prepares the automation connection, and opens Chrome itself. Your existing logins, bookmarks, and tabs stay in the real profile. There is no manual debugging port or attach step.
+
+Chrome 144 or later displays **Allow remote debugging?** when Monaw connects. Click **Allow** in Chrome. Chrome controls this consent and may ask again after a reconnection. If Chrome is already running before its first setup, close it once and retry so Monaw can safely prepare the profile without overwriting live preferences.
+
+The built-in connection waits up to one minute for that consent before starting page automation, then keeps the same connection between actions. This avoids the underlying browser library's ten-second handshake deadline. The relay accepts one client on loopback with an unpredictable connection path and rejects browser origins.
+
+The optional Chrome DevTools MCP preset uses the same automatic launch preparation and adds page snapshots, hover, drag, dialogs, uploads, and other browser actions.
 
 Browser settings are stored in runtime settings. Runtime browser folders are under:
 
@@ -28,13 +34,13 @@ browser\chrome.log
 
 | Mode | Meaning |
 | --- | --- |
-| `auto` | Use saved settings and fallback behavior. Default. |
+| `auto` | Launch a separate profile, with optional fallback to your Chrome. |
 | `managed` | Launch an isolated Chrome profile controlled by Monaw. |
-| `system` | Attach to an already-running Chrome DevTools endpoint. |
+| `system` | Automatically launch or reuse your local Chrome profile. Default. |
 
 Managed mode is safest for automation because it uses an isolated profile and dedicated runtime folder.
 
-System mode for the built-in browser tools attaches to an existing DevTools endpoint, normally `http://127.0.0.1:9222`. The **Connect to my Chrome** option above uses Chrome's direct connection flow for your running browser.
+System mode discovers Chrome's approved connection from `DevToolsActivePort` in the real user-data folder. It keeps personal Chrome open when Monaw disconnects. An explicit endpoint is still available through advanced runtime configuration for integrations that already manage Chrome.
 
 ## Important Settings
 
@@ -49,8 +55,8 @@ System mode for the built-in browser tools attaches to an existing DevTools endp
 | `cross_origin_iframes` | Allow deeper cross-origin iframe inspection when supported. Default off. |
 | `max_iframes` | Maximum iframes to inspect in enhanced mode. |
 | `max_iframe_depth` | Maximum iframe nesting depth in enhanced mode. |
-| `system_connection_strategy` | `auto`, `attach`, or `launch`. Current system mode is designed to attach, not manage the user's real Chrome profile. |
-| `system_cdp_url` | Chrome DevTools endpoint, default `http://127.0.0.1:9222`. |
+| `system_connection_strategy` | Advanced configuration: `launch` (default), `auto`, or explicit `attach`. |
+| `system_cdp_url` | Advanced explicit endpoint for `attach` or `auto`; unnecessary for normal launch. |
 | `managed_profile_dir` | Isolated Chrome profile directory. |
 | `downloads_dir` | Managed browser downloads directory. |
 | `screenshots_dir` | Screenshot output directory. |
@@ -58,23 +64,20 @@ System mode for the built-in browser tools attaches to an existing DevTools endp
 | `system_profile_directory` | Optional Chrome profile directory name for system-profile workflows. |
 | `allowed_domains` | Optional domain allow list. Empty means no domain restriction. |
 
-## Starting Chrome For System Mode
+## Automatic Local Chrome Launch
 
-Use **Connect to my Chrome** for your running Chrome profile. The port-based system mode below remains available for a manually started debugging endpoint.
+Monaw locates Chrome's user-data folder and uses the saved profile selection or Chrome's last-used profile. While Chrome is closed, it enables the supported remote-debugging preference in `Local State`, preserving unrelated settings. It launches the real profile with `--enable-features=DevToolsAcceptDebuggingConnections` and discovers the local connection automatically. A live endpoint is reused without opening another window for every tool call.
 
-For Chrome DevTools workflows, start Chrome manually with remote debugging and set the system CDP URL in Settings -> Browser:
+Chrome 136+ rejects `--remote-debugging-port` and `--remote-debugging-pipe` on the default user-data folder. Monaw therefore uses Chrome 144+'s approved connection for your personal profile. Separate managed profiles continue to use a dedicated debugging port.
 
-```text
-http://127.0.0.1:9222
-```
-
-Modern Chrome may block remote debugging on the default user-data-dir. If system mode cannot attach, use managed mode or start Chrome manually with a non-default `--user-data-dir`.
+If a restart is needed, `browser_close_chrome` can close Chrome and its background processes after explicit approval. It can lose unsaved work, so Monaw never runs it as an automatic launch step.
 
 ## Main Browser Tools
 
 | Tool | Purpose |
 | --- | --- |
 | `browser_session` | Inspect, doctor, reset, stop, list profiles, or one-off switch modes. |
+| `browser_close_chrome` | Explicitly close Chrome and background processes after approval, for restart recovery. |
 | `browser_fetch` | Read-only URL fetch and extraction. Tries local HTTP plus Scrapling parsing first, with dynamic and explicit stealth modes through Monaw's browser session. |
 | `browser_open` | Start or reuse a browser session and optionally open a URL. |
 | `browser_navigate` | Navigate the current tab. |
@@ -185,7 +188,10 @@ Doctor output can show:
 | `managed_cdp_timeout` | Managed Chrome did not expose CDP in time. | Reset once, then check `chrome.log`. |
 | `managed_chrome_exited` | Managed Chrome exited during launch. | Check `chrome.log` and profile lock state. |
 | `chrome_executable_missing` | Chrome executable could not be found. | Install Chrome or set a valid path if supported by settings. |
-| `system_launch_disabled` | System mode will not launch the user's real Chrome profile. | Start Chrome with remote debugging or use managed mode. |
+| `chrome_setup_requires_restart` | Chrome is using preferences that need first-time preparation. | Close Chrome once, then retry. |
+| `chrome_profile_setup_failed` | Profile preparation failed. | Check profile access and diagnostics. |
+| `system_debugging_not_enabled` | Chrome launched but its supported endpoint is unavailable. | Use Chrome 144+, close Chrome once, then retry. |
+| `system_debugging_approval_required` | Chrome is waiting for consent or declined the connection. | Click Allow in Chrome, then resume. |
 | `tool_timeout` | A browser tool timed out. | Narrow the operation or inspect with doctor/screenshot. |
 
 ## Troubleshooting
@@ -193,7 +199,7 @@ Doctor output can show:
 | Symptom | Check |
 | --- | --- |
 | Browser does not open. | Confirm `browser-use` is installed and check `browser\chrome.log` under the active runtime folder. |
-| System mode cannot attach. | Open `http://127.0.0.1:9222/json/version` in a browser or PowerShell to confirm CDP is live. |
+| Personal Chrome cannot connect. | Check the native Chrome consent prompt, run doctor, and follow its reason code. |
 | Actions hit the wrong field. | Use `browser_snapshot(include_screenshot=true)` and identify the target by ref, label, role, placeholder, and nearby text. |
 | A ref is stale. | Call `browser_snapshot` again; refs are invalidated after page-changing or mutating actions. |
 | Tab state is stale. | Run `browser_tabs(action="list")` and switch to the expected tab. |

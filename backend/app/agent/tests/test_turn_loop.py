@@ -1044,6 +1044,82 @@ def test_turn_loop_isolates_parallel_tool_errors():
     assert [call["status"] for call in memory.persisted_turns[0]["tool_calls"]] == ["error", "complete"]
 
 
+def test_turn_loop_prompts_for_access_while_siblings_run_and_reruns_with_call_id():
+    from app.agent.tool_cancellation import current_call_id
+
+    prompt_seen = threading.Event()
+    gated_call_ids: list[str] = []
+    sibling_released: list[bool] = []
+
+    def gated_tool() -> str:
+        gated_call_ids.append(current_call_id())
+        if len(gated_call_ids) == 1:
+            return json.dumps({"status": "pending_access_grant", "ticket_id": "grant-1"})
+        return json.dumps({"status": "ok", "value": "granted"})
+
+    def sibling_tool() -> str:
+        # Only finishes promptly if the prompt is streamed before the batch completes.
+        sibling_released.append(prompt_seen.wait(timeout=2.0))
+        return "sibling"
+
+    registry = ToolRegistry(
+        [
+            {
+                "name": name,
+                "parameters": {"type": "object", "properties": {}},
+                "callable": fn,
+                "execution_mode": "sync_stateless",
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            }
+            for name, fn in (("gated_tool", gated_tool), ("sibling_tool", sibling_tool))
+        ]
+    )
+
+    class GatedBatchLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(call_id="gated", tool_name="gated_tool", arguments={}),
+                        ToolCallRequest(call_id="sibling", tool_name="sibling_tool", arguments={}),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            return final_answer_response("Finished.")
+
+    loop = TurnLoop(
+        llm_client=GatedBatchLLM(),
+        registry=registry,
+        memory=PersistingFakeMemory(),
+        max_parallel_tool_calls=2,
+    )
+
+    async def grant_immediately(*, budget, tool_dict, arguments, execute_tool, **_kwargs):
+        yield {"_result": await execute_tool(budget, tool_dict, arguments)}
+
+    loop.execution_gate.await_ticket_resolution = grant_immediately  # type: ignore[method-assign]
+
+    async def collect():
+        events = []
+        async for event in loop.run("run both", "conv-gated-batch", system_prompt="system"):
+            if event["event"] == "access_grant_required":
+                prompt_seen.set()
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect())
+    tool_end_events = [event for event in events if event["event"] == "tool_end"]
+
+    assert sibling_released == [True]
+    assert gated_call_ids == ["gated", "gated"]
+    assert [event["data"]["call_id"] for event in tool_end_events] == ["gated", "sibling"]
+    assert json.loads(tool_end_events[0]["data"]["output"])["value"] == "granted"
+
+
 def test_turn_loop_orders_invalid_safe_call_between_valid_results():
     def echo(label: str) -> str:
         return label

@@ -384,11 +384,14 @@ def test_docker_runner_blocks_unsupported_shell():
     assert "bash commands" in result.reason
 
 
-def test_docker_timeout_removes_named_container(monkeypatch):
+def test_docker_timeout_removes_named_container(monkeypatch, tmp_path):
     settings = AgentSettings()
     settings.sandbox.docker.image = "python@sha256:" + "a" * 64
+    settings.sandbox.allowed_bind_roots = [str(tmp_path)]
+    settings.sandbox.blocked_bind_roots = []
     runner = DockerRunner(settings.sandbox)
     request = _request("sleep 5")
+    request.workdir = str(tmp_path)
     request.shell = "bash"
     request.timeout = 1
     removed: list[str] = []

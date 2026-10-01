@@ -1,9 +1,15 @@
 ﻿from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import hashlib
 import shutil
+import stat
+import threading
+import time
+from collections import deque
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,9 +17,10 @@ from typing import Any
 
 from app.agent.access_grant_broker import create_grant_ticket
 from app.agent.approval_broker import create_ticket
-from app.agent.controller_policy import ActionType, canonical, resolve_permission
+from app.agent.controller_policy import ActionType, blocked_roots_below, canonical, resolve_permission
 from app.agent.execution_resume import register_executor
 from app.agent.response_attachments import ATTACHMENT_HANDLE_PREFIX, resolve_attachment_handle_path
+from app.agent.tool_cancellation import current_call_id, register_cancellation, unregister_cancellation
 
 _MAX_READ_BYTES = 1024 * 1024
 _DEFAULT_READ_BYTES = 65536
@@ -22,6 +29,7 @@ _MAX_SEARCH_RESULTS = 200
 _MAX_WRITE_BYTES = 16 * 1024 * 1024
 _MAX_RECURSIVE_ITEMS = 5000
 _MAX_RECURSIVE_BYTES = 512 * 1024 * 1024
+_WALK_TIME_BUDGET_SECONDS = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,13 +249,178 @@ def _validate_glob_pattern(pattern: str, *, operation: str) -> str | None:
 
 
 def _within_base(item: Path, base: Path) -> bool:
-    """Keep glob results inside the gated base, even through symlinks/junctions."""
+    """True when ``item`` resolves inside ``base``; walks use it to drop links that leave the gated base."""
     try:
         resolved_item = os.path.normcase(canonical(str(item)))
         resolved_base = os.path.normcase(canonical(str(base)))
         return os.path.commonpath([resolved_item, resolved_base]) == resolved_base
     except (OSError, ValueError):
         return False
+
+
+def _is_link_entry(entry: os.DirEntry) -> bool:
+    """True for symlinks and Windows junctions, which walks must not descend."""
+    try:
+        if entry.is_symlink():
+            return True
+        is_junction = getattr(entry, "is_junction", None)  # Python 3.12+
+        if is_junction is not None:
+            return bool(is_junction())
+        reparse_tag = getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0)
+        return reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except OSError:
+        return True
+
+
+class _WalkBudget:
+    """Time budget plus Stop/timeout cancellation shared by directory walks."""
+
+    def __init__(self) -> None:
+        self._deadline = time.monotonic() + _WALK_TIME_BUDGET_SECONDS
+        self._cancelled = threading.Event()
+        self._call_id = current_call_id()
+        self.exhausted_reason = ""
+
+    def __enter__(self) -> _WalkBudget:
+        register_cancellation(self._call_id, self._cancelled.set)
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        unregister_cancellation(self._call_id)
+
+    def exhausted(self) -> bool:
+        if not self.exhausted_reason:
+            if self._cancelled.is_set():
+                self.exhausted_reason = "cancelled"
+            elif time.monotonic() > self._deadline:
+                self.exhausted_reason = "time_budget"
+        return bool(self.exhausted_reason)
+
+
+@dataclass(frozen=True, slots=True)
+class _WalkEntry:
+    entry: os.DirEntry
+    relative_parts: tuple[str, ...]
+    restricted: bool
+
+
+def _walk(base: Path, budget: _WalkBudget, *, max_depth: int | None = None) -> Iterator[_WalkEntry]:
+    """Breadth-first walk of ``base`` in name order.
+
+    Links and junctions are yielded but never followed (and dropped when they
+    leave ``base``), blocked roots nested under ``base`` are yielded as
+    restricted but not entered, nothing below ``max_depth`` is read, and the
+    walk ends as soon as ``budget`` is exhausted.
+    """
+    if max_depth is not None and max_depth < 1:
+        return
+    restricted_dirs = {os.path.normcase(root) for root in blocked_roots_below(str(base))}
+    pending: deque[tuple[str, tuple[str, ...]]] = deque([(str(base), ())])
+    while pending:
+        directory, parent_parts = pending.popleft()
+        try:
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda entry: entry.name.lower())
+        except OSError:
+            continue
+        for entry in children:
+            if budget.exhausted():
+                return
+            is_link = _is_link_entry(entry)
+            if is_link and not _within_base(Path(entry.path), base):
+                continue
+            parts = (*parent_parts, entry.name)
+            restricted = os.path.normcase(entry.path) in restricted_dirs
+            yield _WalkEntry(entry, parts, restricted)
+            if is_link or restricted or (max_depth is not None and len(parts) >= max_depth):
+                continue
+            try:
+                if entry.is_dir():
+                    pending.append((entry.path, parts))
+            except OSError:
+                continue
+
+
+def _glob_parts(pattern: str) -> tuple[str, ...]:
+    return tuple(part for part in pattern.replace("\\", "/").split("/") if part not in ("", "."))
+
+
+def _glob_max_depth(pattern: tuple[str, ...]) -> int | None:
+    return None if "**" in pattern else len(pattern)
+
+
+def _match_glob_parts(parts: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
+    if not pattern:
+        return not parts
+    head, rest = pattern[0], pattern[1:]
+    if head == "**":
+        return any(_match_glob_parts(parts[index:], rest) for index in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatch(parts[0], head) and _match_glob_parts(parts[1:], rest)
+
+
+def _glob_matches(item: _WalkEntry, pattern: tuple[str, ...]) -> bool:
+    """Match like ``Path.glob``: ``**`` spans directories and a trailing ``**`` selects directories."""
+    if pattern and pattern[-1] == "**" and not item.entry.is_dir():
+        return False
+    return _match_glob_parts(item.relative_parts, pattern)
+
+
+def _entry_payload(item: _WalkEntry) -> dict[str, Any]:
+    entry = item.entry
+    info = entry.stat()
+    is_dir = entry.is_dir()
+    is_file = entry.is_file()
+    payload = {
+        "path": entry.path,
+        "exists": True,
+        "type": "directory" if is_dir else "file" if is_file else "other",
+        "is_file": is_file,
+        "is_dir": is_dir,
+        "size": info.st_size,
+        "modified_at": _iso_from_timestamp(info.st_mtime),
+        "created_at": _iso_from_timestamp(info.st_ctime),
+        "depth": len(item.relative_parts),
+        "relative_path": os.path.join(*item.relative_parts),
+    }
+    if item.restricted:
+        payload["restricted"] = True
+    return payload
+
+
+def _walk_entries(
+    base: Path,
+    *,
+    max_items: int,
+    max_depth: int | None = None,
+    pattern: tuple[str, ...] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Collect up to ``max_items`` walk payloads in path order.
+
+    Returns the entries and why the walk stopped early ("" when it completed).
+    """
+    collected: list[tuple[list[str], dict[str, Any]]] = []
+    truncated_reason = ""
+    with _WalkBudget() as budget:
+        for item in _walk(base, budget, max_depth=max_depth):
+            if pattern is not None and not _glob_matches(item, pattern):
+                continue
+            if len(collected) >= max_items:
+                truncated_reason = "limit"
+                break
+            try:
+                collected.append(([part.lower() for part in item.relative_parts], _entry_payload(item)))
+            except OSError:
+                continue
+        truncated_reason = truncated_reason or budget.exhausted_reason
+    collected.sort(key=lambda pair: pair[0])
+    return [payload for _key, payload in collected], truncated_reason
+
+
+def _truncated_result(result: dict[str, Any], truncated_reason: str) -> str:
+    result["truncated"] = bool(truncated_reason)
+    if truncated_reason:
+        result["truncated_reason"] = truncated_reason
+    return _json(result)
 
 
 def _validate_write_budget(content: str, encoding: str) -> str | None:
@@ -361,19 +534,19 @@ def file_list(path: str, pattern: str = "*", recursive: bool = False, limit: int
         return _json({"status": "error", "error": f"Not a directory: {base}"})
 
     max_items = _safe_int(limit, 200, minimum=1, maximum=_MAX_LIST_LIMIT)
-    glob_pattern = pattern or "*"
-    iterator = base.rglob(glob_pattern) if recursive else base.glob(glob_pattern)
-    entries: list[dict[str, Any]] = []
-    for item in iterator:
-        if len(entries) >= max_items:
-            break
-        if not _within_base(item, base):
-            continue
-        try:
-            entries.append(_stat_payload(item))
-        except OSError:
-            continue
-    return _json({"status": "ok", "operation": "list", "path": str(base), "count": len(entries), "truncated": len(entries) >= max_items, "entries": entries})
+    glob_pattern = _glob_parts(pattern or "*")
+    if recursive:
+        glob_pattern = ("**", *glob_pattern)
+    entries, truncated_reason = _walk_entries(
+        base,
+        max_items=max_items,
+        max_depth=_glob_max_depth(glob_pattern),
+        pattern=glob_pattern,
+    )
+    return _truncated_result(
+        {"status": "ok", "operation": "list", "path": str(base), "count": len(entries), "entries": entries},
+        truncated_reason,
+    )
 
 
 def file_read(path: str, start: int = 0, max_bytes: int = _DEFAULT_READ_BYTES, encoding: str = "utf-8") -> str:
@@ -571,39 +744,46 @@ def file_search(
 
     needle = query if case_sensitive else query.lower()
     limit = _safe_int(max_results, 50, minimum=1, maximum=_MAX_SEARCH_RESULTS)
-    files = (
-        [base]
-        if base.is_file()
-        else [item for item in base.glob(glob or "**/*") if item.is_file() and _within_base(item, base)]
-    )
+    glob_pattern = _glob_parts(glob or "**/*")
     matches: list[dict[str, Any]] = []
-    for file_path in files:
+    with _WalkBudget() as budget:
+        candidates: Iterable[Path] = (
+            [base]
+            if base.is_file()
+            else (
+                Path(item.entry.path)
+                for item in _walk(base, budget, max_depth=_glob_max_depth(glob_pattern))
+                if not item.restricted and _glob_matches(item, glob_pattern) and item.entry.is_file()
+            )
+        )
+        for file_path in candidates:
+            if len(matches) >= limit or budget.exhausted():
+                break
+            matches.extend(_file_matches(file_path, needle, case_sensitive=case_sensitive, limit=limit - len(matches)))
+    return _truncated_result(
+        {"status": "ok", "operation": "search", "path": str(base), "query": query, "count": len(matches), "matches": matches},
+        budget.exhausted_reason or ("limit" if len(matches) >= limit else ""),
+    )
+
+
+def _file_matches(file_path: Path, needle: str, *, case_sensitive: bool, limit: int) -> list[dict[str, Any]]:
+    """Return up to ``limit`` line matches from the first read slice of one file."""
+    try:
+        with file_path.open("rb") as handle:
+            text = handle.read(_DEFAULT_READ_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    if needle not in (text if case_sensitive else text.lower()):
+        return []
+    matches: list[dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        column = (line if case_sensitive else line.lower()).find(needle)
+        if column < 0:
+            continue
+        matches.append({"path": str(file_path), "line": line_number, "column": column + 1, "preview": line.strip()[:300]})
         if len(matches) >= limit:
             break
-        try:
-            data = file_path.read_bytes()[:_DEFAULT_READ_BYTES]
-            text = data.decode("utf-8", errors="replace")
-        except OSError:
-            continue
-        haystack = text if case_sensitive else text.lower()
-        if needle not in haystack:
-            continue
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            compare_line = line if case_sensitive else line.lower()
-            column = compare_line.find(needle)
-            if column < 0:
-                continue
-            matches.append(
-                {
-                    "path": str(file_path),
-                    "line": line_number,
-                    "column": column + 1,
-                    "preview": line.strip()[:300],
-                }
-            )
-            if len(matches) >= limit:
-                break
-    return _json({"status": "ok", "operation": "search", "path": str(base), "query": query, "count": len(matches), "truncated": len(matches) >= limit, "matches": matches})
+    return matches
 
 
 def file_exists(path: str) -> str:
@@ -652,22 +832,11 @@ def file_tree(path: str, depth: int = 2, limit: int = 200) -> str:
         return _json({"status": "error", "error": f"Not a directory: {base}"})
     max_depth = _safe_int(depth, 2, minimum=0, maximum=8)
     max_items = _safe_int(limit, 200, minimum=1, maximum=_MAX_LIST_LIMIT)
-    entries: list[dict[str, Any]] = []
-    base_parts = len(base.parts)
-    for item in base.rglob("*"):
-        item_depth = len(item.parts) - base_parts
-        if item_depth > max_depth or not _within_base(item, base):
-            continue
-        try:
-            payload = _stat_payload(item)
-        except OSError:
-            continue
-        payload["depth"] = item_depth
-        payload["relative_path"] = str(item.relative_to(base))
-        entries.append(payload)
-        if len(entries) >= max_items:
-            break
-    return _json({"status": "ok", "operation": "tree", "path": str(base), "count": len(entries), "truncated": len(entries) >= max_items, "entries": entries})
+    entries, truncated_reason = _walk_entries(base, max_items=max_items, max_depth=max_depth)
+    return _truncated_result(
+        {"status": "ok", "operation": "tree", "path": str(base), "count": len(entries), "entries": entries},
+        truncated_reason,
+    )
 
 
 def file_hash(path: str, algorithm: str = "sha256") -> str:

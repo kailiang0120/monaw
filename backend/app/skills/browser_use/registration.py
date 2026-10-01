@@ -9,6 +9,7 @@ from .manager import configure_browser_use_manager
 from .tools import (
     browser_back,
     browser_click,
+    browser_close_chrome,
     browser_console,
     browser_downloads,
     browser_evaluate,
@@ -114,9 +115,19 @@ def register_browser_tools(registry, settings) -> None:
     register_executor("browser_click", _resume_browser_click)
     register_executor("browser_type", _resume_browser_type)
     register_executor("browser_downloads", _resume_browser_downloads)
+    register_executor("browser_close_chrome", lambda _input: _run_resume(browser_close_chrome(manager, _bypass_gate=True)))
 
     registry.extend(
         [
+            {
+                "name": "browser_close_chrome",
+                "description": "Close all Chrome/Chromium windows and background processes, force-killing survivors. Requires approval; unsaved work may be lost. Use only when the user wants Chrome fully closed before relaunching.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+                "callable": lambda: browser_close_chrome(manager),
+                "domain": "browser",
+                "execution_mode": "async",
+                "affinity_group": "browser-use",
+            },
             {
                 "name": "browser_session",
                 "description": "Inspect, reset, stop, or switch the built-in browser-use session between managed and system Chrome modes.",

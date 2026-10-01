@@ -14,11 +14,13 @@ PENDING_ACCESS_GRANT_LIMIT_MAX = 100
 
 @router.get("/access-grants/pending", response_model=list[AccessGrantTicketOut])
 async def list_pending_access_grants(
+    request: Request,
     conversation_id: str = "",
     limit: int = Query(50, ge=1, le=PENDING_ACCESS_GRANT_LIMIT_MAX),
     offset: int = Query(0, ge=0, le=10_000),
 ):
-    tickets = get_pending_grants(conversation_id)
+    # Only list tickets this session may resolve; others would 404 on resolve.
+    tickets = get_pending_grants(conversation_id, request.state.control_session.session_id)
     tickets = tickets[offset:offset + limit]
     return [
         AccessGrantTicketOut(

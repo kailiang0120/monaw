@@ -1,6 +1,8 @@
 import asyncio
 import json
 import threading
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +12,7 @@ from app.agent.execution_resume import resume_approved_ticket
 from app.agent.settings_store import MCPServerConfig
 from app.agent.tool_registry import ToolRegistry
 from app.skills.mcp_bridge import tools as mcp_tools_module
-from app.skills.mcp_bridge.connection import ServerManager
+from app.skills.mcp_bridge.connection import ServerManager, _TailBuffer
 from app.skills.mcp_bridge.registry import (
     build_tool_entries,
     clear_all_reflected_tools,
@@ -31,6 +33,36 @@ class _FakeSession:
 
     async def list_tools(self):
         return SimpleNamespace(tools=[])
+
+
+def test_stderr_buffer_accepts_real_subprocess_output_and_keeps_bounded_tail():
+    capture = _TailBuffer(limit=32)
+    try:
+        subprocess.run([sys.executable, "-c", "import sys; sys.stderr.write('x' * 100 + ' connector error')"],
+                       stderr=capture, check=True)
+        assert capture.getvalue().endswith(" connector error")
+        assert len(capture.getvalue()) == 32
+        capture.close()
+        assert capture.getvalue().endswith(" connector error")
+    finally:
+        capture.close()
+
+
+def test_chrome_mcp_launches_local_profile_before_first_tool_only(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.skills.browser_use import manager as browser_module
+    from app.agent import settings_store
+
+    launcher = AsyncMock(return_value=("ws://127.0.0.1:1234/devtools/browser/test", "Profile 1"))
+    monkeypatch.setattr(browser_module, "launch_local_chrome", launcher)
+    monkeypatch.setattr(settings_store, "load_agent_settings", lambda: SimpleNamespace(
+        browser=SimpleNamespace(system_profile_directory="Profile 1")))
+    manager = ServerManager(MCPServerConfig(name="Chrome-dev-tools", command="npx",
+        args=["-y", "chrome-devtools-mcp@latest", "--autoConnect"]))
+    manager._session = _FakeSession()
+    asyncio.run(manager._call_tool("take_snapshot", {}))
+    asyncio.run(manager._call_tool("take_snapshot", {}))
+    launcher.assert_awaited_once_with("Profile 1")
 
 
 class _SlowSession:

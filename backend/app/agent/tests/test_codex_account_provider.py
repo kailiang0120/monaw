@@ -115,6 +115,41 @@ def test_account_provider_appears_alongside_openai_api():
     assert LLMSettings(provider="codex", model_name="gpt-6-luna", reasoning_effort="ultra").reasoning_effort == "max"
 
 
+def test_mcp_dynamic_tools_use_safe_aliases_and_execute_original_registry_name(monkeypatch, tmp_path):
+    from app.agent.codex_account import _codex_tool_name, _history_item
+    original = "mcp__Chrome-dev-tools__click"
+    alias = _codex_tool_name(original)
+    server = FakeServer(turn_script=[_tool_call("req-1", "call_1", tool=alias)])
+    _service(tmp_path, monkeypatch, server)
+    client = LLMClient("codex", "gpt-6-luna", "")
+    response = asyncio.run(client.chat_with_tools(
+        [{"role": "user", "content": "click"}],
+        [{"name": original, "description": "Click", "parameters": {"type": "object"}}],
+        f"Use {original}.",
+    ))
+    assert response.tool_calls[0].tool_name == original
+    start = dict(server.requests)["thread/start"]
+    assert start["dynamicTools"][0]["name"] == alias
+    assert not alias.startswith("mcp__")
+    assert alias in start["baseInstructions"]
+    assert _history_item({"type": "function_call", "name": original})["name"] == alias
+    assert len(_codex_tool_name("mcp__" + "x" * 100)) <= 64
+
+
+def test_mcp_alias_instructions_handle_tool_names_that_share_a_prefix(monkeypatch, tmp_path):
+    server = FakeServer(turn_script=_FINISH)
+    _service(tmp_path, monkeypatch, server)
+    names = ["mcp__server__read", "mcp__server__read_file"]
+    asyncio.run(LLMClient("codex", "gpt-6-luna", "").chat_with_tools(
+        [{"role": "user", "content": "read"}],
+        [{"name": name, "parameters": {"type": "object"}} for name in names],
+        "Use mcp__server__read or mcp__server__read_file.",
+    ))
+    assert dict(server.requests)["thread/start"]["baseInstructions"] == (
+        "Use monaw_mcp__server__read or monaw_mcp__server__read_file."
+    )
+
+
 def test_tool_calls_come_back_to_monaw_and_resume_the_same_codex_turn(monkeypatch, tmp_path):
     server = FakeServer(turn_script=[_tool_call("req-1", "call_1")], resume_script=_FINISH)
     _service(tmp_path, monkeypatch, server)

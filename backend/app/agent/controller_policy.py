@@ -12,7 +12,6 @@ import os
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -343,15 +342,6 @@ def _write_allowlist_md(apps: list[AppEntry]) -> None:
     _ALLOWLIST_FILE.write_text(content, encoding="utf-8")
 
 
-def _read_policy_json() -> dict[str, Any]:
-    path = _policy_json_path()
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    state = _permissions_to_state(_load_runtime_settings())
-    _write_policy_json(state)
-    return state.model_dump()
-
-
 def _write_policy_json(state: ControllerPolicyState) -> None:
     _policy_json_path().write_text(state.model_dump_json(indent=2), encoding="utf-8")
 
@@ -593,6 +583,20 @@ def _check_session_grant(target_type: str, identifier: str, action: ActionType =
 
 def _is_path_in_blocked_roots(canon_path: str, blocked_roots: list[str]) -> bool:
     return any(_path_within_root(canon_path, root) for root in blocked_roots)
+
+
+def blocked_roots_below(path: str) -> list[str]:
+    """Return canonical blocked roots nested inside ``path``.
+
+    Directory walks stop at these even when ``path`` itself is permitted, so a
+    grant on a parent folder does not expose e.g. AppData underneath it.
+    """
+    canon_path = canonical(path)
+    roots = [canonical(root) for root in _load_runtime_settings().permissions.blocked_roots]
+    return [
+        root for root in roots
+        if _path_within_root(root, canon_path) and not _path_within_root(canon_path, root)
+    ]
 
 
 def _is_state_permitted_root(canon_path: str, roots: list[str]) -> bool:

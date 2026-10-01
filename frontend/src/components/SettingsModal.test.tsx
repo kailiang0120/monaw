@@ -501,28 +501,27 @@ describe('SettingsModal', () => {
   it('keeps model selection and image help out of Settings', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
-    expect(await screen.findByRole('heading', { name: 'Voice & limits' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Voice' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Provider' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reasoning effort' })).not.toBeInTheDocument()
     expect(screen.queryByText('Reading images and screenshots')).not.toBeInTheDocument()
   })
 
-  it('configures direct control of the running Chrome browser', async () => {
+  it('saves automatic launch of the local Chrome profile', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Connect to my Chrome' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Browser mode' }))
+    fireEvent.click(screen.getByRole('option', { name: 'My Chrome profile' }))
+    expect(screen.queryByRole('button', { name: 'Connection method' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('CDP endpoint')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        mcp: expect.objectContaining({
-          enabled: true,
-          servers: expect.arrayContaining([expect.objectContaining({
-            name: 'Chrome-dev-tools',
-            command: 'npx',
-            args: ['-y', 'chrome-devtools-mcp@latest', '--autoConnect'],
-          })]),
+        browser: expect.objectContaining({
+          mode: 'system',
+          system_connection_strategy: 'launch',
         }),
       }))
     })
@@ -691,7 +690,7 @@ describe('SettingsModal', () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click((await screen.findAllByRole('button', { name: /Identity/i }))[0])
-    fireEvent.change(await screen.findByLabelText('Call me'), { target: { value: 'Kai' } })
+    fireEvent.change(await screen.findByLabelText('Your name'), { target: { value: 'Kai' } })
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
     await waitFor(() => {
@@ -746,12 +745,12 @@ describe('SettingsModal', () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click((await screen.findAllByRole('button', { name: /Identity/i }))[0])
-    fireEvent.change(await screen.findByLabelText('Agent nickname'), { target: { value: 'Hermes' } })
-    fireEvent.change(screen.getByLabelText('Call me'), { target: { value: 'Kai' } })
-    fireEvent.change(screen.getByLabelText('User identity'), {
+    fireEvent.change(await screen.findByLabelText('Agent name'), { target: { value: 'Hermes' } })
+    fireEvent.change(screen.getByLabelText('Your name'), { target: { value: 'Kai' } })
+    fireEvent.change(screen.getByLabelText('About you'), {
       target: { value: 'Builder working on Windows automation.' },
     })
-    fireEvent.change(screen.getByLabelText('Communication style'), {
+    fireEvent.change(screen.getByLabelText('Reply style'), {
       target: { value: 'Use direct, concise replies.' },
     })
 
@@ -798,94 +797,37 @@ describe('SettingsModal', () => {
     expect(await screen.findByDisplayValue(/Ignore this file if the task is not coding/i)).toBeInTheDocument()
   })
 
-  it('refreshes memory stats and records from the memory settings panel', async () => {
-    vi.mocked(fetchMemories)
-      .mockResolvedValueOnce([buildMemoryRecord({ id: 'memory-1', content: 'Memory one' }) as any])
-      .mockResolvedValueOnce([buildMemoryRecord({ id: 'memory-2', content: 'Memory two' }) as any])
-    vi.mocked(fetchMemoryStats)
-      .mockResolvedValueOnce(buildMemoryStats({
-        active: 1,
-        new: 1,
-        short_term: 1,
-        personalities: 2,
-        curated_sessions: 1,
-        audit_events: 3,
-      }) as any)
-      .mockResolvedValueOnce(buildMemoryStats({
-        active: 2,
-        new: 2,
-        short_term: 2,
-        personalities: 2,
-        curated_sessions: 2,
-        audit_events: 4,
-      }) as any)
-
+  it('hides memory, request limits, and the redundant identity summary', async () => {
     render(<SettingsModal onClose={() => {}} />)
-
-    fireEvent.click((await screen.findAllByRole('button', { name: /Memory/i }))[0])
-    expect((await screen.findAllByText('Memory one')).length).toBeGreaterThan(0)
-    expect(screen.getByText('Candidates')).toBeInTheDocument()
-    expect(screen.getByText('Episodes')).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
-
-    expect((await screen.findAllByText('Memory two')).length).toBeGreaterThan(0)
-    expect(fetchMemories).toHaveBeenCalledTimes(2)
-    expect(fetchMemoryStats).toHaveBeenCalledTimes(2)
+    await screen.findByRole('heading', { name: 'Voice' })
+    expect(screen.queryByRole('button', { name: /^Memory$/i })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Tool iteration limit')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Turn timeout seconds')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('LLM call timeout seconds')).not.toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('button', { name: /Identity/i })[0])
+    expect(screen.queryByText('What the agent will use')).not.toBeInTheDocument()
   })
 
-  it('shows a memory skeleton while the memory panel is loading', async () => {
-    let resolveMemories: (value: any) => void = (_value: any) => {
-      throw new Error('Expected memory resolver to be captured')
-    }
-    vi.mocked(fetchMemories).mockReturnValue(
-      new Promise((resolve) => {
-        resolveMemories = resolve
-      }) as any,
-    )
-    vi.mocked(fetchMemoryStats).mockResolvedValue(buildMemoryStats() as any)
-    vi.mocked(fetchMemoryFile).mockResolvedValue(null as any)
+  it('opens profile help without changing permissions and dismisses it with Escape', async () => {
+    vi.mocked(updateSettings).mockClear()
+    const onClose = vi.fn()
+    render(<SettingsModal onClose={onClose} />)
+    fireEvent.click((await screen.findAllByRole('button', { name: /Permissions/i }))[0])
 
-    render(<SettingsModal onClose={() => {}} />)
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+    const info = screen.getByRole('button', { name: 'About Auto approve' })
+    fireEvent.focus(info)
+    expect(screen.getByRole('tooltip')).toHaveTextContent('without stopping')
+    expect(screen.getByRole('button', { name: 'Ask first' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+    expect(onClose).not.toHaveBeenCalled()
 
-    fireEvent.click((await screen.findAllByRole('button', { name: /Memory/i }))[0])
-    expect(await screen.findByTestId('memory-loading-skeleton')).toBeInTheDocument()
-
-    resolveMemories([buildMemoryRecord({ id: 'memory-loaded', content: 'Loaded memory' })])
-
-    expect((await screen.findAllByText('Loaded memory')).length).toBeGreaterThan(0)
-  })
-
-  it('does not submit manual memories shorter than the backend quality gate', async () => {
-    render(<SettingsModal onClose={() => {}} />)
-
-    fireEvent.click((await screen.findAllByRole('button', { name: /Memory/i }))[0])
-    fireEvent.change(await screen.findByPlaceholderText('Add a memory…'), {
-      target: { value: 'Hey' },
-    })
-
-    expect(screen.getByText(/Use at least 8 characters/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Add memory' })).toBeDisabled()
-    expect(mocks.createMemory).not.toHaveBeenCalled()
-  })
-
-  it('saves runtime iteration limits from model settings', async () => {
-    render(<SettingsModal onClose={() => {}} />)
-
-    fireEvent.change(await screen.findByLabelText('Tool iteration limit'), {
-      target: { value: '180' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
-
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        llm: expect.objectContaining({
-          max_iterations_per_turn: 180,
-          max_turn_seconds: 1800,
-          max_llm_call_seconds: 300,
-        }),
-      }))
-    })
+    fireEvent.click(info)
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+    fireEvent.pointerDown(screen.getByRole('heading', { name: 'Approval profile' }))
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+    expect(updateSettings).not.toHaveBeenCalled()
   })
 
   it('switches preset permissions to custom when a preset toggle changes', async () => {
@@ -914,7 +856,7 @@ describe('SettingsModal', () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click((await screen.findAllByRole('button', { name: /Permissions/i }))[0])
-    fireEvent.click(await screen.findByLabelText('Allow screen fallback'))
+    fireEvent.click(await screen.findByLabelText('Allow clicks by screen coordinates'))
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
     await waitFor(() => {
@@ -952,7 +894,7 @@ describe('SettingsModal', () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click((await screen.findAllByRole('button', { name: /Permissions/i }))[0])
-    fireEvent.click(screen.getByRole('button', { name: 'Full Access' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Auto approve' }))
     fireEvent.click(screen.getByRole('button', { name: 'Custom' }))
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 

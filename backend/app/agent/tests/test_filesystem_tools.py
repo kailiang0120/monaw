@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -350,3 +351,152 @@ def test_filesystem_cannot_rewrite_agent_settings(policy_env):
     assert result["status"] == "blocked"
     assert result["reason_code"] == "protected_control_path"
     assert settings_path.read_text(encoding="utf-8") == original
+
+
+def _make_tree(root, paths):
+    for relative in paths:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x", encoding="utf-8")
+
+
+def test_filesystem_tree_never_scans_below_requested_depth(policy_env, monkeypatch):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    _make_tree(policy_env.root, ["a/b/c/d/deep.txt", "a/top.txt", "z.txt"])
+    scanned: list[str] = []
+    real_scandir = file_ops.os.scandir
+
+    def recording_scandir(path):
+        scanned.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(file_ops.os, "scandir", recording_scandir)
+
+    result = json.loads(file_ops.file_tree(str(policy_env.root), depth=2))
+
+    assert result["status"] == "ok"
+    assert result["truncated"] is False
+    assert [entry["relative_path"] for entry in result["entries"]] == [
+        "a",
+        str(Path("a") / "b"),
+        str(Path("a") / "top.txt"),
+        "z.txt",
+    ]
+    assert sorted(scanned) == sorted([str(policy_env.root), str(policy_env.root / "a")])
+
+
+def test_filesystem_tree_reports_limit_and_time_budget_truncation(policy_env, monkeypatch):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    _make_tree(policy_env.root, [f"file-{index}.txt" for index in range(5)])
+
+    limited = json.loads(file_ops.file_tree(str(policy_env.root), limit=3))
+    monkeypatch.setattr(file_ops, "_WALK_TIME_BUDGET_SECONDS", -1.0)
+    timed_out = json.loads(file_ops.file_tree(str(policy_env.root)))
+
+    assert limited["count"] == 3
+    assert limited["truncated"] is True
+    assert limited["truncated_reason"] == "limit"
+    assert timed_out["truncated"] is True
+    assert timed_out["truncated_reason"] == "time_budget"
+
+
+def test_filesystem_tree_does_not_enter_blocked_roots_under_granted_path(policy_env):
+    blocked = policy_env.root / "private"
+    _make_tree(policy_env.root, ["private/secret.txt", "public.txt"])
+    policy_env.save_settings(_settings_for_root(policy_env.root, blocked_roots=[str(blocked)]))
+
+    result = json.loads(file_ops.file_tree(str(policy_env.root)))
+
+    entries = {entry["relative_path"]: entry for entry in result["entries"]}
+    assert set(entries) == {"private", "public.txt"}
+    assert entries["private"]["restricted"] is True
+
+
+def test_filesystem_tree_lists_but_does_not_follow_directory_links(policy_env):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    _make_tree(policy_env.root, ["real/inner.txt"])
+    try:
+        (policy_env.root / "linked").symlink_to(policy_env.root / "real", target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    result = json.loads(file_ops.file_tree(str(policy_env.root)))
+
+    relative_paths = {entry["relative_path"] for entry in result["entries"]}
+    assert "linked" in relative_paths
+    assert str(Path("real") / "inner.txt") in relative_paths
+    assert str(Path("linked") / "inner.txt") not in relative_paths
+
+
+def test_filesystem_directory_walk_tools_have_timeout_backstop():
+    registry = ToolRegistry()
+    filesystem_tools.register_tools(registry)
+    tools = {tool["name"]: tool for tool in registry.get_all_tools()}
+
+    for name in ("fs_list", "fs_tree", "fs_search", "file_tree"):
+        assert tools[name]["timeout_seconds"] == 60.0, name
+    assert "timeout_seconds" not in tools["fs_read"]
+
+
+def test_filesystem_tree_does_not_follow_windows_junctions(policy_env):
+    winapi = pytest.importorskip("_winapi")
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    _make_tree(policy_env.root, ["real/inner.txt"])
+    winapi.CreateJunction(str(policy_env.root / "real"), str(policy_env.root / "junction"))
+
+    result = json.loads(file_ops.file_tree(str(policy_env.root)))
+
+    relative_paths = {entry["relative_path"] for entry in result["entries"]}
+    assert "junction" in relative_paths
+    assert str(Path("junction") / "inner.txt") not in relative_paths
+
+
+@pytest.mark.parametrize(
+    ("pattern", "recursive", "expected"),
+    [
+        ("*.txt", False, ["top.txt"]),
+        ("*.txt", True, ["top.txt", "sub/nested.txt", "sub/deeper/deep.txt"]),
+        ("sub/*.txt", False, ["sub/nested.txt"]),
+        ("**/deep*", False, ["sub/deeper", "sub/deeper/deep.txt"]),
+        ("**", False, ["sub", "sub/deeper"]),
+    ],
+)
+def test_filesystem_list_matches_glob_semantics(policy_env, pattern, recursive, expected):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    _make_tree(policy_env.root, ["top.txt", "top.md", "sub/nested.txt", "sub/deeper/deep.txt"])
+
+    result = json.loads(file_ops.file_list(str(policy_env.root), pattern=pattern, recursive=recursive))
+
+    assert sorted(entry["relative_path"] for entry in result["entries"]) == sorted(str(Path(p)) for p in expected)
+
+
+def test_filesystem_walk_stops_when_the_tool_call_is_cancelled(policy_env):
+    from app.agent.tool_cancellation import cancel_call, reset_current_call_id, set_current_call_id
+
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    _make_tree(policy_env.root, [f"file-{index}.txt" for index in range(5)])
+    token = set_current_call_id("call-walk")
+    try:
+        with file_ops._WalkBudget() as budget:
+            walked = []
+            for item in file_ops._walk(policy_env.root, budget):
+                walked.append(item)
+                assert cancel_call("call-walk") is True
+    finally:
+        reset_current_call_id(token)
+
+    assert len(walked) == 1
+    assert budget.exhausted_reason == "cancelled"
+    assert cancel_call("call-walk") is False
+
+
+def test_filesystem_search_does_not_read_blocked_roots_under_granted_path(policy_env):
+    blocked = policy_env.root / "private"
+    _make_tree(policy_env.root, ["private/secret.txt", "public.txt"])
+    (blocked / "secret.txt").write_text("needle", encoding="utf-8")
+    (policy_env.root / "public.txt").write_text("needle", encoding="utf-8")
+    policy_env.save_settings(_settings_for_root(policy_env.root, blocked_roots=[str(blocked)]))
+
+    result = json.loads(file_ops.file_search(str(policy_env.root), "needle"))
+
+    assert [match["path"] for match in result["matches"]] == [str(policy_env.root / "public.txt")]

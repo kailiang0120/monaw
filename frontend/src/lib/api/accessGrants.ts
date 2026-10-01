@@ -1,4 +1,4 @@
-import { apiFetch, BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS, throwApiError } from './client'
 import type { AccessGrantDecision, AccessGrantTicket } from './types'
 
 export async function fetchPendingAccessGrants(
@@ -22,6 +22,6 @@ export async function resolveAccessGrant(
     headers: JSON_HEADERS,
     body: JSON.stringify({ decision }),
   })
-  if (!res.ok) throw new Error('Failed to resolve access grant')
+  if (!res.ok) await throwApiError(res, 'Failed to resolve access grant')
   return res.json()
 }

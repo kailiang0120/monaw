@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -100,13 +101,25 @@ class _TurnSession:
     usage_total: dict[str, int] = field(default_factory=dict)
     usage_mark: dict[str, int] = field(default_factory=dict)
     last_active: float = field(default_factory=time.monotonic)
+    tool_names: dict[str, str] = field(default_factory=dict)
+
+
+def _codex_tool_name(name: str) -> str:
+    # Codex reserves mcp__ for its own MCP integrations. Monaw runs the bridge
+    # itself, so expose a dynamic alias and translate calls back at the boundary.
+    if not name.startswith("mcp__"):
+        return name
+    alias = f"monaw_{name}"
+    if len(alias) > 64:
+        alias = f"{alias[:51]}_{hashlib.sha256(name.encode()).hexdigest()[:12]}"
+    return alias
 
 
 def _tool_specs(tools: list[dict]) -> list[dict]:
     return [
         {
             "type": "function",
-            "name": str(tool.get("name") or ""),
+            "name": _codex_tool_name(str(tool.get("name") or "")),
             "description": str(tool.get("description") or ""),
             "inputSchema": tool.get("parameters") or {"type": "object", "properties": {}},
         }
@@ -148,7 +161,7 @@ def _history_item(message: dict) -> dict | None:
         return {
             "type": "function_call",
             "call_id": str(message.get("call_id") or ""),
-            "name": str(message.get("name") or ""),
+            "name": _codex_tool_name(str(message.get("name") or "")),
             "arguments": arguments,
         }
     if item_type == "function_call_output":
@@ -277,6 +290,13 @@ class CodexAccountService:
         self._close_idle_sessions()
         effort = effort if effort in _EFFORTS else "low"
         specs = _tool_specs(tools)
+        tool_names = {_codex_tool_name(str(tool.get("name") or "")): str(tool.get("name") or "") for tool in tools}
+        if len(tool_names) != len(specs):
+            raise ValueError("Codex tool aliases must be unique.")
+        aliases = {original: alias for alias, original in tool_names.items() if alias != original}
+        if aliases:
+            pattern = "|".join(re.escape(name) for name in sorted(aliases, key=len, reverse=True))
+            system_prompt = re.sub(pattern, lambda match: aliases[match.group()], system_prompt)
         signature = _signature(model, effort, system_prompt, specs)
 
         session = self._resume_target(messages, signature)
@@ -287,6 +307,7 @@ class CodexAccountService:
                 session = await self._start_session(
                     model, effort, messages, specs, system_prompt, signature, reasoning_callback is not None,
                 )
+            session.tool_names = tool_names
             return await self._collect(session, stream_callback, reasoning_callback)
         except BaseException:
             if session is not None:
@@ -400,7 +421,7 @@ class CodexAccountService:
                             arguments = {}
                     tool_calls.append(CodexToolCall(
                         call_id=call_id,
-                        name=str(params.get("tool") or ""),
+                        name=session.tool_names.get(str(params.get("tool") or ""), str(params.get("tool") or "")),
                         arguments=arguments if isinstance(arguments, dict) else {},
                     ))
                     session.pending[call_id] = message["id"]

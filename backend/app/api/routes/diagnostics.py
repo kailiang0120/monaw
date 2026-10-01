@@ -98,6 +98,8 @@ def _redact_mcp_args(values: object) -> list[str]:
 
 def _safe_browser_diagnostics(diagnostics: dict) -> dict:
     safe = redact(diagnostics)
+    # "session" is a secret-key pattern, but this field is a public boolean.
+    safe["session_active"] = diagnostics.get("session_active") is True
     for key in (
         "system_cdp_url",
         "managed_profile_dir",
@@ -112,7 +114,12 @@ def _safe_browser_diagnostics(diagnostics: dict) -> dict:
     if isinstance(profiles, list):
         for profile in profiles:
             if isinstance(profile, dict):
-                profile["directory"] = ""
+                # This is a profile identifier (Default / Profile N), not a path.
+                directory = str(profile.get("directory") or "")
+                if directory not in {"Default", "Guest Profile"} and not (
+                    directory.startswith("Profile ") and directory.removeprefix("Profile ").isdigit()
+                ):
+                    profile["directory"] = ""
     return safe
 
 

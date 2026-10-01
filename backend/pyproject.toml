@@ -37,6 +37,7 @@ dependencies = [
     "tiktoken>=0.8.0",
     "tzdata>=2025.2; sys_platform == 'win32'",
     "uvicorn[standard]>=0.30.6",
+    "websockets>=15.0,<17.0",
 ]
 
 [dependency-groups]

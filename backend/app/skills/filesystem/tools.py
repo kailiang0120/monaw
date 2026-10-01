@@ -61,6 +61,10 @@ def _fs_delete_many(paths: list[str]) -> str:
     return _batch_results(paths, lambda path: file_ops.fs_delete(str(path)))
 
 
+_DIRECTORY_WALK_TIMEOUT_SECONDS = 60.0
+_DIRECTORY_WALK_CALLABLES = {file_ops.file_list, file_ops.file_glob, file_ops.file_tree, file_ops.file_search}
+
+
 def _params(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required or []}
 
@@ -89,6 +93,9 @@ def _tool(
     }
     if deprecated_alias_for:
         tool["deprecated_alias_for"] = deprecated_alias_for
+    if callable_ in _DIRECTORY_WALK_CALLABLES:
+        # Backstop so a slow walk surfaces as a tool error instead of an endless spinner.
+        tool["timeout_seconds"] = _DIRECTORY_WALK_TIMEOUT_SECONDS
     return tool
 
 

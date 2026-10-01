@@ -175,10 +175,45 @@ def create_grant_ticket(
     return ticket
 
 
-def get_pending_grants(conversation_id: str = "") -> list[AccessGrantTicket]:
-    tickets = list(_pending.values())
+def _expiry_error(ticket: AccessGrantTicket) -> str:
+    try:
+        if datetime.fromisoformat(ticket.expires_at) <= datetime.now(timezone.utc):
+            return "ticket is expired"
+    except ValueError:
+        return "ticket expiry is invalid"
+    return ""
+
+
+def _retire_pending_locked(ticket_id: str) -> AccessGrantTicket | None:
+    ticket = _pending.pop(ticket_id, None)
+    if ticket is not None:
+        ticket.status = "expired"
+        ticket.resolved_at = datetime.now(timezone.utc).isoformat()
+    return ticket
+
+
+def retire_grant(ticket_id: str) -> None:
+    """Expire a still-pending ticket once nothing waits on it (timeout or Stop)."""
+    with _state_lock:
+        ticket = _retire_pending_locked(ticket_id)
+    if ticket is not None:
+        publish_ui_event(
+            "access_grant.changed",
+            {"ticket_id": ticket.id, "conversation_id": ticket.conversation_id, "status": ticket.status},
+        )
+
+
+def get_pending_grants(conversation_id: str = "", control_session_id: str = "") -> list[AccessGrantTicket]:
+    """Pending tickets the given session can still resolve, oldest first."""
+    with _state_lock:
+        for ticket in list(_pending.values()):
+            if _expiry_error(ticket):
+                _retire_pending_locked(ticket.id)
+        tickets = list(_pending.values())
     if conversation_id:
         tickets = [t for t in tickets if t.conversation_id == conversation_id]
+    if control_session_id:
+        tickets = [t for t in tickets if t.control_session_id == control_session_id]
     return sorted(tickets, key=lambda t: t.created_at)
 
 
@@ -197,11 +232,9 @@ def grant_validation_error(
     expected_status = "granted" if require_granted else "pending"
     if ticket.status != expected_status:
         return f"ticket is {ticket.status}"
-    try:
-        if datetime.fromisoformat(ticket.expires_at) <= datetime.now(timezone.utc):
-            return "ticket is expired"
-    except ValueError:
-        return "ticket expiry is invalid"
+    expiry_error = _expiry_error(ticket)
+    if expiry_error:
+        return expiry_error
     if expected_session_id and ticket.control_session_id != expected_session_id:
         return "ticket belongs to another control session"
     if expected_conversation_id and ticket.conversation_id != expected_conversation_id:

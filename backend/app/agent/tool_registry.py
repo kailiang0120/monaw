@@ -40,6 +40,7 @@ _NEVER_PARALLEL = {
     "delete",
     "computer_functions_get_window_state",
     "browser_session",
+    "browser_close_chrome",
     "browser_open",
     "browser_navigate",
     "browser_back",

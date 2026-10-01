@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -84,6 +85,17 @@ class _TailBuffer:
         self.limit = limit
         self._lock = threading.Lock()
         self._text = ""
+        self._temp_dir = None
+        self._file = None
+
+    def fileno(self) -> int:
+        # The MCP SDK passes errlog directly to subprocess stderr on Windows.
+        # A write-only Python buffer is not a valid subprocess file descriptor.
+        with self._lock:
+            if self._file is None:
+                self._temp_dir = tempfile.TemporaryDirectory(prefix="monaw-mcp-stderr-")
+                self._file = (Path(self._temp_dir.name) / "stderr.log").open("ab", buffering=0)
+            return self._file.fileno()
 
     def write(self, chunk: Any) -> int:
         if isinstance(chunk, bytes):
@@ -91,7 +103,10 @@ class _TailBuffer:
         else:
             text = str(chunk)
         with self._lock:
-            self._text = (self._text + text)[-self.limit :]
+            if self._file is not None:
+                self._file.write(text.encode("utf-8", errors="replace"))
+            else:
+                self._text = (self._text + text)[-self.limit :]
         return len(text)
 
     def flush(self) -> None:
@@ -99,7 +114,28 @@ class _TailBuffer:
 
     def getvalue(self) -> str:
         with self._lock:
-            return self._text
+            return self._read_tail_locked()
+
+    def _read_tail_locked(self) -> str:
+        tail = ""
+        if self._temp_dir is not None:
+            # Use a separate read handle so seeking never moves the child's
+            # stderr write position.
+            with (Path(self._temp_dir.name) / "stderr.log").open("rb") as reader:
+                reader.seek(0, os.SEEK_END)
+                reader.seek(max(0, reader.tell() - self.limit))
+                tail = reader.read().decode("utf-8", errors="replace")
+        return (self._text + tail)[-self.limit :]
+
+    def close(self) -> None:
+        with self._lock:
+            self._text = self._read_tail_locked()
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+            if self._temp_dir is not None:
+                self._temp_dir.cleanup()
+                self._temp_dir = None
 
 
 class ServerManager:
@@ -136,6 +172,7 @@ class ServerManager:
         self.liveness_failure_threshold = 3
         self._liveness_failures = 0
         self._child_pids_before_start: set[int] = set()
+        self._local_chrome_launched = False
 
     def start(self) -> bool:
         self._register_active()
@@ -194,7 +231,7 @@ class ServerManager:
         self.last_call_started_at = started.isoformat()
         try:
             future = asyncio.run_coroutine_threadsafe(
-                self._session.call_tool(tool_name, arguments=arguments),
+                self._call_tool(tool_name, arguments),
                 self._loop,
             )
             result = future.result(timeout=self.cfg.call_timeout_ms / 1000)
@@ -303,7 +340,22 @@ class ServerManager:
             return False
         return self.restart()
 
+    async def _call_tool(self, tool_name: str, arguments: dict[str, Any]):
+        if not self._local_chrome_launched and "--autoConnect" in self.cfg.args and any(
+            "chrome-devtools-mcp" in arg for arg in self.cfg.args
+        ):
+            from app.agent.settings_store import load_agent_settings
+            from app.skills.browser_use.manager import launch_local_chrome
+
+            browser_settings = load_agent_settings().browser
+            await launch_local_chrome(browser_settings.system_profile_directory)
+            self._local_chrome_launched = True
+        return await self._session.call_tool(tool_name, arguments=arguments)
+
     def _prepare_start_locked(self) -> None:
+        self._local_chrome_launched = False
+        self.stderr_tail.close()
+        self.stderr_tail = _TailBuffer()
         self.connected = False
         self.last_error = ""
         self.unhealthy_reason = ""
@@ -414,6 +466,7 @@ class ServerManager:
             if pending:
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.close()
+            self.stderr_tail.close()
 
     async def _serve(self) -> None:
         from mcp import ClientSession

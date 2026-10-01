@@ -285,7 +285,7 @@ export const MCP_SERVER_TEMPLATES = {
     }),
   },
   chromeDevToolsAutoConnect: {
-    label: 'Chrome DevTools (autoConnect)',
+    label: 'Chrome DevTools (my profile)',
     build: (): AgentSettings['mcp']['servers'][number] => ({
       ...emptyMCPServer(),
       name: 'Chrome-dev-tools',
@@ -293,7 +293,7 @@ export const MCP_SERVER_TEMPLATES = {
       args: ['-y', 'chrome-devtools-mcp@latest', '--autoConnect'],
       startup_timeout_ms: 60000,
       call_timeout_ms: 90000,
-      description: 'Attach to a running Chrome 144+ session after remote debugging is enabled in chrome://inspect/#remote-debugging.',
+      description: 'Monaw opens your Chrome profile automatically. Allow Chrome’s connection prompt when shown (Chrome 144+).',
     }),
   },
   filesystem: {
@@ -423,9 +423,9 @@ export function normalizeDraft(
       provider,
       model_name: modelName,
       reasoning_effort: reasoningEffort,
-      max_iterations_per_turn: clampInteger(settings.llm.max_iterations_per_turn, 40, 1, 500),
-      max_turn_seconds: clampInteger(settings.llm.max_turn_seconds, 1800, 30, 14400),
-      max_llm_call_seconds: clampInteger(settings.llm.max_llm_call_seconds, 300, 30, 1800),
+      max_iterations_per_turn: clampInteger(settings.llm.max_iterations_per_turn, 200, 1, 500),
+      max_turn_seconds: clampInteger(settings.llm.max_turn_seconds, 7200, 30, 14400),
+      max_llm_call_seconds: clampInteger(settings.llm.max_llm_call_seconds, 600, 30, 1800),
     },
     permissions: settings.permissions.mode === 'custom'
       ? {
