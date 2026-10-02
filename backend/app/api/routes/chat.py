@@ -8,10 +8,11 @@ from fastapi.responses import StreamingResponse
 from app.agent.job_manager import cancel_job, create_job, get_job, list_jobs, run_job
 from app.agent.response_attachments import runtime_attachment_from_ref
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
+from app.agent.steering import SteeringInbox, SteeringMessage, get_steering, register_steering, unregister_steering
 from app.agent.ui_events import publish_ui_event
 from app.config import settings
 from app.debug_ndjson import dbg_log
-from app.schemas import ChatJobCreateResponse, ChatJobOut, ChatRequest, OkResponse
+from app.schemas import ChatJobCreateResponse, ChatJobOut, ChatRequest, ChatSteerRequest, ChatSteerResponse, OkResponse
 
 router = APIRouter()
 
@@ -75,10 +76,13 @@ async def chat(req: ChatRequest, request: Request):
             data={"conv_id": conv_id, "msg_len": len(message or ""), "attachments": len(req.attachments)},
         )
 
-        merged = build_runtime_namespace(settings, load_agent_settings(settings))
-        from app.agent.runtime import run_agent_stream
-
+        inbox = SteeringInbox(conv_id, control_session_id)
+        register_steering(inbox)
         try:
+            yield f'event: turn_started\ndata: {json.dumps({"run_id": inbox.run_id, "conversation_id": conv_id})}\n\n'.encode()
+            merged = build_runtime_namespace(settings, load_agent_settings(settings))
+            from app.agent.runtime import run_agent_stream
+
             async for event_dict in run_agent_stream(
                 message=message,
                 conversation_id=conv_id,
@@ -89,6 +93,7 @@ async def chat(req: ChatRequest, request: Request):
                 principal_id=control_session_id,
                 permission_profile_id="desktop-current",
                 interactive=True,
+                steering=inbox,
             ):
                 event_name = event_dict.get("event", "message")
                 event_data = json.dumps(event_dict.get("data", {}))
@@ -109,9 +114,31 @@ async def chat(req: ChatRequest, request: Request):
             )
             raise
         finally:
+            unregister_steering(inbox)
             dbg_log("routes.py:chat.stream", "sse_stream_generator_finally", hypothesis_id="H1", data={})
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.post("/chat/steer", response_model=ChatSteerResponse)
+async def steer_chat(body: ChatSteerRequest, request: Request):
+    session_id = request.state.control_session.session_id
+    inbox = get_steering(body.run_id, session_id)
+    if inbox is None:
+        raise HTTPException(status_code=409, detail="This turn is no longer running. Send the message as a new turn.")
+    req = ChatRequest(message=body.message, conversation_id=inbox.conversation_id, attachments=body.attachments)
+    attachments = _runtime_attachments(req, control_session_id=session_id, conversation_id=inbox.conversation_id)
+    try:
+        item = inbox.enqueue(SteeringMessage(
+            body.message_id, _message_with_attachments(req), attachments,
+            display_message=body.message,
+            public_attachments=[attachment.model_dump() for attachment in body.attachments],
+        ))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OverflowError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    return {"message_id": item.id, "conversation_id": inbox.conversation_id, "status": "applied" if item.applied else "queued"}
 
 
 @router.post("/chat/jobs", response_model=ChatJobCreateResponse)

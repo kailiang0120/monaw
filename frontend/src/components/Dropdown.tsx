@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown } from 'lucide-react'
 
@@ -17,6 +17,7 @@ interface Props<T extends string> {
   align?: 'left' | 'right'
   size?: 'sm' | 'md'
   className?: string
+  icon?: ReactNode
 }
 
 const MENU_MARGIN = 4
@@ -32,6 +33,7 @@ export function Dropdown<T extends string>({
   align = 'left',
   size = 'md',
   className = '',
+  icon,
 }: Props<T>) {
   const [open, setOpen] = useState(false)
   const [menuStyle, setMenuStyle] = useState<{ top: number; left: number; minWidth: number } | null>(null)
@@ -152,7 +154,10 @@ export function Dropdown<T extends string>({
         aria-expanded={open}
         className={`st-select ${size === 'sm' ? 'st-select-sm' : ''}`}
       >
-        <span className="truncate">{active?.label ?? placeholder ?? 'Select'}</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          {icon}
+          <span className="truncate">{active?.label ?? placeholder ?? 'Select'}</span>
+        </span>
         <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {menu ? createPortal(menu, portalContainer()) : null}

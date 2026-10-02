@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import re
 import time
+import uuid
 from collections import defaultdict
 from typing import Any, AsyncIterator, Callable
 from urllib.parse import urlparse
@@ -26,7 +27,7 @@ from app.agent.observability.recorder import (
     usage_from_any,
 )
 from app.agent.observability.ports import ObservabilityPort
-from app.agent.response_attachments import collect_response_attachments
+from app.agent.response_attachments import collect_response_attachments, public_runtime_attachments
 from app.agent.run_events import RunEventPublisher
 from app.agent.run_context import (
     reset_current_conversation_id,
@@ -34,11 +35,15 @@ from app.agent.run_context import (
 )
 from app.agent.run_state_machine import AgentRunStateMachine
 from app.agent.state import ExecutionPlan, PlanStep
+from app.agent.steering import SteeringInbox
 from app.agent.harness.tool_executor import ToolExecutor
+from app.agent.harness.context_budget import ContextBudgetExceeded, fit_live_context
 from app.agent.harness.tool_policy import ToolPolicy, tool_call_signature
 from app.agent.harness.tool_protocol import ToolCallRequest as HarnessToolCallRequest
 from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.tool_registry import ToolRegistry, can_parallelize
+from app.agent.tool_cancellation import set_tool_scope, reset_tool_scope
+from app.agent.harness.workers import unfinished_workers
 
 logger = logging.getLogger(__name__)
 
@@ -626,7 +631,7 @@ class TurnLoop:
         self.max_llm_call_seconds = max_llm_call_seconds
         self.max_parallel_tool_calls = max(1, int(max_parallel_tool_calls))
         self.executor = ToolExecutor()
-        self.policy = ToolPolicy()
+        self.max_identical_calls = 2
         self.execution_gate = ExecutionGateService()
         self.observability: ObservabilityPort = observability or get_observability_recorder()
 
@@ -731,9 +736,12 @@ class TurnLoop:
         system_prompt: str | Callable[[], str],
         publisher: RunEventPublisher,
         attachments: list[dict] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> None:
         """Run the react loop, pushing all events into the queue. Caller is responsible for the None sentinel."""
         context_token = set_current_conversation_id(conversation_id)
+        tool_scope_token = set_tool_scope(uuid.uuid4().hex)
+        policy = ToolPolicy(max_identical_calls=self.max_identical_calls)
         obs_run_id = ""
         obs_context_token = None
         turn_started_at = time.perf_counter()
@@ -894,6 +902,14 @@ class TurnLoop:
             nonlocal turn_persisted
             if turn_persisted:
                 return
+            if steering is not None:
+                steering.closed = True
+            steering_messages = [item.message for item in steering.messages] if steering is not None else []
+            attachment_kwargs = {}
+            if attachments:
+                attachment_kwargs["user_attachments"] = public_runtime_attachments(attachments)
+            if steering is not None and any(item.attachments for item in steering.messages):
+                attachment_kwargs["steering_attachments"] = [public_runtime_attachments(item.attachments) for item in steering.messages]
             _transition(run_state.finalizing)
             response_duration_ms = _response_duration_ms()
             persist_turn = getattr(self.memory, "persist_turn", None)
@@ -907,11 +923,15 @@ class TurnLoop:
                     status=status,
                     response_duration_ms=response_duration_ms,
                     response_attachments=response_attachments or [],
+                    **({"steering_messages": steering_messages} if steering_messages else {}),
+                    **attachment_kwargs,
                 )
             else:
                 await self.memory.add_message_and_maybe_summarize(
                     conversation_id, "user", message
                 )
+                for steering_message in steering_messages:
+                    await self.memory.add_message_and_maybe_summarize(conversation_id, "user", steering_message)
                 await self.memory.add_message_and_maybe_summarize(
                     conversation_id, "assistant", assistant_message
                 )
@@ -928,12 +948,19 @@ class TurnLoop:
             )
             obs_context_token = set_current_run_id(obs_run_id)
             budget = self._new_turn_budget()
-            self.policy.begin_turn()
+            policy.begin_turn()
             self.memory.get_or_create(
                 conversation_id, title=_conversation_title_from_prompt(message)
             )
             self.memory.set_task_goal(conversation_id, message)
             self.memory.set_active_task(conversation_id, None)
+            if unfinished_workers(conversation_id):
+                final_text = "Paused: a previous tool is still stopping. Wait for it to finish, then continue and verify its last action."
+                await _persist_turn_once(final_text, status="paused")
+                _put({"event": "error", "data": {"code": "tool_still_running", "message": final_text}})
+                _put({"event": "done", "data": {"conversation_id": conversation_id, "summary": final_text, "status": "paused"}})
+                self.observability.finish_run(run_id=obs_run_id, status="paused", final_output=final_text, failure_reason="tool_still_running")
+                return
             build_long_term_context = getattr(self.memory, "build_long_term_memory_context", None)
             long_term_context = (
                 build_long_term_context(message)
@@ -961,6 +988,32 @@ class TurnLoop:
                 initial_message["images"] = initial_images
                 initial_message["ephemeral"] = True
             messages.append(initial_message)
+            latest_round_start = len(messages) - 1
+
+            def _current_user_request() -> str:
+                applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
+                return "\n\n".join([message, *applied])
+
+            def _apply_steering() -> bool:
+                nonlocal streamed_answer_text
+                pending = steering.drain() if steering is not None else []
+                for item in pending:
+                    entry = {"role": "user", "content": item.message}
+                    images = _attachment_image_payloads(item.attachments)
+                    if images:
+                        entry.update({"images": images, "ephemeral": True})
+                    messages.append(entry)
+                    _put({"event": "steering_applied", "data": {
+                        "message_id": item.id,
+                        "message": item.display_message or item.message,
+                        "attachments": item.public_attachments,
+                        "reset_response": True,
+                    }})
+                    _obs_event("steering_applied", input={"message": item.message}, metadata={"message_id": item.id})
+                if pending:
+                    streamed_answer_text = ""
+                    self.memory.set_task_goal(conversation_id, _current_user_request())
+                return bool(pending)
 
             budget_exhausted = False
             completed_normally = False
@@ -997,7 +1050,8 @@ class TurnLoop:
                     {
                         "status": "cancelled",
                         "reason_code": "user_stopped",
-                        "error": "Stopped by user before the tool finished.",
+                        "error": "Cancellation requested while the tool was running. Verify its last action before retrying.",
+                        "worker_state": "stopping" if unfinished_workers(conversation_id) else "stopped",
                     },
                     ensure_ascii=False,
                 )
@@ -1059,6 +1113,11 @@ class TurnLoop:
 
                 async def _execute(tool_dict: dict, arguments: dict) -> ToolCallResult:
                     async with parallel_semaphore:
+                        if steering is not None and steering.pending:
+                            return ToolCallResult.from_output(
+                                call_id=call_id, name=tool_name,
+                                output=json.dumps({"status": "cancelled", "reason_code": "user_steered", "error": "Skipped so the agent can read the new user instruction."}),
+                            )
                         _transition(run_state.tool_execution)
                         return await self._execute_tool_result(budget, tool_dict, arguments, call_id=call_id)
 
@@ -1080,7 +1139,7 @@ class TurnLoop:
                             execute_tool=_rerun_after_grant,
                             emit=_emit_gate_event,
                             review_client=self.llm_client,
-                            user_request=message,
+                            user_request=_current_user_request(),
                         )
                     result = ToolCallResult.from_output(call_id=call_id, name=tool_name, output=output)
                     _record_call_result(prepared, result, timed=False)
@@ -1346,6 +1405,11 @@ class TurnLoop:
                             )
 
                 raw_tool_output = tool_output
+                result_payload = _parse_tool_json(raw_tool_output)
+                if result_payload.get("worker_state") == "stopping":
+                    stop_requested = True
+                    incomplete_reason_code = "tool_still_running"
+                    final_text = "Paused: a tool is still stopping after cancellation or timeout. Wait for it to finish, then continue and verify its last action."
                 active_call = active_tool_calls.get(prepared["active_key"])
                 if active_call is not None:
                     active_call.update(
@@ -1452,6 +1516,9 @@ class TurnLoop:
             for iteration_index in range(self._max_iterations):
                 if stop_requested:
                     break
+                if _apply_steering():
+                    consecutive_text_only = 0
+                    force_tool_choice_next = False
                 if not budget.consume():
                     final_text = "Iteration budget exhausted."
                     budget_exhausted = True
@@ -1501,6 +1568,14 @@ class TurnLoop:
                     _transition(run_state.model_call)
                     visible_tools = self.registry.get_all_tools(visible_only=True)
                     model_tools = visible_tools
+                    current_prompt = _current_system_prompt()
+                    messages, latest_round_start, compaction_info = await fit_live_context(
+                        messages, model_tools, current_prompt, llm_client=self.llm_client,
+                        latest_round_start=latest_round_start, timeout_seconds=self.max_llm_call_seconds,
+                    )
+                    if compaction_info:
+                        _obs_event("live_context_compacted", metadata=compaction_info)
+                        _put({"event": "context_compacted", "data": compaction_info})
                     # When tools are available, wait for the full model response
                     # before deciding whether its text is progress or the answer.
                     stream_callback = None if visible_tools else _answer_token_cb
@@ -1529,7 +1604,7 @@ class TurnLoop:
                         llm_call = self.llm_client.chat_with_tools(
                             messages,
                             model_tools,
-                            system_prompt=_current_system_prompt(),
+                            system_prompt=current_prompt,
                             stream_callback=stream_callback,
                             tool_choice="required",
                             **reasoning_kwargs,
@@ -1538,7 +1613,7 @@ class TurnLoop:
                         llm_call = self.llm_client.chat_with_tools(
                             messages,
                             model_tools,
-                            system_prompt=_current_system_prompt(),
+                            system_prompt=current_prompt,
                             stream_callback=stream_callback,
                             **reasoning_kwargs,
                         )
@@ -1568,6 +1643,13 @@ class TurnLoop:
                         tokens=llm_usage,
                         metadata={"iteration": iteration_index + 1},
                     )
+                except ContextBudgetExceeded as exc:
+                    final_text = str(exc)
+                    terminal_error = True
+                    incomplete_reason_code = exc.reason_code
+                    _put({"event": "error", "data": {"code": exc.reason_code, "message": final_text}})
+                    _obs_error(final_text, error_type=exc.reason_code)
+                    break
                 except asyncio.TimeoutError:
                     final_text = f"Timed out: LLM call exceeded {self.max_llm_call_seconds}s limit."
                     terminal_error = True
@@ -1616,6 +1698,13 @@ class TurnLoop:
                         "data": {"code": "provider_error", "message": final_text},
                     })
                     break
+
+                # A response produced before a new instruction arrived must not
+                # dispatch stale tool actions or finish the turn.
+                if _apply_steering():
+                    consecutive_text_only = 0
+                    force_tool_choice_next = False
+                    continue
 
                 assistant_content = llm_response.content or ""
                 reasoning_content = str(getattr(llm_response, "reasoning_content", "") or "")
@@ -1714,6 +1803,7 @@ class TurnLoop:
                 if assistant_content:
                     _emit_agent_progress(assistant_content)
                 provider_messages = list(getattr(llm_response, "provider_messages", []) or [])
+                latest_round_start = len(messages)
                 if provider_messages:
                     messages.extend(provider_messages)
                 elif assistant_content:
@@ -1809,7 +1899,7 @@ class TurnLoop:
                         },
                     )
                     break
-                execution_plan = self._build_execution_plan(message, call_dicts)
+                execution_plan = self._build_execution_plan(_current_user_request(), call_dicts)
                 plan_by_step_id = {step.step_id: step for step in execution_plan.steps}
                 _put({"event": "plan", "data": execution_plan.to_dict()})
                 sync_plan_progress = getattr(self.memory, "sync_plan_progress", None)
@@ -1848,7 +1938,7 @@ class TurnLoop:
                             await _flush_prepared_tool_calls(prepared_tool_calls)
                             if stop_requested:
                                 break
-                            policy_decision = self.policy.decide(
+                            policy_decision = policy.decide(
                                 request=raw_request,
                                 registry=self.registry,
                                 arguments=raw_request.arguments,
@@ -1989,7 +2079,7 @@ class TurnLoop:
                             arguments=arguments,
                             step_id=step_id or None,
                         )
-                        policy_decision = self.policy.decide(
+                        policy_decision = policy.decide(
                             request=request,
                             registry=self.registry,
                             arguments=arguments,
@@ -2249,6 +2339,8 @@ class TurnLoop:
                     },
                 )
 
+            if steering is not None:
+                steering.closed = True
             run_status = (
                 "paused"
                 if iteration_limit_hit or budget_exhausted or terminal_error or stop_requested
@@ -2343,6 +2435,8 @@ class TurnLoop:
                 mark_active_calls()
             _transition(run_state.cancel, "cancelled")
             partial_text = _assistant_message_on_cancel()
+            if unfinished_workers(conversation_id):
+                partial_text += "\n\nA tool is still stopping. Further actions are blocked until it finishes; verify its last action before retrying."
             try:
                 await _persist_turn_once(partial_text, status="paused")
                 self.observability.finish_run(
@@ -2385,6 +2479,14 @@ class TurnLoop:
                 error_type=type(exc).__name__,
                 metadata={"phase": "turn_loop"},
             )
+            failure_text = "Paused after an internal error. The saved tool results can be used to continue."
+            partial_text = final_text.strip() or streamed_answer_text.strip() or latest_progress_text.strip()
+            if partial_text:
+                failure_text += f"\n\nLast response: {partial_text}"
+            try:
+                await _persist_turn_once(failure_text, status="error")
+            except Exception:
+                logger.exception("Unable to checkpoint failed turn conversation_id=%s", conversation_id)
             self.observability.finish_run(
                 run_id=obs_run_id,
                 status="error",
@@ -2406,11 +2508,12 @@ class TurnLoop:
                 })
                 _put({
                     "event": "done",
-                    "data": {"conversation_id": conversation_id, "summary": "Error."},
+                    "data": {"conversation_id": conversation_id, "summary": failure_text, "status": "error"},
                 })
             except Exception:
                 pass
         finally:
+            reset_tool_scope(tool_scope_token)
             if obs_context_token is not None:
                 reset_current_run_id(obs_context_token)
             reset_current_conversation_id(context_token)
@@ -2424,6 +2527,7 @@ class TurnLoop:
         *,
         system_prompt: str | Callable[[], str],
         attachments: list[dict] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> AsyncIterator[dict]:
         async with _SESSION_LOCKS[conversation_id]:
             queue: asyncio.Queue = asyncio.Queue()
@@ -2445,10 +2549,14 @@ class TurnLoop:
                             system_prompt,
                             publisher,
                             attachments,
+                            **({"steering": steering} if steering is not None else {}),
                         ),
                         timeout=self.max_turn_seconds,
                     )
                 except asyncio.TimeoutError:
+                    timeout_summary = "Paused: task timed out."
+                    if unfinished_workers(conversation_id):
+                        timeout_summary += " A tool is still stopping; wait for it to finish and verify its last action before continuing."
                     self.observability.log_error(
                         conversation_id=conversation_id,
                         message=f"Turn exceeded {self.max_turn_seconds}s limit.",
@@ -2459,7 +2567,7 @@ class TurnLoop:
                         conversation_id=conversation_id,
                         status="paused",
                         failure_reason="turn_timeout",
-                        final_output="Timed out.",
+                        final_output=timeout_summary,
                     )
                     publisher.publish_nowait({
                         "event": "error",
@@ -2467,7 +2575,7 @@ class TurnLoop:
                     })
                     publisher.publish_nowait({
                         "event": "done",
-                        "data": {"conversation_id": conversation_id, "summary": "Timed out."},
+                        "data": {"conversation_id": conversation_id, "summary": timeout_summary, "status": "paused", "incomplete_reason_code": "turn_timeout"},
                     })
                 finally:
                     await queue.put(None)  # sentinel always placed here

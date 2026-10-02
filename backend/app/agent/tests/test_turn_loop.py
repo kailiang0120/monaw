@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from app.agent.iteration_budget import IterationBudget
 from app.agent.tool_registry import ToolRegistry
+from app.agent.steering import SteeringInbox, SteeringMessage
 from app.agent.turn_loop import TurnLoop, _conversation_title_from_prompt, _extract_image_attachments, _repeat_key
 from app.agent.run_context import current_conversation_id
 from app.agent.controller_policy import load_policy, update_permitted_roots
@@ -43,6 +44,101 @@ def test_conversation_title_uses_first_line_and_stays_compact() -> None:
     assert _conversation_title_from_prompt("Summarize the report. Include three key risks.") == "Summarize the report"
     assert _conversation_title_from_prompt("  Compare   these options\nThen explain the tradeoffs") == "Compare these options"
     assert _conversation_title_from_prompt("Review the complete quarterly performance and provide detailed recommendations") == "Review the complete quarterly performance and…"
+
+
+def test_concurrent_turns_keep_repetition_policy_isolated():
+    counts = {}
+    both_started = asyncio.Event()
+    invoked = []
+
+    class ConcurrentLLM:
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            conversation = current_conversation_id()
+            counts[conversation] = counts.get(conversation, 0) + 1
+            if len(counts) == 2:
+                both_started.set()
+            await both_started.wait()
+            await asyncio.sleep(0)
+            if counts[conversation] <= 2:
+                return LLMResponse(content="", tool_calls=[ToolCallRequest(call_id="same-id", tool_name="change", arguments={})], finish_reason="tool_calls")
+            return final_answer_response("Finished")
+
+    async def change():
+        invoked.append(current_conversation_id())
+        await asyncio.sleep(0)
+        return '{"status":"ok"}'
+
+    loop = TurnLoop(llm_client=ConcurrentLLM(), registry=ToolRegistry([{
+        "name": "change", "callable": change, "parameters": {"type": "object", "properties": {}},
+        "execution_mode": "async", "metadata": {"mutates_state": True, "risk_level": "low"},
+    }]), memory=PersistingFakeMemory(), observability=FakeObservability())
+
+    async def collect():
+        async def run(conversation):
+            return [event async for event in loop.run("work", conversation, system_prompt="")]
+        return await asyncio.wait_for(asyncio.gather(run("isolated-a"), run("isolated-b")), timeout=2)
+
+    try:
+        results = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert invoked.count("isolated-a") == invoked.count("isolated-b") == 2
+    assert all(result[-1]["data"]["summary"] == "Finished" for result in results)
+
+
+def test_turn_loop_checks_live_tool_context_and_preserves_full_history(monkeypatch):
+    from app.agent.harness import context_budget
+    from app.agent.context_usage import estimate_message_tokens
+    monkeypatch.setattr(context_budget, "input_budget", lambda _client: 7000)
+    output = "observation " * 30_000
+
+    class LargeObservationLLM:
+        calls = 0
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(content="", tool_calls=[ToolCallRequest(call_id="large", tool_name="inspect", arguments={})], finish_reason="tool_calls")
+            assert estimate_message_tokens(messages, llm_client=self) < 7000
+            assert any("Observation shortened" in str(item.get("content")) for item in messages)
+            return final_answer_response("Reviewed")
+
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(llm_client=LargeObservationLLM(), registry=ToolRegistry([{
+        "name": "inspect", "callable": lambda: output, "parameters": {"type": "object", "properties": {}},
+    }]), memory=memory, observability=FakeObservability())
+    async def collect():
+        return [event async for event in loop.run("review", "live-budget", system_prompt="")]
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert any(event["event"] == "context_compacted" for event in events)
+    assert events[-1]["data"]["summary"] == "Reviewed"
+    assert memory.persisted_turns[0]["tool_calls"][0]["output"] == output
+
+
+def test_internal_failure_checkpoints_completed_tool_and_user_request():
+    memory = PersistingFakeMemory()
+    def fail_recording(*args):
+        raise RuntimeError("injected bookkeeping failure")
+    memory.add_tool_outcome = fail_recording
+    loop = TurnLoop(llm_client=FakeLLM(), registry=ToolRegistry([{
+        "name": "echo_tool", "callable": lambda text: text,
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+    }]), memory=memory, observability=FakeObservability())
+    async def collect():
+        return [event async for event in loop.run("save this task", "internal-checkpoint", system_prompt="")]
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert events[-1]["data"]["status"] == "error"
+    assert len(memory.persisted_turns) == 1
+    saved = memory.persisted_turns[0]
+    assert saved["user_message"] == "save this task"
+    assert saved["status"] == "error"
+    assert saved["tool_calls"][0]["status"] == "complete"
+    assert saved["tool_calls"][0]["output"]
 
 
 class FakeMemory:
@@ -856,6 +952,69 @@ def test_turn_loop_executes_tool_and_finishes():
     assert memory.added_messages[-1] == ("assistant", "All done.")
 
 
+def test_turn_loop_applies_steering_before_dispatching_a_stale_model_response():
+    inbox = SteeringInbox("conv-steer", "session-a")
+    instruction = "Use a table instead"
+    calls = []
+
+    class SteeredLLM:
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            calls.append([dict(item) for item in messages])
+            if len(calls) == 1:
+                inbox.enqueue(SteeringMessage("steer-1", instruction))
+                return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                    call_id="stale-call", tool_name="echo_tool", arguments={"text": "stale"},
+                )], finish_reason="tool_calls")
+            return final_answer_response("Here is the table.")
+
+    executed = []
+    registry = ToolRegistry([{
+        "name": "echo_tool", "description": "Echo", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+        "callable": lambda text: executed.append(text), "domain": "general", "execution_mode": "sync_stateless", "affinity_group": None,
+    }])
+    memory = FakeMemory()
+    loop = TurnLoop(llm_client=SteeredLLM(), registry=registry, memory=memory, observability=FakeObservability())
+
+    async def collect():
+        return [event async for event in loop.run("Summarize the report", "conv-steer", system_prompt="system", steering=inbox)]
+
+    events = asyncio.run(collect())
+    assert executed == []
+    assert calls[1][-1] == {"role": "user", "content": instruction}
+    assert any(event["event"] == "steering_applied" for event in events)
+    assert memory.added_messages == [("user", "Summarize the report"), ("user", instruction), ("assistant", "Here is the table.")]
+    assert inbox.closed
+
+
+def test_turn_loop_keeps_completed_tool_work_when_steered_during_execution():
+    inbox = SteeringInbox("conv-steer-tool", "session-a")
+    seen = []
+
+    async def echo_tool(text):
+        inbox.enqueue(SteeringMessage("steer-1", "Include the completed result"))
+        return f"echo:{text}"
+
+    class SteeredLLM(FakeLLM):
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            seen.append([dict(item) for item in messages])
+            return await super().chat_with_tools(messages, tools, **kwargs)
+
+    registry = ToolRegistry([{
+        "name": "echo_tool", "description": "Echo", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+        "callable": echo_tool, "domain": "general", "execution_mode": "async", "affinity_group": None,
+    }])
+    memory = FakeMemory()
+    loop = TurnLoop(llm_client=SteeredLLM(), registry=registry, memory=memory, observability=FakeObservability())
+
+    async def collect():
+        return [event async for event in loop.run("Say hello", inbox.conversation_id, system_prompt="system", steering=inbox)]
+
+    asyncio.run(collect())
+    assert memory.tool_results == [("echo_tool", "echo:hello")]
+    assert seen[1][-1]["content"] == "Include the completed result"
+    assert any("echo:hello" in str(item) for item in seen[1])
+
+
 def test_turn_loop_overlaps_safe_tools_and_preserves_model_result_order():
     first_entered = threading.Event()
     second_entered = threading.Event()
@@ -1115,7 +1274,8 @@ def test_turn_loop_prompts_for_access_while_siblings_run_and_reruns_with_call_id
     tool_end_events = [event for event in events if event["event"] == "tool_end"]
 
     assert sibling_released == [True]
-    assert gated_call_ids == ["gated", "gated"]
+    assert len(gated_call_ids) == 2 and gated_call_ids[0] == gated_call_ids[1]
+    assert gated_call_ids[0].endswith(":gated")
     assert [event["data"]["call_id"] for event in tool_end_events] == ["gated", "sibling"]
     assert json.loads(tool_end_events[0]["data"]["output"])["value"] == "granted"
 

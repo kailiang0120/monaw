@@ -261,11 +261,11 @@ def test_model_options_endpoint_returns_backend_model_catalog():
     payload = response.json()
     providers = {item["id"]: item for item in payload["providers"]}
     assert providers["openai"]["label"] == "OpenAI API"
-    assert providers["openai"]["models"] == ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"]
+    assert providers["openai"]["models"] == ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
     assert providers["codex"]["label"] == "OpenAI account"
     assert providers["codex"]["models"] == providers["openai"]["models"]
     assert providers["gemini"]["label"] == "Google"
-    assert providers["gemini"]["models"][0].startswith("gemini-3")
+    assert providers["gemini"]["models"] == ["gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"]
     assert "deepseek" not in providers
     assert "vision_fallback_models" not in payload
 

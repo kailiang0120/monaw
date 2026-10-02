@@ -13,6 +13,24 @@ export interface ChatJobCreateResponse {
   conversation_id: string
 }
 
+export interface ChatSteerResponse {
+  message_id: string
+  conversation_id: string
+  status: string
+}
+
+export interface TurnStartedEvent {
+  run_id: string
+  conversation_id: string
+}
+
+export interface SteeringAppliedEvent {
+  message_id: string
+  message: string
+  attachments?: UploadedAttachment[]
+  reset_response?: boolean
+}
+
 export interface ChatJob {
   job_id: string
   conversation_id: string

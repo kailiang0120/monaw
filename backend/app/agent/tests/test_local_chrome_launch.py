@@ -126,6 +126,28 @@ def test_page_tools_keep_one_off_browser_mode():
     manager.ensure_browser.assert_awaited_once_with("managed")
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_default_browser_calls_honor_local_profile_without_managed_fallback(monkeypatch, fails):
+    manager = module.BrowserUseManager({
+        "mode": "system", "system_connection_strategy": "launch", "enable_system_fallback": True,
+    })
+    monkeypatch.setattr(module, "_browser_use_installed", lambda: True)
+    manager._start_managed_locked = AsyncMock(side_effect=AssertionError("Must use the local profile"))
+    manager._start_system_locked = AsyncMock(
+        side_effect=module.BrowserLaunchError("Chrome needs approval", reason_code="system_debugging_approval_required")
+        if fails else None,
+        return_value="local-session",
+    )
+    if fails:
+        with pytest.raises(module.BrowserLaunchError) as error:
+            asyncio.run(manager.ensure_browser())
+        assert error.value.reason_code == "system_debugging_approval_required"
+    else:
+        assert asyncio.run(manager.ensure_browser()) == "local-session"
+    manager._start_system_locked.assert_awaited_once_with("")
+    manager._start_managed_locked.assert_not_awaited()
+
+
 def test_invalid_profile_never_launches(monkeypatch, tmp_path):
     manager, launches = configure_launch(monkeypatch, tmp_path)
     with pytest.raises(module.BrowserLaunchError) as error:

@@ -84,6 +84,12 @@ export const MessageBubble = memo(function MessageBubble({
         <div className="max-w-[78%] rounded-2xl rounded-tr-md bg-accent px-3.5 py-2 text-sm leading-relaxed text-white shadow-lg shadow-accent/10">
           <div>{message.content}</div>
           <AttachmentStrip attachments={message.attachments} compact />
+          {message.steeringStatus && (
+            <p className="mt-1 text-[10px] text-white/70">
+              {message.steeringStatus === 'applied' ? 'Applied to the running task'
+                : message.steeringStatus === 'queued' ? 'Waiting for the next step' : 'Saved for the next turn'}
+            </p>
+          )}
         </div>
       </div>
     )
@@ -359,6 +365,7 @@ function ImageAttachmentCard({
       .then((value) => {
         objectUrl = value
         if (active) setPreviewHref(value)
+        else URL.revokeObjectURL(value)
       })
       .catch(() => {
         if (active) setPreviewFailed(true)
@@ -380,7 +387,7 @@ function ImageAttachmentCard({
           ? 'w-36 border-white/15 bg-black/10 hover:bg-black/15'
           : 'w-44 border-white/[0.08] bg-white/[0.025] hover:border-white/[0.16] hover:bg-white/[0.04]'
       }`}
-      title={attachment.path}
+      title="Download image"
       aria-label={`Open image ${attachment.name}`}
     >
       <span
@@ -418,36 +425,8 @@ function ImageAttachmentCard({
           <Loader2 size={20} className="animate-spin text-neutral-500" aria-label="Loading preview" />
         )}
       </span>
-      <span
-        className={`flex min-w-0 items-center gap-2 border-t px-2.5 py-2 text-[11px] ${
-          compact
-            ? 'border-white/15 text-white/85'
-            : 'border-white/[0.08] text-neutral-400 group-hover:text-neutral-200'
-        }`}
-      >
-        <Image size={12} className="shrink-0" aria-hidden />
-        <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
-        {attachment.size > 0 && (
-          <span className={compact ? 'shrink-0 text-white/55' : 'shrink-0 text-neutral-600'}>
-            {formatBytes(attachment.size)}
-          </span>
-        )}
-      </span>
     </button>
   )
-}
-
-function formatBytes(size: number): string {
-  if (!Number.isFinite(size) || size <= 0) return ''
-  if (size < 1024) return `${size} B`
-  const units = ['KB', 'MB', 'GB']
-  let value = size / 1024
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`
 }
 
 function ToolActivityGroup({

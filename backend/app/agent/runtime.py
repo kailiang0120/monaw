@@ -11,10 +11,11 @@ from typing import AsyncIterator
 from app.agent.llm_client import LLMClient
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
 from app.agent.long_term_memory import get_long_term_memory
-from app.agent.memory_manager import get_memory_manager
+from app.agent.memory_manager import MemoryManager
 from app.agent.skill_loader import load_tools
 from app.agent.skill_prompt import build_skill_prompt
 from app.agent.turn_loop import TurnLoop
+from app.agent.steering import SteeringInbox
 from app.agent.workspace_instructions import (
     build_workspace_instruction_prompt,
     workspace_instruction_fingerprint,
@@ -118,7 +119,7 @@ class AgentRuntime:
             reasoning_effort=getattr(settings, "reasoning_effort", "medium"),
         )
         self.skills, self.tool_registry = load_tools(settings)
-        self.memory = get_memory_manager(self.llm_client)
+        self.memory = MemoryManager(self.llm_client)
         self.long_term_memory = get_long_term_memory(self.llm_client, settings)
         self.memory.set_long_term_memory(self.long_term_memory)
         threading.Thread(
@@ -180,6 +181,7 @@ class AgentRuntime:
         message: str,
         conversation_id: str,
         attachments: list[dict] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> AsyncIterator[dict]:
         global _active_run_count
         self._active_runs += 1
@@ -187,6 +189,8 @@ class AgentRuntime:
             _active_run_count += 1
         try:
             if _is_compact_command(message):
+                if steering is not None:
+                    steering.closed = True
                 result = await self.memory.compact_conversation(conversation_id)
                 reply = _format_compact_reply(result)
                 await self.memory.persist_turn(
@@ -215,6 +219,7 @@ class AgentRuntime:
                 conversation_id,
                 system_prompt=self.current_system_prompt,
                 attachments=attachments,
+                **({"steering": steering} if steering is not None else {}),
             ):
                 yield event
         finally:
@@ -371,6 +376,7 @@ async def run_agent_stream(
     principal_id: str = "",
     permission_profile_id: str = "",
     interactive: bool = True,
+    steering: SteeringInbox | None = None,
 ):
     session_token = set_current_control_session_id(control_session_id)
     source_token = set_current_execution_source(execution_source)
@@ -379,7 +385,10 @@ async def run_agent_stream(
     interactive_token = set_current_interactive(interactive)
     try:
         runtime = get_runtime(settings)
-        async for event in runtime.run(message, conversation_id, attachments=attachments):
+        async for event in runtime.run(
+            message, conversation_id, attachments=attachments,
+            **({"steering": steering} if steering is not None else {}),
+        ):
             yield event
     finally:
         reset_current_interactive(interactive_token)

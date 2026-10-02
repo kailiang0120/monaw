@@ -107,6 +107,8 @@ export default function App() {
     setPendingAccessGrant,
     loadOlderMessages,
     sendMessage,
+    steerMessage,
+    steeringConversationId,
     refreshMessages,
     stopStreaming,
     clearMessages,
@@ -511,6 +513,8 @@ export default function App() {
             )}
             <InputBar
               onSend={handleSend}
+              onSteer={steerMessage}
+              steeringConversationId={steeringConversationId}
               onStop={stopStreaming}
               isStreaming={isStreaming}
               conversationId={activeConvId}

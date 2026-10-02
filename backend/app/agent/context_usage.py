@@ -32,9 +32,13 @@ _OPENAI_CONTEXT_WINDOWS = {
     "gpt-5.6-sol": 1_050_000,
     "gpt-6-luna": 1_050_000,
     "gpt-6-sol": 1_050_000,
+    "gpt-6.1-sol": 1_050_000,
     "gpt-6-astra": 1_050_000,
 }
 _GEMINI_CONTEXT_WINDOWS = {
+    "gemini-pro-latest": 1_048_576,
+    "gemini-flash-latest": 1_048_576,
+    "gemini-flash-lite-latest": 1_048_576,
     "gemini-3.1-pro-preview": 1_048_576,
     "gemini-3.1-flash-lite": 1_048_576,
     "gemini-3.1-flash-lite-preview": 1_048_576,
@@ -178,6 +182,18 @@ def estimate_message_tokens(messages: list[dict], *, llm_client) -> int:
     for message in messages:
         total += _GENERIC_MESSAGE_OVERHEAD_TOKENS
         total += count_text_tokens(str(message.get("role", "user")), llm_client=llm_client)
+        if provider == "gemini" and isinstance(message.get("gemini_parts"), list):
+            for part in message["gemini_parts"]:
+                payload = part if isinstance(part, dict) else part.model_dump(exclude_none=True)
+                payload = dict(payload)
+                for image_key in ("inline_data", "file_data"):
+                    if payload.pop(image_key, None) is not None:
+                        total += _IMAGE_ATTACHMENT_TOKEN_FALLBACK
+                total += count_text_tokens(json.dumps(payload, ensure_ascii=False, default=str), llm_client=llm_client)
+            continue
+        if provider == "gemini" and isinstance(message.get("gemini_function_response"), dict):
+            total += count_text_tokens(json.dumps(message["gemini_function_response"], ensure_ascii=False, default=str), llm_client=llm_client)
+            continue
         total += _count_content_tokens(message.get("content", ""), llm_client=llm_client)
         images = message.get("images") if isinstance(message.get("images"), list) else []
         total += len(images) * _IMAGE_ATTACHMENT_TOKEN_FALLBACK

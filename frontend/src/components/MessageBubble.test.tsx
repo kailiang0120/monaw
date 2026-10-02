@@ -227,6 +227,8 @@ const answer = 42
       'src',
       'blob:attachment-preview',
     )
+    expect(screen.queryByText('chart.png')).not.toBeInTheDocument()
+    expect(screen.queryByText('3 B')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /report.pdf/i }))
     expect(downloadAttachment).toHaveBeenCalledWith(expect.objectContaining({ id: 'file-1' }))
     expect(fetchAttachmentObjectUrl).toHaveBeenCalledWith(

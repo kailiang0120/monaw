@@ -118,7 +118,7 @@ def openai_reasoning_effort(value: str, model_name: str = "") -> str:
     effort = str(value or "").strip().lower()
     model = str(model_name or "").strip().lower()
     if model.startswith("gpt-6"):
-        if effort == "none" and model == "gpt-6-astra":
+        if effort == "none" and model in {"gpt-6-astra", "gpt-6.1-sol"}:
             return "low"
         if effort == "minimal":
             return "low"
@@ -143,7 +143,7 @@ def gemini_thinking_config(model_name: str, reasoning_effort: str, types_mod):
     if not model.startswith("gemini-"):
         return None
 
-    if model.startswith("gemini-3"):
+    if model.startswith("gemini-3") or model in {"gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"}:
         if "pro" in model:
             level_by_effort = {
                 "none": "low",
@@ -166,6 +166,8 @@ def gemini_thinking_config(model_name: str, reasoning_effort: str, types_mod):
                 "max": "high",
             }
             level = level_by_effort.get(effort, "medium")
+        if level == "minimal" and model in {"gemini-flash-latest", "gemini-3.7-flash", "gemini-3.8-flash"}:
+            level = "low"
         return types_mod.ThinkingConfig(thinking_level=level, include_thoughts=True)
 
     if model.startswith("gemini-2.5"):

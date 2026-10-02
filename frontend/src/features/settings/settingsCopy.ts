@@ -36,20 +36,15 @@ export const PAGE_COPY = {
     blurb: 'Decide what the agent is allowed to remember between conversations, and review what it already knows.',
     keywords: 'remember recall facts preferences learning retrieval curation',
   },
-  skills: {
-    label: 'Skills',
-    blurb: 'Turn the agent’s capabilities on or off. A skill it cannot use is a thing it cannot do.',
-    keywords: 'capabilities tools browser computer use memory scheduling web search',
+  tools: {
+    label: 'Tools',
+    blurb: 'Manage skills, MCP connections, and plugins in one place.',
+    keywords: 'skills capabilities tools browser computer use memory scheduling web search mcp model context protocol stdio http server integration plugins extensions',
   },
   browser: {
     label: 'Browser',
     blurb: 'Choose which browser the agent drives and where it saves screenshots and downloads.',
     keywords: 'chrome chromium headless cdp profile downloads screenshots automation domains',
-  },
-  mcp: {
-    label: 'MCP servers',
-    blurb: 'Connect external tool servers that speak the Model Context Protocol.',
-    keywords: 'model context protocol stdio http server tools integration',
   },
   observability: {
     label: 'Activity log',
@@ -99,13 +94,18 @@ export const IDENTITY_COPY = {
 /* ----------------------------------------------------------------- skills --- */
 
 export const SKILLS_COPY = {
-  intro: 'A skill is a group of tools. Turning one off removes those tools from the agent entirely, so it cannot use them even if you ask.',
+  intro: 'Recommended skills are enabled by default. Keep these settings as they are, or customize what the agent can use.',
   unavailable: 'This skill cannot be turned on until the missing backend dependency is installed.',
 } as const
 
 /* ---------------------------------------------------------------- browser --- */
 
 export const BROWSER_COPY = {
+  modeLabels: {
+    auto: 'Separate profile with fallback',
+    managed: 'Separate Chrome profile',
+    system: 'My Chrome profile',
+  },
   modeHelp: {
     auto: 'Starts a separate Chrome profile; falls back to your Chrome if launch fails.',
     managed: 'Uses a separate profile with its own logins and tabs.',
@@ -133,7 +133,7 @@ export const BROWSER_COPY = {
 /* -------------------------------------------------------------------- mcp --- */
 
 export const MCP_COPY = {
-  intro: 'Add a server to give the agent more tools.',
+  intro: 'Optional connections to external tools. Monaw’s built-in skills work without adding a server.',
   bridge: 'Master switch. When off, no MCP server is contacted and none of their tools are available.',
   transportStdio: 'Monaw starts the server as a local program and talks to it over its input and output.',
   transportHttp: 'Monaw connects to a server that is already running at a URL.',

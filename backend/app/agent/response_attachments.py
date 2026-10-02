@@ -36,13 +36,7 @@ _GENERATED_SCREENSHOT_NAME_RE = re.compile(
 _WINDOWS_FILE_RE = re.compile(
     r"(?P<path>(?:[A-Za-z]:\\|\\\\)(?:[^<>:\"|?*\r\n]+\\)+[^<>:\"|?*\r\n]+?\.[A-Za-z0-9]{1,10})(?=$|[\s)\],.;:'\"`<>])"
 )
-_PATH_KEYS = {
-    "path",
-    "file",
-    "filename",
-    "filepath",
-    "file_path",
-    "output",
+_OUTPUT_PATH_KEYS = {
     "output_path",
     "saved_path",
     "download_path",
@@ -127,6 +121,19 @@ def public_attachment_payload(record: AttachmentRecord) -> dict[str, Any]:
     if record.height is not None:
         payload["height"] = record.height
     return payload
+
+
+def public_runtime_attachments(attachments: Iterable[dict] | None) -> list[dict]:
+    """Persist handles and display metadata, never resolved private paths."""
+    result = []
+    for item in attachments or []:
+        attachment_id = str(item.get("id") or "")
+        if not attachment_id:
+            continue
+        payload = {key: item[key] for key in ("id", "name", "mime_type", "size", "width", "height", "conversation_id", "expires_at") if key in item}
+        payload["path"] = attachment_handle(attachment_id)
+        result.append(payload)
+    return result
 
 
 def _record_from_path(
@@ -638,18 +645,18 @@ def _paths_from_text(text: str) -> Iterable[str]:
 
 def _paths_from_json_value(value: Any) -> Iterable[str]:
     if isinstance(value, dict):
+        if value.get("dry_run") or str(value.get("status") or "ok").lower() not in {"ok", "success", "complete", "completed"}:
+            return
         for key, child in value.items():
             key_normalized = str(key).lower()
             if isinstance(child, str):
-                if key_normalized in _PATH_KEYS or key_normalized.endswith("_path"):
+                if key_normalized in _OUTPUT_PATH_KEYS:
                     yield child
             else:
                 yield from _paths_from_json_value(child)
     elif isinstance(value, list):
         for item in value:
             yield from _paths_from_json_value(item)
-    elif isinstance(value, str):
-        yield from _paths_from_text(value)
 
 
 def _paths_from_tool_output(output: str) -> Iterable[str]:
@@ -659,7 +666,7 @@ def _paths_from_tool_output(output: str) -> Iterable[str]:
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, TypeError):
-        return list(_paths_from_text(text))
+        return []
     return list(_paths_from_json_value(parsed))
 
 
@@ -677,10 +684,10 @@ def collect_response_attachments(
 ) -> list[dict[str, Any]]:
     """Collect user-visible deliverables without exposing progress screenshots.
 
-    Explicit final-answer paths and paths mentioned in final assistant content
-    are returned. Paths discovered only inside tool outputs are treated as
-    background artifacts when their filename looks like a generated
-    browser/desktop screenshot.
+    Return final-answer paths and structured output/saved/download artifact
+    paths. Generic paths, directory entries, search results, and free-form
+    command output are context, not deliverables. Generated browser/desktop
+    screenshots stay hidden unless explicitly requested.
     """
     seen: set[str] = set()
     attachments: list[dict[str, Any]] = []

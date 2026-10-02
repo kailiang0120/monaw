@@ -97,6 +97,77 @@ def test_conversation_state_persists_task_goal_and_steps():
     assert restored.completed_steps == ["Downloaded installer"]
 
 
+def test_steering_messages_persist_in_the_same_chat_and_reach_next_turn(monkeypatch, tmp_path):
+    _patch_memory_dirs(monkeypatch, tmp_path)
+    manager = MemoryManager(RecordingLLM())
+    manager.get_or_create("conv-steer-history")
+    asyncio.run(manager.persist_turn(
+        "conv-steer-history", "Summarize", "Here is the table", tool_calls=[],
+        steering_messages=["Use a table", "Keep it short"],
+    ))
+    user_messages = [item["content"] for item in manager.build_llm_messages("conv-steer-history") if item["role"] == "user"]
+    assert user_messages == ["Summarize", "Use a table", "Keep it short"]
+    assert not any(item.get("content") == "Use a table" for item in manager.build_llm_messages("another-chat"))
+
+
+def test_uploaded_images_survive_reopen_and_steering_without_cross_session_access(monkeypatch, tmp_path):
+    from app.agent import response_attachments as attachment_module
+    from app.agent.response_attachments import register_attachment_path, public_attachment_payload
+    from app.agent.run_context import (
+        set_current_control_session_id, reset_current_control_session_id,
+        set_current_principal_id, reset_current_principal_id,
+    )
+    monkeypatch.setattr(attachment_module, "_ATTACHMENT_REGISTRY_PATH", tmp_path / "registry.json")
+    monkeypatch.setattr(attachment_module, "_ATTACHMENT_REGISTRY_LOADED", True)
+    monkeypatch.setattr(attachment_module, "_ATTACHMENT_REGISTRY", {})
+    monkeypatch.setattr(attachment_module, "_is_read_allowed_by_policy", lambda _path: True)
+    paths = [tmp_path / "original.png", tmp_path / "steered.png"]
+    for path in paths:
+        path.write_bytes(b"image")
+    references = [public_attachment_payload(register_attachment_path(
+        f"history-image-{index}", path, control_session_id="owner", principal_id="owner", conversation_id="image-chat",
+    )) for index, path in enumerate(paths)]
+    manager = MemoryManager(RecordingLLM())
+    asyncio.run(manager.persist_turn(
+        "image-chat", "Analyze the image", "Compared them", tool_calls=[],
+        user_attachments=[references[0]], steering_messages=["Compare with this"], steering_attachments=[[references[1]]],
+    ))
+    session_token = set_current_control_session_id("owner")
+    principal_token = set_current_principal_id("owner")
+    try:
+        reopened = MemoryManager(RecordingLLM()).build_llm_messages("image-chat")
+        image_paths = [image["path"] for message in reopened for image in message.get("images", [])]
+        assert image_paths == [str(path.resolve()) for path in paths]
+        foreign_session = set_current_control_session_id("other-session")
+        try:
+            assert not any(message.get("images") for message in manager.build_llm_messages("image-chat"))
+        finally:
+            reset_current_control_session_id(foreign_session)
+        paths[0].unlink()
+        remaining = manager.build_llm_messages("image-chat")
+        assert len([image for message in remaining for image in message.get("images", [])]) == 1
+    finally:
+        reset_current_control_session_id(session_token)
+        reset_current_principal_id(principal_token)
+
+
+def test_failed_turn_restores_bounded_tool_evidence_for_continuation():
+    manager = MemoryManager(RecordingLLM())
+    raw_result = "Start: saved report " + "detail " * 4000 + " End: report.pdf"
+    asyncio.run(manager.persist_turn(
+        "failed-tool-evidence", "Create a report", "Paused after an internal error", status="error",
+        tool_calls=[{"tool_name": "fs_write", "input": '{"path":"report.pdf"}', "output": raw_result, "status": "complete"}],
+    ))
+    history = MemoryManager(RecordingLLM()).build_llm_messages("failed-tool-evidence")
+    checkpoint = history[-1]["content"]
+    assert "Interrupted task tool checkpoint" in checkpoint
+    assert '"path":"report.pdf"' in checkpoint
+    assert "Start: saved report" in checkpoint and "End: report.pdf" in checkpoint
+    assert len(checkpoint) < 3000
+    assistant = manager._db.get_messages("failed-tool-evidence")[-1]
+    assert manager._db.get_tool_calls_for_message(assistant["id"])[0]["output"] == raw_result
+
+
 def test_memory_manager_builds_structured_context_and_history(monkeypatch, tmp_path):
     _patch_memory_dirs(monkeypatch, tmp_path)
     llm = RecordingLLM()

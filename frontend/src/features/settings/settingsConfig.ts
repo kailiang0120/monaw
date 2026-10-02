@@ -3,12 +3,11 @@ import { DEFAULT_AGENT_NAME, resolveAgentName } from '../../lib/identity'
 
 export type ModelOptionsCatalog = ModelOptions
 
-export const OPENAI_MODELS = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra']
+export const OPENAI_MODELS = ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']
 export const GEMINI_MODELS = [
-  'gemini-3.1-pro-preview',
-  'gemini-3.1-flash-lite',
-  'gemini-3.1-flash-lite-preview',
-  'gemini-3-flash-preview',
+  'gemini-pro-latest',
+  'gemini-flash-latest',
+  'gemini-flash-lite-latest',
 ]
 export const FALLBACK_MODEL_OPTIONS: ModelOptionsCatalog = {
   providers: [
@@ -78,6 +77,8 @@ export function reasoningEffortsForProvider(
   modelName = '',
 ): Array<AgentSettings['llm']['reasoning_effort']> {
   if (provider === 'gemini') {
+    if (modelName === 'gemini-flash-lite-latest') return GEMINI_FLASH_REASONING_EFFORTS
+    if (modelName === 'gemini-pro-latest' || modelName === 'gemini-flash-latest') return GEMINI_PRO_REASONING_EFFORTS
     if (modelName.startsWith('gemini-3') && modelName.includes('flash')) return GEMINI_FLASH_REASONING_EFFORTS
     if (modelName.startsWith('gemini-3') && modelName.includes('pro')) return GEMINI_PRO_REASONING_EFFORTS
     if (modelName.startsWith('gemini-2.5') && modelName.includes('pro')) return GEMINI_25_PRO_REASONING_EFFORTS
@@ -86,7 +87,7 @@ export function reasoningEffortsForProvider(
   if (provider === 'codex') return modelName === 'gpt-6-luna'
     ? OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none')
     : [...OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none'), 'ultra']
-  return modelName === 'gpt-6-astra'
+  return modelName === 'gpt-6-astra' || modelName === 'gpt-6.1-sol'
     ? OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none')
     : OPENAI_REASONING_EFFORTS
 }
@@ -301,16 +302,6 @@ export const MCP_SERVER_TEMPLATES = {
       startup_timeout_ms: 60000,
       call_timeout_ms: 90000,
       description: 'Monaw opens your Chrome profile automatically. Allow Chrome’s connection prompt when shown (Chrome 144+).',
-    }),
-  },
-  filesystem: {
-    label: 'Filesystem',
-    build: (): AgentSettings['mcp']['servers'][number] => ({
-      ...emptyMCPServer(),
-      name: 'filesystem',
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-filesystem', ''],
-      description: 'Expose a local directory tree over MCP.',
     }),
   },
   custom: {

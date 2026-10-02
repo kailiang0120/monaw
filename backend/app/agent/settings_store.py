@@ -13,10 +13,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agent.llm_constants import (
     CHAT_MODELS_BY_PROVIDER,
-    DEFAULT_GEMINI_CHAT_MODEL,
     DEFAULT_OPENAI_CHAT_MODEL,
-    GEMINI_CHAT_MODELS,
-    OPENAI_CHAT_MODELS,
+    normalize_chat_model,
 )
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
 from app.agent.output_workspace import default_downloads_dir, default_screenshots_dir
@@ -122,17 +120,16 @@ class LLMSettings(BaseModel):
 
     @model_validator(mode="after")
     def normalize_provider_models(self) -> "LLMSettings":
-        if self.provider == "gemini" and self.model_name not in GEMINI_CHAT_MODELS:
-            self.model_name = DEFAULT_GEMINI_CHAT_MODEL
-        if self.provider in {"openai", "codex"} and self.model_name not in OPENAI_CHAT_MODELS:
-            self.model_name = DEFAULT_OPENAI_CHAT_MODEL
+        self.model_name = normalize_chat_model(self.provider, self.model_name)
         if self.provider in {"openai", "codex"} and self.model_name.startswith("gpt-6"):
-            if self.reasoning_effort == "minimal" or (self.model_name == "gpt-6-astra" and self.reasoning_effort == "none"):
+            if self.reasoning_effort == "minimal" or (self.model_name in {"gpt-6-astra", "gpt-6.1-sol"} and self.reasoning_effort == "none"):
                 self.reasoning_effort = "low"
         if self.provider == "codex" and self.reasoning_effort == "none":
             self.reasoning_effort = "low"
         if self.reasoning_effort == "ultra" and (self.provider != "codex" or self.model_name == "gpt-6-luna"):
             self.reasoning_effort = "max"
+        if self.provider == "gemini" and self.reasoning_effort in {"none", "minimal"}:
+            self.reasoning_effort = "minimal" if self.model_name == "gemini-flash-lite-latest" else "low"
         return self
 
 
@@ -449,8 +446,7 @@ def build_default_agent_settings(base_settings) -> AgentSettings:
     mode = "default"
     provider = base_settings.model_provider if base_settings.model_provider in {"openai", "gemini", "codex"} else "openai"
     model_name = str(getattr(base_settings, "model_name", "") or "").strip()
-    if provider == "gemini" and model_name not in GEMINI_CHAT_MODELS:
-        model_name = DEFAULT_GEMINI_CHAT_MODEL
+    model_name = normalize_chat_model(provider, model_name)
     return AgentSettings(
         llm=LLMSettings(
             provider=provider,

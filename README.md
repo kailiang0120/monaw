@@ -201,11 +201,13 @@ You can change the main data folder with `MONAW_HOME` or `AGENT_HOME`, the runti
 
 ## Feature Docs
 
+While the agent is working, type a new instruction and press Enter or the send arrow to steer the same task. Stop remains available beside it. Steering takes effect after the current model or tool step, and the message shows whether it is waiting or applied. New text, pasted images, and attached files stay in the same chat history. If the turn finishes before delivery, the draft stays in the composer for sending as a new turn.
+
 Memory works in the background and is hidden from Settings. Memory files are local markdown files. See [docs/memory.md](docs/memory.md) for advanced configuration.
 
 Browser automation is configured in Settings -> Browser. See [docs/browser-automation.md](docs/browser-automation.md).
 
-MCP servers are configured in Settings -> MCP. See [docs/mcp.md](docs/mcp.md).
+MCP servers are configured in Settings -> Tools -> MCP. See [docs/mcp.md](docs/mcp.md).
 
 Scheduled tasks are configured in the app when scheduling is enabled. See [docs/scheduling.md](docs/scheduling.md).
 

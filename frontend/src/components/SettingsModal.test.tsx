@@ -379,11 +379,11 @@ describe('SettingsModal', () => {
     vi.mocked(fetchSettings).mockResolvedValue(buildSettings() as any)
     vi.mocked(fetchModelOptions).mockResolvedValue({
       providers: [
-        { id: 'openai', label: 'OpenAI', models: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'] },
+        { id: 'openai', label: 'OpenAI', models: ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'] },
         {
           id: 'gemini',
           label: 'Google',
-          models: ['gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3.1-flash-lite-preview', 'gemini-3-flash-preview'],
+          models: ['gemini-pro-latest', 'gemini-flash-latest', 'gemini-flash-lite-latest'],
         },
       ],
     } as any)
@@ -511,8 +511,12 @@ describe('SettingsModal', () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    expect(screen.getByText('Managed profile folder')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Browser mode' }))
     fireEvent.click(screen.getByRole('option', { name: 'My Chrome profile' }))
+    expect(screen.queryByText('Managed profile folder')).not.toBeInTheDocument()
+    expect(screen.getByText('Chrome keeps your profile in its own folder. Monaw saves screenshots, downloads, and traces here.')).toBeInTheDocument()
+    expect(screen.getByText('Browser trace folder')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Connection method' })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('CDP endpoint')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
@@ -539,15 +543,45 @@ describe('SettingsModal', () => {
     })))
   })
 
-  it('renders skill display metadata and hides internal skills', async () => {
+  it('manages skills and MCP through Tools tabs and preserves edits when switching', async () => {
+    mocks.updateSettings.mockClear()
     render(<SettingsModal onClose={() => {}} />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /Skills/i }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
 
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Skills', 'MCP', 'Plugins'])
+    expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.queryByRole('button', { name: 'Skills' })).not.toBeInTheDocument()
     expect(await screen.findByText('Browser automation')).toBeInTheDocument()
     expect(screen.getByText('Browse and interact with websites.')).toBeInTheDocument()
     expect(screen.queryByText('Core utilities')).not.toBeInTheDocument()
     expect(screen.queryByText('MCP integrations')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Browser automation' }))
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Skills' }), { key: 'ArrowRight' })
+    expect(screen.getByRole('tab', { name: 'MCP' })).toHaveFocus()
+    expect(screen.getByRole('tabpanel', { name: 'MCP' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Server template' })).toHaveTextContent('Custom stdio')
+    fireEvent.click(screen.getByRole('button', { name: 'Server template' }))
+    expect(screen.queryByRole('option', { name: 'Filesystem' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: 'Chrome DevTools (my profile)' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add server' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Server name 1' }), { target: { value: 'my-files' } })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Plugins' }))
+    expect(screen.getByText('Plugin installation is not available yet')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Manage MCP connections' }))
+    expect(screen.getByRole('textbox', { name: 'Server name 1' })).toHaveValue('my-files')
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }))
+    expect(screen.getByRole('checkbox', { name: 'Browser automation' })).not.toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Use skill defaults' }))
+    expect(screen.getByRole('checkbox', { name: 'Browser automation' })).toBeChecked()
+    expect(updateSettings).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      tools: expect.objectContaining({ skills: expect.objectContaining({ 'browser-use': true, core: true }) }),
+      mcp: expect.objectContaining({ servers: [expect.objectContaining({ name: 'my-files' })] }),
+    })))
   })
 
   it('shows faster-whisper speech-to-text status and downloads the local model', async () => {

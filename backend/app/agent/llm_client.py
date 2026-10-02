@@ -205,61 +205,7 @@ def _openai_model_supports_reasoning_config(model_name: str) -> bool:
 
 
 def _gemini_thinking_config(model_name: str, reasoning_effort: str, types_mod):
-    effort = str(reasoning_effort or "medium").strip().lower()
-    model = str(model_name or "").strip().lower()
-    if not model.startswith("gemini-"):
-        return None
-
-    if model.startswith("gemini-3"):
-        if "pro" in model:
-            level_by_effort = {
-                "none": "low",
-                "minimal": "low",
-                "low": "low",
-                "medium": "medium",
-                "high": "high",
-                "xhigh": "high",
-                "max": "high",
-            }
-            level = level_by_effort.get(effort, "high")
-        else:
-            level_by_effort = {
-                "none": "minimal",
-                "minimal": "minimal",
-                "low": "low",
-                "medium": "medium",
-                "high": "high",
-                "xhigh": "high",
-                "max": "high",
-            }
-            level = level_by_effort.get(effort, "medium")
-        return types_mod.ThinkingConfig(thinking_level=level, include_thoughts=True)
-
-    if model.startswith("gemini-2.5"):
-        if "pro" in model:
-            budget_by_effort = {
-                "none": 128,
-                "low": 128,
-                "medium": -1,
-                "high": 32768,
-                "xhigh": 32768,
-                "max": 32768,
-            }
-        else:
-            budget_by_effort = {
-                "none": 0,
-                "low": 1024,
-                "medium": -1,
-                "high": 24576,
-                "xhigh": 24576,
-                "max": 24576,
-            }
-        return types_mod.ThinkingConfig(
-            thinking_budget=budget_by_effort.get(effort, -1),
-            include_thoughts=True,
-        )
-
-    return None
+    return provider_requests.gemini_thinking_config(model_name, reasoning_effort, types_mod)
 
 
 def _tool_output_response_payload(output: str) -> dict:
@@ -281,6 +227,7 @@ def build_tool_result_message(result: ToolCallResult, *, provider: str = "") -> 
     message = {
         "role": "user",
         "content": f"Tool result for {result.name}: {result.output}",
+        "tool_result": True,
     }
     if str(provider or "").lower() == "gemini":
         message["gemini_function_response"] = {

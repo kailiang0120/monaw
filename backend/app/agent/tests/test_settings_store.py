@@ -306,6 +306,10 @@ def test_gpt6_astra_normalizes_unsupported_reasoning_effort():
     assert LLMSettings(model_name="gpt-6-astra", reasoning_effort="none").reasoning_effort == "low"
     assert LLMSettings(model_name="gpt-6-sol", reasoning_effort="minimal").reasoning_effort == "low"
     assert LLMSettings(model_name="gpt-6-luna", reasoning_effort="none").reasoning_effort == "none"
+    for provider in ("openai", "codex"):
+        migrated = LLMSettings(provider=provider, model_name="gpt-6-sol", reasoning_effort="none")
+        assert migrated.model_name == "gpt-6.1-sol"
+        assert migrated.reasoning_effort == "low"
 
 
 def test_stored_gemini_selection_survives_migration(tmp_path):
@@ -318,10 +322,10 @@ def test_stored_gemini_selection_survives_migration(tmp_path):
     loaded = load_agent_settings(settings_path=settings_path)
 
     assert loaded.llm.provider == "gemini"
-    assert loaded.llm.model_name == "gemini-3.1-flash-lite"
+    assert loaded.llm.model_name == "gemini-flash-lite-latest"
 
 
-def test_gemini_provider_falls_back_to_a_supported_chat_model():
+def test_gemini_provider_migrates_to_matching_latest_family():
     settings_data = AgentSettings.model_validate(
         {
             "llm": {
@@ -332,7 +336,19 @@ def test_gemini_provider_falls_back_to_a_supported_chat_model():
         }
     )
 
-    assert settings_data.llm.model_name == "gemini-3.1-pro-preview"
+    assert settings_data.llm.model_name == "gemini-flash-latest"
+
+
+@pytest.mark.parametrize("old_model,new_model", [
+    ("gemini-3.1-pro-preview", "gemini-pro-latest"),
+    ("gemini-3.8-flash", "gemini-flash-latest"),
+    ("gemini-3.5-flash-lite", "gemini-flash-lite-latest"),
+])
+def test_gemini_latest_aliases_preserve_family_and_supported_reasoning(old_model, new_model):
+    migrated = LLMSettings(provider="gemini", model_name=old_model, reasoning_effort="minimal")
+    assert migrated.model_name == new_model
+    assert migrated.reasoning_effort == ("minimal" if new_model == "gemini-flash-lite-latest" else "low")
+    assert LLMSettings(provider="gemini", model_name=new_model).model_name == new_model
 
 
 def test_default_skills_use_recommended_profile():

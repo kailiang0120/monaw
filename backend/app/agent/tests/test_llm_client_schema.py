@@ -175,6 +175,8 @@ def test_openai_reasoning_effort_maps_to_responses_contract():
     assert _openai_reasoning_effort("none", "gpt-6-astra") == "low"
     assert _openai_reasoning_effort("xhigh", "gpt-6-astra") == "xhigh"
     assert _openai_reasoning_effort("max", "gpt-6-luna") == "max"
+    assert _openai_reasoning_effort("none", "gpt-6.1-sol") == "low"
+    assert _openai_reasoning_effort("max", "gpt-6.1-sol") == "max"
 
 
 def test_gemini_thinking_effort_maps_to_provider_contract():
@@ -199,6 +201,17 @@ def test_gemini_thinking_effort_maps_to_provider_contract():
     assert gemini_25_flash.thinking_budget == 0
     assert gemini_31.include_thoughts is True
     assert gemini_25_pro.include_thoughts is True
+    for model, effort, expected in (
+        ("gemini-pro-latest", "medium", "MEDIUM"),
+        ("gemini-flash-latest", "minimal", "LOW"),
+        ("gemini-flash-lite-latest", "minimal", "MINIMAL"),
+    ):
+        _, config = llm_provider_requests.gemini_request_payload(
+            model_name=model, messages=[{"role": "user", "content": "Hello"}],
+            tools=[], system_prompt="", reasoning_effort=effort, include_images=False,
+        )
+        assert config.thinking_config.thinking_level.value == expected
+        assert config.thinking_config.include_thoughts is True
 
 
 def test_model_supports_vision_covers_enabled_providers():

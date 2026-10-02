@@ -78,7 +78,7 @@ def test_collect_response_attachments_can_include_generated_tool_screenshots(mon
 
     result = collect_response_attachments(
         tool_calls=[
-            {"output": json.dumps({"status": "ok", "path": str(screenshot)})}
+            {"output": json.dumps({"status": "ok", "screenshot_path": str(screenshot)})}
         ],
         include_generated_tool_screenshots=True,
     )
@@ -108,11 +108,36 @@ def test_collect_response_attachments_keeps_tool_output_deliverable_images(monke
 
     result = collect_response_attachments(
         tool_calls=[
-            {"output": json.dumps({"status": "ok", "path": str(image)})}
+            {"output": json.dumps({"status": "ok", "output_path": str(image)})}
         ],
     )
 
     assert [attachment["name"] for attachment in result] == ["result image.png"]
+
+
+def test_response_attachments_ignore_discovered_files_and_keep_deliverables(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
+    source = tmp_path / "README.md"
+    report = tmp_path / "report.pdf"
+    requested = tmp_path / "requested.txt"
+    for path in (source, report, requested):
+        path.write_bytes(b"content")
+
+    result = collect_response_attachments(
+        explicit_paths=[str(requested)],
+        tool_calls=[
+            {"output": json.dumps({"status": "ok", "operation": "list", "entries": [{"path": str(source)}]})},
+            {"output": json.dumps({"status": "ok", "operation": "read", "path": str(source), "content": str(source)})},
+            {"output": json.dumps({"stdout": json.dumps([str(source)])})},
+            {"output": str(source)},
+            {"output": json.dumps({"status": "error", "output_path": str(source)})},
+            {"output": json.dumps({"status": "ok", "dry_run": True, "output_path": str(source)})},
+            {"output": json.dumps({"status": "ok", "output_path": str(report)})},
+        ],
+        tool_outputs=[str(source)],
+    )
+
+    assert [attachment["name"] for attachment in result] == ["requested.txt", "report.pdf"]
 
 
 def test_attachment_registry_persists_registered_paths(monkeypatch, tmp_path: Path):

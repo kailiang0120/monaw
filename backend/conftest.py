@@ -31,6 +31,7 @@ TEST_GROUPS = {
         "test_skill_prompt.py",
         "test_speech_to_text.py",
         "test_tool_executor.py",
+        "test_live_context_budget.py",
         "test_tool_registry_enhanced.py",
         "test_turn_loop.py",
     },

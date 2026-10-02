@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { chatStream } from '../lib/api/chatStream'
+import { sendSteeringMessage } from '../lib/api/steering'
 import { fetchMessages } from '../lib/api/conversations'
 import {
   type ApprovalEvent,
@@ -76,6 +77,7 @@ export interface Message {
   responseStartedAtMs?: number
   responseDurationMs?: number
   contentRevision?: number
+  steeringStatus?: 'queued' | 'applied' | 'unapplied'
 }
 
 interface StreamDonePayload {
@@ -117,6 +119,8 @@ function savedMessageToMessage(m: SavedMessage): Message {
 export function useChat(conversationId: string | null) {
   const [messages, setMessages] = useState<Message[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  const [steeringConversationId, setSteeringConversationId] = useState<string | null>(null)
+  const steeringTargetRef = useRef<{ runId: string; conversationId: string; assistantId: string } | null>(null)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [isLoadingOlderHistory, setIsLoadingOlderHistory] = useState(false)
   const [hasMoreHistory, setHasMoreHistory] = useState(false)
@@ -126,6 +130,7 @@ export function useChat(conversationId: string | null) {
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const typewriterCleanupRef = useRef<(() => void) | null>(null)
   const conversationIdRef = useRef<string | null>(conversationId)
+  const streamConversationIdRef = useRef<string | null>(conversationId)
   const historyCursorRef = useRef<number | null>(null)
   const skipCompletedTurnReloadRef = useRef<string | null>(null)
   const preserveUnboundTurnRef = useRef(false)
@@ -230,9 +235,29 @@ export function useChat(conversationId: string | null) {
     setRefreshNonce((value) => value + 1)
   }, [conversationId, isStreaming])
 
+  const steerMessage = useCallback(async (text: string, attachments: UploadedAttachment[] = []) => {
+    const target = steeringTargetRef.current
+    if (!target || !abortRef.current) throw new Error('The turn has finished. Send your message as a new turn.')
+    const messageId = crypto.randomUUID()
+    const response = await sendSteeringMessage(target.runId, messageId, text, attachments)
+    if (steeringTargetRef.current !== target) throw new Error('The task changed before delivery was confirmed. Your draft has been kept.')
+    setMessages((current) => {
+      if (current.some((item) => item.id === messageId)) return current
+      const index = current.findIndex((item) => item.id === target.assistantId)
+      if (index < 0) return current
+      const steeringMessage: Message = {
+        id: messageId, role: 'user', content: text, attachments,
+        steeringStatus: response.status === 'applied' ? 'applied' : abortRef.current ? 'queued' : 'unapplied',
+      }
+      return [...current.slice(0, index), steeringMessage, ...current.slice(index)]
+    })
+  }, [])
+
   const sendMessage = useCallback(
     (text: string, attachments: UploadedAttachment[], onConversationCreated: (id: string) => void) => {
       if (!text.trim() || isStreaming) return
+      steeringTargetRef.current = null
+      setSteeringConversationId(null)
 
       const userMsg: Message = {
         id: crypto.randomUUID(),
@@ -242,6 +267,7 @@ export function useChat(conversationId: string | null) {
       }
 
       const assistantId = crypto.randomUUID()
+      streamConversationIdRef.current = conversationId
       preserveUnboundTurnRef.current = conversationId === null
       const requestStartedAt = performance.now()
       const requestStartedAtMs = Date.now()
@@ -307,6 +333,7 @@ export function useChat(conversationId: string | null) {
         Math.max(0, Math.round(performance.now() - requestStartedAt))
 
       const finalizeDone = (done: StreamDonePayload) => {
+        abortRef.current = null
         if (typewriterCleanupRef.current === cleanupTypewriter) {
           typewriterCleanupRef.current = null
         }
@@ -325,7 +352,7 @@ export function useChat(conversationId: string | null) {
                   responseDurationMs:
                     done.response_duration_ms ?? currentResponseDurationMs() ?? m.responseDurationMs,
                 }
-              : m
+              : m.steeringStatus === 'queued' ? { ...m, steeringStatus: 'unapplied' } : m
           )
         )
         const convId = done.conversation_id ?? ''
@@ -368,10 +395,12 @@ export function useChat(conversationId: string | null) {
 
       // Idle timeout: auto-stop if no SSE activity for IDLE_TIMEOUT_MS
       const resetIdleTimer = () => {
+        if (typewriter.stopped) return
         if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
         idleTimerRef.current = setTimeout(() => {
           cleanupTypewriter()
           abortRef.current?.()
+          abortRef.current = null
           skipCompletedTurnReloadRef.current = conversationId
           setIsStreaming(false)
           setMessages((prev) =>
@@ -382,7 +411,8 @@ export function useChat(conversationId: string | null) {
             )
           )
           setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, runStatus: 'error' } : m))
+            prev.map((m) => (m.id === assistantId ? { ...m, runStatus: 'error' }
+              : m.steeringStatus === 'queued' ? { ...m, steeringStatus: 'unapplied' } : m))
           )
         }, IDLE_TIMEOUT_MS)
       }
@@ -397,6 +427,7 @@ export function useChat(conversationId: string | null) {
       resetIdleTimer()
 
       const addApprovalNotice = (data: ApprovalEvent, type: ApprovalNotice['type']) => {
+        if (typewriter.stopped) return
         const notice: ApprovalNotice = { ...data, type }
         setMessages((prev) =>
           prev.map((m) =>
@@ -407,8 +438,10 @@ export function useChat(conversationId: string | null) {
         )
       }
 
-      const updateMsg = (updater: (m: Message) => Message) =>
+      const updateMsg = (updater: (m: Message) => Message) => {
+        if (typewriter.stopped) return
         setMessages((prev) => prev.map((m) => (m.id === assistantId ? updater(m) : m)))
+      }
 
       const handleThinking = (content: string) => {
         updateMsg((m) => ({ ...m, thinking: (m.thinking ?? '') + content }))
@@ -478,6 +511,7 @@ export function useChat(conversationId: string | null) {
       }
 
       const handleAccessGrantRequired = (data: AccessGrantRequiredEvent) => {
+        if (typewriter.stopped) return
         resetIdleTimer()
         setPendingAccessGrant({
           ticket_id: data.ticket_id,
@@ -500,6 +534,7 @@ export function useChat(conversationId: string | null) {
         },
         // onToolStart
         (data) => {
+          if (typewriter.stopped) return
           resetIdleTimer()
           const toolId = data.call_id ?? crypto.randomUUID()
           const tc: ToolCall = {
@@ -523,6 +558,7 @@ export function useChat(conversationId: string | null) {
         },
         // onToolEnd
         (data) => {
+          if (typewriter.stopped) return
           resetIdleTimer()
           setMessages((prev) =>
             prev.map((m) => {
@@ -564,8 +600,10 @@ export function useChat(conversationId: string | null) {
         },
         // onError
         (err, data) => {
+          if (typewriter.stopped) return
           cleanupTypewriter()
           clearIdleTimer()
+          abortRef.current = null
           skipCompletedTurnReloadRef.current = conversationId
           setIsStreaming(false)
           const isPause = data?.code?.startsWith('iteration_limit_')
@@ -582,7 +620,7 @@ export function useChat(conversationId: string | null) {
                     runStatus: isPause ? 'paused' : 'error',
                     responseDurationMs: currentResponseDurationMs() ?? m.responseDurationMs,
                   }
-                : m
+                : m.steeringStatus === 'queued' ? { ...m, steeringStatus: 'unapplied' } : m
             )
           )
         },
@@ -602,6 +640,7 @@ export function useChat(conversationId: string | null) {
         handleAccessGrantRequired,
         // onToolResumed — update the last pending tool card with the resolved result
         (data) => {
+          if (typewriter.stopped) return
           resetIdleTimer()
           setMessages((prev) =>
             prev.map((m) => {
@@ -626,9 +665,38 @@ export function useChat(conversationId: string | null) {
         },
         // onPing — keepalive while waiting for permission dialog, reset idle timer
         () => { resetIdleTimer() },
-        // onHeartbeat — backend idle heartbeat, reset idle timer
+        // onHeartbeat and transport activity keep the turn alive.
         () => { resetIdleTimer() },
         () => { resetIdleTimer() },
+        // The server assigns a steering target even for a brand new chat.
+        (data) => {
+          if (typewriter.stopped) return
+          steeringTargetRef.current = { runId: data.run_id, conversationId: data.conversation_id, assistantId }
+          setSteeringConversationId(data.conversation_id)
+        },
+        (data) => {
+          if (typewriter.stopped) return
+          resetIdleTimer()
+          if (data.reset_response) {
+            clearTypewriterTimer()
+            typewriter.queue = ''
+          }
+          setMessages((current) => {
+            const existing = current.some((item) => item.id === data.message_id)
+            const updated = current.map((item) => item.id === data.message_id
+              ? { ...item, steeringStatus: 'applied' as const }
+              : item.id === assistantId && data.reset_response
+                ? { ...item, content: '', contentRevision: (item.contentRevision ?? 0) + 1 }
+                : item)
+            if (existing) return updated
+            const index = updated.findIndex((item) => item.id === assistantId)
+            if (index < 0) return updated
+            return [...updated.slice(0, index), {
+              id: data.message_id, role: 'user' as const, content: data.message,
+              attachments: data.attachments, steeringStatus: 'applied' as const,
+            }, ...updated.slice(index)]
+          })
+        },
       )
 
       abortRef.current = abort
@@ -637,29 +705,55 @@ export function useChat(conversationId: string | null) {
   )
 
   const stopStreaming = useCallback(() => {
+    steeringTargetRef.current = null
+    setSteeringConversationId(null)
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
     typewriterCleanupRef.current?.()
     abortRef.current?.()
-    skipCompletedTurnReloadRef.current = conversationIdRef.current
+    abortRef.current = null
+    skipCompletedTurnReloadRef.current = streamConversationIdRef.current === conversationIdRef.current
+      ? conversationIdRef.current : null
     setIsStreaming(false)
     setMessages((prev) =>
-      prev.map((m) => (m.streaming ? { ...m, streaming: false, runStatus: 'paused' } : m))
+      prev.map((m) => (m.streaming ? { ...m, streaming: false, runStatus: 'paused' }
+        : m.steeringStatus === 'queued' ? { ...m, steeringStatus: 'unapplied' } : m))
     )
   }, [])
 
   const clearMessages = useCallback(() => {
+    steeringTargetRef.current = null
+    setSteeringConversationId(null)
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
     typewriterCleanupRef.current?.()
+    abortRef.current?.()
+    abortRef.current = null
     skipCompletedTurnReloadRef.current = null
     preserveUnboundTurnRef.current = false
     displayedConversationIdRef.current = null
     setMessages([])
+    setPendingAccessGrant(null)
     setIsStreaming(false)
     setHasMoreHistory(false)
     historyCursorRef.current = null
   }, [])
 
+  useEffect(() => {
+    if (abortRef.current && streamConversationIdRef.current !== conversationId) {
+      stopStreaming()
+      setPendingAccessGrant(null)
+    }
+  }, [conversationId, stopStreaming])
+
+  useEffect(() => () => {
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
+    typewriterCleanupRef.current?.()
+    abortRef.current?.()
+    abortRef.current = null
+  }, [])
+
   return {
+    steerMessage,
+    steeringConversationId,
     messages,
     isStreaming,
     isLoadingHistory,

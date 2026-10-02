@@ -374,19 +374,19 @@ def test_telegram_bridge_sets_model_for_chat_runtime():
             initialize_conversation=lambda _conv_id, _title: None,
         )
 
-        model, error = bridge.set_model_selection(12345, "gemini-3.1-pro-preview")
+        model, error = bridge.set_model_selection(12345, "gemini-pro-latest")
         result = asyncio.run(bridge.run_chat_message(chat_id=12345, text="Hello"))
 
         assert error == ""
         assert model is not None
         assert model.provider == "gemini"
-        assert model.model_name == "gemini-3.1-pro-preview"
+        assert model.model_name == "gemini-pro-latest"
         assert result.reply == "Reply"
         runtime_settings = calls[0]["settings"]
         assert runtime_settings.model_provider == "gemini"
-        assert runtime_settings.model_name == "gemini-3.1-pro-preview"
+        assert runtime_settings.model_name == "gemini-pro-latest"
         assert runtime_settings.llm.provider == "gemini"
-        assert runtime_settings.llm.model_name == "gemini-3.1-pro-preview"
+        assert runtime_settings.llm.model_name == "gemini-pro-latest"
         assert runtime_settings.browser is not base_settings.browser
         assert base_settings.model_name == "gpt-5.6-luna"
         assert base_settings.llm.model_name == "gpt-5.6-luna"

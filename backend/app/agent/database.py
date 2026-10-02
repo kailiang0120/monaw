@@ -678,6 +678,13 @@ class Database:
         )
         return int(row["count"]) if row is not None else 0
 
+    def get_recent_tool_calls_for_message(self, message_id: int, limit: int = 5) -> list[dict]:
+        rows = self.fetchall(
+            "SELECT tool_name, input, output, status FROM tool_calls WHERE message_id = ? ORDER BY id DESC LIMIT ?",
+            (message_id, limit),
+        )
+        return [dict(row) for row in reversed(rows)]
+
     def get_conversation_compaction(self, conv_id: str) -> dict[str, Any] | None:
         row = self.fetchone(
             "SELECT * FROM conversation_compactions WHERE conversation_id = ?",

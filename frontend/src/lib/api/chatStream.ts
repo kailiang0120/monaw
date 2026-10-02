@@ -5,6 +5,8 @@ import type {
   PlanEvent,
   StepEvent,
   UploadedAttachment,
+  TurnStartedEvent,
+  SteeringAppliedEvent,
 } from './types'
 
 const DEBUG_ENDPOINT = String(import.meta.env.VITE_DEBUG_INGEST_URL || '').trim()
@@ -20,6 +22,8 @@ const DEBUG_HEADERS = {
 }
 
 interface ChatStreamHandlers {
+  onTurnStarted?: (data: TurnStartedEvent) => void
+  onSteeringApplied?: (data: SteeringAppliedEvent) => void
   onToken: (token: string) => void
   onToolStart: (data: { tool: string; input: unknown; call_id?: string }) => void
   onToolEnd: (data: { output: string; call_id?: string; status?: string }) => void
@@ -95,7 +99,11 @@ function dispatchSseEvent(
 ) {
   try {
     const json = JSON.parse(raw)
-    if (eventType === 'token') {
+    if (eventType === 'turn_started') {
+      handlers.onTurnStarted?.(json)
+    } else if (eventType === 'steering_applied') {
+      handlers.onSteeringApplied?.(json)
+    } else if (eventType === 'token') {
       bumpEvt(state, 'token')
       handlers.onToken(json.content)
     } else if (eventType === 'tool_start') {
@@ -235,6 +243,8 @@ export function chatStream(
   onPing?: () => void,
   onHeartbeat?: () => void,
   onActivity?: () => void,
+  onTurnStarted?: (data: TurnStartedEvent) => void,
+  onSteeringApplied?: (data: SteeringAppliedEvent) => void,
 ): () => void {
   const controller = new AbortController()
 
@@ -246,6 +256,8 @@ export function chatStream(
     }
 
     const handlers: ChatStreamHandlers = {
+      onTurnStarted,
+      onSteeringApplied,
       onToken,
       onToolStart,
       onToolEnd,
@@ -275,6 +287,7 @@ export function chatStream(
         body: JSON.stringify({ message, conversation_id: conversationId, attachments }),
         signal: controller.signal,
       })
+      if (controller.signal.aborted) return
 
       sendDebugEvent('fetch_response', 'H2', {
         ok: res.ok,
@@ -299,6 +312,10 @@ export function chatStream(
 
       while (true) {
         const { done, value } = await reader.read()
+        if (controller.signal.aborted) {
+          await reader.cancel()
+          break
+        }
         if (done) {
           buffer += decoder.decode()
           buffer = processSseBuffer(buffer, true, state, handlers)
@@ -310,14 +327,14 @@ export function chatStream(
           })
 
           if (!state.sawTerminal) {
-            bumpEvt(state, 'fallback_done')
+            bumpEvt(state, 'stream_interrupted')
             sendDebugEvent('stream_closed_without_terminal_event', 'H3', {
               conversationId,
               evtCounts: state.evtCounts,
             })
-            handlers.onDone({ conversation_id: conversationId ?? '' })
-            state.sawDone = true
             state.sawTerminal = true
+            const message = 'The connection ended before the response finished. Please try again.'
+            handlers.onError(message, { code: 'stream_interrupted', message })
           }
           break
         }
@@ -333,7 +350,7 @@ export function chatStream(
         name: err?.name,
         errMsg: String(err?.message ?? err).slice(0, 200),
       })
-      if (err.name !== 'AbortError') onError(err.message ?? 'Stream error')
+      if (!controller.signal.aborted && err.name !== 'AbortError') onError(err.message ?? 'Stream error')
     }
   })()
 

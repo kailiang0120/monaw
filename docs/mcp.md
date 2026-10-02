@@ -15,7 +15,9 @@ The bridge has two parts:
 
 ## Where To Configure
 
-Open Settings -> MCP.
+Open Settings -> Tools -> MCP.
+
+The template menu offers Chrome DevTools, custom stdio, and Streamable HTTP connections. File tools are built in, so Filesystem is not offered as a template. Existing filesystem MCP connections remain editable.
 
 MCP server configuration is saved in runtime settings under `%USERPROFILE%\.monaw\runtime\settings.json`.
 
@@ -150,7 +152,7 @@ Names, descriptions and annotations produce risk labels. The shared action polic
 
 | Symptom | Check |
 | --- | --- |
-| No MCP tools appear. | Check Settings -> MCP enabled state, server enabled state, and `mcp_status`. |
+| No MCP tools appear. | Check Settings -> Tools -> MCP enabled state, server enabled state, and `mcp_status`. |
 | `mcp package is not installed`. | Run `uv sync --locked` from the `backend` directory. |
 | Server startup times out. | Increase `startup_timeout_ms`, verify `command`, `args`, `cwd`, and `env`. |
 | `stdio` command not found. | Use an absolute command path or confirm it is on PATH for the backend Python process. |

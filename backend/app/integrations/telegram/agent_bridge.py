@@ -33,7 +33,11 @@ def _efforts_for_model(provider: str, model_name: str) -> tuple[str, ...]:
         return ("low", "medium", "high", "xhigh", "max") if model_name == "gpt-6-luna" else ("low", "medium", "high", "xhigh", "max", "ultra")
     if provider == "openai" and model_name.startswith("gpt-6"):
         efforts = ("none", "low", "medium", "high", "xhigh", "max")
-        return efforts[1:] if model_name == "gpt-6-astra" else efforts
+        return efforts[1:] if model_name in {"gpt-6-astra", "gpt-6.1-sol"} else efforts
+    if provider == "gemini" and model_name in {"gemini-pro-latest", "gemini-flash-latest"}:
+        return ("low", "medium", "high")
+    if provider == "gemini" and model_name == "gemini-flash-lite-latest":
+        return ("minimal", "low", "medium", "high")
     return REASONING_EFFORTS
 
 

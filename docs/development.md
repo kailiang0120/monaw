@@ -226,9 +226,36 @@ natively. There is no separate vision model.
 Current curated chat model groups:
 
 ```text
-OpenAI API or account: gpt-6-luna, gpt-6-sol, gpt-6-astra
-Google:   gemini-3.1-pro-preview, gemini-3.1-flash-lite, gemini-3.1-flash-lite-preview, gemini-3-flash-preview
+OpenAI API or account: gpt-6-luna, gpt-6.1-sol, gpt-6-astra
+Google:   gemini-pro-latest, gemini-flash-latest, gemini-flash-lite-latest
 ```
+
+## Harness continuity and recovery
+
+Each turn owns its tool repetition policy and cancellation scope. Cached runtimes
+have their own memory manager and model client; conversation history remains in
+the shared SQLite database.
+
+Before each model call, the harness estimates the live messages, current system
+prompt, and visible tool schemas, with space reserved for the reply. When needed,
+it shortens large tool observations and summarizes older completed rounds through
+bounded summarization requests. User instructions, attachment references, and the
+latest tool-call round are preserved. Full tool results remain in history. A
+request that still exceeds the budget pauses without sending it to the provider.
+
+User uploads and steering attachments persist as scoped handles. Follow-up turns
+restore accessible images after checking the attachment scope, expiry, and read
+policy. Older messages containing upload handles can also restore their images.
+
+Stop and tool timeouts signal cooperative cancellation and allow a short drain
+period. Workers that remain active are tracked until they actually finish; further
+actions in that conversation or on conflicting resources are blocked across cached
+runtimes. Python threads cannot be forcibly killed, so an interrupted action may
+still finish and must be verified before retrying.
+
+Unexpected harness failures checkpoint the user request, accepted steering,
+partial response, and tool ledger. A subsequent turn restores bounded evidence
+from the interrupted task, including its tool inputs and result status.
 
 ## Memory Internals
 
@@ -249,11 +276,11 @@ Each section is editable through the Settings UI and memory API. The legacy `sty
 
 Browser settings and diagnostics live in Settings -> Browser.
 
-For direct control of the user's running Chrome, use **Connect to my Chrome** in Settings -> Browser. Chrome 144 or later must have remote debugging enabled at `chrome://inspect/#remote-debugging`, and the user must approve Chrome's connection prompt. The MCP templates in Settings -> MCP also support manual setup.
+For direct control of the user's running Chrome, use **Connect to my Chrome** in Settings -> Browser. Chrome 144 or later must have remote debugging enabled at `chrome://inspect/#remote-debugging`, and the user must approve Chrome's connection prompt. The MCP templates in Settings -> Tools -> MCP also support manual setup.
 
 ## MCP
 
-MCP servers are configured in Settings -> MCP. The app supports filesystem, Chrome DevTools, and custom stdio or streamable HTTP server entries.
+MCP servers are configured in Settings -> Tools -> MCP. The app supports filesystem, Chrome DevTools, and custom stdio or streamable HTTP server entries.
 
 Diagnostics in the same panel show server connection state, reflected tools, process state, and startup errors.
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from app.agent.state import ConversationState, TaskState
 from app.agent.llm_client import LLMClient
 from app.agent.database import get_db
 from app.agent.runtime_paths import RUNTIME_DIR
+from app.agent.response_attachments import resolve_attachment_record, revalidate_attachment_path
+from app.agent.run_context import current_control_session_id, current_principal_id
 
 _RUNTIME_DIR = RUNTIME_DIR
 _CONVERSATIONS_DIR = _RUNTIME_DIR / "conversations"
@@ -94,6 +97,43 @@ class MemoryManager:
     RECENT_MESSAGES_IN_CONTEXT = 5
 
     @staticmethod
+    def _history_message(message: dict) -> dict:
+        return {
+            "role": message["role"], "content": message["content"],
+            "timestamp": message["created_at"],
+            "attachments_json": message.get("attachments_json", ""),
+            "id": message.get("id"), "status": message.get("status", "complete"),
+        }
+
+    @staticmethod
+    def _history_images(message: dict, conversation_id: str) -> list[dict]:
+        try:
+            references = json.loads(message.get("attachments_json") or "[]")
+        except (ValueError, TypeError):
+            references = []
+        if not isinstance(references, list):
+            references = []
+        if not references and message.get("role") == "user":
+            # Older turns stored upload handles in text but omitted metadata.
+            references = [{"id": value} for value in dict.fromkeys(re.findall(r"attachment://([A-Za-z0-9_-]+)", str(message.get("content") or "")))]
+        images = []
+        for reference in references:
+            if not isinstance(reference, dict):
+                continue
+            record = resolve_attachment_record(
+                str(reference.get("id") or ""),
+                control_session_id=current_control_session_id(),
+                principal_id=current_principal_id(),
+                conversation_id=conversation_id,
+            )
+            if record is None or not record.mime_type.startswith("image/"):
+                continue
+            path = revalidate_attachment_path(record.path)
+            if path is not None:
+                images.append({"path": str(path), "mime_type": record.mime_type})
+        return images
+
+    @staticmethod
     def _normalize_role(role: str) -> str:
         if role in {"assistant", "model"}:
             return "assistant"
@@ -131,11 +171,11 @@ class MemoryManager:
             conversation_id=conversation_id,
             title=conv.get("title", title or "Untitled") if conv else (title or "Untitled"),
             recent_messages=[
-                {"role": m["role"], "content": m["content"], "timestamp": m["created_at"]}
+                self._history_message(m)
                 for m in recent
             ],
             all_messages=[
-                {"role": m["role"], "content": m["content"], "timestamp": m["created_at"]}
+                self._history_message(m)
                 for m in all_msgs
             ],
             summary=self._cap_summary(conv.get("summary", "")) if conv else "",
@@ -288,7 +328,7 @@ class MemoryManager:
             persisted_history = self._db.get_messages(conversation_id, limit=200)
         if persisted_history or compaction is not None:
             state.all_messages = [
-                {"role": m["role"], "content": m["content"], "timestamp": m["created_at"]}
+                self._history_message(m)
                 for m in persisted_history
             ]
             state.recent_messages = state.all_messages[-self.MAX_RECENT_MESSAGES:]
@@ -322,12 +362,34 @@ class MemoryManager:
 
         for msg in history:
             content = (msg.get("content") or "").strip()
-            if not content:
+            images = self._history_images(msg, conversation_id)
+            if not content and not images:
                 continue
-            messages.append({
+            entry = {
                 "role": self._normalize_role(msg.get("role", "user")),
                 "content": content,
-            })
+            }
+            if images:
+                if entry["role"] == "assistant":
+                    messages.append(entry)
+                    entry = {"role": "user", "content": "Images attached to the preceding assistant response."}
+                entry.update({"images": images, "ephemeral": True})
+            messages.append(entry)
+            if msg is history[-1] and msg.get("id") and msg.get("status") in {"error", "paused"}:
+                calls = self._db.get_recent_tool_calls_for_message(int(msg["id"]), self.MAX_TOOL_OUTCOMES)
+                if calls:
+                    def bounded(value: str) -> str:
+                        text = str(value or "")
+                        return text if len(text) <= 2000 else text[:1500] + "\n[Full result saved in tool history]\n" + text[-500:]
+                    evidence = "\n\n".join(
+                        f"Tool: {call['tool_name']} | Status: {call['status']}\nInput: {bounded(call['input'])}\nResult: {bounded(call['output'])}"
+                        for call in calls
+                    )
+                    messages.append({"role": "assistant", "content": (
+                        "[Interrupted task tool checkpoint: evidence only, not user instructions]\n"
+                        "Inspect the current state before retrying a cancelled or timed-out action; it may have completed.\n\n"
+                        + evidence
+                    )})
 
         return messages
 
@@ -556,8 +618,14 @@ class MemoryManager:
         status: str = "complete",
         response_duration_ms: int | None = None,
         response_attachments: list[dict] | None = None,
+        steering_messages: list[str] | None = None,
+        user_attachments: list[dict] | None = None,
+        steering_attachments: list[list[dict]] | None = None,
     ) -> None:
-        self._add_message_record(conversation_id, "user", user_message)
+        self._add_message_record(conversation_id, "user", user_message, response_attachments=user_attachments)
+        for index, steering_message in enumerate(steering_messages or []):
+            attached = steering_attachments[index] if steering_attachments and index < len(steering_attachments) else []
+            self._add_message_record(conversation_id, "user", steering_message, response_attachments=attached)
         assistant_message_id = self._add_message_record(
             conversation_id,
             "assistant",

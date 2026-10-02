@@ -38,6 +38,26 @@ class AttachmentRef(BaseModel):
     expires_at: int | None = None
 
 
+class ChatSteerRequest(BaseModel):
+    run_id: str = Field(..., min_length=1, max_length=64)
+    message_id: str = Field(..., min_length=1, max_length=64)
+    message: str = Field(..., min_length=1, max_length=20000)
+    attachments: list[AttachmentRef] = Field(default_factory=list, max_length=8)
+
+    @field_validator("message")
+    @classmethod
+    def nonempty_message(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("A steering message must contain text")
+        return value.strip()
+
+
+class ChatSteerResponse(BaseModel):
+    message_id: str
+    conversation_id: str
+    status: str
+
+
 class AttachmentUploadRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
     data_base64: str = Field(..., min_length=1)

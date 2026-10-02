@@ -14,10 +14,10 @@ import {
   Loader2,
   Mic,
   Plus,
+  Puzzle,
   RotateCcw,
   Save,
   Search,
-  Server,
   Shield,
   Trash2,
   UserRound,
@@ -114,28 +114,33 @@ interface Props {
 }
 
 type SettingsTab = SettingsPageId
+type ToolsTab = 'skills' | 'mcp' | 'plugins'
+
+const TOOLS_TABS: Array<{ id: ToolsTab; label: string }> = [
+  { id: 'skills', label: 'Skills' },
+  { id: 'mcp', label: 'MCP' },
+  { id: 'plugins', label: 'Plugins' },
+]
 
 const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
   identity: UserRound,
   apiKeys: KeyRound,
   model: Bot,
   memory: Brain,
-  skills: Wrench,
+  tools: Wrench,
   browser: Globe2,
-  mcp: Server,
   permissions: Shield,
   sandbox: Container,
   observability: Activity,
 }
 
 /**
- * Ten flat tabs is a list; grouped, it is a map. The grouping follows what a
- * user is trying to do — set the agent up, give it abilities, fence it in.
+ * Group pages by what the user is trying to configure.
  */
 const NAV_GROUPS: Array<{ id: string; label: string; items: SettingsTab[] }> = [
   { id: 'general', label: 'General', items: ['identity', 'apiKeys'] },
   { id: 'intelligence', label: 'Intelligence', items: ['model'] },
-  { id: 'capabilities', label: 'Capabilities', items: ['skills', 'browser', 'mcp'] },
+  { id: 'capabilities', label: 'Capabilities', items: ['tools', 'browser'] },
   { id: 'safety', label: 'Safety', items: ['permissions', 'sandbox'] },
   { id: 'inspect', label: 'Inspect', items: ['observability'] },
 ]
@@ -188,6 +193,7 @@ export function SettingsModal({
   const [draft, setDraft] = useState<AgentSettings | null>(null)
   const [modelOptions, setModelOptions] = useState<ModelOptionsCatalog>(FALLBACK_MODEL_OPTIONS)
   const [activeTab, setActiveTab] = useState<SettingsTab>('model')
+  const [toolsTab, setToolsTab] = useState<ToolsTab>('skills')
   const [navQuery, setNavQuery] = useState('')
   const [openaiKey, setOpenaiKey] = useState('')
   const [openaiAccount, setOpenaiAccount] = useState<OpenAIAccountStatus | null>(null)
@@ -203,7 +209,7 @@ export function SettingsModal({
   const [dirtySecrets, setDirtySecrets] = useState<Set<ConnectionSecretId>>(() => new Set())
   const [showKey, setShowKey] = useState(false)
   const [activeConnectionPortal, setActiveConnectionPortal] = useState<ConnectionPortalId>(DEFAULT_CONNECTION_PORTAL)
-  const [mcpTemplate, setMcpTemplate] = useState<MCPServerTemplateKey>('filesystem')
+  const [mcpTemplate, setMcpTemplate] = useState<MCPServerTemplateKey>('custom')
   const [browserDiagnostics, setBrowserDiagnostics] = useState<BrowserUseDiagnostics | null>(null)
   const [mcpDiagnostics, setMcpDiagnostics] = useState<Record<string, MCPServerDiagnostics>>({})
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
@@ -1276,10 +1282,65 @@ export function SettingsModal({
                 </>
               )}
 
-              {activeTab === 'skills' && (
+              {activeTab === 'tools' && (
                 <>
-                  <PageHeader title={PAGE_COPY.skills.label} />
-                  <div className="space-y-4">
+                  <PageHeader
+                    title={PAGE_COPY.tools.label}
+                    description={PAGE_COPY.tools.blurb}
+                    action={toolsTab === 'skills' ? (
+                      <button
+                        type="button"
+                        className="st-btn st-btn-secondary"
+                        onClick={() => updateDraft((current) => ({
+                          ...current,
+                          tools: {
+                            ...current.tools,
+                            skills: current.available_skills.reduce((flags, skill) => ({
+                              ...flags,
+                              [skill.name]: skill.always || skill.enabled_by_default,
+                            }), { ...current.tools.skills }),
+                          },
+                        }))}
+                      >
+                        <RotateCcw size={13} />
+                        Use skill defaults
+                      </button>
+                    ) : undefined}
+                  />
+                  <div role="tablist" aria-label="Tool types" className="st-segment mb-5 w-full sm:w-auto">
+                    {TOOLS_TABS.map((tab, index) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        id={`settings-tools-tab-${tab.id}`}
+                        aria-controls={`settings-tools-panel-${tab.id}`}
+                        aria-selected={toolsTab === tab.id}
+                        tabIndex={toolsTab === tab.id ? 0 : -1}
+                        className="st-segment-item flex-1 sm:flex-none"
+                        onClick={() => setToolsTab(tab.id)}
+                        onKeyDown={(event) => {
+                          const nextIndex = event.key === 'ArrowRight' ? (index + 1) % TOOLS_TABS.length
+                            : event.key === 'ArrowLeft' ? (index + TOOLS_TABS.length - 1) % TOOLS_TABS.length
+                              : event.key === 'Home' ? 0
+                                : event.key === 'End' ? TOOLS_TABS.length - 1 : null
+                          if (nextIndex === null) return
+                          event.preventDefault()
+                          const nextTab = TOOLS_TABS[nextIndex].id
+                          setToolsTab(nextTab)
+                          document.getElementById(`settings-tools-tab-${nextTab}`)?.focus()
+                        }}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {activeTab === 'tools' && toolsTab === 'skills' && (
+                <>
+                  <div role="tabpanel" id="settings-tools-panel-skills" aria-labelledby="settings-tools-tab-skills" className="space-y-4" tabIndex={0}>
                     <Note tone="info">{SKILLS_COPY.intro}</Note>
                     {(['recommended', 'optional'] as const).map((tier) => (
                       <SettingsCard
@@ -1381,7 +1442,7 @@ export function SettingsModal({
                             browserSkill?.available === false
                               ? 'Unavailable'
                               : browserDiagnostics?.session_active && browserDiagnostics.current_mode
-                                ? `${browserDiagnostics.current_mode} active`
+                                ? `${BROWSER_COPY.modeLabels[browserDiagnostics.current_mode as keyof typeof BROWSER_COPY.modeLabels] ?? browserDiagnostics.current_mode} active`
                                 : browserDiagnostics?.last_error
                                   ? 'Degraded'
                                   : browserSkillEnabled ? 'Idle' : 'Off'
@@ -1397,9 +1458,9 @@ export function SettingsModal({
                           ariaLabel="Browser mode"
                           value={draft.browser.mode}
                           options={[
-                            { value: 'auto', label: 'Automatic' },
-                            { value: 'managed', label: 'Separate Chrome profile' },
-                            { value: 'system', label: 'My Chrome profile' },
+                            { value: 'auto', label: BROWSER_COPY.modeLabels.auto },
+                            { value: 'managed', label: BROWSER_COPY.modeLabels.managed },
+                            { value: 'system', label: BROWSER_COPY.modeLabels.system },
                           ]}
                           onChange={(mode) => updateDraft((current) => ({
                             ...current,
@@ -1479,6 +1540,9 @@ export function SettingsModal({
 
                     <SettingsCard
                       title="Browser folders"
+                      description={draft.browser.mode === 'system'
+                        ? 'Chrome keeps your profile in its own folder. Monaw saves screenshots, downloads, and traces here.'
+                        : undefined}
                       action={window.electronAPI?.selectDirectory ? (
                         <button type="button" onClick={setOutputRoot} className="st-btn st-btn-secondary">
                           <Folder size={13} />
@@ -1509,7 +1573,9 @@ export function SettingsModal({
                         />
                       </StackedRow>
                       <div className="st-row-stacked grid gap-3 sm:grid-cols-2">
-                        <ReadOnlyValue label="Managed profile folder" value={draft.browser.managed_profile_dir} />
+                        {draft.browser.mode !== 'system' && (
+                          <ReadOnlyValue label="Managed profile folder" value={draft.browser.managed_profile_dir} />
+                        )}
                         <ReadOnlyValue label="Browser trace folder" value={draft.browser.traces_dir} />
                       </div>
                     </SettingsCard>
@@ -1586,41 +1652,41 @@ export function SettingsModal({
                 </>
               )}
 
-              {activeTab === 'mcp' && (
+              {activeTab === 'tools' && toolsTab === 'mcp' && (
                 <>
-                  <PageHeader
-                    title={PAGE_COPY.mcp.label}
-                    action={
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Dropdown<MCPServerTemplateKey>
-                          ariaLabel="Server template"
-                          value={mcpTemplate}
-                          options={(Object.entries(MCP_SERVER_TEMPLATES) as Array<[MCPServerTemplateKey, { label: string; build: () => unknown }]>).map(
-                            ([key, template]) => ({ value: key, label: template.label }),
-                          )}
-                          onChange={setMcpTemplate}
-                          size="sm"
-                          className="min-w-44"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => updateDraft((current) => ({
-                            ...current,
-                            mcp: {
-                              ...current.mcp,
-                              servers: [...current.mcp.servers, MCP_SERVER_TEMPLATES[mcpTemplate].build()],
-                            },
-                          }))}
-                          className="st-btn st-btn-primary st-btn-sm"
-                        >
-                          <Plus size={13} />
-                          Add server
-                        </button>
-                      </div>
-                    }
-                  />
-                  <div className="space-y-4">
-                    <SettingsCard>
+                  <div role="tabpanel" id="settings-tools-panel-mcp" aria-labelledby="settings-tools-tab-mcp" className="space-y-4" tabIndex={0}>
+                    <SettingsCard
+                      title="External connections"
+                      description={MCP_COPY.intro}
+                      action={
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Dropdown<MCPServerTemplateKey>
+                            ariaLabel="Server template"
+                            value={mcpTemplate}
+                            options={(Object.entries(MCP_SERVER_TEMPLATES) as Array<[MCPServerTemplateKey, { label: string; build: () => unknown }]>).map(
+                              ([key, template]) => ({ value: key, label: template.label }),
+                            )}
+                            onChange={setMcpTemplate}
+                            size="sm"
+                            className="min-w-44"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => updateDraft((current) => ({
+                              ...current,
+                              mcp: {
+                                ...current.mcp,
+                                servers: [...current.mcp.servers, MCP_SERVER_TEMPLATES[mcpTemplate].build()],
+                              },
+                            }))}
+                            className="st-btn st-btn-primary st-btn-sm"
+                          >
+                            <Plus size={13} />
+                            Add server
+                          </button>
+                        </div>
+                      }
+                    >
                       <SwitchRow
                         label="Enable MCP servers"
                         checked={mcpFeatureEnabled}
@@ -1646,7 +1712,7 @@ export function SettingsModal({
                     {draft.mcp.servers.length === 0 ? (
                       <SettingsCard>
                         <div className="p-8 text-center">
-                          <p className="st-label">No MCP servers yet</p>
+                          <p className="st-label">No external connections</p>
                           <p className="st-desc mx-auto mt-1.5">{MCP_COPY.intro}</p>
                         </div>
                       </SettingsCard>
@@ -1690,9 +1756,26 @@ export function SettingsModal({
                       })
                     )}
 
-                    <Note tone="warn">{MCP_COPY.plaintextWarning}</Note>
+                    {draft.mcp.servers.length > 0 && <Note tone="warn">{MCP_COPY.plaintextWarning}</Note>}
                   </div>
                 </>
+              )}
+
+              {activeTab === 'tools' && toolsTab === 'plugins' && (
+                <div role="tabpanel" id="settings-tools-panel-plugins" aria-labelledby="settings-tools-tab-plugins" tabIndex={0}>
+                  <SettingsCard title="Plugins">
+                    <div className="flex items-start gap-3 p-5">
+                      <Puzzle size={20} className="mt-0.5 shrink-0" style={{ color: 'var(--st-text-faint)' }} />
+                      <div className="min-w-0">
+                        <p className="st-label">Plugin installation is not available yet</p>
+                        <p className="st-desc mt-1">Monaw currently supports built-in skills and external MCP connections.</p>
+                        <button type="button" className="st-btn st-btn-secondary mt-3" onClick={() => setToolsTab('mcp')}>
+                          Manage MCP connections
+                        </button>
+                      </div>
+                    </div>
+                  </SettingsCard>
+                </div>
               )}
 
               {activeTab === 'observability' && (
@@ -2137,7 +2220,7 @@ function BrowserDiagnosticsCard({
     <div className="space-y-2 p-4">
       <p className="st-label">
         {diagnostics?.session_active
-          ? `Session active — ${diagnostics.current_mode || 'unknown'} mode`
+          ? `Session active — ${BROWSER_COPY.modeLabels[diagnostics.current_mode as keyof typeof BROWSER_COPY.modeLabels] ?? (diagnostics.current_mode || 'unknown')}`
           : 'No active browser session'}
       </p>
       <div className="grid gap-2 sm:grid-cols-2">

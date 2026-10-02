@@ -12,6 +12,32 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.security.request_limits import RequestSizeLimitMiddleware
 from app.security.control_plane import mint_control_token
+from app.agent.steering import SteeringInbox, register_steering, unregister_steering
+
+
+def test_steering_endpoint_accepts_only_the_owner_and_rejects_finished_turns():
+    inbox = SteeringInbox("conv-steer-api", "steering-owner")
+    register_steering(inbox)
+    secret = os.environ["MONAW_CONTROL_SECRET"]
+    owner = mint_control_token(secret, session_id="steering-owner")
+    other = mint_control_token(secret, session_id="another-session")
+    client = TestClient(app)
+    payload = {"run_id": inbox.run_id, "message_id": "message-1", "message": "Use a table"}
+    try:
+        denied = client.post("/api/chat/steer", json=payload, headers={"Authorization": f"Bearer {other}"})
+        assert denied.status_code == 409
+        response = client.post("/api/chat/steer", json=payload, headers={"Authorization": f"Bearer {owner}"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "queued"
+        retry = client.post("/api/chat/steer", json=payload, headers={"Authorization": f"Bearer {owner}"})
+        assert retry.status_code == 200
+        assert len(inbox.messages) == 1
+        inbox.closed = True
+        finished = client.post("/api/chat/steer", json={**payload, "message_id": "message-2"}, headers={"Authorization": f"Bearer {owner}"})
+        assert finished.status_code == 409
+        assert len(inbox.messages) == 1
+    finally:
+        unregister_steering(inbox)
 
 
 def test_health_is_the_only_unauthenticated_runtime_endpoint():

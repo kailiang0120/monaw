@@ -1,5 +1,5 @@
-import { KeyboardEvent, useEffect, useRef, useState } from 'react'
-import { Check, ChevronUp, FileText, Loader2, Mic, Paperclip, Send, Shield, Square, Terminal, X } from 'lucide-react'
+import { type ClipboardEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
+import { FileText, Loader2, Mic, Paperclip, Send, Shield, Square, Terminal, X } from 'lucide-react'
 import { ContextUsageBar } from './ContextUsageBar'
 import { Dropdown } from './Dropdown'
 import { formatReasoningEffort, providerOptions, reasoningEffortsForProvider } from '../features/settings/settingsConfig'
@@ -34,8 +34,56 @@ const SLASH_COMMANDS = [
   },
 ]
 
+function ComposerAttachment({ file, onRemove, disabled }: { file: File; onRemove: () => void; disabled: boolean }) {
+  const isImage = file.type.startsWith('image/') || (!file.type && /\.(apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(file.name))
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewFailed, setPreviewFailed] = useState(false)
+
+  useEffect(() => {
+    if (!isImage) return
+    const url = URL.createObjectURL(file)
+    setPreviewUrl(url)
+    setPreviewFailed(false)
+    return () => URL.revokeObjectURL(url)
+  }, [file, isImage])
+
+  return (
+    <div
+      className={isImage
+        ? 'relative h-24 w-28 shrink-0 overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]'
+        : 'inline-flex max-w-[220px] items-center gap-1.5 rounded-lg border border-white/[0.07] bg-white/[0.03] py-1 pl-2 pr-1 text-[11px] text-neutral-400'}
+    >
+      {isImage ? (
+        previewFailed ? (
+          <span className="flex h-full items-center justify-center px-2 text-center text-[11px] text-neutral-500">Preview unavailable</span>
+        ) : previewUrl ? (
+          <img src={previewUrl} alt={`Preview of ${file.name}`} className="h-full w-full object-contain" onError={() => setPreviewFailed(true)} />
+        ) : null
+      ) : (
+        <>
+          <FileText size={12} className="shrink-0 text-neutral-600" />
+          <span className="truncate" title={file.name}>{file.name}</span>
+        </>
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        className={isImage
+          ? 'absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full border border-[var(--st-border-strong)] bg-[var(--st-surface)] text-[var(--st-text)] shadow-sm transition-colors hover:bg-[var(--st-surface-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--st-accent)] disabled:opacity-50'
+          : 'flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-white/[0.06] hover:text-neutral-200 disabled:opacity-50'}
+        aria-label={`Remove ${file.name}`}
+        disabled={disabled}
+      >
+        <X size={14} />
+      </button>
+    </div>
+  )
+}
+
 interface Props {
   onSend: (text: string, attachments?: UploadedAttachment[]) => void
+  onSteer?: (text: string, attachments?: UploadedAttachment[]) => Promise<void>
+  steeringConversationId?: string | null
   onStop: () => void
   isStreaming: boolean
   conversationId: string | null
@@ -57,6 +105,8 @@ interface Props {
 
 export function InputBar({
   onSend,
+  onSteer,
+  steeringConversationId,
   onStop,
   isStreaming,
   conversationId,
@@ -82,7 +132,6 @@ export function InputBar({
   const [transcribing, setTranscribing] = useState(false)
   const [voiceLevel, setVoiceLevel] = useState(0)
   const [uploadError, setUploadError] = useState('')
-  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const previousFocusRequestKeyRef = useRef(focusRequestKey)
@@ -104,7 +153,6 @@ export function InputBar({
   const voiceNextTranscriptIndexRef = useRef(0)
   const voiceTranscriptQueueRef = useRef<Map<number, string>>(new Map())
   const voiceStopRequestedRef = useRef(false)
-  const activeApprovalLabel = APPROVAL_OPTIONS.find((o) => o.value === approvalMode)?.label ?? approvalMode
   const modelChoices = providerOptions(modelOptions)
     .filter((provider) => provider.id !== 'gemini' || hasGoogleKey)
     .flatMap((provider) =>
@@ -117,9 +165,11 @@ export function InputBar({
     (choice) => choice.value === `${modelSelection.provider}:${modelSelection.model_name}`,
   )
   const effortChoices = reasoningEffortsForProvider(modelSelection.provider, modelSelection.model_name)
+  const settingsSaving = modelSelectionDisabled || approvalModeDisabled
+  const canSteer = Boolean(isStreaming && onSteer && steeringConversationId)
   const placeholder = disabled && disabledReason
     ? disabledReason
-    : 'Enter to send · Shift+Enter for newline'
+    : isStreaming ? 'Enter to steer · Shift+Enter for newline' : 'Enter to send · Shift+Enter for newline'
   const slashQuery = value.startsWith('/') && !value.includes('\n') && !value.includes(' ')
     ? value.slice(1).toLowerCase()
     : ''
@@ -129,7 +179,7 @@ export function InputBar({
       return command.startsWith(slashQuery) || item.label.toLowerCase().includes(slashQuery)
     })
     : []
-  const showSlashCommands = !recording && !isStreaming && !disabled && slashCommandMatches.length > 0
+  const showSlashCommands = !recording && !isStreaming && !disabled && !settingsSaving && slashCommandMatches.length > 0
 
   useEffect(() => {
     if (previousFocusRequestKeyRef.current === focusRequestKey) return
@@ -180,14 +230,15 @@ export function InputBar({
   const handleSend = async () => {
     const trimmed = value.trim()
     const message = trimmed || (selectedFiles.length ? 'Please review the attached file(s).' : '')
-    if (!message || !selectedModelAvailable || isStreaming || disabled || uploading || recording || transcribing) return
+    if (!message || !selectedModelAvailable || settingsSaving || (isStreaming && !canSteer) || disabled || uploading || recording || transcribing) return
     setUploadError('')
     setUploading(true)
     try {
       const attachments = selectedFiles.length
-        ? await Promise.all(selectedFiles.map((file) => uploadAttachment(file, conversationId)))
+        ? await Promise.all(selectedFiles.map((file) => uploadAttachment(file, isStreaming ? steeringConversationId ?? conversationId : conversationId)))
         : []
-      onSend(message, attachments)
+      if (isStreaming && onSteer) await onSteer(message, attachments)
+      else onSend(message, attachments)
       setValue('')
       setSelectedFiles([])
       if (fileInputRef.current) fileInputRef.current.value = ''
@@ -213,7 +264,7 @@ export function InputBar({
   }
 
   const handleSendCommand = async (command: string) => {
-    if (isStreaming || disabled || uploading || recording || transcribing) return
+    if (settingsSaving || isStreaming || disabled || uploading || recording || transcribing) return
     setUploadError('')
     onSend(command, [])
     setValue('')
@@ -248,10 +299,27 @@ export function InputBar({
     el.style.height = `${Math.min(el.scrollHeight, 180)}px`
   }
 
-  const addFiles = (files: FileList | null) => {
+  const addFiles = (files: FileList | File[] | null) => {
     if (!files?.length) return
     setUploadError('')
     setSelectedFiles((current) => [...current, ...Array.from(files)].slice(0, 8))
+  }
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    // Files and items describe the same clipboard payload. Prefer the file list
+    // and only use items as a fallback so images aren't attached twice.
+    const files = Array.from(event.clipboardData.files)
+    if (!files.length) {
+      for (const item of Array.from(event.clipboardData.items)) {
+        if (item.kind !== 'file') continue
+        const file = item.getAsFile()
+        if (file) files.push(file)
+      }
+    }
+    if (!files.length) return
+    event.preventDefault()
+    if ((isStreaming && !canSteer) || disabled || uploading || recording || transcribing) return
+    addFiles(files)
   }
 
   const removeFile = (index: number) => {
@@ -546,6 +614,18 @@ export function InputBar({
               ))}
             </div>
           )}
+          {selectedFiles.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 px-4 pt-3" role="group" aria-label="Attachments">
+              {selectedFiles.map((file, index) => (
+                <ComposerAttachment
+                  key={`${file.name}-${file.size}-${index}`}
+                  file={file}
+                  onRemove={() => removeFile(index)}
+                  disabled={uploading}
+                />
+              ))}
+            </div>
+          )}
           {/* Textarea / waveform row */}
           <div className="px-4 pt-3">
             <input
@@ -578,17 +658,18 @@ export function InputBar({
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onInput={handleInput}
                 aria-label="Message"
                 placeholder={placeholder}
                 rows={1}
-                disabled={disabled}
+                disabled={disabled || uploading}
                 className="chat-composer-input w-full min-h-9 max-h-44 resize-none bg-transparent text-sm leading-relaxed outline-none disabled:opacity-50"
               />
             )}
           </div>
 
-          {(selectedFiles.length > 0 || uploadError || (!recording && transcribing)) && (
+          {(uploadError || (!recording && transcribing)) && (
             <div className="mx-3 mt-2 flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-2">
               {!recording && transcribing && (
                 <span className="inline-flex items-center gap-1.5 rounded-lg border border-accent/20 bg-accent/10 px-2 py-1 text-[11px] text-accent-light">
@@ -596,25 +677,6 @@ export function InputBar({
                   Transcribing voice...
                 </span>
               )}
-              {selectedFiles.map((file, index) => (
-                <span
-                  key={`${file.name}-${file.size}-${index}`}
-                  className="inline-flex max-w-[220px] items-center gap-1.5 rounded-lg border border-white/[0.07] bg-white/[0.03] px-2 py-1 text-[11px] text-neutral-400"
-                  title={file.name}
-                >
-                  <FileText size={12} className="shrink-0 text-neutral-600" />
-                  <span className="truncate">{file.name}</span>
-                  <button
-                    type="button"
-                    onClick={() => removeFile(index)}
-                    className="shrink-0 rounded p-0.5 text-neutral-600 hover:bg-white/[0.06] hover:text-neutral-200"
-                    aria-label={`Remove ${file.name}`}
-                    disabled={uploading}
-                  >
-                    <X size={11} />
-                  </button>
-                </span>
-              ))}
               {uploadError && <span className="text-[11px] text-red-300">{uploadError}</span>}
             </div>
           )}
@@ -625,10 +687,10 @@ export function InputBar({
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={isStreaming || disabled || uploading || recording || transcribing}
+                disabled={(isStreaming && !canSteer) || disabled || uploading || recording || transcribing}
                 className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.03] text-neutral-500 outline-none transition-colors hover:border-white/[0.12] hover:text-neutral-200 focus:border-accent/50 disabled:opacity-50"
                 aria-label="Attach files"
-                title="Attach files"
+                title="Attach files or paste images and files into the message"
               >
                 <Paperclip size={12} />
               </button>
@@ -649,46 +711,15 @@ export function InputBar({
               </button>
 
               {/* Permission dropdown */}
-              <div className="relative">
-                <button
-                  type="button"
-                  disabled={approvalModeDisabled}
-                  onClick={() => setPermissionMenuOpen((open) => !open)}
-                  className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-white/[0.07] bg-white/[0.03] px-2.5 text-[11px] font-medium text-neutral-400 outline-none transition-colors hover:border-white/[0.12] hover:text-neutral-200 focus:border-accent/50 disabled:opacity-50"
-                  aria-label="Permission mode"
-                  aria-expanded={permissionMenuOpen}
-                >
-                  <Shield size={11} className="shrink-0 text-neutral-600" />
-                  <span>{activeApprovalLabel}</span>
-                  <ChevronUp size={11} className={`shrink-0 transition-transform ${permissionMenuOpen ? '' : 'rotate-180'}`} />
-                </button>
-
-                {permissionMenuOpen && (
-                  <div className="absolute bottom-9 right-0 z-30 w-36 overflow-hidden rounded-xl border border-white/[0.1] bg-[#171615] py-1 text-[11px] shadow-2xl shadow-black/50">
-                    {APPROVAL_OPTIONS.map((option) => {
-                      const selected = option.value === approvalMode
-                      return (
-                        <button
-                          key={option.value}
-                          type="button"
-                          onClick={() => {
-                            onApprovalModeChange(option.value)
-                            setPermissionMenuOpen(false)
-                          }}
-                          className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors ${
-                            selected
-                              ? 'bg-accent/20 text-neutral-100'
-                              : 'text-neutral-400 hover:bg-white/[0.05] hover:text-neutral-100'
-                          }`}
-                        >
-                          <span>{option.label}</span>
-                          {selected && <Check size={11} className="text-accent-light" />}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
+              <Dropdown<ApprovalMode>
+                ariaLabel="Permission mode"
+                value={approvalMode}
+                options={APPROVAL_OPTIONS}
+                onChange={onApprovalModeChange}
+                disabled={approvalModeDisabled}
+                size="sm"
+                icon={<Shield size={11} className="shrink-0" />}
+              />
             </div>
 
             <div className="flex min-w-0 items-center justify-end gap-2">
@@ -725,18 +756,26 @@ export function InputBar({
               <ContextUsageBar usage={contextUsage} />
 
               {/* Send / Stop */}
+              {isStreaming && (
+                <button
+                  type="button"
+                  onClick={onStop}
+                  aria-label="Stop response"
+                  title="Stop response"
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-red-500/15 text-red-300 ring-1 ring-red-400/20 hover:bg-red-500/25"
+                >
+                  <Square size={12} fill="currentColor" />
+                </button>
+              )}
               <button
                 type="button"
-                onClick={isStreaming ? onStop : () => { void handleSend() }}
-                disabled={!isStreaming && ((!value.trim() && selectedFiles.length === 0) || !selectedModelAvailable || disabled || uploading || recording || transcribing)}
-                className={`h-7 w-7 shrink-0 rounded-lg ${
-                  isStreaming
-                    ? 'inline-flex items-center justify-center bg-red-500/15 text-red-300 ring-1 ring-red-400/20 hover:bg-red-500/25'
-                    : 'primary-button'
-                }`}
-                aria-label={isStreaming ? 'Stop response' : 'Send message'}
+                onClick={() => { void handleSend() }}
+                disabled={(!value.trim() && selectedFiles.length === 0) || !selectedModelAvailable || settingsSaving || (isStreaming && !canSteer) || disabled || uploading || recording || transcribing}
+                className="h-7 w-7 shrink-0 rounded-lg primary-button"
+                aria-label={isStreaming ? 'Steer message' : 'Send message'}
+                title={isStreaming ? 'Steer the running task' : 'Send message'}
               >
-                {uploading ? <Loader2 size={12} className="animate-spin" /> : isStreaming ? <Square size={12} fill="currentColor" /> : <Send size={12} />}
+                {uploading ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
               </button>
             </div>
           </div>
