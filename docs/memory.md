@@ -19,7 +19,7 @@ Do not save secrets, tokens, passwords, one-off requests, volatile facts, or sen
 
 ## User Controls
 
-Memory is configured in Settings -> Memory.
+Memory runs in the background and is hidden from Settings. Advanced configuration is stored in the `memory` section of the runtime `settings.json` file; its location is shown on the Custom permission page. Existing memory files can also be edited directly.
 
 The important settings are:
 

@@ -18,7 +18,7 @@ Monaw currently targets Windows. macOS has not been tested yet.
 - **Local control.** Runtime data, memory files, logs, browser artifacts, and the default workspace stay under your local Monaw folder.
 - **Choose your model connection.** Sign in with a ChatGPT account through the Codex SDK, or use OpenAI or Google Gemini through your own API keys.
 - **Context discipline.** Memory, context tracking, and compression help keep useful knowledge available without blindly stuffing every conversation.
-- **Tool permissions.** Choose sandbox, approval, and access settings before the agent performs higher-impact actions.
+- **Four permission modes.** Use Default, Full Access, Auto Review, or a Custom config. Routine browsing works without repeated approvals.
 - **Windows-friendly setup.** The one-click setup prepares Python, Node, backend packages, and frontend packages for normal Windows users.
 
 ## What Monaw Can Do
@@ -28,48 +28,48 @@ Monaw currently targets Windows. macOS has not been tested yet.
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/multi-model-chat.png" alt="Monaw mascot chatting with multiple model options" width="100%" />
       <br />
-      <strong>Chat With Your Preferred Models</strong>
+      <strong>Choose Your Model</strong>
       <br />
-      Sign in with a ChatGPT account or use OpenAI or Google Gemini API keys, while keeping conversations in one local desktop workspace.
+      Sign in with ChatGPT or use OpenAI or Gemini API keys. Switch models and reasoning effort from the chat composer.
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/desktop-automation.png" alt="Monaw mascot automating browser files and local commands" width="100%" />
       <br />
-      <strong>Work Inside Your Windows Desktop</strong>
+      <strong>Work With Files, Apps, and Chrome</strong>
       <br />
-      Ask Monaw to inspect files, run local commands, automate browser flows, and coordinate computer-use actions with visible tool access.
+      Read and edit files, run commands, and control Windows apps. Monaw launches your local Chrome profile with your existing logins and bookmarks.
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/memory-context.png" alt="Monaw mascot organizing memory and compressed context" width="100%" />
       <br />
-      <strong>Remember Useful Context</strong>
+      <strong>Keep Useful Context</strong>
       <br />
-      Store long-term memory locally and use context tracking plus compression so the agent can stay helpful without wasting tokens.
+      Local memory, context tracking, and conversation compression help Monaw keep useful information available during longer tasks.
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/scheduled-tasks.png" alt="Monaw mascot setting up scheduled task automation" width="100%" />
       <br />
-      <strong>Schedule Follow-Up Work</strong>
+      <strong>Schedule Tasks</strong>
       <br />
-      Run scheduled tasks with history for reminders, recurring checks, delayed follow-ups, and automation that should happen later.
+      Set reminders, recurring checks, and tasks for later. View scheduled runs and their results in the app.
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/mcp-integrations.png" alt="Monaw mascot connecting MCP and external tool blocks" width="100%" />
       <br />
-      <strong>Connect Tools Through MCP</strong>
+      <strong>Connect More Tools</strong>
       <br />
-      Add MCP servers from Settings, use browser automation through <code>browser-use</code>, and optionally connect a Telegram bot bridge.
+      Add MCP servers, including Chrome DevTools for browser control. An optional Telegram bridge lets you send Monaw tasks remotely.
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/permissions-local-control.png" alt="Monaw mascot guarding local permissions and sandbox controls" width="100%" />
       <br />
-      <strong>Control What The Agent Can Do</strong>
+      <strong>Choose How Actions Are Approved</strong>
       <br />
-      Choose permissions, approvals, access grants, and sandbox settings before Monaw performs higher-impact actions.
+      Default asks before changes and commands. Full Access runs without action prompts. Auto Review uses AI to review actions. Custom reads your config file. Optional Docker isolation contains shell commands.
     </td>
   </tr>
 </table>
@@ -153,13 +153,12 @@ Open Settings in Monaw Agent and configure only the services you use:
 - Tavily API key, if using web search tools.
 - Telegram bot token and allowlist, if using Telegram.
 - Model provider, model, and reasoning effort in the chat composer.
-- Permission profile and access grants.
+- Permission mode: Default, Full Access, Auto Review, or Custom. Custom rules are edited in the config file shown in Settings.
 - Sandbox mode.
-- Browser automation mode.
+- Browser choice. Your local Chrome profile is the default; Monaw handles launch and connection.
 - MCP servers.
-- Memory settings.
 
-Normal desktop use does not require editing `.env`. The Settings screen saves runtime configuration locally.
+Normal desktop use does not require editing `.env`. Settings saves runtime configuration locally. Advanced Custom permission rules use the config file rather than individual setup switches.
 
 ## Daily Use
 
@@ -202,7 +201,7 @@ You can change the main data folder with `MONAW_HOME` or `AGENT_HOME`, the runti
 
 ## Feature Docs
 
-Memory is configured in Settings -> Memory. Memory files are local markdown files and can be edited from the app. See [docs/memory.md](docs/memory.md).
+Memory works in the background and is hidden from Settings. Memory files are local markdown files. See [docs/memory.md](docs/memory.md) for advanced configuration.
 
 Browser automation is configured in Settings -> Browser. See [docs/browser-automation.md](docs/browser-automation.md).
 
@@ -212,7 +211,7 @@ Scheduled tasks are configured in the app when scheduling is enabled. See [docs/
 
 Telegram is optional. Keep the bot token private and keep the allowlist narrow. See [docs/telegram.md](docs/telegram.md).
 
-Permissions, approvals, access grants, and sandbox settings are configured in Settings. See [docs/permissions.md](docs/permissions.md) and [docs/sandboxing.md](docs/sandboxing.md).
+Choose one of four permission modes in Settings or the chat composer. Custom rules are configured only in the runtime config file; sandbox options remain in Settings. Default, Full Access, and Auto Review still enforce protected-path and sensitive-app restrictions. See [docs/permissions.md](docs/permissions.md) and [docs/sandboxing.md](docs/sandboxing.md).
 
 The backend API is a privileged local control plane. The desktop application
 authenticates every `/api` request with a short-lived session and binds the
