@@ -7,6 +7,7 @@ os.environ.setdefault("MONAW_CONTROL_SECRET", "test-control-secret-that-is-at-le
 
 TEST_GROUPS = {
     "api": {
+        "test_conversation_workspace.py",
         "test_control_plane_auth.py",
         "test_main_config.py",
         "test_mcp_runtime_routes.py",
@@ -17,6 +18,7 @@ TEST_GROUPS = {
         "test_architecture_boundaries.py",
         "test_codex_account_provider.py",
         "test_execution_gate.py",
+        "test_approval_review.py",
         "test_execution_resume.py",
         "test_iteration_budget.py",
         "test_job_manager.py",
@@ -51,6 +53,8 @@ TEST_GROUPS = {
         "test_sandbox_sessions.py",
     },
     "skills": {
+        "test_computer_state.py",
+        "test_computer_input.py",
         "test_browser_tools.py",
         "test_chrome_approval.py",
         "test_local_chrome_launch.py",

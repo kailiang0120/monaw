@@ -245,6 +245,7 @@ export function chatStream(
   onActivity?: () => void,
   onTurnStarted?: (data: TurnStartedEvent) => void,
   onSteeringApplied?: (data: SteeringAppliedEvent) => void,
+  workspaceDir?: string,
 ): () => void {
   const controller = new AbortController()
 
@@ -284,7 +285,7 @@ export function chatStream(
       const res = await apiFetch(`${BASE}/api/chat`, {
         method: 'POST',
         headers: JSON_HEADERS,
-        body: JSON.stringify({ message, conversation_id: conversationId, attachments }),
+        body: JSON.stringify({ message, conversation_id: conversationId, attachments, workspace_dir: workspaceDir }),
         signal: controller.signal,
       })
       if (controller.signal.aborted) return

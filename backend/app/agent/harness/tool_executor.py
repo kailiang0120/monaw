@@ -63,7 +63,7 @@ def _status_from_output(output: str, fallback: ToolStatus = "ok") -> ToolStatus:
     if not isinstance(payload, dict):
         return fallback
     status = str(payload.get("status") or "").lower()
-    if status in {"ok", "error", "blocked", "denied", "failed", "pending_approval", "pending_access_grant"}:
+    if status in {"ok", "error", "blocked", "denied", "failed", "cancelled", "pending_approval", "pending_access_grant"}:
         return status  # type: ignore[return-value]
     return fallback
 
@@ -145,13 +145,17 @@ class ToolExecutor:
                 output=output,
                 normalized_output=normalized,
                 error=str(normalized.get("error") or "") if normalized and status != "ok" else None,
-                retryable=status in {"error", "failed", "pending_approval", "pending_access_grant"},
+                retryable=status in {"error", "failed", "pending_approval", "pending_access_grant"} and not (normalized and normalized.get("retryable") is False),
                 metadata={"execution_mode": execution_mode},
             )
         except asyncio.CancelledError:
             raise
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             still_running = unfinished_workers(current_conversation_id(), resource_keys(tool_dict))
+            partial = _normalized_output(getattr(exc, "tool_output", ""))
+            retryable = not still_running and not bool((tool_dict.get("metadata") or {}).get("mutates_state"))
+            if partial and (partial.get("retryable") is False or partial.get("completed_actions", 0)):
+                retryable = False
             output = json.dumps(
                 {
                     "status": "error",
@@ -161,6 +165,8 @@ class ToolExecutor:
                     "timeout_seconds": timeout_seconds,
                     "error": f"{tool_name} exceeded {timeout_seconds}s timeout.",
                     "worker_state": "stopping" if still_running else "stopped",
+                    "retryable": retryable,
+                    **({"partial_result": partial} if partial else {}),
                 }
             )
             return ToolCallResult(
@@ -170,7 +176,7 @@ class ToolExecutor:
                 output=output,
                 normalized_output=_normalized_output(output),
                 error=f"{tool_name} exceeded {timeout_seconds}s timeout.",
-                retryable=not still_running,
+                retryable=retryable,
                 metadata={"execution_mode": execution_mode, "timeout_seconds": timeout_seconds},
             )
         except Exception as exc:
@@ -259,7 +265,7 @@ class ToolExecutor:
             if timeout_seconds is not None:
                 return await asyncio.wait_for(asyncio.shield(future), timeout=timeout_seconds)
             return await asyncio.shield(future)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
+        except (asyncio.CancelledError, asyncio.TimeoutError) as interruption:
             cancelled.set()
             cancel_call(cancellation_id)
             worker.cancel()  # Queued work must never start after Stop.
@@ -275,4 +281,9 @@ class ToolExecutor:
             future.add_done_callback(consume)
             if worker.done():
                 finish_cancellation(cancellation_id)
+                if not future.cancelled():
+                    try:
+                        interruption.tool_output = str(worker.result())
+                    except Exception:
+                        pass
             raise

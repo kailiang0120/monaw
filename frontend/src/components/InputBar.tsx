@@ -1,6 +1,7 @@
 import { type ClipboardEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
 import { FileText, Loader2, Mic, Paperclip, Send, Shield, Square, Terminal, X } from 'lucide-react'
 import { ContextUsageBar } from './ContextUsageBar'
+import { WorkspacePicker } from './WorkspacePicker'
 import { Dropdown } from './Dropdown'
 import { formatReasoningEffort, providerOptions, reasoningEffortsForProvider } from '../features/settings/settingsConfig'
 import { fetchContextUsage } from '../lib/api/conversations'
@@ -81,6 +82,8 @@ function ComposerAttachment({ file, onRemove, disabled }: { file: File; onRemove
 }
 
 interface Props {
+  workspaceDir?: string
+  onWorkspaceChange?: (path: string) => Promise<void>
   onSend: (text: string, attachments?: UploadedAttachment[]) => void
   onSteer?: (text: string, attachments?: UploadedAttachment[]) => Promise<void>
   steeringConversationId?: string | null
@@ -104,6 +107,8 @@ interface Props {
 }
 
 export function InputBar({
+  workspaceDir = '',
+  onWorkspaceChange,
   onSend,
   onSteer,
   steeringConversationId,
@@ -586,6 +591,8 @@ export function InputBar({
   return (
     <footer className="bg-[#11100f] px-4 pb-4 pt-2">
       <div className="mx-auto max-w-3xl">
+        {onWorkspaceChange && <WorkspacePicker key={conversationId || 'new'} value={workspaceDir}
+          disabled={disabled || isStreaming} onChange={onWorkspaceChange} />}
         {/* Unified dock panel */}
         <div className="panel relative rounded-2xl transition-colors focus-within:border-accent/40">
           {showSlashCommands && (

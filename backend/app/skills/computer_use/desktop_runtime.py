@@ -11,6 +11,7 @@ from app.agent.access_grant_broker import create_grant_ticket
 from app.agent.audit import AuditLogger
 from app.agent.approval_broker import create_ticket
 from app.agent.execution_resume import register_executor
+from app.agent.tool_cancellation import check_cancelled, cancellable_sleep, ToolCancelled
 from app.agent.output_workspace import configured_screenshots_dir
 from app.skills.computer_use.screen_geometry import get_screen_layout
 from app.skills.computer_use.screen_redaction import redact_capture
@@ -322,6 +323,7 @@ def _wait_for_launch_window(alias: str, pid: int = 0, *, timeout_seconds: float 
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     last_windows: list[dict[str, Any]] = []
     while time.monotonic() <= deadline:
+        check_cancelled()
         windows: list[dict[str, Any]] = []
 
         def _enum_cb(hwnd, _):
@@ -347,7 +349,7 @@ def _wait_for_launch_window(alias: str, pid: int = 0, *, timeout_seconds: float 
             process_name = str(window.get("process_name") or "").lower()
             if alias_lower in title or alias_lower in process_name:
                 return {"status": "found", "window": window}
-        time.sleep(0.25)
+        cancellable_sleep(0.25)
 
     return {
         "status": "not_found",
@@ -501,6 +503,7 @@ def launch_app(alias: str, url: str = "", args: str = "", *, _bypass_gate: bool 
         )
 
     try:
+        check_cancelled()
         proc, launch_method = _launch_resolved_target(target, extra_args, launch_url)
         pid = int(getattr(proc, "pid", 0) or 0)
         window_result = _wait_for_launch_window(alias, pid)
@@ -532,6 +535,8 @@ def launch_app(alias: str, url: str = "", args: str = "", *, _bypass_gate: bool 
             },
             ensure_ascii=False,
         )
+    except ToolCancelled as exc:
+        return json.dumps({"status": "cancelled", "reason_code": exc.reason_code, "error": str(exc), "pid": locals().get("pid", 0), "instruction": "The app may have launched. Inspect before launching again."})
     except Exception as exc:
         return json.dumps(
             {
@@ -730,6 +735,7 @@ def focus_window(title: str = "", hwnd: int = 0, *, _bypass_gate: bool = False) 
             )
 
     try:
+        check_cancelled()
         win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
         try:
             win32gui.SetForegroundWindow(target_hwnd)
@@ -739,6 +745,8 @@ def focus_window(title: str = "", hwnd: int = 0, *, _bypass_gate: bool = False) 
         _audit.log("desktop.focus_window", data={"title": actual_title, "hwnd": target_hwnd})
         selected["title"] = actual_title
         return json.dumps({"status": "focused", "title": actual_title, "hwnd": target_hwnd, "matched_window": selected}, ensure_ascii=False)
+    except ToolCancelled as exc:
+        return json.dumps({"status": "cancelled", "reason_code": exc.reason_code, "error": str(exc)})
     except Exception as exc:
         return json.dumps({"status": "error", "error": f"Error focusing window: {exc}"})
 

@@ -37,10 +37,7 @@ export type ActivityItem =
   | { id: string; type: 'progress'; content: string }
   | { id: string; type: 'tool'; toolCall: ToolCall }
 
-export interface ApprovalNotice {
-  ticket_id: string
-  action: string
-  reason: string
+export interface ApprovalNotice extends ApprovalEvent {
   type: 'required' | 'resolved' | 'resumed'
 }
 
@@ -254,7 +251,7 @@ export function useChat(conversationId: string | null) {
   }, [])
 
   const sendMessage = useCallback(
-    (text: string, attachments: UploadedAttachment[], onConversationCreated: (id: string) => void) => {
+    (text: string, attachments: UploadedAttachment[], onConversationCreated: (id: string) => void, workspaceDir?: string) => {
       if (!text.trim() || isStreaming) return
       steeringTargetRef.current = null
       setSteeringConversationId(null)
@@ -427,14 +424,16 @@ export function useChat(conversationId: string | null) {
       resetIdleTimer()
 
       const addApprovalNotice = (data: ApprovalEvent, type: ApprovalNotice['type']) => {
-        if (typewriter.stopped) return
+        if (typewriter.stopped || !data.ticket_id) return
         const notice: ApprovalNotice = { ...data, type }
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
-              ? { ...m, approvals: [...(m.approvals ?? []), notice] }
-              : m
-          )
+          prev.map((m) => {
+            if (m.id !== assistantId) return m
+            const approvals = m.approvals ?? []
+            return { ...m, approvals: approvals.some((entry) => entry.ticket_id === notice.ticket_id)
+              ? approvals.map((entry) => entry.ticket_id === notice.ticket_id ? { ...entry, ...notice } : entry)
+              : [...approvals, notice] }
+          })
         )
       }
 
@@ -697,6 +696,7 @@ export function useChat(conversationId: string | null) {
             }, ...updated.slice(index)]
           })
         },
+        workspaceDir,
       )
 
       abortRef.current = abort

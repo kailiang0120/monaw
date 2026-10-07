@@ -39,6 +39,7 @@ from app.agent.steering import SteeringInbox
 from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.harness.context_budget import ContextBudgetExceeded, fit_live_context
 from app.agent.harness.tool_policy import ToolPolicy, tool_call_signature
+from app.agent.approval_review import AutoReviewState
 from app.agent.harness.tool_protocol import ToolCallRequest as HarnessToolCallRequest
 from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.tool_registry import ToolRegistry, can_parallelize
@@ -48,6 +49,11 @@ from app.agent.harness.workers import unfinished_workers
 logger = logging.getLogger(__name__)
 
 _SESSION_LOCKS: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def conversation_turn_running(conversation_id: str) -> bool:
+    lock = _SESSION_LOCKS.get(conversation_id)
+    return lock is not None and lock.locked()
 
 
 def _conversation_title_from_prompt(message: str) -> str:
@@ -632,7 +638,7 @@ class TurnLoop:
         self.max_parallel_tool_calls = max(1, int(max_parallel_tool_calls))
         self.executor = ToolExecutor()
         self.max_identical_calls = 2
-        self.execution_gate = ExecutionGateService()
+        self.execution_gate = ExecutionGateService(executor=self.executor)
         self.observability: ObservabilityPort = observability or get_observability_recorder()
 
     def shutdown(self) -> None:
@@ -725,6 +731,8 @@ class TurnLoop:
         if not isinstance(payload, dict):
             return fallback
         status = str(payload.get("status") or "").lower()
+        if status == "cancelled":
+            return "cancelled"
         if status in {"error", "blocked", "denied", "failed"}:
             return "error"
         return fallback
@@ -968,10 +976,16 @@ class TurnLoop:
                 else ""
             )
 
+            review_state = AutoReviewState()
+            build_review_context = getattr(self.memory, "build_approval_review_context", None)
+            review_history = build_review_context(conversation_id) if callable(build_review_context) else {}
+
             def _current_system_prompt() -> str:
                 base_prompt = system_prompt() if callable(system_prompt) else system_prompt
                 if long_term_context:
                     base_prompt = f"{base_prompt}\n\n{long_term_context}" if base_prompt else long_term_context
+                if review_state.denials:
+                    base_prompt = f"{base_prompt}\n\n{review_state.instructions()}"
                 return _completion_protocol_prompt(base_prompt)
 
             initial_visible_tools = self.registry.get_all_tools(visible_only=True)
@@ -1113,6 +1127,9 @@ class TurnLoop:
 
                 async def _execute(tool_dict: dict, arguments: dict) -> ToolCallResult:
                     async with parallel_semaphore:
+                        blocked = review_state.blocked_output(tool_name, arguments)
+                        if blocked:
+                            return ToolCallResult.from_output(call_id=call_id, name=tool_name, output=blocked)
                         if steering is not None and steering.pending:
                             return ToolCallResult.from_output(
                                 call_id=call_id, name=tool_name,
@@ -1140,11 +1157,20 @@ class TurnLoop:
                             emit=_emit_gate_event,
                             review_client=self.llm_client,
                             user_request=_current_user_request(),
+                            review_context={**review_history, "progress": latest_progress_text,
+                                            "tool_evidence": persisted_tool_calls},
+                            review_state=review_state,
+                            review_is_current=lambda: steering is None or not steering.pending,
+                            call_id=call_id,
                         )
                     result = ToolCallResult.from_output(call_id=call_id, name=tool_name, output=output)
                     _record_call_result(prepared, result, timed=False)
                     return result
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as exc:
+                    stopped_output = getattr(exc, "tool_output", None)
+                    if stopped_output:
+                        _record_call_result(prepared, ToolCallResult.from_output(
+                            call_id=call_id, name=tool_name, output=stopped_output), timed=False)
                     raise
                 except Exception as exc:
                     _obs_error(
@@ -1225,7 +1251,16 @@ class TurnLoop:
 
                 status = self._tool_output_status(tool_output, status)
                 recovery_prompt = ""
+                review_result = _parse_tool_json(tool_output)
+                review_code = str(review_result.get("reason_code") or "")
+                if review_code in {"auto_review_retry_blocked", "auto_review_limit"}:
+                    stop_requested = True
+                    terminal_error = True
+                    incomplete_reason_code = review_code
+                    final_text = "Paused: " + str(review_result.get("reason") or "Auto Review blocked this action.")
                 blocked_key = _blocked_tool_key(tool_name, arguments, tool_output)
+                if review_code.startswith("auto_review_"):
+                    blocked_key = None
                 if blocked_key is not None:
                     blocked_tool_counts[blocked_key] = blocked_tool_counts.get(blocked_key, 0) + 1
                     if blocked_tool_counts[blocked_key] >= 2:

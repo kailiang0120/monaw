@@ -57,6 +57,24 @@ def _runtime_attachments(req: ChatRequest, *, control_session_id: str, conversat
     return attachments
 
 
+def _prepare_conversation_workspace(req: ChatRequest, conv_id: str) -> None:
+    if req.workspace_dir is not None:
+        from app.agent.conversation_workspace import validate_workspace_dir
+        from app.agent.database import get_db
+        from app.agent.turn_loop import _conversation_title_from_prompt
+
+        try:
+            workspace_dir = validate_workspace_dir(req.workspace_dir)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        db = get_db()
+        existing = db.get_conversation(conv_id)
+        if existing is None:
+            db.create_conversation(conv_id, _conversation_title_from_prompt(req.message), workspace_dir)
+        elif existing.get("workspace_dir", "") != workspace_dir:
+            raise HTTPException(status_code=409, detail="Change the working folder before starting a task.")
+
+
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
     conv_id = req.conversation_id or str(uuid.uuid4())
@@ -67,6 +85,7 @@ async def chat(req: ChatRequest, request: Request):
         control_session_id=control_session_id,
         conversation_id=conv_id,
     )
+    _prepare_conversation_workspace(req, conv_id)
 
     async def stream():
         dbg_log(
@@ -146,7 +165,6 @@ async def create_chat_job(req: ChatRequest, request: Request):
     """Start a detached background job. Returns job_id immediately."""
     conv_id = req.conversation_id or str(uuid.uuid4())
     message = _message_with_attachments(req)
-    job = create_job(conv_id)
     merged = build_runtime_namespace(settings, load_agent_settings(settings))
     control_session_id = request.state.control_session.session_id
     runtime_attachments = _runtime_attachments(
@@ -154,6 +172,8 @@ async def create_chat_job(req: ChatRequest, request: Request):
         control_session_id=control_session_id,
         conversation_id=conv_id,
     )
+    _prepare_conversation_workspace(req, conv_id)
+    job = create_job(conv_id)
 
     async def _start():
         await run_job(

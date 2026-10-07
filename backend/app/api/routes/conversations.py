@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.agent.database import get_db
+from app.agent.conversation_workspace import validate_workspace_dir
 from app.agent.context_usage import (
     build_context_usage_report,
     infer_context_query,
@@ -32,6 +33,7 @@ from app.schemas import (
     ConversationCreate,
     ConversationOut,
     ConversationRename,
+    ConversationWorkspace,
     ContextUsagePayload,
     MessageOut,
     MessagesResponse,
@@ -219,10 +221,22 @@ async def list_conversations(
     return conversations[offset:offset + limit]
 
 
+@router.post("/conversations/workspace-validation", response_model=ConversationWorkspace)
+async def validate_conversation_workspace(body: ConversationWorkspace):
+    try:
+        return {"workspace_dir": validate_workspace_dir(body.workspace_dir)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/conversations", response_model=ConversationOut)
 async def create_conversation(body: ConversationCreate):
     conv_id = str(uuid.uuid4())
-    conversation = create_conversation_file(conv_id, body.title)
+    try:
+        workspace_dir = validate_workspace_dir(body.workspace_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    conversation = create_conversation_file(conv_id, body.title, workspace_dir)
     publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "created"})
     return conversation
 
@@ -233,7 +247,8 @@ async def get_context_usage(conv_id: str):
     from app.agent.workspace_instructions import build_workspace_instruction_prompt
 
     db = get_db()
-    if db.get_conversation(conv_id) is None:
+    conversation = db.get_conversation(conv_id)
+    if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     tool_call_counter = getattr(db, "count_tool_calls_for_conversation", None)
     tool_call_count = int(tool_call_counter(conv_id)) if callable(tool_call_counter) else 0
@@ -249,6 +264,12 @@ async def get_context_usage(conv_id: str):
         runtime.skills,
         {str(tool.get("name", "")) for tool in visible_tools},
     )
+    from app.agent.conversation_workspace import set_workspace_dir, reset_workspace_dir
+    token = set_workspace_dir(conversation.get("workspace_dir", ""))
+    try:
+        workspace_prompt = build_workspace_instruction_prompt()
+    finally:
+        reset_workspace_dir(token)
     runtime_prompt_text = "\n\n".join(
         part
         for part in [
@@ -256,7 +277,7 @@ async def get_context_usage(conv_id: str):
             skill_sections.get("browser_policy", ""),
             skill_sections.get("computer_use_policy", ""),
             build_identity_prompt(runtime_settings),
-            build_workspace_instruction_prompt(),
+            workspace_prompt,
             _completion_protocol_prompt(""),
         ]
         if part
@@ -292,7 +313,25 @@ async def rename_conversation(conv_id: str, body: ConversationRename):
     db = get_db()
     if db.get_conversation(conv_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    db.update_conversation(conv_id, title=body.title.strip())
+    fields = {}
+    if body.title is not None:
+        fields["title"] = body.title.strip()
+    if body.workspace_dir is not None:
+        from app.agent.job_manager import list_jobs
+        from app.agent.steering import conversation_is_running
+        from app.agent.harness.workers import unfinished_workers
+        from app.agent.turn_loop import conversation_turn_running
+
+        if conversation_is_running(conv_id) or conversation_turn_running(conv_id) or unfinished_workers(conv_id) or any(
+            job.conversation_id == conv_id and job.status in {"pending", "running"}
+            for job in list_jobs()
+        ):
+            raise HTTPException(status_code=409, detail="Wait for the current task to finish before changing its working folder.")
+        try:
+            fields["workspace_dir"] = validate_workspace_dir(body.workspace_dir)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.update_conversation(conv_id, **fields)
     conv = db.get_conversation(conv_id)
     publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "renamed"})
     return conv

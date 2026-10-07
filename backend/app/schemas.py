@@ -14,6 +14,7 @@ _CONV_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
+    workspace_dir: str | None = Field(default=None, max_length=4096)
     attachments: list["AttachmentRef"] = Field(default_factory=list)
 
     @field_validator("conversation_id")
@@ -88,18 +89,32 @@ class SpeechToTextTranscriptionResponse(BaseModel):
     text: str
 
 
-class ConversationCreate(BaseModel):
+class ConversationWorkspace(BaseModel):
+    workspace_dir: str = Field(default="", max_length=4096)
+
+
+class ConversationCreate(ConversationWorkspace):
     title: str = "New Conversation"
 
 
 class ConversationRename(BaseModel):
-    title: str = Field(..., min_length=1, max_length=200)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    workspace_dir: str | None = Field(default=None, max_length=4096)
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if self.title is None and self.workspace_dir is None:
+            raise ValueError("Provide a title or working folder.")
+        if self.title is not None and not self.title.strip():
+            raise ValueError("The title cannot be blank.")
+        return self
 
 
 class ConversationOut(BaseModel):
     id: str
     title: str
     created_at: str
+    workspace_dir: str = ""
 
 
 class ContextUsageBreakdownItemPayload(BaseModel):
@@ -607,6 +622,8 @@ class MCPServerDiagnosticsOut(BaseModel):
 
 
 class ApprovalTicketOut(BaseModel):
+    review_decision: str = ""
+    review_reason: str = ""
     id: str
     conversation_id: str
     control_session_id: str = ""

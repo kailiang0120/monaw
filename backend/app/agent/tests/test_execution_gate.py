@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 
@@ -27,6 +28,94 @@ from app.agent.approval_broker import (
 from app.agent.execution_gate import ExecutionGateService, _format_timeout
 from app.agent.execution_resume import _EXECUTORS, register_executor
 from app.agent.iteration_budget import IterationBudget
+
+
+def test_approved_replay_stop_keeps_partial_result_and_call_scope():
+    from app.agent.harness.tool_executor import ToolExecutor
+    from app.agent.tool_cancellation import current_call_id, set_tool_scope, reset_tool_scope, check_cancelled, cancellable_sleep, ToolCancelled
+    started = threading.Event()
+    finished = threading.Event()
+    calls = []
+    identities = []
+    def replay(payload):
+        identities.append(current_call_id())
+        calls.append(json.loads(payload)["first"])
+        started.set()
+        try:
+            while True:
+                cancellable_sleep(0.01)
+                check_cancelled()
+        except ToolCancelled:
+            finished.set()
+            return json.dumps({"status": "cancelled", "completed_actions": 1, "results": [{"status": "ok"}], "retryable": False})
+    register_executor("computer_functions_test", replay)
+    ticket = create_ticket(tool_name="computer_functions_test", payload={"input_str": '{"first":"applied"}'})
+    approve_ticket(ticket.id)
+    executor = ToolExecutor()
+    service = ExecutionGateService(executor=executor)
+    async def run():
+        scope = set_tool_scope("approval-turn")
+        try:
+            task = asyncio.create_task(service._resume_approved_ticket(ticket.id,
+                tool_dict={"name": "computer_functions_test", "metadata": {"resource_locks": ["desktop"]}},
+                call_id="original-call"))
+            for _ in range(200):
+                if started.is_set(): break
+                await asyncio.sleep(0.005)
+            assert started.is_set()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as stopped:
+                await task
+            assert finished.is_set()
+            assert json.loads(stopped.value.tool_output)["completed_actions"] == 1
+        finally:
+            reset_tool_scope(scope)
+    try:
+        asyncio.run(run())
+    finally:
+        executor.shutdown()
+    assert calls == ["applied"]
+    assert identities == ["approval-turn:original-call"]
+    assert ticket.status == TicketStatus.FAILED
+    assert json.loads(ticket.execution_result)["completed_actions"] == 1
+
+
+def test_approved_replay_respects_desktop_lock():
+    from app.agent.harness.tool_executor import ToolExecutor
+    from app.agent.harness.workers import resource_lock
+    started = threading.Event()
+    register_executor("computer_functions_test", lambda _: started.set() or '{"status":"ok"}')
+    ticket = create_ticket(tool_name="computer_functions_test", payload={"input_str": "{}"})
+    approve_ticket(ticket.id)
+    executor = ToolExecutor()
+    lock = resource_lock("desktop")
+    async def run():
+        lock.acquire()
+        try:
+            task = asyncio.create_task(ExecutionGateService(executor=executor)._resume_approved_ticket(ticket.id,
+                tool_dict={"name": "computer_functions_test", "metadata": {"resource_locks": ["desktop"]}}, call_id="locked-call"))
+            await asyncio.sleep(0.05)
+            assert not started.is_set()
+        finally:
+            lock.release()
+        output = await asyncio.wait_for(task, timeout=2)
+        assert json.loads(output)["status"] == "ok"
+    try:
+        asyncio.run(run())
+    finally:
+        executor.shutdown()
+    assert started.is_set()
+
+
+def test_failed_approved_replay_preserves_structured_verification_failure():
+    result = {"status": "error", "reason_code": "verification_failed", "completed_actions": 1,
+              "results": [{"status": "ok"}], "retryable": False}
+    register_executor("computer_functions_test", lambda _: json.dumps(result))
+    ticket = create_ticket(tool_name="computer_functions_test", payload={"input_str": "{}"})
+    approve_ticket(ticket.id)
+    output = asyncio.run(ExecutionGateService()._resume_approved_ticket(ticket.id))
+    assert json.loads(output) == result
+    assert ticket.status == TicketStatus.FAILED
 
 
 @pytest.fixture(autouse=True)
@@ -127,6 +216,80 @@ def test_auto_review_cannot_approve_a_changed_payload(monkeypatch):
         execute_tool=_fake_execute_tool, emit=lambda _event: None, review_client=Reviewer(), user_request="Create a report."))
     assert ticket.status == TicketStatus.PENDING
     assert json.loads(result)["status"] == "error"
+
+
+def test_auto_review_denial_retires_ticket_without_execution_and_persists_reason(monkeypatch):
+    import app.agent.approval_broker as broker
+    import app.agent.execution_gate as gate
+    from app.agent.approval_review import AutoReviewState
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "auto_review"
+    monkeypatch.setattr(gate, "load_agent_settings", lambda: settings)
+    calls = []
+    register_executor("send", lambda payload: calls.append(payload) or '{"status":"ok"}')
+    class Reviewer:
+        async def chat(self, **kwargs):
+            return '{"decision":"deny","reason":"The user prohibited sending this report."}'
+    state = AutoReviewState()
+    events = []
+    ticket = create_ticket(tool_name="send", payload={"input_str": "{}"})
+    def resolve(target):
+        return asyncio.run(ExecutionGateService(default_timeout_seconds=0).resolve_pending_output(
+            tool_output=json.dumps({"status": "pending_approval", "ticket_id": target.id}),
+            tool_dict={"name": "send"}, arguments={"recipient": "someone"}, budget=IterationBudget(max_iterations=1),
+            execute_tool=_fake_execute_tool, emit=events.append, review_client=Reviewer(),
+            user_request="Draft this report; do not send it.", review_state=state))
+    assert json.loads(resolve(ticket))["reason_code"] == "auto_review_denied"
+    assert ticket.status == TicketStatus.REJECTED
+    assert broker.get_pending_tickets() == []
+    assert events[0]["event"] == "approval_resolved"
+    assert events[0]["data"]["decision"] == "deny"
+    assert not calls
+    broker._load_tickets_from_disk()
+    assert broker.get_ticket(ticket.id).review_decision == "deny"
+    assert "prohibited" in broker.get_ticket(ticket.id).review_reason
+    retry = create_ticket(tool_name="send", payload={"input_str": "{}"})
+    assert json.loads(resolve(retry))["reason_code"] == "auto_review_retry_blocked"
+    assert retry.status == TicketStatus.REJECTED
+    assert len(state.recent) == 1  # No second model review of an identical denied action.
+    assert not calls
+
+
+@pytest.mark.parametrize("change", ["target", "identity", "mode", "human_rejected", "expiry", "steering"])
+def test_auto_review_revalidates_all_action_context_before_execution(monkeypatch, change):
+    import app.agent.execution_gate as gate
+    from app.agent.approval_broker import reject_ticket
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "auto_review"
+    monkeypatch.setattr(gate, "load_agent_settings", lambda: settings)
+    ticket = create_ticket(tool_name="write_report", payload={"input_str": "{}"})
+    calls = []
+    register_executor("write_report", lambda payload: calls.append(payload) or '{"status":"ok"}')
+    class Reviewer:
+        async def chat(self, **kwargs):
+            if change == "target":
+                ticket.target_path = "different.txt"
+            elif change == "identity":
+                ticket.conversation_id = "other"
+            elif change == "mode":
+                settings.permissions.mode = "default"
+            elif change == "human_rejected":
+                reject_ticket(ticket.id)
+                signal_approval_resume(ticket.id, "rejected")
+            elif change == "expiry":
+                ticket.expires_at = "2000-01-01T00:00:00+00:00"
+            return '{"decision":"approve","reason":"Requested."}'
+    output = asyncio.run(ExecutionGateService(default_timeout_seconds=0.01).resolve_pending_output(
+        tool_output=json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
+        tool_dict={"name": "write_report"}, arguments={}, budget=IterationBudget(max_iterations=1),
+        execute_tool=_fake_execute_tool, emit=lambda event: None, review_client=Reviewer(), user_request="Create the report",
+        review_is_current=lambda: change != "steering"))
+    assert not calls
+    assert json.loads(output)["status"] in {"error", "denied", "cancelled"}
+    assert ticket.status != TicketStatus.APPLIED
+    assert ticket.review_decision != "approve"
 
 
 def test_check_pending_status_parses_approval_and_access_grant():

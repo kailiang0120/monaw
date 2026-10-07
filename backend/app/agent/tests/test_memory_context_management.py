@@ -81,6 +81,18 @@ def _patch_memory_dirs(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(memory_manager_mod, "_CONVERSATIONS_DIR", conversations_dir)
 
 
+def test_approval_review_history_uses_direct_messages_without_thinking(isolated_memory_db):
+    db = isolated_memory_db
+    db.create_conversation("review-history", "Review")
+    db.add_message("review-history", "user", "Use the selected project folder")
+    db.add_message("review-history", "assistant", "I found the report", thinking="private reasoning")
+    memory = MemoryManager(RecordingLLM())
+    context = memory.build_approval_review_context("review-history")
+    assert context["messages"] == [{"role": "user", "content": "Use the selected project folder"},
+                                   {"role": "assistant", "content": "I found the report"}]
+    assert "private reasoning" not in str(context)
+
+
 def test_conversation_state_persists_task_goal_and_steps():
     state = ConversationState(
         conversation_id="conv-1",

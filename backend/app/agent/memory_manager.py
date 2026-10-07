@@ -71,9 +71,9 @@ def list_conversation_metadata() -> list[dict]:
     return get_db().list_conversations()
 
 
-def create_conversation_file(conversation_id: str, title: str) -> dict:
+def create_conversation_file(conversation_id: str, title: str, workspace_dir: str = "") -> dict:
     """Create a new conversation and return its metadata dict."""
-    result = get_db().create_conversation(conversation_id, title)
+    result = get_db().create_conversation(conversation_id, title, workspace_dir)
     manager = peek_memory_manager()
     if manager is not None:
         manager._ensure_state(conversation_id, title)
@@ -312,6 +312,19 @@ class MemoryManager:
             pass
         except Exception as exc:
             logger.warning("Long-term memory learning failed: %s", exc)
+
+    def build_approval_review_context(self, conversation_id: str) -> dict:
+        """Visible chat context only; summaries are background, never authorization."""
+        state = self.get_or_create(conversation_id)
+        compaction = self._db.get_conversation_compaction(conversation_id)
+        return {
+            "summary": str((compaction or {}).get("summary") or state.summary or ""),
+            "messages": [
+                {"role": row["role"], "content": row.get("content") or ""}
+                for row in self._db.get_messages(conversation_id, limit=12)
+                if row.get("role") in {"user", "assistant"}
+            ],
+        }
 
     def build_llm_messages(self, conversation_id: str) -> list[dict]:
         """Build conversation history messages for cross-turn LLM continuity."""

@@ -11,6 +11,7 @@ from app.agent.audit import AuditLogger
 from app.agent.controller_policy import ActionType, resolve_permission
 from app.agent.execution_resume import register_executor
 from app.agent.runtime_paths import WORKSPACE_DIR
+from app.agent.conversation_workspace import selected_workspace_dir, workspace_path
 from app.agent.settings_store import load_agent_settings
 from app.agent.sandbox.artifacts import write_artifact as _write_artifact
 from app.agent.sandbox.environment import SanitizedEnvironment, build_exec_environment
@@ -201,7 +202,9 @@ def _pending_access_grant(workdir: str) -> str:
 
 
 def _effective_workdir(workdir: str) -> str:
-    return workdir or str(WORKSPACE_DIR)
+    if workdir:
+        return str(workspace_path(workdir))
+    return selected_workspace_dir() or str(WORKSPACE_DIR)
 
 
 def _permission_check(

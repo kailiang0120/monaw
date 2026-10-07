@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from contextvars import ContextVar
 
@@ -11,6 +12,36 @@ _TOOL_SCOPE: ContextVar[str] = ContextVar("tool_cancellation_scope", default="")
 _LOCK = threading.RLock()
 _CALLBACKS: dict[str, Callable[[], None]] = {}
 _CANCELLED: set[str] = set()
+
+
+class ToolCancelled(Exception):
+    """Raised only at safe interruption points; held inputs must still be released."""
+
+    reason_code = "user_stopped"
+
+    def __init__(self) -> None:
+        super().__init__("Stopped by the user. Earlier actions may already have completed.")
+
+
+def cancellation_requested() -> bool:
+    call_id = current_call_id()
+    with _LOCK:
+        return bool(call_id and call_id in _CANCELLED)
+
+
+def check_cancelled() -> None:
+    if cancellation_requested():
+        raise ToolCancelled()
+
+
+def cancellable_sleep(seconds: float) -> None:
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        check_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.02, remaining))
 
 
 def set_tool_scope(scope: str):

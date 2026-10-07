@@ -1,14 +1,14 @@
-# Monaw
+# Monaw Agent: AI Desktop Assistant for Windows
 
 <p align="center">
-  <img src="docs/assets/monaw-agent-hero-v3.png" alt="Monaw Agent desktop workspace with the refreshed mascot" width="100%" />
+  <img src="docs/assets/monaw-agent-hero-v3.png" alt="Monaw Agent AI desktop assistant for Windows with chat and automation tools" width="100%" />
 </p>
 
-**Monaw Agent is a local-first Windows desktop AI agent for people who want an assistant that can work inside their machine, not just answer questions.**
+**Monaw Agent is an open-source AI desktop assistant for Windows with computer use, browser automation, file editing, and shell commands in one chat interface.**
 
-Monaw combines a calm chat interface with controlled access to local files, shell commands, browser automation, computer-use actions, memory, scheduled tasks, MCP servers, and an optional Telegram bridge. You bring your own model keys, choose the provider and permission profile, and keep runtime data under your local Monaw folder.
+Work in a folder you choose, keep useful context in local memory, schedule recurring tasks, and connect tools through the **Model Context Protocol (MCP)**. Sign in with ChatGPT through the Codex SDK, or bring your own OpenAI or Google Gemini API key. An optional Telegram bot lets you send Monaw tasks remotely.
 
-It is built for users who have outgrown basic chatbots but do not want a heavyweight agent setup that burns through context, hides what it is doing, or turns every task into a large token bill. Monaw focuses on practical desktop automation: give it a task, review tool access, and let it work with your Windows workspace under your control.
+Monaw runs on your PC and stores settings, chat history, memory, logs, and its default workspace locally. Model requests use your selected provider's service. Choose a permission mode, review tool access, and let the agent work with your Windows apps, Chrome browser, and project files.
 
 Monaw currently targets Windows. macOS has not been tested yet.
 
@@ -16,10 +16,19 @@ Monaw currently targets Windows. macOS has not been tested yet.
 
 - **Desktop-first workflow.** Work with files, browser pages, local commands, app windows, and scheduled follow-ups from one agent UI.
 - **Local control.** Runtime data, memory files, logs, browser artifacts, and the default workspace stay under your local Monaw folder.
+- **Project workspaces.** Choose a folder for each conversation so file tools, commands, and project instructions use the right workspace.
 - **Choose your model connection.** Sign in with a ChatGPT account through the Codex SDK, or use OpenAI or Google Gemini through your own API keys.
 - **Context discipline.** Memory, context tracking, and compression help keep useful knowledge available without blindly stuffing every conversation.
 - **Four permission modes.** Use Default, Full Access, Auto Review, or a Custom config. Routine browsing works without repeated approvals.
 - **Windows-friendly setup.** The one-click setup prepares Python, Node, backend packages, and frontend packages for normal Windows users.
+
+## Example Tasks
+
+- **File organization:** "Organize the files in this folder by type and show me what changed."
+- **Browser research:** "Open this website in Chrome, collect the information I need, and save it as a CSV in my workspace."
+- **Coding assistance:** "Use this project folder, inspect the code, and run its tests."
+- **Windows app automation:** "Open this app, inspect its controls, and help me complete this form."
+- **Scheduled checks:** "Every weekday at 9 AM, check this website and summarize any updates."
 
 ## What Monaw Can Do
 
@@ -199,6 +208,8 @@ Settings, config, logs, browser downloads, screenshots, managed profiles, traces
 
 You can change the main data folder with `MONAW_HOME` or `AGENT_HOME`, the runtime folder with `AGENT_RUNTIME_DIR`, the default agent workspace with `AGENT_WORKSPACE_DIR`, and the memory folder with `AGENT_MEMORY_DIR`.
 
+Chats open immediately in the default workspace. To work on a project, click **Default workspace** above the message box and choose a folder. The selection is saved for that conversation and applies to commands, relative file paths, and project `AGENTS.md` instructions. Use the reset button beside the folder to return to the default workspace. Folder changes are available while the agent is idle; existing permission and sandbox rules still apply. Chat history stays in the runtime database.
+
 ## Feature Docs
 
 While the agent is working, type a new instruction and press Enter or the send arrow to steer the same task. Stop remains available beside it. Steering takes effect after the current model or tool step, and the message shows whether it is waiting or applied. New text, pasted images, and attached files stay in the same chat history. If the turn finishes before delivery, the draft stays in the composer for sending as a new turn.
@@ -207,13 +218,15 @@ Memory works in the background and is hidden from Settings. Memory files are loc
 
 Browser automation is configured in Settings -> Browser. See [docs/browser-automation.md](docs/browser-automation.md).
 
+Windows computer use combines screenshots and accessibility controls for desktop automation. See [docs/computer-use.md](docs/computer-use.md).
+
 MCP servers are configured in Settings -> Tools -> MCP. See [docs/mcp.md](docs/mcp.md).
 
 Scheduled tasks are configured in the app when scheduling is enabled. See [docs/scheduling.md](docs/scheduling.md).
 
 Telegram is optional. Keep the bot token private and keep the allowlist narrow. See [docs/telegram.md](docs/telegram.md).
 
-Choose one of four permission modes in Settings or the chat composer. Custom rules are configured only in the runtime config file; sandbox options remain in Settings. Default, Full Access, and Auto Review still enforce protected-path and sensitive-app restrictions. See [docs/permissions.md](docs/permissions.md) and [docs/sandboxing.md](docs/sandboxing.md).
+Choose one of four permission modes in Settings or the chat composer. Custom rules are configured only in the runtime config file; sandbox options remain in Settings. Auto Review uses conversation context to approve authorized actions, deny clear violations or ask you when uncertain. Denial reasons are visible, unchanged retries are blocked within the turn, and repeated denials pause it. Default, Full Access, and Auto Review still enforce protected-path and sensitive-app restrictions. See [docs/permissions.md](docs/permissions.md) and [docs/sandboxing.md](docs/sandboxing.md).
 
 The backend API is a privileged local control plane. The desktop application
 authenticates every `/api` request with a short-lived session and binds the

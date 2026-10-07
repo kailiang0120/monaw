@@ -18,7 +18,7 @@ from app.agent.access_grant_broker import (
     signal_resume as signal_grant_resume,
 )
 from app.agent.approval_broker import (
-    approve_ticket,
+    apply_auto_review,
     ticket_validation_error,
     cleanup_resume as cleanup_approval_resume,
     get_resume_decision as get_approval_resume_decision,
@@ -27,10 +27,11 @@ from app.agent.approval_broker import (
     reject_ticket,
     signal_resume as signal_approval_resume,
 )
-from app.agent.approval_review import review_action
+from app.agent.approval_review import AutoReviewState, review_action
 from app.agent.settings_store import load_agent_settings
 from app.agent.execution_resume import resume_approved_ticket
 from app.agent.iteration_budget import IterationBudget
+from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.run_context import (
     current_control_session_id,
     current_conversation_id,
@@ -56,8 +57,9 @@ class ExecutionGateService:
 
     MAX_GATE_HOPS = 3
 
-    def __init__(self, *, default_timeout_seconds: float = 600.0) -> None:
+    def __init__(self, *, default_timeout_seconds: float = 600.0, executor: ToolExecutor | None = None) -> None:
         self.default_timeout_seconds = default_timeout_seconds
+        self.executor = executor
 
     async def resolve_pending_output(
         self,
@@ -70,12 +72,17 @@ class ExecutionGateService:
         emit: Callable[[dict[str, Any]], None],
         review_client=None,
         user_request: str = "",
+        review_context: dict[str, Any] | None = None,
+        review_state: AutoReviewState | None = None,
+        review_is_current: Callable[[], bool] | None = None,
+        call_id: str = "",
     ) -> str:
         """Wait on each gate the output raises and return the final tool output.
 
         Gate events are emitted as they happen so the user sees the prompt
         before the wait starts.
         """
+        review_state = review_state or AutoReviewState()
         for _hop in range(self.MAX_GATE_HOPS):
             pending_event = self.check_pending_status(tool_output)
             if pending_event is None:
@@ -83,24 +90,58 @@ class ExecutionGateService:
             auto_approved = False
             if pending_event["event"] == "approval_required":
                 ticket = get_approval_ticket(pending_event["data"]["ticket_id"])
+                validation_error = "ticket missing" if ticket is None else ticket_validation_error(
+                    ticket, expected_session_id=current_control_session_id(),
+                    expected_conversation_id=current_conversation_id(),
+                    expected_execution_source=current_execution_source())
+                blocked = review_state.blocked_output(str(tool_dict.get("name", "")), arguments, ticket)
+                if ticket is not None and blocked and not validation_error:
+                    reason = json.loads(blocked)["reason"]
+                    rejected = apply_auto_review(ticket.id, ticket.model_dump(), "deny", reason)
+                    if rejected is not None:
+                        emit({"event": "approval_resolved", "data": {**pending_event["data"],
+                              "decision": "deny", "resolved_by": "auto_review:retry_guard", "reason": reason}})
+                        cleanup_approval_resume(ticket.id)
+                        return blocked
                 if (ticket is not None and ticket.interactive and review_client is not None
                         and load_agent_settings().permissions.mode == "auto_review"
                         and not ticket_validation_error(ticket,
                             expected_session_id=current_control_session_id(),
                             expected_conversation_id=current_conversation_id(),
                             expected_execution_source=current_execution_source())):
-                    original_hash = ticket.payload_hash
-                    review = await review_action(review_client, ticket, user_request)
-                    # A profile change, rejected ticket, or altered payload during
-                    # review must never turn into automatic authorization.
-                    if (review["decision"] == "approve"
-                            and load_agent_settings().permissions.mode == "auto_review"
-                            and ticket.compute_hash() == original_hash
-                            and not ticket_validation_error(ticket)):
-                        approved = approve_ticket(ticket.id, resolved_by="auto_review")
-                        if approved is not None:
+                    snapshot = ticket.model_dump()
+                    context = {**(review_context or {}), "prior_denials": review_state.denials}
+                    review = await review_action(review_client, ticket, user_request, context=context)
+                    if review_is_current is not None and not review_is_current():
+                        cancelled = apply_auto_review(ticket.id, snapshot, "ask", "New user instruction arrived; action cancelled.")
+                        if cancelled is not None:
+                            reject_ticket(ticket.id, resolved_by="system:user_steered")
+                        cleanup_approval_resume(ticket.id)
+                        reason = "New user instruction arrived; the pending action was cancelled."
+                        emit({"event": "approval_resolved", "data": {**pending_event["data"],
+                              "decision": "deny", "resolved_by": "system:user_steered", "reason": reason}})
+                        return json.dumps({"status": "cancelled", "reason_code": "user_steered", "reason": reason})
+                    # Audit and settle under the broker lock. The snapshot includes
+                    # targets and identity as well as payload, expiry and status.
+                    reviewed = None
+                    if load_agent_settings().permissions.mode == "auto_review":
+                        reviewed = apply_auto_review(ticket.id, snapshot, review["decision"], review["reason"])
+                    if reviewed is not None:
+                        review_state.record(review["decision"], ticket, str(tool_dict.get("name", "")), arguments, review["reason"])
+                        pending_event["data"]["decision"] = review["decision"]
+                        if review["decision"] == "deny":
+                            pending_event["data"].update({"reason": review["reason"], "review_reason": review["reason"], "resolved_by": "auto_review"})
+                            emit({"event": "approval_resolved", "data": pending_event["data"]})
+                            cleanup_approval_resume(ticket.id)
+                            return json.dumps({"status": "denied", "reason_code": "auto_review_limit" if review_state.paused else "auto_review_denied",
+                                               "reason": ("Auto Review paused after repeated denials. Last denial: " if review_state.paused else "") + review["reason"], "ticket_id": ticket.id,
+                                               "instruction": "Do not retry or circumvent this denial. Choose a materially safer alternative or stop and explain."})
+                        if review["decision"] == "approve":
                             signal_approval_resume(ticket.id, "approved")
                             auto_approved = True
+                            pending_event["data"]["resolved_by"] = "auto_review"
+                    else:
+                        review = {"decision": "ask", "reason": "The action or permission context changed during review; approval is required."}
                     pending_event["data"]["review_reason"] = review["reason"]
                     pending_event["data"]["reason"] = review["reason"]
             # Do not offer human Approve/Reject buttons for an action that
@@ -115,6 +156,7 @@ class ExecutionGateService:
                 tool_dict=tool_dict,
                 arguments=arguments,
                 execute_tool=execute_tool,
+                call_id=call_id,
             ):
                 if "_result" in resolution_event:
                     resolved_output = resolution_event["_result"]
@@ -191,6 +233,7 @@ class ExecutionGateService:
         arguments: dict[str, Any],
         execute_tool: ToolExecute,
         timeout: float | None = None,
+        call_id: str = "",
     ) -> AsyncIterator[dict[str, Any]]:
         if event_kind == "access_grant_required":
             event = register_grant_resume(ticket_id)
@@ -256,7 +299,7 @@ class ExecutionGateService:
 
             try:
                 if event_kind == "approval_required":
-                    resumed_output = await self._resume_approved_ticket(ticket_id)
+                    resumed_output = await self._resume_approved_ticket(ticket_id, tool_dict=tool_dict, budget=budget, call_id=call_id)
                 else:
                     resumed_output = await self._resume_access_grant(
                         ticket_id=ticket_id,
@@ -270,7 +313,8 @@ class ExecutionGateService:
 
             yield {
                 "event": "tool_resumed",
-                "data": {"tool": tool_dict.get("name", ""), "output": resumed_output},
+                "data": {"tool": tool_dict.get("name", ""), "output": resumed_output,
+                         **({"ticket_id": ticket_id, "decision": "approve"} if event_kind == "approval_required" else {})},
             }
             yield {"_result": resumed_output}
         finally:
@@ -280,15 +324,32 @@ class ExecutionGateService:
                 # the UI stops offering a prompt that can no longer be answered.
                 retire_grant(ticket_id)
 
-    async def _resume_approved_ticket(self, ticket_id: str) -> str:
+    async def _resume_approved_ticket(self, ticket_id: str, *, tool_dict: dict | None = None,
+                                      budget: IterationBudget | None = None, call_id: str = "") -> str:
         ticket = get_approval_ticket(ticket_id)
         if ticket is None:
             return json.dumps(
                 {"status": "error", "error": f"Approval ticket {ticket_id} not found after approval."}
             )
 
-        updated_ticket = await asyncio.to_thread(resume_approved_ticket, ticket)
-        return updated_ticket.execution_result or json.dumps({"status": "ok", "ticket_id": ticket_id})
+        def replay() -> str:
+            updated = resume_approved_ticket(ticket)
+            return updated.execution_result or json.dumps({"status": "error", "error": "Approved action produced no result."})
+
+        # Replays need the same locks, call identity, Stop handling and timeout
+        # as the initial invocation. They still execute only the stored payload.
+        executor = self.executor or ToolExecutor()
+        resumed_tool = {**(tool_dict or {}), "name": ticket.tool_name, "callable": replay,
+                        "execution_mode": "sync_thread_affine" if (tool_dict or {}).get("execution_mode") == "sync_thread_affine" else "sync_stateless"}
+        if not tool_dict:
+            resumed_tool["metadata"] = {"resource_locks": ["desktop"] if ticket.tool_name.startswith("computer_functions_") else [ticket.tool_name]}
+        try:
+            result = await executor.execute(tool_dict=resumed_tool, arguments={},
+                                            budget=budget or IterationBudget(max_iterations=1), call_id=call_id or f"resume-{ticket.id}")
+            return result.output
+        finally:
+            if self.executor is None:
+                executor.shutdown()
 
     async def _resume_access_grant(
         self,

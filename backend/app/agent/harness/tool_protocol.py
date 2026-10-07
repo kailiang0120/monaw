@@ -12,6 +12,7 @@ ToolStatus = Literal[
     "blocked",
     "denied",
     "failed",
+    "cancelled",
     "pending_approval",
     "pending_access_grant",
 ]
@@ -61,7 +62,7 @@ class ToolCallResult:
         if isinstance(payload, dict):
             normalized = payload
             raw_status = str(payload.get("status") or "").lower()
-            if raw_status in {"ok", "error", "blocked", "denied", "failed", "pending_approval", "pending_access_grant"}:
+            if raw_status in {"ok", "error", "blocked", "denied", "failed", "cancelled", "pending_approval", "pending_access_grant"}:
                 status = raw_status  # type: ignore[assignment]
         error = None
         if normalized and status != "ok":
@@ -73,7 +74,7 @@ class ToolCallResult:
             output=str(output),
             normalized_output=normalized,
             error=error,
-            retryable=status in {"error", "failed", "pending_approval", "pending_access_grant"},
+            retryable=status in {"error", "failed", "pending_approval", "pending_access_grant"} and not (normalized and normalized.get("retryable") is False),
             metadata=dict(metadata or {}),
         )
 

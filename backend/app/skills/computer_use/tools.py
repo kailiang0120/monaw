@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import math
+import time
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from app.agent.access_grant_broker import create_grant_ticket
@@ -14,11 +18,15 @@ from app.agent.controller_policy import (
     resolve_permission,
 )
 from app.agent.execution_resume import register_executor
+from app.agent.tool_cancellation import check_cancelled, cancellation_requested, cancellable_sleep, ToolCancelled
+from app.agent.conversation_workspace import workspace_path
 from app.agent.run_context import current_interactive
 from app.agent.settings_store import load_agent_settings
 from app.skills.computer_use import desktop_runtime, window_ops
 from app.skills.computer_use.screen_geometry import get_window_rect
-from app.skills.computer_use.session import get_state, store_state
+from app.skills.computer_use.session import get_state, store_state, consume_state, invalidate_window, ComputerWindowState
+from app.skills.computer_use.input_safety import text_entry_error, MAX_TYPED_TEXT_CHARS
+from app.skills.computer_use.observation import window_changed, uia_fingerprint, image_sample, image_changed
 
 _audit = AuditLogger()
 
@@ -41,18 +49,18 @@ _ACTION_METADATA = {
 
 # Action kinds that _computer_functions_act dispatches through the screen-coordinate
 # primitives (precision_click/screen_type/ctrl_hotkey/ctrl_scroll/ctrl_drag). These
-# are gated by the screen-fallback policy; the UIA kinds (set_value/select_option/
-# invoke/secondary_action) go through _uia_interact_app and are gated by uia_allowed.
+# are gated by the screen-fallback policy. Secondary action targets a UIA
+# element but sends a right click, so it needs both UIA and screen permission.
 _SCREEN_FALLBACK_ACTIONS = {
     "click",
     "type_text",
     "press_key",
     "scroll",
     "drag",
+    "secondary_action",
 }
 _MAX_ACTIONS_PER_BATCH = 20
-_MAX_TYPED_TEXT_CHARS = 4000
-_CREDENTIAL_TEXT_HINTS = ("password", "passcode", "otp", "2fa", "mfa", "secret", "token", "api key", "apikey")
+_MAX_TYPED_TEXT_CHARS = MAX_TYPED_TEXT_CHARS
 
 
 def _json_loads(value: str, fallback: Any) -> Any:
@@ -220,7 +228,9 @@ def _computer_functions_get_window(
         matches = exact
     if len(matches) > 1:
         return json.dumps({"status": "error", "reason_code": "window_ambiguous", "matches": matches[:10]}, ensure_ascii=False)
-    return json.dumps({"status": "ok", "window": matches[0]}, ensure_ascii=False)
+    # Discovery only returns titles/processes. Hydrate the exact HWND so all
+    # callers receive canonical geometry, identity and display scaling.
+    return _computer_functions_get_window(hwnd=int(matches[0]["hwnd"]))
 
 
 def _computer_functions_activate_window(window: dict | None = None, hwnd: int = 0, title: str = "") -> str:
@@ -267,12 +277,25 @@ def _computer_functions_get_window_state(
                 "get_elements",
                 {
                     "window_title": selected.get("title") or "",
+                    "hwnd": int(selected.get("hwnd") or 0),
                     "limit": max(1, min(int(limit or 100), 200)),
                 },
             ),
             {"status": "error", "error": "Invalid UIA response."},
         )
 
+    for observation in (screenshot, uia):
+        if observation.get("status") in {"pending_approval", "pending_access_grant", "blocked", "cancelled"}:
+            return json.dumps(observation, ensure_ascii=False)
+    if include_text:
+        uia["limit"] = max(1, min(int(limit or 100), 200))
+    if screenshot.get("status") == "ok" and image_sample(screenshot) is None:
+        screenshot = {"status": "error", "reason_code": "invalid_capture", "error": "The captured image could not be read."}
+    if screenshot.get("status") != "ok" and uia.get("status") != "ok":
+        return json.dumps({"status": "error", "reason_code": "observation_failed", "error": "No usable window observation was captured.", "screenshot": screenshot, "uia": uia})
+    current = _resolve_window(hwnd=int(selected.get("hwnd") or 0))
+    if current.get("status") != "ok" or window_changed(selected, current.get("window") or {}):
+        return json.dumps({"status": "error", "reason_code": "stale_state", "error": "The window changed during capture. Capture a fresh state."})
     screen = _json_loads(desktop_runtime.screen_info(), {})
     state_id = store_state(window=selected, screenshot=screenshot, uia=uia)
     return json.dumps(
@@ -321,26 +344,41 @@ def _action_batch_budget_error(actions: list[dict[str, Any]]) -> dict[str, Any] 
             "max_actions": _MAX_ACTIONS_PER_BATCH,
         }
     for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            return {"status": "error", "reason_code": "invalid_action", "error": "Every action must be an object.", "action_index": index}
         kind = str(action.get("type") or "").strip().lower()
-        if kind != "type_text":
+        if kind not in _SCREEN_FALLBACK_ACTIONS | {"launch_app", "set_value", "select_option", "invoke", "secondary_action"}:
+            return {"status": "error", "reason_code": "unsupported_action", "error": f"Unsupported action type: {kind}", "action_index": index}
+        coordinate_keys = {"click": ("x", "y"), "drag": ("from_x", "from_y", "to_x", "to_y"),
+                           "scroll": tuple(key for key in ("x", "y") if key in action)}.get(kind, ())
+        for key in coordinate_keys:
+            if key not in action or isinstance(action[key], bool) or not isinstance(action[key], (int, float)) or not math.isfinite(action[key]):
+                return {"status": "error", "reason_code": "invalid_action", "error": f"A finite numeric {key} is required.", "action_index": index}
+        if kind == "press_key" and not str(action.get("key") or action.get("keys") or "").strip():
+            return {"status": "error", "reason_code": "invalid_action", "error": "A key chord is required.", "action_index": index}
+        if kind in {"set_value", "select_option", "invoke", "secondary_action"} and (type(action.get("element_index")) is not int or action["element_index"] < 0):
+            return {"status": "error", "reason_code": "invalid_action", "error": "A nonnegative integer element_index is required.", "action_index": index}
+        if kind == "select_option" and not isinstance(action.get("option"), str):
+            return {"status": "error", "reason_code": "invalid_action", "error": "A string option is required.", "action_index": index}
+        expectation = action.get("expect")
+        if expectation is not None:
+            if not isinstance(expectation, dict) or expectation.get("type") not in {"file_exists", "window_title", "element_value", "selected_option"}:
+                return {"status": "error", "reason_code": "invalid_expectation", "error": "Unsupported outcome check.", "action_index": index}
+            required = ("path",) if expectation["type"] == "file_exists" else ("equals",)
+            if any(not isinstance(expectation.get(key), str) for key in required):
+                return {"status": "error", "reason_code": "invalid_expectation", "error": "The expected path or value must be a string.", "action_index": index}
+            if expectation["type"] in {"element_value", "selected_option"} and (type(expectation.get("element_index")) is not int or expectation["element_index"] < 0):
+                return {"status": "error", "reason_code": "invalid_expectation", "error": "Outcome checks need a nonnegative integer element_index.", "action_index": index}
+            if expectation["type"] == "file_exists" and not expectation["path"].strip():
+                return {"status": "error", "reason_code": "invalid_expectation", "error": "An expected file path is required.", "action_index": index}
+        if kind not in {"type_text", "set_value"}:
             continue
-        text = str(action.get("text") or "")
-        if len(text) > _MAX_TYPED_TEXT_CHARS:
-            return {
-                "status": "error",
-                "reason_code": "typed_text_limit_exceeded",
-                "error": "Typed text exceeds the maximum allowed character count.",
-                "action_index": index,
-                "max_chars": _MAX_TYPED_TEXT_CHARS,
-            }
-        label = " ".join(str(action.get(key) or "") for key in ("field", "name", "label", "target_text", "description")).lower()
-        if any(hint in label for hint in _CREDENTIAL_TEXT_HINTS):
-            return {
-                "status": "blocked",
-                "reason_code": "credential_entry_restricted",
-                "error": "Credential-like text entry requires direct local user control.",
-                "action_index": index,
-            }
+        text = action.get("value", action.get("text", "")) if kind == "set_value" else action.get("text", "")
+        if not isinstance(text, str):
+            return {"status": "error", "reason_code": "invalid_action", "error": "Text entry requires a string.", "action_index": index}
+        error = text_entry_error(text, action)
+        if error:
+            return {**error, "action_index": index}
     return None
 
 
@@ -350,7 +388,7 @@ def _active_window_matches(window: dict[str, Any]) -> bool:
         return True
     active = _active_window()
     active_hwnd = int(active.get("hwnd") or 0)
-    return not active_hwnd or active_hwnd == expected_hwnd
+    return bool(active_hwnd and active_hwnd == expected_hwnd)
 
 
 def _normalize_key_chord(keys: str) -> str:
@@ -369,8 +407,8 @@ def _normalize_key_chord(keys: str) -> str:
     return "+".join(aliases.get(part, part) for part in parts if part)
 
 
-def _element_params_from_state(state_id: str, element_index: int, window: dict[str, Any]) -> dict[str, Any] | dict[str, str]:
-    state = get_state(state_id)
+def _element_params_from_state(state_id: str, element_index: int, window: dict[str, Any], *, state: ComputerWindowState | None = None) -> dict[str, Any]:
+    state = state or get_state(state_id)
     if state is None:
         return {"status": "error", "reason_code": "stale_state", "error": "state_id is stale or unknown."}
     if int(state.window.get("hwnd") or 0) != int(window.get("hwnd") or 0):
@@ -383,6 +421,8 @@ def _element_params_from_state(state_id: str, element_index: int, window: dict[s
     except StopIteration:
         return {"status": "error", "reason_code": "element_not_found", "error": f"No element index {element_index} in state."}
     return {
+        "hwnd": int(window.get("hwnd") or 0),
+        **{key: element[key] for key in ("runtime_id", "bounds") if key in element},
         "element": element.get("name") or "",
         "automation_id": element.get("automation_id") or "",
         "control_type": element.get("control_type") or "",
@@ -396,6 +436,7 @@ def _permission_for_batch(
     *,
     target_app: str = "",
     state_id: str = "",
+    skip_confirmation: bool = False,
 ) -> dict[str, Any] | None:
     window = dict(window or {})
     target_app = str(target_app or window.get("process_name") or window.get("app") or window.get("title") or "")
@@ -425,9 +466,9 @@ def _permission_for_batch(
     launch_aliases: list[str] = []
     for action in actions:
         kind = str(action.get("type") or "").strip().lower()
-        if kind in {"click", "scroll", "drag", "set_value", "select_option", "invoke", "secondary_action"}:
+        if kind in {"click", "scroll", "drag", "select_option", "invoke", "secondary_action"}:
             needed.append((ActionType.CLICK, target_app))
-        elif kind in {"type_text", "press_key"}:
+        elif kind in {"type_text", "set_value", "press_key"}:
             needed.append((ActionType.TYPE, target_app))
         elif kind == "launch_app":
             alias = str(action.get("app") or action.get("alias") or "")
@@ -466,7 +507,7 @@ def _permission_for_batch(
         if decision.requires_confirmation and confirmation is None:
             confirmation = decision
 
-    if confirmation is not None:
+    if confirmation is not None and not skip_confirmation:
         args = {"window": window, "actions": actions, "state_id": state_id}
         description = f"Computer action batch on {target_app}"
         if launch_aliases:
@@ -491,172 +532,341 @@ def _permission_for_batch(
     return None
 
 
+def _live_window_error(selected: dict, *, check_title: bool = True) -> dict | None:
+    current = _resolve_window(hwnd=int(selected.get("hwnd") or 0))
+    if current.get("status") != "ok":
+        return current
+    if window_changed(selected, current["window"], check_title=check_title):
+        return {"status": "error", "reason_code": "stale_state",
+                "error": "Window identity, bounds or display scaling changed. Capture a fresh state."}
+    return None
+
+
+def _validate_observation(state: ComputerWindowState, selected: dict) -> dict | None:
+    if state.uia.get("status") == "ok":
+        current = _json_loads(window_ops._uia_interact_app(
+            str(selected.get("process_name") or selected.get("app") or selected.get("title") or ""),
+            "get_elements", {"hwnd": int(selected["hwnd"]), "limit": int(state.uia.get("limit", 100))},
+            _bypass_gate=True), {})
+        if current.get("status") != "ok" or uia_fingerprint(current) != uia_fingerprint(state.uia):
+            return {"status": "error", "reason_code": "stale_state", "error": "The accessible UI changed. Capture a fresh state."}
+    if state.visual_sample is not None:
+        current = _json_loads(window_ops._ctrl_screenshot_window(hwnd=int(selected["hwnd"])), {})
+        sample = image_sample(current)
+        if sample is None or image_changed(state.visual_sample, sample):
+            return {"status": "error", "reason_code": "stale_state", "error": "The visible UI changed. Capture a fresh state."}
+    return None
+
+
+def _file_expectation_permission(expectation: dict) -> dict | None:
+    expectation["path"] = str(workspace_path(expectation["path"]).resolve())
+    decision = resolve_permission(ActionType.READ, target_path=expectation["path"])
+    if decision.blocked:
+        return {"status": "blocked", "reason_code": decision.reason_code, "reason": decision.reason}
+    if decision.requires_access_grant:
+        ticket = create_grant_ticket(target_type="path", target_identifier=expectation["path"],
+                                     display_name=expectation["path"], action_context="Verify a desktop action's file output", requested_access="read")
+        return {"status": "pending_access_grant", "ticket_id": ticket.id, "target_type": ticket.target_type,
+                "target_identifier": ticket.target_identifier, "display_name": ticket.display_name, "action_context": ticket.action_context}
+    if decision.requires_confirmation or not decision.allowed:
+        return {"status": "blocked", "reason_code": "verification_access_required", "error": "Allow read access to the expected file before acting."}
+    return None
+
+
+def _verify_expected(expectation: dict, selected: dict, state: ComputerWindowState | None, state_id: str) -> dict:
+    deadline = time.monotonic() + 1.0
+    actual = None
+    while True:
+        check_cancelled()
+        kind = expectation["type"]
+        if kind == "file_exists":
+            path = Path(expectation["path"]).resolve()
+            permission = resolve_permission(ActionType.READ, target_path=str(path))
+            if permission.blocked or permission.requires_access_grant or permission.requires_confirmation or not permission.allowed:
+                return {"verified": False, "reason_code": "verification_access_required"}
+            actual = path.is_file()
+            matched = actual
+        elif kind == "window_title":
+            current = _resolve_window(hwnd=int(selected["hwnd"]))
+            actual = (current.get("window") or {}).get("title")
+            matched = current.get("status") == "ok" and actual == expectation["equals"]
+        else:
+            params = _element_params_from_state(state_id, int(expectation.get("element_index", -1)), selected, state=state)
+            if params.get("status") in {"error", "blocked"}:
+                return {"verified": False, "reason_code": params.get("reason_code", "verification_unavailable")}
+            result = _json_loads(window_ops._uia_interact_app(
+                str(selected.get("process_name") or selected.get("title") or ""), "read_element", params, _bypass_gate=True), {})
+            if result.get("status") != "ok":
+                return {"verified": False, "reason_code": result.get("reason_code", "verification_unavailable")}
+            actual = result.get("selected") if kind == "selected_option" else result.get("value")
+            matched = actual == expectation["equals"]
+        if matched:
+            return {"verified": True, "type": kind, "actual": actual}
+        if actual is None:
+            return {"verified": False, "reason_code": "verification_unavailable", "type": kind}
+        if time.monotonic() >= deadline:
+            return {"verified": False, "reason_code": "verification_failed", "type": kind, "actual": actual,
+                    "instruction": "Inspect the resulting state before retrying; the action may have completed."}
+        cancellable_sleep(0.05)
+
+
+def _dispatch_batch_action(kind: str, action: dict, selected: dict, state_id: str,
+                           state: ComputerWindowState | None, _bypass_gate: bool) -> dict:
+    if kind == "launch_app":
+        alias = str(action.get("app") or action.get("alias") or "")
+        if _is_blocked_app(alias):
+            result = {"status": "blocked", "reason_code": "blocked_app", "error": f"Blocked app target: {alias}"}
+        else:
+            result = _json_loads(
+                desktop_runtime.launch_app(
+                    alias,
+                    str(action.get("url") or ""),
+                    str(action.get("args") or ""),
+                    _bypass_gate=_bypass_gate,
+                ),
+                {},
+            )
+    elif kind == "click":
+        mode = str(action.get("coordinate_mode") or "window")
+        result = _json_loads(
+            window_ops._precision_click(
+                float(action.get("x", 0)),
+                float(action.get("y", 0)),
+                action.get("button", "left"),
+                int(action.get("clicks", 1)),
+                mode,
+                int(action.get("origin_x", 0)),
+                int(action.get("origin_y", 0)),
+                int(action.get("width", 0)),
+                int(action.get("height", 0)),
+                int(action.get("monitor", 0)),
+                str(selected.get("title") or ""),
+                int(selected.get("hwnd") or 0),
+                bool(action.get("verify_bounds", True)),
+                _bypass_gate=True,
+            ),
+            {},
+        )
+    elif kind == "type_text":
+        entry_error = window_ops._focused_text_entry_error(str(action.get("text", "")))
+        if entry_error:
+            return entry_error
+        if action.get("clear"):
+            for chord in ("ctrl+a", "backspace"):
+                check_cancelled()
+                cleared = _json_loads(window_ops._ctrl_hotkey(chord, target_hwnd=int(selected.get("hwnd") or 0), _restore_focus=False, _bypass_gate=True), {})
+                if cleared.get("status") != "ok":
+                    return cleared
+        result = _json_loads(
+            window_ops._screen_type(
+                str(action.get("text") or ""),
+                target_hwnd=int(selected.get("hwnd") or 0),
+                target_title=str(selected.get("title") or ""),
+                target_process_name=str(selected.get("process_name") or ""),
+                _restore_focus=False,
+                _bypass_gate=True,
+            ),
+            {},
+        )
+    elif kind == "press_key":
+        result = _json_loads(
+            window_ops._ctrl_hotkey(
+                _normalize_key_chord(str(action.get("key") or action.get("keys") or "")),
+                target_hwnd=int(selected.get("hwnd") or 0),
+                target_title=str(selected.get("title") or ""),
+                target_process_name=str(selected.get("process_name") or ""),
+                _restore_focus=False,
+                _bypass_gate=True,
+            ),
+            {},
+        )
+    elif kind == "scroll":
+        abs_x, abs_y = _map_window_point(selected, float(action.get("x", 0)), float(action.get("y", 0)))
+        scroll_y = int(action.get("scrollY", action.get("scroll_y", 0)) or 0)
+        direction = str(action.get("direction") or ("up" if scroll_y < 0 else "down"))
+        amount = int(action.get("amount") or max(1, abs(scroll_y) // 120) or 3)
+        result = _json_loads(window_ops._ctrl_scroll(direction, amount, abs_x, abs_y, target_hwnd=int(selected.get("hwnd") or 0), _bypass_gate=True), {})
+    elif kind == "drag":
+        from_x, from_y = _map_window_point(selected, float(action.get("from_x", 0)), float(action.get("from_y", 0)))
+        to_x, to_y = _map_window_point(selected, float(action.get("to_x", 0)), float(action.get("to_y", 0)))
+        result = _json_loads(window_ops._ctrl_drag(from_x, from_y, to_x, to_y, action.get("button", "left"), target_hwnd=int(selected.get("hwnd") or 0), _bypass_gate=True), {})
+    elif kind in {"set_value", "select_option", "invoke", "secondary_action"}:
+        params = _element_params_from_state(state_id, int(action.get("element_index", -1)), selected, state=state)
+        if params.get("status") in {"error", "blocked"}:
+            result = params
+        else:
+            if kind == "set_value":
+                params["text"] = str(action.get("value", action.get("text", "")))
+                uia_action = "set_value"
+            elif kind == "select_option":
+                params["option"] = str(action.get("option") or "")
+                uia_action = "select_option"
+            else:
+                uia_action = "secondary_action" if kind == "secondary_action" else "invoke_element"
+            result = _json_loads(
+                window_ops._uia_interact_app(
+                    str(selected.get("process_name") or selected.get("app") or selected.get("title") or ""),
+                    uia_action,
+                    params,
+                    _bypass_gate=True,
+                ),
+                {},
+            )
+    else:
+        result = {"status": "error", "reason_code": "unsupported_action", "error": f"Unsupported action type: {kind}"}
+
+
+    return result if isinstance(result, dict) and result.get("status") else {
+        "status": "error", "reason_code": "invalid_action_result", "error": "The desktop action returned no valid outcome."}
+
+
 def _computer_functions_act(
-    actions: list[dict[str, Any]],
-    window: dict | None = None,
-    state_id: str = "",
-    hwnd: int = 0,
-    title: str = "",
-    app: str = "",
-    _bypass_gate: bool = False,
+    actions: list[dict[str, Any]], window: dict | None = None, state_id: str = "",
+    hwnd: int = 0, title: str = "", app: str = "", _bypass_gate: bool = False,
 ) -> str:
     if not isinstance(actions, list) or not actions:
         return json.dumps({"status": "error", "error": "actions must be a non-empty array."})
     budget_error = _action_batch_budget_error(actions)
     if budget_error is not None:
         return json.dumps(budget_error, ensure_ascii=False)
+    actions = deepcopy(actions)
+    for action in actions:
+        action["type"] = action["type"].strip().lower()
+    results: list[dict] = []
+    selected: dict = {}
+    state = None
+    started_input = False
 
-    launch_only = all(str(action.get("type") or "").lower() == "launch_app" for action in actions)
-    selected: dict[str, Any] = {}
-    if state_id:
-        state = get_state(state_id)
-        if state is None:
-            return json.dumps({"status": "error", "reason_code": "stale_state", "error": "state_id is stale or unknown."})
-        selected = dict(state.window)
-    elif not launch_only:
-        target = _resolve_window(window=window, hwnd=hwnd, title=title, app=app)
-        if target.get("status") != "ok":
-            return json.dumps(target, ensure_ascii=False)
-        selected = target["window"]
+    def finish(status: str, **details) -> str:
+        payload = {"status": status, "window": selected, "results": results,
+                   "completed_actions": sum(result.get("input_completed", result.get("status") in {"ok", "launched"}) for result in results), **details}
+        if started_input and selected and status != "cancelled" and not cancellation_requested():
+            try:
+                after = _json_loads(_computer_functions_get_window_state(
+                    hwnd=int(selected["hwnd"]), include_screenshot=True, include_text=True), {})
+            except ToolCancelled:
+                after = {"status": "cancelled", "reason_code": "user_stopped"}
+                payload["status"] = "cancelled"
+            except Exception as exc:
+                after = {"status": "error", "reason_code": "observation_failed", "error": str(exc)}
+            payload["after_state"] = after
+            if after.get("status") == "ok":
+                payload["state_id"] = after.get("state_id", "")
+        payload["verified"] = payload["status"] == "ok" and bool(results) and all(result.get("verification", {}).get("verified") for result in results)
+        if payload["status"] != "ok":
+            payload["retryable"] = False
+            payload["instruction"] = "Earlier actions may have completed. Inspect current state before continuing; do not replay the batch."
+        return json.dumps(payload, ensure_ascii=False)
 
-    if not _bypass_gate:
-        launch_targets = [
-            str(action.get("app") or action.get("alias") or "")
-            for action in actions
-            if str(action.get("type") or "").strip().lower() == "launch_app"
-        ]
-        batch_target = selected or {}
-        target_app = ""
-        if launch_only:
-            target_app = launch_targets[0] if len(set(launch_targets)) == 1 else "multiple_apps"
-        pending = _permission_for_batch(actions, batch_target, target_app=target_app, state_id=state_id)
-        if pending is not None:
-            return json.dumps(pending, ensure_ascii=False)
-
-    if selected:
-        focus_result = _json_loads(
-            desktop_runtime.focus_window(hwnd=int(selected.get("hwnd") or 0), _bypass_gate=True),
-            {},
-        )
-        if focus_result.get("status") not in {"focused", "ok"}:
-            return json.dumps(focus_result or {"status": "error", "error": "Could not focus target window."}, ensure_ascii=False)
-
-    results: list[dict[str, Any]] = []
-    for index, action in enumerate(actions):
-        kind = str(action.get("type") or "").strip().lower()
-        if selected and kind in _SCREEN_FALLBACK_ACTIONS and not _active_window_matches(selected):
-            result = {
-                "status": "blocked",
-                "reason_code": "target_focus_changed",
-                "error": "Target window focus changed before the approved action batch completed.",
-            }
-            result.setdefault("action_index", index)
-            result.setdefault("action_type", kind)
+    try:
+        check_cancelled()
+        launch_only = all(str(action["type"]).strip().lower() == "launch_app" for action in actions)
+        if state_id:
+            state = get_state(state_id)
+            if state is None:
+                return finish("error", reason_code="stale_state", error="state_id is expired, used, or belongs to another chat/control session.")
+            selected = dict(state.window)
+            requested_hwnd = int(hwnd or (window or {}).get("hwnd") or (window or {}).get("handle") or 0)
+            if requested_hwnd and requested_hwnd != int(selected.get("hwnd") or 0):
+                return finish("error", reason_code="window_mismatch", error="The requested window differs from the captured state.")
+            if (window and window_changed(window, selected)) or (title and title != selected.get("title")) or (app and _normalize_app_id(app) not in {_normalize_app_id(selected.get("app")), _normalize_app_id(selected.get("process_name"))}):
+                return finish("error", reason_code="window_mismatch", error="The requested target differs from the captured state.")
+        elif not launch_only:
+            target = _resolve_window(window=window, hwnd=hwnd, title=title, app=app)
+            if target.get("status") != "ok":
+                return json.dumps(target, ensure_ascii=False)
+            selected = target["window"]
+            if window and window_changed(window, selected):
+                return finish("error", reason_code="stale_state", error="The supplied window changed. Capture a fresh state.")
+        for action in actions:
+            if (action.get("expect") or {}).get("type") == "file_exists":
+                pending = _file_expectation_permission(action["expect"])
+                if pending:
+                    return json.dumps(pending, ensure_ascii=False)
+            if str(action["type"]).lower() in {"set_value", "select_option", "invoke", "secondary_action"}:
+                params = _element_params_from_state(state_id, int(action.get("element_index", -1)), selected, state=state)
+                if params.get("status") in {"error", "blocked"}:
+                    return json.dumps(params, ensure_ascii=False)
+            if (action.get("expect") or {}).get("type") in {"element_value", "selected_option"}:
+                params = _element_params_from_state(state_id, action["expect"]["element_index"], selected, state=state)
+                if params.get("status") in {"error", "blocked"}:
+                    return json.dumps(params, ensure_ascii=False)
+        launch_targets = [str(action.get("app") or action.get("alias") or "") for action in actions if action["type"] == "launch_app"]
+        target_app = launch_targets[0] if launch_only and len(set(launch_targets)) == 1 else "multiple_apps" if launch_only else ""
+        pending = _permission_for_batch(actions, selected, target_app=target_app, state_id=state_id, skip_confirmation=_bypass_gate)
+        if pending:
+            return finish(pending["status"], **{key: value for key, value in pending.items() if key != "status"})
+        if not state_id and any(action["type"] in {"click", "scroll", "drag"} for action in actions):
+            return finish("error", reason_code="state_required", error="Capture a fresh window state before coordinate input and pass its state_id.")
+        if selected:
+            error = _live_window_error(selected)
+            if error:
+                invalidate_window(int(selected["hwnd"]))
+                return json.dumps(error, ensure_ascii=False)
+            if state is not None:
+                error = _validate_observation(state, selected)
+                if error:
+                    invalidate_window(int(selected["hwnd"]))
+                    return json.dumps(error, ensure_ascii=False)
+                state = consume_state(state_id)
+                if state is None:
+                    return finish("error", reason_code="stale_state", error="The state was invalidated before input.")
+            else:
+                invalidate_window(int(selected["hwnd"]))
+            check_cancelled()
+            focused = _json_loads(desktop_runtime.focus_window(hwnd=int(selected["hwnd"]), _bypass_gate=True), {})
+            if focused.get("status") == "cancelled":
+                return finish("cancelled", reason_code=focused.get("reason_code", "user_stopped"))
+            if focused.get("status") not in {"focused", "ok"}:
+                return finish("error", reason_code="target_window_not_focused", error=focused.get("error", "Could not focus target window."))
+            if state is not None and state.visual_sample is not None:
+                current_capture = _json_loads(window_ops._ctrl_screenshot_window(hwnd=int(selected["hwnd"])), {})
+                focused_sample = image_sample(current_capture)
+                if focused_sample is None or image_changed(state.visual_sample, focused_sample):
+                    return finish("error", reason_code="stale_state", error="The visible target changed on activation. Inspect a fresh state before input.")
+        for index, action in enumerate(actions):
+            check_cancelled()
+            kind = str(action["type"]).strip().lower()
+            if selected and kind != "launch_app":
+                error = _live_window_error(selected, check_title=index == 0)
+                if error:
+                    results.append({**error, "action_index": index, "action_type": kind})
+                    return finish(error["status"], reason_code=error.get("reason_code"))
+                if not _active_window_matches(selected):
+                    results.append({"status": "blocked", "reason_code": "target_focus_changed", "action_index": index, "action_type": kind})
+                    return finish("blocked", reason_code="target_focus_changed")
+                if index and kind in {"click", "scroll", "drag"} and state is not None:
+                    error = _validate_observation(state, selected)
+                    if error:
+                        results.append({**error, "action_index": index, "action_type": kind})
+                        return finish("error", reason_code=error.get("reason_code"))
+            started_input = True
+            result = _dispatch_batch_action(kind, action, selected, state_id, state, _bypass_gate)
+            result.update({"action_index": index, "action_type": kind})
+            if result.get("status") in {"ok", "launched", "focused"}:
+                result["input_completed"] = True
+            result.setdefault("verification", {"verified": False, "status": "input_sent" if result.get("input_completed") else "unconfirmed",
+                                               "instruction": "Verify the resulting state or supply an explicit expected outcome."})
             results.append(result)
-            return json.dumps({"status": "blocked", "window": selected, "results": results}, ensure_ascii=False)
-        if kind == "launch_app":
-            alias = str(action.get("app") or action.get("alias") or "")
-            if _is_blocked_app(alias):
-                result = {"status": "blocked", "reason_code": "blocked_app", "error": f"Blocked app target: {alias}"}
-            else:
-                result = _json_loads(
-                    desktop_runtime.launch_app(
-                        alias,
-                        str(action.get("url") or ""),
-                        str(action.get("args") or ""),
-                        _bypass_gate=_bypass_gate,
-                    ),
-                    {},
-                )
-        elif kind == "click":
-            mode = str(action.get("coordinate_mode") or "window")
-            result = _json_loads(
-                window_ops._precision_click(
-                    float(action.get("x", 0)),
-                    float(action.get("y", 0)),
-                    action.get("button", "left"),
-                    int(action.get("clicks", 1)),
-                    mode,
-                    int(action.get("origin_x", 0)),
-                    int(action.get("origin_y", 0)),
-                    int(action.get("width", 0)),
-                    int(action.get("height", 0)),
-                    int(action.get("monitor", 0)),
-                    str(selected.get("title") or ""),
-                    int(selected.get("hwnd") or 0),
-                    bool(action.get("verify_bounds", True)),
-                    _bypass_gate=True,
-                ),
-                {},
-            )
-        elif kind == "type_text":
-            if action.get("clear"):
-                window_ops._ctrl_hotkey("ctrl+a", target_hwnd=int(selected.get("hwnd") or 0), _bypass_gate=True)
-                window_ops._ctrl_hotkey("backspace", target_hwnd=int(selected.get("hwnd") or 0), _bypass_gate=True)
-            result = _json_loads(
-                window_ops._screen_type(
-                    str(action.get("text") or ""),
-                    target_hwnd=int(selected.get("hwnd") or 0),
-                    target_title=str(selected.get("title") or ""),
-                    target_process_name=str(selected.get("process_name") or ""),
-                    _bypass_gate=True,
-                ),
-                {},
-            )
-        elif kind == "press_key":
-            result = _json_loads(
-                window_ops._ctrl_hotkey(
-                    _normalize_key_chord(str(action.get("key") or action.get("keys") or "")),
-                    target_hwnd=int(selected.get("hwnd") or 0),
-                    target_title=str(selected.get("title") or ""),
-                    target_process_name=str(selected.get("process_name") or ""),
-                    _bypass_gate=True,
-                ),
-                {},
-            )
-        elif kind == "scroll":
-            abs_x, abs_y = _map_window_point(selected, float(action.get("x", 0)), float(action.get("y", 0)))
-            scroll_y = int(action.get("scrollY", action.get("scroll_y", 0)) or 0)
-            direction = str(action.get("direction") or ("up" if scroll_y < 0 else "down"))
-            amount = int(action.get("amount") or max(1, abs(scroll_y) // 120) or 3)
-            result = _json_loads(window_ops._ctrl_scroll(direction, amount, abs_x, abs_y, _bypass_gate=True), {})
-        elif kind == "drag":
-            from_x, from_y = _map_window_point(selected, float(action.get("from_x", 0)), float(action.get("from_y", 0)))
-            to_x, to_y = _map_window_point(selected, float(action.get("to_x", 0)), float(action.get("to_y", 0)))
-            result = _json_loads(window_ops._ctrl_drag(from_x, from_y, to_x, to_y, action.get("button", "left"), _bypass_gate=True), {})
-        elif kind in {"set_value", "select_option", "invoke", "secondary_action"}:
-            params = _element_params_from_state(state_id, int(action.get("element_index", -1)), selected)
-            if params.get("status") == "error":
-                result = params
-            else:
-                if kind == "set_value":
-                    params["text"] = str(action.get("value") or action.get("text") or "")
-                    uia_action = "set_value"
-                elif kind == "select_option":
-                    params["option"] = str(action.get("option") or "")
-                    uia_action = "select_option"
-                else:
-                    uia_action = "invoke_element"
-                result = _json_loads(
-                    window_ops._uia_interact_app(
-                        str(selected.get("process_name") or selected.get("app") or selected.get("title") or ""),
-                        uia_action,
-                        params,
-                        _bypass_gate=True,
-                    ),
-                    {},
-                )
-        else:
-            result = {"status": "error", "reason_code": "unsupported_action", "error": f"Unsupported action type: {kind}"}
-
-        result.setdefault("action_index", index)
-        result.setdefault("action_type", kind)
-        results.append(result)
-        if result.get("status") in {"error", "blocked", "pending_approval", "pending_access_grant"}:
-            return json.dumps({"status": result.get("status"), "window": selected, "results": results}, ensure_ascii=False)
-
-    _audit.log("computer_functions.act", data={"count": len(actions), "hwnd": selected.get("hwnd")})
-    return json.dumps({"status": "ok", "window": selected, "results": results}, ensure_ascii=False)
+            if result.get("status") not in {"ok", "launched", "focused"}:
+                if result.get("status") in {"pending_approval", "pending_access_grant"}:
+                    # Native dispatch may already have applied earlier inputs.
+                    # A gate must never automatically replay this batch.
+                    return finish("error", reason_code="batch_interrupted", error="Desktop permissions changed during the batch. Inspect current state before continuing.")
+                return finish(str(result.get("status") or "error"), reason_code=result.get("reason_code", "desktop_action_failed"))
+            if action.get("expect"):
+                verification = _verify_expected(action["expect"], selected, state, state_id)
+                result["verification"] = verification
+                if not verification["verified"]:
+                    result.update({"status": "error", "reason_code": verification["reason_code"]})
+                    return finish("error", reason_code=verification["reason_code"])
+        check_cancelled()
+        _audit.log("computer_functions.act", data={"count": len(results), "hwnd": selected.get("hwnd")})
+        return finish("ok")
+    except ToolCancelled as exc:
+        return finish("cancelled", reason_code=exc.reason_code, error=str(exc))
+    except Exception as exc:
+        return finish("error", reason_code="desktop_action_exception", error=str(exc))
 
 
 def _computer_functions_clipboard(action: str = "read", text: str = "") -> str:
@@ -907,11 +1117,41 @@ def register_tools(registry, _settings=None) -> None:
             },
             {
                 "name": "computer_functions_act",
-                "description": "Run an ordered batch of Windows computer actions against one target window, or launch an app.",
+                "description": "Run up to 20 ordered Windows actions. Pass a fresh state_id for pointer/UIA input; it is consumed by one batch. Changed targets stop input. Results distinguish input sent from verified outcomes and include after_state when available. Inspect partial failures before continuing; never replay them automatically.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "actions": {"type": "array"},
+                        "actions": {
+                            "type": "array", "minItems": 1, "maxItems": _MAX_ACTIONS_PER_BATCH,
+                            "items": {
+                                "type": "object", "required": ["type"],
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["launch_app", "click", "type_text", "press_key", "scroll", "drag", "set_value", "select_option", "invoke", "secondary_action"]},
+                                    "x": {"type": "number"}, "y": {"type": "number"},
+                                    "from_x": {"type": "number"}, "from_y": {"type": "number"},
+                                    "to_x": {"type": "number"}, "to_y": {"type": "number"},
+                                    "text": {"type": "string", "maxLength": MAX_TYPED_TEXT_CHARS},
+                                    "value": {"type": "string", "maxLength": MAX_TYPED_TEXT_CHARS},
+                                    "clear": {"type": "boolean"}, "key": {"type": "string"},
+                                    "element_index": {"type": "integer", "minimum": 0},
+                                    "option": {"type": "string"}, "app": {"type": "string"},
+                                    "url": {"type": "string"}, "args": {"type": "string"},
+                                    "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                                    "clicks": {"type": "integer", "minimum": 1, "maximum": 2},
+                                    "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                                    "amount": {"type": "integer", "minimum": 1},
+                                    "coordinate_mode": {"type": "string", "description": "Default window. Coordinates use physical pixels."},
+                                    "expect": {
+                                        "type": "object", "required": ["type"],
+                                        "properties": {
+                                            "type": {"type": "string", "enum": ["file_exists", "window_title", "element_value", "selected_option"]},
+                                            "path": {"type": "string", "description": "Expected file; requires read access before input. Relative paths use the chat workspace."},
+                                            "equals": {"type": "string"}, "element_index": {"type": "integer", "minimum": 0},
+                                        },
+                                    },
+                                },
+                            },
+                        },
                         "window": {"type": "object", "default": {}},
                         "state_id": {"type": "string", "default": ""},
                         "hwnd": {"type": "integer", "default": 0},

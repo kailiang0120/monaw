@@ -3,6 +3,31 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 from typing import Any
+from contextlib import contextmanager
+from functools import wraps
+
+
+@contextmanager
+def physical_coordinates():
+    """Keep screenshots, UIA bounds and Win32 input in physical pixels."""
+    setter = getattr(getattr(getattr(ctypes, "windll", None), "user32", None), "SetThreadDpiAwarenessContext", None)
+    previous = None
+    if setter is not None:
+        setter.restype = ctypes.c_void_p
+        previous = setter(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+    try:
+        yield
+    finally:
+        if previous:
+            setter(ctypes.c_void_p(previous))
+
+
+def physical_pixels(fn):
+    @wraps(fn)
+    def run(*args, **kwargs):
+        with physical_coordinates():
+            return fn(*args, **kwargs)
+    return run
 
 
 def _get_system_metric(index: int) -> int:
@@ -23,6 +48,7 @@ def _virtual_screen_fallback() -> dict[str, int]:
     }
 
 
+@physical_pixels
 def get_cursor_position() -> dict[str, int]:
     if not hasattr(ctypes, "windll"):
         return {"x": 0, "y": 0}
@@ -82,6 +108,7 @@ def _rect_payload(left: int, top: int, right: int, bottom: int) -> dict[str, int
     }
 
 
+@physical_pixels
 def get_window_rect(title: str = "", hwnd: int = 0) -> dict[str, Any]:
     try:
         import win32gui
@@ -97,10 +124,13 @@ def get_window_rect(title: str = "", hwnd: int = 0) -> dict[str, Any]:
         left, top, right, bottom = win32gui.GetWindowRect(candidate_hwnd)
         _, pid = win32process.GetWindowThreadProcessId(candidate_hwnd)
         process_name = ""
+        process_create_time = None
         try:
             import psutil
 
-            process_name = psutil.Process(pid).name()
+            process = psutil.Process(pid)
+            process_name = process.name()
+            process_create_time = process.create_time()
         except Exception:
             process_name = ""
         return {
@@ -108,6 +138,8 @@ def get_window_rect(title: str = "", hwnd: int = 0) -> dict[str, Any]:
             "title": window_title,
             "pid": int(pid),
             "process_name": process_name,
+            "process_create_time": process_create_time,
+            "dpi": _get_window_dpi(candidate_hwnd),
             "rect": _rect_payload(left, top, right, bottom),
         }
 
@@ -143,6 +175,13 @@ def get_window_rect(title: str = "", hwnd: int = 0) -> dict[str, Any]:
         "reason_code": "window_ambiguous",
         "matches": matches[:10],
     }
+
+
+def _get_window_dpi(hwnd: int) -> int:
+    try:
+        return int(ctypes.windll.user32.GetDpiForWindow(ctypes.c_void_p(hwnd))) or 96
+    except (AttributeError, OSError):
+        return 96
 
 
 def _monitor_rect(monitor_index: int) -> dict[str, int] | None:

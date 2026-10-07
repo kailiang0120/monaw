@@ -10,6 +10,19 @@ vi.mock('./client', async (importOriginal) => ({
 describe('chat stream completion', () => {
   afterEach(() => vi.resetAllMocks())
 
+  it('includes the selected folder in a new chat request', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('event: done\ndata: {"status":"complete"}\n\n'))
+    const onDone = vi.fn()
+    chatStream('Hello', null, [], vi.fn(), vi.fn(), vi.fn(), onDone, vi.fn(),
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, 'C:\\Projects\\demo')
+    await vi.waitFor(() => expect(onDone).toHaveBeenCalled())
+    expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[0][1]?.body))).toEqual({
+      message: 'Hello', conversation_id: null, attachments: [], workspace_dir: 'C:\\Projects\\demo',
+    })
+  })
+
   it.each([false, true])('requires a terminal event to report success (completed: %s)', async (completed) => {
     const token = 'event: token\ndata: {"content":"Partial answer"}\n\n'
     const done = 'event: done\ndata: {"conversation_id":"chat-a","status":"complete"}\n\n'

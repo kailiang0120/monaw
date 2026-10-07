@@ -79,22 +79,22 @@ class Database:
 
     # Conversation CRUD
 
-    def create_conversation(self, conv_id: str, title: str) -> dict:
+    def create_conversation(self, conv_id: str, title: str, workspace_dir: str = "") -> dict:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             self.conn.execute(
-                "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (conv_id, title, now, now),
+                "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, workspace_dir) VALUES (?, ?, ?, ?, ?)",
+                (conv_id, title, now, now, workspace_dir),
             )
             self.conn.commit()
-        return {"id": conv_id, "title": title, "created_at": now}
+        return {"id": conv_id, "title": title, "created_at": now, "workspace_dir": workspace_dir}
 
     def list_conversations(self) -> list[dict]:
         rows = self.fetchall(
-            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+            "SELECT id, title, created_at, updated_at, workspace_dir FROM conversations ORDER BY updated_at DESC"
         )
         return [
-            {"id": r["id"], "title": r["title"], "created_at": r["created_at"]}
+            {"id": r["id"], "title": r["title"], "created_at": r["created_at"], "workspace_dir": r["workspace_dir"]}
             for r in rows
         ]
 
@@ -104,7 +104,7 @@ class Database:
 
     # C2: Allowed column names for update_conversation - prevents dynamic SQL injection.
     _CONVERSATION_MUTABLE_COLS: frozenset[str] = frozenset(
-        {"title", "updated_at", "summary", "task_goal", "context_tokens_estimate"}
+        {"title", "updated_at", "summary", "task_goal", "context_tokens_estimate", "workspace_dir"}
     )
 
     def update_conversation(self, conv_id: str, **fields) -> None:

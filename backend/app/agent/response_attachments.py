@@ -18,6 +18,7 @@ from app.agent.run_context import (
     current_principal_id,
 )
 from app.agent.runtime_paths import RUNTIME_DIR
+from app.agent.conversation_workspace import selected_workspace_dir, workspace_path
 
 MAX_RESPONSE_ATTACHMENTS = 12
 MAX_ATTACHMENT_REGISTRY_ITEMS = 1000
@@ -515,7 +516,9 @@ def _resolved_candidate_path(raw_path: str) -> Path | None:
     if not cleaned:
         return None
     try:
-        return Path(os.path.expandvars(cleaned)).expanduser().resolve(strict=False)
+        expanded = os.path.expandvars(cleaned)
+        source = workspace_path(expanded) if selected_workspace_dir() else Path(expanded).expanduser()
+        return source.resolve(strict=False)
     except (OSError, RuntimeError):
         return None
 

@@ -6,7 +6,7 @@ import { InputBar } from './components/InputBar'
 import { ApprovalToast } from './components/ApprovalToast'
 import { AccessGrantCard } from './components/AccessGrantCard'
 import { useChat } from './hooks/useChat'
-import { deleteConversation, fetchConversations, renameConversation } from './lib/api/conversations'
+import { deleteConversation, fetchConversations, renameConversation, setConversationWorkspace, validateConversationWorkspace } from './lib/api/conversations'
 import {
   deleteScheduledTask,
   fetchScheduledTasks,
@@ -51,6 +51,7 @@ function sameConversations(a: Conversation[], b: Conversation[]): boolean {
       && item.id === other.id
       && item.title === other.title
       && item.created_at === other.created_at
+      && item.workspace_dir === other.workspace_dir
   })
 }
 
@@ -71,6 +72,9 @@ function sameScheduledTasks(a: ScheduledTask[], b: ScheduledTask[]): boolean {
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [activeConvId, setActiveConvId] = useState<string | null>(null)
+  const [draftWorkspaceDir, setDraftWorkspaceDir] = useState('')
+  const [savingWorkspace, setSavingWorkspace] = useState(false)
+  const workspaceGenerationRef = useRef(0)
   const [showSettings, setShowSettings] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [isBackendReady, setIsBackendReady] = useState(() => typeof window === 'undefined' || !window.electronAPI?.isElectron)
@@ -358,10 +362,30 @@ export default function App() {
   }
 
   const handleSend = (text: string, attachments: UploadedAttachment[] = []) => {
+    if (savingWorkspace) return
     sendMessage(text, attachments, (newConvId) => {
       setActiveConvId(newConvId)
       loadConversations()
-    })
+    }, activeConvId ? undefined : draftWorkspaceDir || undefined)
+  }
+
+  const handleWorkspaceChange = async (path: string) => {
+    const targetId = activeConvId
+    const generation = workspaceGenerationRef.current
+    if (activeConvIdRef.current !== targetId) return
+    setSavingWorkspace(true)
+    try {
+      if (!targetId) {
+        const validated = await validateConversationWorkspace(path)
+        if (activeConvIdRef.current === targetId && workspaceGenerationRef.current === generation) setDraftWorkspaceDir(validated.workspace_dir)
+        return
+      }
+      const updated = await setConversationWorkspace(targetId, path)
+      setConversations((current) => current.map((item) => item.id === targetId ? updated : item))
+      setUsageRefreshKey((value) => value + 1)
+    } finally {
+      setSavingWorkspace(false)
+    }
   }
 
   const handleSelectConversation = (id: string) => {
@@ -375,6 +399,8 @@ export default function App() {
   }
 
   const handleNewChat = () => {
+    workspaceGenerationRef.current += 1
+    setDraftWorkspaceDir('')
     setActiveConvId(null)
     clearMessages()
   }
@@ -512,6 +538,8 @@ export default function App() {
               />
             )}
             <InputBar
+              workspaceDir={activeConvId ? activeConversation?.workspace_dir || '' : draftWorkspaceDir}
+              onWorkspaceChange={handleWorkspaceChange}
               onSend={handleSend}
               onSteer={steerMessage}
               steeringConversationId={steeringConversationId}
@@ -520,7 +548,7 @@ export default function App() {
               conversationId={activeConvId}
               contextRefreshKey={messages.length}
               usageRefreshKey={usageRefreshKey}
-              disabled={!isBackendReady}
+              disabled={!isBackendReady || savingWorkspace}
               disabledReason={!isBackendReady ? 'Waiting for the local backend to finish starting…' : undefined}
               approvalMode={approvalMode}
               modelSelection={modelSelection}

@@ -14,6 +14,7 @@ from app.agent.run_context import (
     current_conversation_id,
     current_execution_source,
 )
+from app.agent.tool_cancellation import check_cancelled, ToolCancelled
 
 from app.agent.approval_broker import (
     ApprovalTicket,
@@ -49,7 +50,7 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
         require_approved=True,
     )
     if validation_error:
-        mark_failed(ticket.id, error=f"Approval invalidated: {validation_error}")
+        mark_failed(ticket.id, error=json.dumps({"status": "error", "reason_code": "approval_invalidated", "error": f"Approval invalidated: {validation_error}"}))
         return ticket
 
     # Approval authorizes this payload, never a permission that has since been
@@ -62,12 +63,12 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
     if action is not None:
         permission = resolve_permission(action, target_path=ticket.target_path, target_app=ticket.target_app)
         if permission.blocked:
-            mark_failed(ticket.id, error=permission.reason)
+            mark_failed(ticket.id, error=json.dumps({"status": "blocked", "reason": permission.reason}))
             return ticket
 
     executor = _EXECUTORS.get(ticket.tool_name)
     if not executor:
-        mark_failed(ticket.id, error=f"No executor registered for '{ticket.tool_name}'")
+        mark_failed(ticket.id, error=json.dumps({"status": "error", "error": f"No executor registered for '{ticket.tool_name}'"}))
         return ticket
 
     input_str = ticket.payload.get("input_str", "")
@@ -78,6 +79,7 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
             input_str = json.dumps(ticket.payload or {})
 
     try:
+        check_cancelled()
         result = executor(input_str)
         result_data = json.loads(result) if isinstance(result, str) else result
         result_status = result_data.get("status") if isinstance(result_data, dict) else None
@@ -90,19 +92,15 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
             "pending_approval",
             "pending_access_grant",
         }:
-            detail = ""
-            if isinstance(result_data, dict):
-                detail = str(
-                    result_data.get("error")
-                    or result_data.get("reason")
-                    or result_data.get("reason_code")
-                    or ""
-                )
-            mark_failed(ticket.id, error=detail or f"Resumed action returned status '{result_status}'.")
+            # Keep structured outcomes and partial progress; a bare error string
+            # would be interpreted as success by the tool protocol.
+            mark_failed(ticket.id, error=result if isinstance(result, str) else json.dumps(result_data))
         else:
             mark_applied(ticket.id, result=result if isinstance(result, str) else json.dumps(result))
+    except ToolCancelled as exc:
+        mark_failed(ticket.id, error=json.dumps({"status": "cancelled", "reason_code": exc.reason_code, "error": str(exc)}))
     except Exception as e:
-        mark_failed(ticket.id, error=str(e))
+        mark_failed(ticket.id, error=json.dumps({"status": "error", "error": str(e)}))
 
     return ticket
 

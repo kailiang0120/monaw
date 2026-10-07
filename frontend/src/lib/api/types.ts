@@ -1,7 +1,12 @@
+export interface ConversationWorkspace {
+  workspace_dir: string
+}
+
 export interface Conversation {
   id: string
   title: string
   created_at: string
+  workspace_dir?: string
 }
 
 export interface OkResponse {
@@ -852,6 +857,8 @@ export interface ControllerPolicy {
 }
 
 export interface ApprovalTicket {
+  review_decision?: 'approve' | 'deny' | 'ask' | ''
+  review_reason?: string
   id: string
   conversation_id: string
   action_type: string
@@ -886,6 +893,9 @@ export interface ApprovalEvent {
   ticket_id: string
   action: string
   reason: string
+  decision?: 'approve' | 'deny' | 'ask'
+  review_reason?: string
+  resolved_by?: string
 }
 
 export interface PlanStep {

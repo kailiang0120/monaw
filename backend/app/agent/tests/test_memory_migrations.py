@@ -51,7 +51,7 @@ def test_fresh_database_does_not_create_sqlite_memory_schema(tmp_path):
     assert "conversation_compactions" in tables
     assert "memory_embeddings" not in tables
     assert "memory_fts" not in tables
-    assert versions == [5, 6, 7, 8, 9, 10, 11, 12]
+    assert versions == [5, 6, 7, 8, 9, 10, 11, 12, 13]
     assert {
         "idx_conversations_updated",
         "idx_tool_calls_conversation",

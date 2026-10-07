@@ -2,12 +2,25 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from app.skills.computer_use.session import store_state
+
+
+def _state_for_window(monkeypatch, window):
+    uia = {"status": "ok", "elements": [], "limit": 100}
+    monkeypatch.setattr(computer_tools.window_ops, "_uia_interact_app", lambda *a, **k: json.dumps(uia))
+    monkeypatch.setattr(computer_tools, "_computer_functions_get_window_state", lambda **k: '{"status":"error","reason_code":"observation_failed"}')
+    monkeypatch.setattr(computer_tools.window_ops, "_focused_control", lambda: None)
+    monkeypatch.setattr(computer_tools.window_ops, "_focused_text_entry_error", lambda _: None)
+    return store_state(window=window, screenshot={"status": "skipped"}, uia=uia)
 
 from app.agent.controller_policy import PermissionDecision
 from app.skills.computer_use import tools as computer_tools
 
 
-def test_computer_functions_get_window_state_returns_state_id(monkeypatch):
+def test_computer_functions_get_window_state_returns_state_id(monkeypatch, tmp_path):
+    from PIL import Image
+    shot = tmp_path / "shot.png"
+    Image.new("RGB", (50, 50)).save(shot)
     window = {
         "hwnd": 123,
         "title": "Untitled - Notepad",
@@ -18,7 +31,7 @@ def test_computer_functions_get_window_state_returns_state_id(monkeypatch):
     monkeypatch.setattr(
         computer_tools.window_ops,
         "_ctrl_screenshot_window",
-        lambda **_kwargs: json.dumps({"status": "ok", "path": "shot.png", "region": {"x": 10, "y": 20}}),
+        lambda **_kwargs: json.dumps({"status": "ok", "path": str(shot), "region": {"x": 10, "y": 20}}),
     )
     monkeypatch.setattr(
         computer_tools.window_ops,
@@ -33,7 +46,7 @@ def test_computer_functions_get_window_state_returns_state_id(monkeypatch):
     assert result["status"] == "ok"
     assert result["state_id"].startswith("cfs_")
     assert result["window"]["hwnd"] == 123
-    assert result["screenshot"]["path"] == "shot.png"
+    assert result["screenshot"]["path"] == str(shot)
     assert result["uia"]["elements"][0]["name"] == "File"
 
 
@@ -87,6 +100,7 @@ def test_computer_functions_act_batches_after_one_focus(monkeypatch):
     result = json.loads(
         computer_tools._computer_functions_act(
             window=window,
+            state_id=_state_for_window(monkeypatch, window),
             actions=[
                 {"type": "click", "x": 20, "y": 30},
                 {"type": "type_text", "text": "hello"},
@@ -154,7 +168,17 @@ def test_computer_functions_act_blocks_terminal_launch():
     )
 
     assert result["status"] == "blocked"
-    assert result["results"][0]["reason_code"] == "blocked_app"
+    assert result["reason_code"] == "blocked_app"
+
+
+def test_window_discovery_hydrates_geometry_and_identity(monkeypatch):
+    monkeypatch.setattr(computer_tools, "_list_visible_windows", lambda: [
+        {"hwnd": 123, "title": "Notes", "process_name": "notepad.exe"}])
+    canonical = {"hwnd": 123, "title": "Notes", "process_name": "notepad.exe", "pid": 10,
+                 "dpi": 144, "process_create_time": 1.5, "rect": {"x": -500, "y": 20, "width": 400, "height": 300}}
+    monkeypatch.setattr(computer_tools, "get_window_rect", lambda **k: {"status": "ok", "window": canonical})
+    result = json.loads(computer_tools._computer_functions_get_window(title="Notes"))
+    assert result["window"] == {**canonical, "app": "notepad.exe"}
 
 
 def test_computer_functions_act_approval_payload_contains_batch(monkeypatch):
@@ -279,6 +303,7 @@ def test_computer_functions_act_invalidates_on_focus_change(monkeypatch):
     result = json.loads(
         computer_tools._computer_functions_act(
             window=window,
+            state_id=_state_for_window(monkeypatch, window),
             actions=[{"type": "click", "x": 1, "y": 2}],
             _bypass_gate=True,
         )

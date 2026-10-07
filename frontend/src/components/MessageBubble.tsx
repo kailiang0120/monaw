@@ -718,19 +718,25 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
   }
 
   if (notice.type !== 'required' || localStatus === 'approved' || localStatus === 'rejected') {
-    const resolved = localStatus === 'approved' || notice.type === 'resolved'
+    const denied = notice.decision === 'deny' || localStatus === 'rejected'
+    const resolved = !denied && (localStatus === 'approved' || notice.type === 'resolved')
     const resumed = notice.type === 'resumed'
-    const Icon = resolved ? CheckCircle2 : resumed ? Play : XCircle
-    const label = resolved ? 'Approved' : resumed ? 'Executing' : 'Rejected'
-    const tone = resolved || resumed
+    const automatic = notice.resolved_by?.startsWith('auto_review')
+    const Icon = denied ? XCircle : resolved ? CheckCircle2 : resumed ? Play : XCircle
+    const label = denied ? (automatic ? 'Denied by Auto Review' : 'Rejected')
+      : resolved ? (automatic ? 'Approved by Auto Review' : 'Approved') : resumed ? 'Executing' : 'Rejected'
+    const tone = !denied && (resolved || resumed)
       ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'
       : 'border-red-400/20 bg-red-400/10 text-red-300'
 
     return (
-      <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs ${tone}`}>
+      <div className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-xs ${tone}`}>
         <Icon size={14} className="shrink-0" />
-        <span className="font-medium">{label}</span>
-        <span className="min-w-0 truncate text-neutral-400">{notice.action}</span>
+        <div className="min-w-0">
+          <span className="font-medium">{label}</span>
+          <p className="mt-1 text-neutral-400">{notice.action}</p>
+          {(denied || automatic) && notice.reason && <p className="mt-1 text-neutral-300">{notice.reason}</p>}
+        </div>
       </div>
     )
   }

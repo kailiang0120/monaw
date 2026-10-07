@@ -16,6 +16,8 @@ from app.agent.skill_loader import load_tools
 from app.agent.skill_prompt import build_skill_prompt
 from app.agent.turn_loop import TurnLoop
 from app.agent.steering import SteeringInbox
+from app.agent.database import get_db
+from app.agent.conversation_workspace import set_workspace_dir, reset_workspace_dir
 from app.agent.workspace_instructions import (
     build_workspace_instruction_prompt,
     workspace_instruction_fingerprint,
@@ -184,6 +186,8 @@ class AgentRuntime:
         steering: SteeringInbox | None = None,
     ) -> AsyncIterator[dict]:
         global _active_run_count
+        conversation = get_db().get_conversation(conversation_id) or {}
+        workspace_token = set_workspace_dir(conversation.get("workspace_dir", ""))
         self._active_runs += 1
         with _active_run_lock:
             _active_run_count += 1
@@ -223,6 +227,7 @@ class AgentRuntime:
             ):
                 yield event
         finally:
+            reset_workspace_dir(workspace_token)
             self._active_runs = max(0, self._active_runs - 1)
             with _active_run_lock:
                 _active_run_count = max(0, _active_run_count - 1)

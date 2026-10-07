@@ -3,6 +3,7 @@ import json
 import shutil
 import threading
 import time
+import pytest
 from pathlib import Path
 from app.agent.iteration_budget import IterationBudget
 from app.agent.tool_registry import ToolRegistry
@@ -254,6 +255,69 @@ class FakeLLM:
                 finish_reason="tool_calls",
             )
         return final_answer_response("All done.")
+
+
+@pytest.mark.parametrize("scenario", ["retry", "safer", "breaker"])
+def test_turn_loop_enforces_auto_review_denials_and_preserves_safer_alternatives(monkeypatch, scenario):
+    import app.agent.execution_gate as gate
+    from app.agent.approval_broker import create_ticket
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "auto_review"
+    monkeypatch.setattr(gate, "load_agent_settings", lambda: settings)
+    invoked = []
+    reviewed = []
+
+    async def sensitive(target):
+        invoked.append(target)
+        ticket = create_ticket(tool_name="sensitive", target_path=target, payload={"target": target})
+        return json.dumps({"status": "pending_approval", "ticket_id": ticket.id, "action": "Delete " + target})
+
+    class ReviewLLM:
+        calls = 0
+        async def chat(self, messages, **kwargs):
+            reviewed.append(json.loads(messages[0]["content"]))
+            return '{"decision":"deny","reason":"The user instructed us to preserve those files."}'
+        async def chat_with_tools(self, messages, tools, system_prompt="", **kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                assert "Do not retry" in system_prompt
+            if scenario == "safer" and self.calls == 2:
+                return LLMResponse(content="", tool_calls=[ToolCallRequest(call_id="safe", tool_name="inspect", arguments={})], finish_reason="tool_calls")
+            if scenario == "safer" and self.calls == 3:
+                return final_answer_response("I inspected the files and left them intact.")
+            target = "folder" + str(self.calls) if scenario == "breaker" else "folder"
+            return LLMResponse(content="", tool_calls=[ToolCallRequest(call_id="change-" + str(self.calls), tool_name="sensitive", arguments={"target": target})], finish_reason="tool_calls")
+
+    memory = PersistingFakeMemory()
+    memory.build_approval_review_context = lambda _: {"messages": [{"role": "user", "content": "These files are important"}]}
+    loop = TurnLoop(llm_client=ReviewLLM(), registry=ToolRegistry([
+        {"name": "sensitive", "callable": sensitive, "execution_mode": "async",
+         "parameters": {"type": "object", "properties": {"target": {"type": "string"}}}, "metadata": {"mutates_state": True}},
+        {"name": "inspect", "callable": lambda: '{"status":"ok","files":3}',
+         "parameters": {"type": "object", "properties": {}}, "metadata": {"observation": True}},
+    ]), memory=memory, observability=FakeObservability())
+    async def collect():
+        return [event async for event in loop.run("Inspect these files and preserve them", "review-" + scenario, system_prompt="")]
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert reviewed[0]["context"]["messages"][0]["content"] == "These files are important"
+    notices = [event for event in events if event["event"] == "approval_resolved"]
+    assert all(event["data"]["decision"] == "deny" for event in notices)
+    assert not any(event["event"] == "approval_required" for event in events)
+    if scenario == "safer":
+        assert events[-1]["data"]["status"] == "complete"
+        assert len(invoked) == len(reviewed) == 1
+        assert memory.persisted_turns[0]["tool_calls"][1]["tool_name"] == "inspect"
+    else:
+        assert events[-1]["data"]["status"] == "paused"
+        assert len(invoked) == len(reviewed) == (3 if scenario == "breaker" else 1)
+        expected_code = "auto_review_limit" if scenario == "breaker" else "auto_review_retry_blocked"
+        assert expected_code in memory.persisted_turns[0]["tool_calls"][-1]["output"]
+        if scenario == "breaker":
+            assert reviewed[1]["context"]["prior_denials"][0]["tool"] == "sensitive"
 
 
 def test_turn_loop_accepts_observability_port():
@@ -2324,6 +2388,45 @@ def test_turn_loop_persists_tool_calls_when_memory_supports_persist_turn():
     assert memory.persisted_turns[0]["status"] == "complete"
     assert memory.persisted_turns[0]["tool_calls"][0]["tool_name"] == "echo_tool"
     assert memory.persisted_turns[0]["tool_calls"][0]["status"] == "complete"
+
+
+def test_turn_loop_preserves_native_partial_progress_on_stop():
+    from app.agent.tool_cancellation import cancellable_sleep, ToolCancelled
+    started = threading.Event()
+    finished = threading.Event()
+    def desktop_batch(text):
+        started.set()
+        try:
+            while True:
+                cancellable_sleep(0.01)
+        except ToolCancelled:
+            finished.set()
+            return json.dumps({"status": "cancelled", "completed_actions": 1,
+                               "results": [{"status": "ok", "action_type": "click"}]})
+    registry = ToolRegistry([{
+        "name": "slow_tool", "description": "Native desktop batch", "domain": "general",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+        "callable": desktop_batch, "execution_mode": "sync_stateless",
+        "metadata": {"resource_locks": ["desktop"]},
+    }])
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(llm_client=SlowToolCallLLM(), registry=registry, memory=memory)
+    async def stop():
+        stream = loop.run("start desktop work", "conv-native-stop", system_prompt="system")
+        try:
+            while (await stream.__anext__())["event"] != "tool_start":
+                pass
+            for _ in range(200):
+                if started.is_set(): break
+                await asyncio.sleep(0.005)
+            assert started.is_set()
+        finally:
+            await stream.aclose()
+    asyncio.run(stop())
+    assert finished.is_set()
+    call = memory.persisted_turns[0]["tool_calls"][0]
+    assert call["status"] == "cancelled"
+    assert json.loads(call["output"])["completed_actions"] == 1
 
 
 def test_turn_loop_persists_partial_turn_when_stream_is_cancelled():

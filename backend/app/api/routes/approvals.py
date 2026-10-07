@@ -103,4 +103,6 @@ def _ticket_to_out(t) -> ApprovalTicketOut:
         resolved_at=t.resolved_at,
         resolved_by=t.resolved_by,
         execution_result=t.execution_result,
+        review_decision=t.review_decision,
+        review_reason=t.review_reason,
     )

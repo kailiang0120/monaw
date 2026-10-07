@@ -6,6 +6,41 @@ from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.iteration_budget import IterationBudget
 
 
+def test_partial_failure_cannot_be_marked_retryable():
+    from app.agent.harness.tool_protocol import ToolCallResult
+    output = json.dumps({"status": "error", "reason_code": "verification_failed", "completed_actions": 1, "retryable": False})
+    parsed = ToolCallResult.from_output(call_id="call", name="desktop", output=output)
+    assert not parsed.retryable
+    executor = ToolExecutor()
+    try:
+        result = asyncio.run(executor.execute(tool_dict={"name": "desktop", "callable": lambda: output},
+            arguments={}, budget=IterationBudget(), call_id="call"))
+        assert not result.retryable
+        assert result.normalized_output["completed_actions"] == 1
+    finally:
+        executor.shutdown()
+
+
+def test_native_timeout_retains_partial_input_and_prevents_retry():
+    from app.agent.tool_cancellation import cancellable_sleep, ToolCancelled
+    def batch():
+        try:
+            while True:
+                cancellable_sleep(0.01)
+        except ToolCancelled:
+            return '{"status":"cancelled","completed_actions":1,"retryable":false}'
+    executor = ToolExecutor()
+    try:
+        result = asyncio.run(executor.execute(tool_dict={"name": "desktop", "callable": batch,
+            "timeout_seconds": 0.02, "metadata": {"resource_locks": ["desktop"], "mutates_state": True}},
+            arguments={}, budget=IterationBudget(), call_id="timed-batch"))
+        assert result.normalized_output["reason_code"] == "tool_timeout"
+        assert result.normalized_output["partial_result"]["completed_actions"] == 1
+        assert not result.retryable
+    finally:
+        executor.shutdown()
+
+
 def test_sync_timeout_blocks_conflicting_work_across_runtimes_until_worker_exits(monkeypatch):
     import app.agent.harness.tool_executor as executor_module
     from app.agent.harness.workers import unfinished_workers

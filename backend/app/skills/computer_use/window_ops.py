@@ -20,6 +20,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from functools import wraps
 
 from app.agent.output_workspace import configured_screenshots_dir
 from app.agent.controller_policy import (
@@ -39,12 +40,150 @@ from app.agent.audit import AuditLogger
 from app.agent.access_grant_broker import create_grant_ticket
 from app.agent.approval_broker import create_ticket as _create_approval_ticket
 from app.agent.execution_resume import register_executor
-from app.skills.computer_use.screen_geometry import get_window_rect, map_precision_coordinates
+from app.skills.computer_use.screen_geometry import get_window_rect, map_precision_coordinates, physical_pixels
 from app.skills.computer_use.screen_redaction import redact_capture
+from app.skills.computer_use.input_safety import text_entry_error
+from app.agent.tool_cancellation import check_cancelled, cancellable_sleep, ToolCancelled
 
 _audit = AuditLogger()
 
 _CTRL_V_KEY_DELAY_SECONDS = 0.05
+
+
+def _uia_worker(fn):
+    """UI Automation needs COM initialized on each native worker thread."""
+    @wraps(fn)
+    def run(*args, **kwargs):
+        try:
+            import pythoncom
+        except ImportError:
+            return fn(*args, **kwargs)
+        pythoncom.CoInitializeEx(pythoncom.COINIT_MULTITHREADED)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            pythoncom.CoUninitialize()
+    return run
+
+
+def _cancelled_result(exc: ToolCancelled, **progress: Any) -> dict:
+    return {"status": "cancelled", "reason_code": exc.reason_code, "error": str(exc), **progress}
+
+
+def _read_control_value(element) -> str | None:
+    """None means unreadable; an empty string is a readable empty field."""
+    for read in (lambda: element.get_value(), lambda: element.iface_value.CurrentValue,
+                 lambda: element.iface_text.DocumentRange.GetText(-1)):
+        try:
+            value = read()
+            return str(value) if value is not None else None
+        except Exception:
+            pass
+    return None
+
+
+def _expected_typed_value(element, before: str | None, text: str) -> str | None:
+    """Typing replaces the current selection; do not assume the caret is at end."""
+    if before is None:
+        return None
+    if not before:
+        return text
+    try:
+        pattern = element.iface_text
+        selections = pattern.GetSelection()
+        if selections.Length != 1:
+            return None
+        selection = selections.GetElement(0)
+        prefix, suffix = pattern.DocumentRange.Clone(), pattern.DocumentRange.Clone()
+        prefix.MoveEndpointByRange(1, selection, 0)  # end -> selection start
+        suffix.MoveEndpointByRange(0, selection, 1)  # start -> selection end
+        left, selected, right = prefix.GetText(-1), selection.GetText(-1), suffix.GetText(-1)
+        normalize = lambda value: value.replace("\r\n", "\n").replace("\r", "\n")
+        if normalize(left + selected + right) == normalize(before):
+            return left + text + right
+    except Exception:
+        pass
+    return None
+
+
+@_uia_worker
+def _focused_control():
+    try:
+        from pywinauto.uia_defines import IUIA
+        from pywinauto.uia_element_info import UIAElementInfo
+        from pywinauto.controls.uiawrapper import UIAWrapper
+        raw = IUIA().iuia.GetFocusedElement()
+        return UIAWrapper(UIAElementInfo(raw)) if raw else None
+    except Exception:
+        return None
+
+
+@_uia_worker
+def _focused_text_entry_error(text: str) -> dict | None:
+    # Keep the COM apartment alive while inspecting returned native properties.
+    control = _focused_control()
+    if control is None:
+        return {"status": "blocked", "reason_code": "input_target_unavailable",
+                "error": "The focused control could not be inspected before text entry."}
+    return text_entry_error(text, _element_summary(control, 0))
+
+
+def _input_target_error(target_hwnd: int = 0, control=None) -> str | None:
+    context = _foreground_window_context()
+    if target_hwnd and int(context.get("target_hwnd") or 0) != int(target_hwnd):
+        return "Target window focus changed during input."
+    if control is not None:
+        current = _focused_control()
+        if current is None:
+            return "The focused text control could no longer be verified."
+        before = _element_summary(control, 0).get("runtime_id")
+        after = _element_summary(current, 0).get("runtime_id")
+        if not before or before != after:
+            return "The focused text control changed during input."
+    return _keyboard_target_error()
+
+
+def _mouse_target_error(target_hwnd: int, x: int | None = None, y: int | None = None) -> str | None:
+    if not target_hwnd:
+        return None
+    try:
+        import win32gui
+        if int(win32gui.GetForegroundWindow()) != target_hwnd:
+            return "Target window focus changed before pointer input."
+        if x is not None and y is not None:
+            hit = win32gui.WindowFromPoint((x, y))
+            root = int(win32gui.GetAncestor(hit, 2))  # GA_ROOT
+            if root != target_hwnd and not _is_target_popup(win32gui, root, target_hwnd):
+                return "The intended point is covered by another window."
+    except Exception:
+        return "The pointer target could not be verified."
+    return None
+
+
+def _window_pid(hwnd: int) -> int:
+    try:
+        import win32process
+        return int(win32process.GetWindowThreadProcessId(hwnd)[1] or 0)
+    except Exception:
+        return 0
+
+
+def _is_target_popup(win32gui, root: int, target_hwnd: int) -> bool:
+    """Menus, dropdowns and other popups the target opened are not occluders."""
+    get_window = getattr(win32gui, "GetWindow", None)
+    owner = root
+    for _ in range(8):
+        owner = int(get_window(owner, 4) or 0) if get_window else 0  # GW_OWNER
+        if not owner:
+            break
+        if owner == target_hwnd:
+            return True
+    # Unowned popups such as #32768 context menus: same process and WS_POPUP,
+    # never another top-level window of the same app.
+    get_style = getattr(win32gui, "GetWindowLong", None)
+    style = int(get_style(root, -16) or 0) if get_style else 0  # GWL_STYLE
+    target_pid = _window_pid(target_hwnd)
+    return bool(style & 0x80000000) and bool(target_pid) and _window_pid(root) == target_pid
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -68,16 +207,21 @@ def _json_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
-def _paste_text_via_clipboard(text: str) -> dict[str, Any]:
+def _paste_text_via_clipboard(text: str, *, target_hwnd: int = 0, control=None) -> dict[str, Any]:
     """Paste text into the currently focused control and restore prior text clipboard content."""
     import win32api
     import win32clipboard
     import win32con
 
+    check_cancelled()
     had_clipboard_text = False
     previous_text = ""
+    temporary_sequence = None
     win32clipboard.OpenClipboard()
     try:
+        sensitive = _sensitive_clipboard_reason(win32clipboard)
+        if sensitive:
+            return {"status": "blocked", "reason_code": "sensitive_clipboard", "error": sensitive}
         formats: list[int] = []
         enum_format = 0
         while hasattr(win32clipboard, "EnumClipboardFormats"):
@@ -105,26 +249,45 @@ def _paste_text_via_clipboard(text: str) -> dict[str, Any]:
             had_clipboard_text = True
         win32clipboard.EmptyClipboard()
         win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+        if hasattr(win32clipboard, "GetClipboardSequenceNumber"):
+            temporary_sequence = win32clipboard.GetClipboardSequenceNumber()
     finally:
         win32clipboard.CloseClipboard()
 
     ctrl_vk = getattr(win32con, "VK_CONTROL", 0x11)
     v_vk = win32api.VkKeyScan("v") & 0xFF
-    win32api.keybd_event(ctrl_vk, 0, 0, 0)
-    win32api.keybd_event(v_vk, 0, 0, 0)
-    win32api.keybd_event(v_vk, 0, win32con.KEYEVENTF_KEYUP, 0)
-    win32api.keybd_event(ctrl_vk, 0, win32con.KEYEVENTF_KEYUP, 0)
-    time.sleep(_CTRL_V_KEY_DELAY_SECONDS)
-
     clipboard_restored = False
-    win32clipboard.OpenClipboard()
+    pressed = []
     try:
-        win32clipboard.EmptyClipboard()
-        if had_clipboard_text:
-            win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, previous_text)
-        clipboard_restored = True
+        check_cancelled()
+        target_error = _input_target_error(target_hwnd, control)
+        if target_error:
+            return {"status": "blocked", "reason_code": "target_focus_changed", "error": target_error}
+        for vk in (ctrl_vk, v_vk):
+            check_cancelled()
+            win32api.keybd_event(vk, 0, 0, 0)
+            pressed.append(vk)
+        for vk in reversed(pressed):
+            win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+        pressed.clear()
+        cancellable_sleep(_CTRL_V_KEY_DELAY_SECONDS)
     finally:
-        win32clipboard.CloseClipboard()
+        for vk in reversed(pressed):
+            win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                # Never overwrite something the user copied while the paste ran.
+                if temporary_sequence is None or win32clipboard.GetClipboardSequenceNumber() == temporary_sequence:
+                    win32clipboard.EmptyClipboard()
+                    if had_clipboard_text:
+                        win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, previous_text)
+                    clipboard_restored = True
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception:
+            # Cleanup failure must not mask Stop or repeat an already sent paste.
+            clipboard_restored = False
 
     return {
         "status": "ok",
@@ -134,7 +297,7 @@ def _paste_text_via_clipboard(text: str) -> dict[str, Any]:
     }
 
 
-def _type_text_via_keyboard(text: str) -> dict[str, Any]:
+def _type_text_via_keyboard(text: str, *, target_hwnd: int = 0, control=None) -> dict[str, Any]:
     """Type text through Win32 key events for controls that do not accept paste."""
     import win32api
     import win32con
@@ -151,6 +314,9 @@ def _type_text_via_keyboard(text: str) -> dict[str, Any]:
         "\t": getattr(win32con, "VK_TAB", 0x09),
     }
 
+    # Validate the entire layout before typing. A late unsupported character
+    # must not paste the whole string over an already typed prefix.
+    prepared = []
     for index, char in enumerate(text):
         modifiers: list[int] = []
         if char in special_chars:
@@ -162,18 +328,33 @@ def _type_text_via_keyboard(text: str) -> dict[str, Any]:
                     "status": "error",
                     "reason_code": "unsupported_keyboard_character",
                     "error": f"Character at index {index} cannot be typed with the current keyboard layout.",
-                    "typed_chars": index,
+                    "typed_chars": 0,
                 }
             code = vk & 0xFF
             shift_state = (vk >> 8) & 0xFF
             modifiers = [modifier for bit, modifier in modifier_keys if shift_state & bit]
-        for modifier in modifiers:
-            win32api.keybd_event(modifier, 0, 0, 0)
-        win32api.keybd_event(code, 0, 0, 0)
-        win32api.keybd_event(code, 0, keyup, 0)
-        for modifier in reversed(modifiers):
-            win32api.keybd_event(modifier, 0, keyup, 0)
-        time.sleep(0.01)
+        prepared.append((code, modifiers))
+
+    typed_chars = 0
+    try:
+        for code, modifiers in prepared:
+            check_cancelled()
+            target_error = _input_target_error(target_hwnd, control)
+            if target_error:
+                return {"status": "blocked", "reason_code": "target_focus_changed", "error": target_error, "typed_chars": typed_chars}
+            pressed = []
+            try:
+                for vk in [*modifiers, code]:
+                    check_cancelled()
+                    win32api.keybd_event(vk, 0, 0, 0)
+                    pressed.append(vk)
+            finally:
+                for vk in reversed(pressed):
+                    win32api.keybd_event(vk, 0, keyup, 0)
+            typed_chars += 1
+            cancellable_sleep(0.01)
+    except ToolCancelled as exc:
+        return _cancelled_result(exc, typed_chars=typed_chars)
 
     return {"status": "ok", "typed_chars": len(text), "method": "type"}
 
@@ -620,11 +801,59 @@ def _element_summary(element, index: int) -> dict[str, Any]:
         "automation_id": automation_id,
         "class_name": class_name,
     }
+    try:
+        payload["runtime_id"] = list(info.runtime_id)
+    except Exception:
+        try:
+            payload["runtime_id"] = list(info.element.GetRuntimeId())
+        except Exception:
+            pass
+    try:
+        payload["is_password"] = bool(info.element.CurrentIsPassword)
+    except Exception:
+        payload["is_password"] = bool(getattr(info, "is_password", False))
+    try:
+        payload["enabled"] = bool(element.is_enabled())
+    except Exception:
+        pass
+    if not text_entry_error("", payload):
+        value = _read_control_value(element)
+        if value is not None:
+            payload["value"] = value[:4000]
     rect = _element_rect(element)
     if rect:
         payload["bounds"] = {key: rect[key] for key in ("x", "y", "width", "height", "right", "bottom")}
         payload["center"] = {"x": rect["center_x"], "y": rect["center_y"]}
     return payload
+
+
+def _verify_control_value(element, expected: str, *, timeout: float = 1.0) -> dict:
+    deadline = time.monotonic() + timeout
+    actual = None
+    normalize = lambda value: value.replace("\r\n", "\n").replace("\r", "\n")
+    while True:
+        check_cancelled()
+        actual = _read_control_value(element)
+        if actual is not None and normalize(actual) == normalize(expected):
+            return {"verified": True, "expected": expected, "actual": actual}
+        if actual is None or time.monotonic() >= deadline:
+            return {"verified": False, "reason_code": "verification_unavailable" if actual is None else "verification_failed",
+                    "expected": expected, "actual": actual,
+                    "instruction": "Inspect the current state before retrying; the input may already have been applied."}
+        cancellable_sleep(0.05)
+
+
+def _selected_control_text(element) -> str | None:
+    try:
+        return str(element.selected_text())
+    except Exception:
+        try:
+            selected = element.get_selection()
+            if isinstance(selected, list) and len(selected) == 1:
+                return str(selected[0].window_text())
+        except Exception:
+            pass
+    return _read_control_value(element)
 
 
 def _element_matches(element, *, name_query: str, automation_id: str, control_type: str) -> bool:
@@ -687,10 +916,14 @@ def _uia_window_process_name(window: Any) -> str:
         return ""
 
 
+@physical_pixels
+@_uia_worker
 def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypass_gate: bool = False) -> str:
     """Interact with an allowlisted application via UIA."""
     if not _bypass_gate:
-        dec = _gate(ActionType.CLICK, target_app=alias)
+        permission_action = (ActionType.READ if action in {"get_elements", "read_element", "wait_element"}
+                             else ActionType.TYPE if action in {"type_element", "set_value", "type_text"} else ActionType.CLICK)
+        dec = _gate(permission_action, target_app=alias)
         if dec.blocked:
             return _blocked_result(dec)
         if dec.requires_access_grant:
@@ -705,7 +938,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
         if dec.requires_confirmation:
             return _pending_approval_result(
                 dec, f"UIA interact with {alias}: {action}",
-                tool_name="ctrl_interact_app", action_type="click",
+                tool_name="ctrl_interact_app", action_type=permission_action.value,
                 target_app=alias,
                 input_str=json.dumps({"app": alias, "action": action, "params": params}),
             )
@@ -728,6 +961,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
         })
 
     try:
+        check_cancelled()
         from pywinauto import Desktop
 
         desktop = Desktop(backend="uia")
@@ -735,9 +969,11 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
         query_title = str(params.get("window_title") or params.get("title") or alias).strip().lower()
         alias_query = alias.lower()
         matches = []
+        exact_hwnd = int(params.get("hwnd") or 0)
         for w in windows:
             title = w.window_text().lower()
-            if query_title in title or alias_query in title:
+            matched = int(w.handle or 0) == exact_hwnd if exact_hwnd else query_title in title or alias_query in title
+            if matched:
                 matches.append(w)
 
         if not matches:
@@ -801,7 +1037,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
             automation_id = str(params.get("automation_id", "")).strip()
             control_type = str(params.get("control_type", "")).strip()
             occurrence = int(params.get("occurrence", 0) or 0)
-            if not element_name and not automation_id and action not in {"get_elements", "wait_element"}:
+            if not element_name and not automation_id and not params.get("runtime_id") and action not in {"get_elements", "wait_element"}:
                 raise ValueError("Provide element name or automation_id.")
             candidates = [
                 child
@@ -812,19 +1048,10 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
                     automation_id=automation_id,
                     control_type=control_type,
                 )
+                and (not params.get("runtime_id") or _element_summary(child, 0).get("runtime_id") == params["runtime_id"])
+                and (not params.get("bounds") or _element_summary(child, 0).get("bounds") == params["bounds"])
             ]
             return candidates, occurrence
-
-        def _element_read_value(element) -> str:
-            try:
-                return str(element.get_value())
-            except Exception:
-                pass
-            try:
-                value_pattern = element.iface_value
-                return str(value_pattern.CurrentValue)
-            except Exception:
-                return ""
 
         if action == "click_element":
             element_name = str(params.get("element", params.get("name", ""))).strip()
@@ -918,7 +1145,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
                     "matched_window": matched_window,
                 })
 
-        elif action in {"read_element", "type_element", "set_value", "invoke_element", "select_option", "wait_element"}:
+        elif action in {"read_element", "type_element", "set_value", "invoke_element", "secondary_action", "select_option", "wait_element"}:
             import time as _time
 
             timeout = max(0.1, min(float(params.get("timeout_seconds", 5) or 5), 60.0))
@@ -926,6 +1153,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
             candidates: list[Any] = []
             occurrence = int(params.get("occurrence", 0) or 0)
             while _time.monotonic() <= deadline:
+                check_cancelled()
                 try:
                     candidates, occurrence = _matched_elements()
                 except ValueError as exc:
@@ -938,7 +1166,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
                     })
                 if candidates or action != "wait_element":
                     break
-                _time.sleep(0.2)
+                cancellable_sleep(0.2)
 
             if not candidates:
                 return json.dumps({
@@ -969,80 +1197,138 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
 
             child = candidates[occurrence]
             summary = _element_summary(child, occurrence)
-            value_before = _element_read_value(child)
+            # Only text entry and value reads touch the secret itself; invoking
+            # a "Forgot password" link or "Show password" toggle does not.
+            if action in {"read_element", "wait_element", "type_element", "set_value"} and (
+                    summary.get("is_password") or text_entry_error("", summary)):
+                return json.dumps({"status": "blocked", "reason_code": "credential_entry_restricted", "error": "Sensitive controls require direct local user control."})
+            check_cancelled()
+            if action in {"type_element", "set_value", "invoke_element", "secondary_action", "select_option"}:
+                target_error = _mouse_target_error(int(target.handle))
+                if target_error:
+                    return json.dumps({"status": "blocked", "reason_code": "target_focus_changed", "error": target_error})
+            value_before = _read_control_value(child)
             if action in {"type_element", "set_value"}:
                 text = str(params.get("text", ""))
+                entry_error = text_entry_error(text, {**summary, **{key: params[key] for key in ("label", "field", "description") if key in params}})
+                if entry_error:
+                    return json.dumps(entry_error)
                 clear = bool(params.get("clear", True))
+                if not clear and value_before is None:
+                    return json.dumps({"status": "error", "reason_code": "verification_unavailable", "error": "The existing text cannot be read; append could not be verified."})
                 paste_meta: dict[str, Any] = {}
                 try:
                     if clear:
+                        check_cancelled()
                         child.set_edit_text(text)
                         method = "uia_value"
                     else:
+                        check_cancelled()
                         child.click_input()
-                        paste_meta = _paste_text_via_clipboard(text)
+                        # The click leaves the caret at the click point; append
+                        # means the end of the existing text.
+                        moved = _safe_json(_ctrl_hotkey("ctrl+end", target_hwnd=int(target.handle), _bypass_gate=True))
+                        if moved.get("status") != "ok":
+                            return json.dumps(moved)
+                        paste_meta = _paste_text_via_clipboard(text, target_hwnd=int(target.handle), control=child)
                         method = "uia_paste" if paste_meta.get("status") == "ok" else "uia_keys"
                         if paste_meta.get("status") != "ok":
-                            child.type_keys(text, with_spaces=True)
-                except Exception:
+                            if paste_meta.get("status") in {"blocked", "cancelled"}:
+                                return json.dumps(paste_meta)
+                            paste_meta = _type_text_via_keyboard(text, target_hwnd=int(target.handle), control=child)
+                            if paste_meta.get("status") != "ok":
+                                return json.dumps(paste_meta)
+                except ToolCancelled:
+                    raise
+                except Exception as exc:
+                    # A setter that changed the value before failing must not be
+                    # retried through a second input method. A missing pattern
+                    # means no write was attempted, even if the value is unreadable.
+                    from pywinauto.uia_defines import NoPatternInterfaceError
+                    if (not isinstance(exc, NoPatternInterfaceError) or not clear
+                            or (value_before is not None and _read_control_value(child) != value_before)):
+                        return json.dumps({"status": "error", "reason_code": "action_completion_unknown", "error": "Text setter failed after a possible change. Inspect before retrying."})
+                    check_cancelled()
                     child.click_input()
                     if clear:
-                        _ctrl_hotkey("ctrl+a", _bypass_gate=True)
-                        _ctrl_hotkey("backspace", _bypass_gate=True)
-                    paste_meta = _paste_text_via_clipboard(text)
+                        for chord in ("ctrl+a", "backspace"):
+                            result = _safe_json(_ctrl_hotkey(chord, target_hwnd=int(target.handle), _bypass_gate=True))
+                            if result.get("status") != "ok":
+                                return json.dumps(result)
+                    paste_meta = _paste_text_via_clipboard(text, target_hwnd=int(target.handle), control=child)
                     method = "uia_paste" if paste_meta.get("status") == "ok" else "uia_keys"
                     if paste_meta.get("status") != "ok":
-                        child.type_keys(text, with_spaces=True)
-                value_after = _element_read_value(child)
-                if (
-                    method == "uia_paste"
-                    and text
-                    and value_before
-                    and value_after == value_before
-                ):
-                    child.type_keys(text, with_spaces=True)
-                    method = "uia_keys"
-                    value_after = _element_read_value(child)
+                        if paste_meta.get("status") in {"blocked", "cancelled"}:
+                            return json.dumps(paste_meta)
+                        paste_meta = _type_text_via_keyboard(text, target_hwnd=int(target.handle), control=child)
+                        if paste_meta.get("status") != "ok":
+                            return json.dumps(paste_meta)
+                verification = _verify_control_value(child, text if clear else value_before + text)
+                mismatch = verification.get("reason_code") == "verification_failed"
                 payload = {
-                    "status": "ok",
+                    "status": "error" if mismatch else "ok",
+                    "verification": verification,
                     "app": alias,
                     "action": action,
                     "method": method,
                     "target": summary,
                     "value_before": value_before,
-                    "value_after": value_after,
+                    "value_after": verification["actual"],
                     "matched_window": matched_window,
                     "policy_source": "settings.json",
                 }
+                # An unreadable control is input sent but unverified, not a
+                # failure; only a readable mismatch is an error.
+                if mismatch:
+                    payload.update({"reason_code": verification["reason_code"], "error": "Text entry could not be verified. Inspect before retrying."})
                 if paste_meta:
                     payload["paste"] = paste_meta
                 return json.dumps(payload)
-            if action == "invoke_element":
+            if action in {"invoke_element", "secondary_action"}:
                 try:
+                    check_cancelled()
+                    if action == "secondary_action":
+                        center = summary.get("center")
+                        if not center:
+                            return json.dumps({"status": "error", "reason_code": "element_bounds_missing"})
+                        return _screen_click(center["x"], center["y"], "right", target_hwnd=int(target.handle), _bypass_gate=True)
                     child.invoke()
                     method = "uia_invoke"
-                except Exception:
-                    child.click_input()
-                    method = "uia_click"
+                except ToolCancelled:
+                    raise
+                except Exception as exc:
+                    return json.dumps({"status": "error", "reason_code": "action_completion_unknown", "error": str(exc), "instruction": "Inspect current state before retrying; invocation may have completed."})
                 return json.dumps({
                     "status": "ok",
                     "app": alias,
                     "action": action,
                     "method": method,
+                    "verification": {"verified": False, "status": "input_sent", "instruction": "Inspect the resulting window or supply an explicit expected outcome."},
                     "target": summary,
                     "matched_window": matched_window,
                     "policy_source": "settings.json",
                 })
             if action == "select_option":
                 option = str(params.get("option", ""))
+                check_cancelled()
                 try:
                     child.select(option)
                     method = "uia_select"
-                except Exception:
-                    child.click_input()
-                    method = "uia_click"
+                except ToolCancelled:
+                    raise
+                except Exception as exc:
+                    return json.dumps({"status": "error", "reason_code": "selection_failed", "error": str(exc), "instruction": "Inspect before retrying. Clicking the control alone does not select an option."})
+                deadline = time.monotonic() + 1.0
+                while True:
+                    check_cancelled()
+                    selected = _selected_control_text(child)
+                    if selected is None or selected == option or time.monotonic() >= deadline:
+                        break
+                    cancellable_sleep(0.05)
                 return json.dumps({
-                    "status": "ok",
+                    "status": "ok" if selected == option else "error",
+                    "reason_code": "" if selected == option else "verification_unavailable" if selected is None else "verification_failed",
+                    "verification": {"verified": selected == option, "expected": option, "actual": selected},
                     "app": alias,
                     "action": action,
                     "method": method,
@@ -1057,27 +1343,19 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
                 "action": action,
                 "target": summary,
                 "value": value_before,
+                "selected": _selected_control_text(child),
                 "matched_window": matched_window,
                 "policy_source": "settings.json",
             })
 
         elif action == "type_text":
             text = params.get("text", "")
+            entry_error = text_entry_error(str(text), _element_summary(target, 0))
+            if entry_error:
+                return json.dumps(entry_error)
+            check_cancelled()
             target.click_input()
-            type_meta = _type_text_via_keyboard(str(text))
-            _audit.log("controller.uia_type", data={"app": alias, "text_len": len(text), "method": type_meta.get("method", "type")})
-            if type_meta.get("status") != "ok":
-                return json.dumps(type_meta)
-            payload = {
-                "status": "ok",
-                "app": alias,
-                "action": action,
-                "method": type_meta.get("method", "type"),
-                "matched_window": matched_window,
-                "policy_source": "settings.json",
-            }
-            payload.update(type_meta)
-            return json.dumps(payload)
+            return _screen_type(str(text), target_hwnd=int(target.handle), _bypass_gate=True)
 
         elif action == "get_elements":
             elements = []
@@ -1085,6 +1363,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
             name_filter = str(params.get("contains", params.get("element", ""))).strip().lower()
             control_type_filter = str(params.get("control_type", "")).strip().lower()
             for child in target.descendants():
+                check_cancelled()
                 try:
                     summary = _element_summary(child, len(elements))
                     if name_filter and name_filter not in str(summary.get("name", "")).lower():
@@ -1112,6 +1391,7 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
                 "app": alias,
                 "elements": elements,
                 "count": len(elements),
+                "limit": limit,
                 "method": "uia",
                 "matched_window": matched_window,
                 "coordinate_hint": "Use element.center.x and element.center.y with computer_functions_act, or prefer a fresh state_id UIA action.",
@@ -1126,6 +1406,8 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
             "matched_window": matched_window,
         })
 
+    except ToolCancelled as exc:
+        return json.dumps(_cancelled_result(exc))
     except Exception as e:
         return json.dumps({
             "status": "error",
@@ -1138,7 +1420,8 @@ def _uia_interact_app(alias: str, action: str, params: dict[str, Any], *, _bypas
 # ── Strategy 3: Coordinate click fallback ─────────────────────────────────────
 
 
-def _screen_click(x: int, y: int, button: str = "left", *, _bypass_gate: bool = False) -> str:
+@physical_pixels
+def _screen_click(x: int, y: int, button: str = "left", *, target_hwnd: int = 0, _bypass_gate: bool = False) -> str:
     """Click at screen coordinates using Win32 SendInput."""
     if not _bypass_gate and not is_screen_fallback_allowed():
         return json.dumps({
@@ -1160,26 +1443,32 @@ def _screen_click(x: int, y: int, button: str = "left", *, _bypass_gate: bool = 
             return pending
 
     try:
+        check_cancelled()
         ctypes.windll.user32.SetCursorPos(x, y)
-        time.sleep(0.05)
+        cancellable_sleep(0.05)
+        target_error = _mouse_target_error(target_hwnd, x, y)
+        if target_error:
+            return json.dumps({"status": "blocked", "reason_code": "target_focus_changed", "error": target_error})
 
         MOUSEEVENTF_LEFTDOWN = 0x0002
         MOUSEEVENTF_LEFTUP = 0x0004
         MOUSEEVENTF_RIGHTDOWN = 0x0008
         MOUSEEVENTF_RIGHTUP = 0x0010
 
-        if button == "right":
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
-            time.sleep(0.02)
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
-        else:
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            time.sleep(0.02)
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        down = MOUSEEVENTF_RIGHTDOWN if button == "right" else MOUSEEVENTF_LEFTDOWN
+        up = MOUSEEVENTF_RIGHTUP if button == "right" else MOUSEEVENTF_LEFTUP
+        check_cancelled()
+        ctypes.windll.user32.mouse_event(down, 0, 0, 0, 0)
+        try:
+            cancellable_sleep(0.02)
+        finally:
+            ctypes.windll.user32.mouse_event(up, 0, 0, 0, 0)
 
         _audit.log("controller.screen_click", data={"x": x, "y": y, "button": button})
         return json.dumps({"status": "ok", "x": x, "y": y, "button": button, "method": "click"})
 
+    except ToolCancelled as exc:
+        return json.dumps(_cancelled_result(exc))
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -1257,10 +1546,10 @@ def _precision_click(
     click_count = max(1, int(clicks or 1))
     if click_count >= 2:
         click_result = json.loads(
-            _ctrl_double_click(int(mapped["x"]), int(mapped["y"]), button, _bypass_gate=True)
+            _ctrl_double_click(int(mapped["x"]), int(mapped["y"]), button, target_hwnd=hwnd, _bypass_gate=True)
         )
     else:
-        click_result = json.loads(_screen_click(int(mapped["x"]), int(mapped["y"]), button, _bypass_gate=True))
+        click_result = json.loads(_screen_click(int(mapped["x"]), int(mapped["y"]), button, target_hwnd=hwnd, _bypass_gate=True))
     if click_result.get("status") != "ok":
         return json.dumps(click_result, ensure_ascii=False)
 
@@ -1282,12 +1571,14 @@ def _precision_click(
     return json.dumps(click_result, ensure_ascii=False)
 
 
+@_uia_worker
 def _screen_type(
     text: str,
     *,
     target_hwnd: int = 0,
     target_title: str = "",
     target_process_name: str = "",
+    _restore_focus: bool = True,
     _bypass_gate: bool = False,
 ) -> str:
     """Type text into the focused control."""
@@ -1319,11 +1610,12 @@ def _screen_type(
             return pending
 
     try:
+        check_cancelled()
         focus_error = _focus_target_window(
             target_hwnd=target_hwnd,
             target_title=target_title,
             target_process_name=target_process_name,
-        )
+        ) if _restore_focus else _input_target_error(target_hwnd)
         if focus_error:
             return json.dumps(
                 {
@@ -1339,14 +1631,33 @@ def _screen_type(
         if target_error:
             return _keyboard_blocked_result(target_error)
 
-        type_meta = _type_text_via_keyboard(text)
+        control = _focused_control()
+        if control is None:
+            return json.dumps({"status": "blocked", "reason_code": "input_target_unavailable", "error": "The focused control could not be inspected before text entry."})
+        entry_error = text_entry_error(text, _element_summary(control, 0) if control is not None else {})
+        if entry_error:
+            return json.dumps(entry_error)
+        before = _read_control_value(control) if control is not None else None
+        expected = _expected_typed_value(control, before, text)
+        type_meta = _type_text_via_keyboard(text, target_hwnd=target_hwnd, control=control)
         if type_meta.get("status") == "error" and type_meta.get("reason_code") == "unsupported_keyboard_character":
-            type_meta = _paste_text_via_clipboard(text)
+            type_meta = _paste_text_via_clipboard(text, target_hwnd=target_hwnd, control=control)
         if type_meta.get("status") != "ok":
             return json.dumps(type_meta, ensure_ascii=False)
+        verification = (_verify_control_value(control, expected) if expected is not None
+                        else {"verified": False, "reason_code": "verification_unavailable", "actual": None,
+                              "instruction": "Input was sent; inspect the resulting state to confirm it."})
+        type_meta["verification"] = verification
+        # Terminals, canvases and fields without a readable value can't be
+        # verified; that is input sent, not a failure. Only a mismatch errors.
+        if verification.get("reason_code") == "verification_failed":
+            type_meta.update({"status": "error", "reason_code": verification["reason_code"],
+                              "error": "Input was sent but the resulting text could not be verified. Inspect before retrying."})
         _audit.log("controller.screen_type", data={"text_len": len(text), "method": type_meta.get("method", "type")})
         return json.dumps(type_meta, ensure_ascii=False)
 
+    except ToolCancelled as exc:
+        return json.dumps(_cancelled_result(exc, typed_chars=(locals().get("type_meta") or {}).get("typed_chars", 0)))
     except ImportError:
         return json.dumps({"status": "error", "error": "pywin32 not installed"})
     except Exception as e:
@@ -1560,6 +1871,7 @@ def _focus_target_window(
     if not hwnd:
         return None
     try:
+        check_cancelled()
         import win32api
         import win32con
         import win32gui
@@ -1590,6 +1902,8 @@ def _focus_target_window(
                     f"got {actual_process!r}."
                 )
 
+        if int(win32gui.GetForegroundWindow()) == hwnd:
+            return None
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         except Exception:
@@ -1626,7 +1940,7 @@ def _focus_target_window(
             except Exception:
                 focused = False
 
-        time.sleep(0.1)
+        cancellable_sleep(0.1)
         foreground = int(win32gui.GetForegroundWindow())
         if foreground != hwnd:
             return (
@@ -1636,6 +1950,8 @@ def _focus_target_window(
         return None
     except ImportError:
         return "pywin32 not installed"
+    except ToolCancelled:
+        raise
     except Exception as exc:
         return str(exc)
 
@@ -1688,6 +2004,7 @@ def _ctrl_hotkey(
     target_hwnd: int = 0,
     target_title: str = "",
     target_process_name: str = "",
+    _restore_focus: bool = True,
     _bypass_gate: bool = False,
 ) -> str:
     """Send a keyboard shortcut. keys is '+' separated, e.g. 'ctrl+c', 'alt+f4'."""
@@ -1715,13 +2032,14 @@ def _ctrl_hotkey(
             return pending
 
     try:
+        check_cancelled()
         import win32api
 
         focus_error = _focus_target_window(
             target_hwnd=target_hwnd,
             target_title=target_title,
             target_process_name=target_process_name,
-        )
+        ) if _restore_focus else _input_target_error(target_hwnd)
         if focus_error:
             return json.dumps(
                 {
@@ -1744,19 +2062,25 @@ def _ctrl_hotkey(
 
         vk_codes = [_vk_for_key(p) for p in parts]
 
-        # Press all keys down in order
-        for vk in vk_codes:
-            win32api.keybd_event(vk, 0, 0, 0)
-            time.sleep(0.02)
-
-        # Release all keys in reverse order
-        for vk in reversed(vk_codes):
-            win32api.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-            time.sleep(0.02)
+        pressed = []
+        try:
+            for vk in vk_codes:
+                check_cancelled()
+                target_error = _input_target_error(target_hwnd)
+                if target_error:
+                    return _keyboard_blocked_result(target_error, keys=keys)
+                win32api.keybd_event(vk, 0, 0, 0)
+                pressed.append(vk)
+                cancellable_sleep(0.02)
+        finally:
+            for vk in reversed(pressed):
+                win32api.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
 
         _audit.log("controller.hotkey", data={"keys": keys})
         return json.dumps({"status": "ok", "keys": keys, "method": "hotkey"})
 
+    except ToolCancelled as exc:
+        return json.dumps(_cancelled_result(exc, keys=keys))
     except ImportError:
         return json.dumps({"status": "error", "error": "pywin32 not installed"})
     except Exception as e:
@@ -1910,7 +2234,8 @@ def _ctrl_window_action(
         return json.dumps({"status": "error", "error": str(e)})
 
 
-def _ctrl_scroll(direction: str = "down", clicks: int = 3, x: int = -1, y: int = -1, *, _bypass_gate: bool = False) -> str:
+@physical_pixels
+def _ctrl_scroll(direction: str = "down", clicks: int = 3, x: int = -1, y: int = -1, *, target_hwnd: int = 0, _bypass_gate: bool = False) -> str:
     """Scroll the mouse wheel. direction: up|down. clicks: scroll steps (default 3)."""
     if not _bypass_gate and not is_screen_fallback_allowed():
         return json.dumps({
@@ -1931,12 +2256,17 @@ def _ctrl_scroll(direction: str = "down", clicks: int = 3, x: int = -1, y: int =
             return pending
 
     try:
+        check_cancelled()
         MOUSEEVENTF_WHEEL = 0x0800
         WHEEL_DELTA = 120
 
-        if x >= 0 and y >= 0:
+        if (x, y) != (-1, -1):
             ctypes.windll.user32.SetCursorPos(x, y)
-            time.sleep(0.05)
+            cancellable_sleep(0.05)
+        target_error = _mouse_target_error(target_hwnd, None if (x, y) == (-1, -1) else x, None if (x, y) == (-1, -1) else y)
+        if target_error:
+            return json.dumps({"status": "blocked", "reason_code": "target_focus_changed", "error": target_error})
+        check_cancelled()
 
         delta = WHEEL_DELTA * clicks if direction == "up" else -(WHEEL_DELTA * clicks)
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta & 0xFFFFFFFF, 0)
@@ -1944,11 +2274,14 @@ def _ctrl_scroll(direction: str = "down", clicks: int = 3, x: int = -1, y: int =
         _audit.log("controller.scroll", data={"direction": direction, "clicks": clicks})
         return json.dumps({"status": "ok", "direction": direction, "clicks": clicks, "method": "scroll"})
 
+    except ToolCancelled as exc:
+        return json.dumps(_cancelled_result(exc))
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
 
-def _ctrl_double_click(x: int, y: int, button: str = "left", *, _bypass_gate: bool = False) -> str:
+@physical_pixels
+def _ctrl_double_click(x: int, y: int, button: str = "left", *, target_hwnd: int = 0, _bypass_gate: bool = False) -> str:
     """Double-click at screen coordinates."""
     if not _bypass_gate and not is_screen_fallback_allowed():
         return json.dumps({
@@ -1976,19 +2309,27 @@ def _ctrl_double_click(x: int, y: int, button: str = "left", *, _bypass_gate: bo
         down = MOUSEEVENTF_RIGHTDOWN if button == "right" else MOUSEEVENTF_LEFTDOWN
         up = MOUSEEVENTF_RIGHTUP if button == "right" else MOUSEEVENTF_LEFTUP
 
-        ctypes.windll.user32.SetCursorPos(x, y)
-        time.sleep(0.05)
-        ctypes.windll.user32.mouse_event(down, 0, 0, 0, 0)
-        time.sleep(0.02)
-        ctypes.windll.user32.mouse_event(up, 0, 0, 0, 0)
-        time.sleep(0.05)
-        ctypes.windll.user32.mouse_event(down, 0, 0, 0, 0)
-        time.sleep(0.02)
-        ctypes.windll.user32.mouse_event(up, 0, 0, 0, 0)
+        completed_clicks = 0
+        for _ in range(2):
+            check_cancelled()
+            ctypes.windll.user32.SetCursorPos(x, y)
+            cancellable_sleep(0.05)
+            target_error = _mouse_target_error(target_hwnd, x, y)
+            if target_error:
+                return json.dumps({"status": "blocked", "reason_code": "target_focus_changed", "error": target_error, "completed_clicks": completed_clicks})
+            check_cancelled()
+            ctypes.windll.user32.mouse_event(down, 0, 0, 0, 0)
+            try:
+                cancellable_sleep(0.02)
+            finally:
+                ctypes.windll.user32.mouse_event(up, 0, 0, 0, 0)
+            completed_clicks += 1
 
         _audit.log("controller.double_click", data={"x": x, "y": y, "button": button})
         return json.dumps({"status": "ok", "x": x, "y": y, "button": button, "method": "double_click"})
 
+    except ToolCancelled as exc:
+        return json.dumps(_cancelled_result(exc, completed_clicks=completed_clicks))
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -2099,7 +2440,8 @@ def _ctrl_clipboard(action: str = "read", text: str = "", *, _bypass_gate: bool 
         return json.dumps({"status": "error", "error": str(e)})
 
 
-def _ctrl_drag(start_x: int, start_y: int, end_x: int, end_y: int, button: str = "left", *, _bypass_gate: bool = False) -> str:
+@physical_pixels
+def _ctrl_drag(start_x: int, start_y: int, end_x: int, end_y: int, button: str = "left", *, target_hwnd: int = 0, _bypass_gate: bool = False) -> str:
     """Drag from (start_x, start_y) to (end_x, end_y)."""
     if not _bypass_gate and not is_screen_fallback_allowed():
         return json.dumps({
@@ -2143,20 +2485,27 @@ def _ctrl_drag(start_x: int, start_y: int, end_x: int, end_y: int, button: str =
         btn_down = MOUSEEVENTF_LEFTDOWN if button != "right" else MOUSEEVENTF_RIGHTDOWN
         btn_up = MOUSEEVENTF_LEFTUP if button != "right" else MOUSEEVENTF_RIGHTUP
 
+        check_cancelled()
         ctypes.windll.user32.SetCursorPos(start_x, start_y)
-        time.sleep(0.05)
+        cancellable_sleep(0.05)
+        target_error = _mouse_target_error(target_hwnd, start_x, start_y)
+        if target_error:
+            return json.dumps({"status": "blocked", "reason_code": "target_focus_changed", "error": target_error})
+        check_cancelled()
         ctypes.windll.user32.mouse_event(btn_down, 0, 0, 0, 0)
-        time.sleep(0.05)
-
-        # Smooth movement via 15 interpolated steps
-        steps = 15
-        for i in range(1, steps + 1):
-            ix = int(start_x + (end_x - start_x) * i / steps)
-            iy = int(start_y + (end_y - start_y) * i / steps)
-            ctypes.windll.user32.SetCursorPos(ix, iy)
-            time.sleep(0.02)
-
-        ctypes.windll.user32.mouse_event(btn_up, 0, 0, 0, 0)
+        try:
+            cancellable_sleep(0.05)
+            for i in range(1, 16):
+                check_cancelled()
+                target_error = _mouse_target_error(target_hwnd)
+                if target_error:
+                    return json.dumps({"status": "blocked", "reason_code": "target_focus_changed", "error": target_error})
+                ix = int(start_x + (end_x - start_x) * i / 15)
+                iy = int(start_y + (end_y - start_y) * i / 15)
+                ctypes.windll.user32.SetCursorPos(ix, iy)
+                cancellable_sleep(0.02)
+        finally:
+            ctypes.windll.user32.mouse_event(btn_up, 0, 0, 0, 0)
 
         _audit.log("controller.drag", data={"from": [start_x, start_y], "to": [end_x, end_y], "button": button})
         return json.dumps({
@@ -2167,6 +2516,8 @@ def _ctrl_drag(start_x: int, start_y: int, end_x: int, end_y: int, button: str =
             "method": "drag",
         })
 
+    except ToolCancelled as exc:
+        return json.dumps(_cancelled_result(exc))
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -2473,4 +2824,3 @@ register_executor("computer_functions_clipboard", _resume_clipboard_write)
 
 
 # ── Build tools ───────────────────────────────────────────────────────────────
-

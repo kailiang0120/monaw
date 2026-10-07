@@ -38,6 +38,28 @@ describe('MessageBubble', () => {
     expect(screen.getByRole('img', { name: 'Monaw mascot' })).toHaveAttribute('src', expect.stringMatching(/success\.gif/))
   })
 
+  it('shows an Auto Review denial and its reason without approval buttons', () => {
+    render(<MessageBubble message={{ id: 'review-denied', role: 'assistant', content: '', approvals: [{
+      ticket_id: 'denied-ticket', action: 'Send the report', reason: 'You requested a draft only.',
+      type: 'resolved', decision: 'deny', resolved_by: 'auto_review',
+    }] }} />)
+    expect(screen.getByText('Denied by Auto Review')).toBeInTheDocument()
+    expect(screen.getByText('You requested a draft only.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Approved')).not.toBeInTheDocument()
+  })
+
+  it('keeps human approval available when the reviewer is uncertain', () => {
+    render(<MessageBubble message={{ id: 'review-ask', role: 'assistant', content: '', approvals: [{
+      ticket_id: 'ask-ticket', action: 'Delete old files', reason: 'The target is unclear.',
+      type: 'required', decision: 'ask',
+    }] }} />)
+    expect(screen.getByText('The target is unclear.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled()
+  })
+
   it('switches the mascot animation while the assistant is working', () => {
     const { rerender } = render(<MessageBubble message={{
       id: 'msg-mascot', role: 'assistant', content: '', streaming: true,

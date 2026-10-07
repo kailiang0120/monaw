@@ -169,9 +169,9 @@ export const PERMISSION_MODE_COPY = {
   auto_review: {
     title: 'Auto Review',
     summary: 'Review changes for me.',
-    description: 'Routine actions run automatically. A separate AI review checks file changes and commands against your request, and asks you when uncertain or unavailable.',
+    description: 'Routine actions run automatically. A separate AI review checks changes and commands against your conversation, approves authorized actions, denies clear violations, and asks you when uncertain or unavailable.',
     recommendation: 'AI review',
-    rules: ['Automatic: read files, browse, click, type and open apps.', 'AI reviews: file changes and deletion, commands and stopping processes.', 'Ask you: review is uncertain or unavailable.'],
+    rules: ['Automatic: read files, browse, click, type and open apps.', 'AI reviews: file changes and deletion, commands and stopping processes.', 'Denied actions cannot be retried unchanged in the same turn; repeated denials pause it.', 'Ask you: review is uncertain or unavailable.'],
   },
   custom: {
     title: 'Custom',

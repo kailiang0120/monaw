@@ -122,7 +122,7 @@ export const PERMISSION_PROFILES = {
 export const PERMISSION_MODE_HELP = {
   default: 'Routine actions run automatically; file changes and commands ask.',
   full_access: 'Actions run automatically; protected targets remain blocked.',
-  auto_review: 'AI reviews changes and commands; asks when uncertain.',
+  auto_review: 'AI reviews actions, denies clear violations, and asks when uncertain.',
   custom: 'Uses your custom confirmation, path override, and app override settings.',
 } as const
 

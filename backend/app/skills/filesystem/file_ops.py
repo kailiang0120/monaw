@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.access_grant_broker import create_grant_ticket
+from app.agent.conversation_workspace import workspace_path
 from app.agent.approval_broker import create_ticket
 from app.agent.controller_policy import ActionType, blocked_roots_below, canonical, resolve_permission
 from app.agent.execution_resume import register_executor
@@ -136,6 +137,12 @@ def _pending_approval_result(
     action_description: str,
     payload_args: dict[str, Any],
 ) -> str:
+    # Approval can resume in a different request context. Pin relative targets
+    # to the folder the user was shown when the ticket was created.
+    payload_args = {
+        key: _policy_target_path(value) if key in {"path", "source", "destination"} and isinstance(value, str) else value
+        for key, value in payload_args.items()
+    }
     input_str = json.dumps(payload_args, ensure_ascii=False, sort_keys=True)
     ticket = create_ticket(
         action_type=action_type,
@@ -199,12 +206,12 @@ def _resolve_path(path: str) -> Path:
     attachment_path = resolve_attachment_handle_path(path)
     if attachment_path is not None:
         return attachment_path
-    return Path(canonical(path))
+    return Path(canonical(str(workspace_path(path))))
 
 
 def _policy_target_path(path: str) -> str:
     attachment_path = resolve_attachment_handle_path(path)
-    return str(attachment_path) if attachment_path is not None else path
+    return str(attachment_path) if attachment_path is not None else str(workspace_path(path))
 
 
 def _same_resolved_path(left: Path, right: Path) -> bool:
@@ -212,7 +219,7 @@ def _same_resolved_path(left: Path, right: Path) -> bool:
 
 
 def _filesystem_target(path: str) -> FilesystemTarget:
-    raw_path = Path(path).expanduser()
+    raw_path = workspace_path(path)
     resolved = _resolve_path(path)
     parent_source = raw_path.parent if str(raw_path.parent) else Path(".")
     return FilesystemTarget(

@@ -88,6 +88,8 @@ class ApprovalTicket(BaseModel):
     resolved_at: str = ""
     resolved_by: str = ""
     execution_result: str = ""
+    review_decision: str = ""
+    review_reason: str = ""
 
     def compute_hash(self) -> str:
         raw = json.dumps(self.payload, sort_keys=True, separators=(",", ":"), default=str)
@@ -349,6 +351,28 @@ def ticket_validation_error(
     if ticket.compute_hash() != ticket.payload_hash:
         return "ticket payload hash mismatch"
     return ""
+
+
+def apply_auto_review(ticket_id: str, snapshot: dict, decision: str, reason: str) -> ApprovalTicket | None:
+    """Atomically audit and settle only the exact ticket the reviewer saw."""
+    if decision not in {"approve", "deny", "ask"}:
+        return None
+    with _state_lock:
+        ticket = _all_tickets.get(ticket_id)
+        if ticket is None or ticket.model_dump() != snapshot or ticket_validation_error(ticket):
+            return None
+        ticket.review_decision = decision
+        ticket.review_reason = reason
+        if decision == "approve":
+            approve_ticket(ticket_id, resolved_by="auto_review")
+        elif decision == "deny":
+            reject_ticket(ticket_id, resolved_by="auto_review")
+        else:
+            _rewrite_tickets()
+    publish_ui_event("approval_ticket.changed", {"ticket_id": ticket.id,
+                     "conversation_id": ticket.conversation_id, "status": ticket.status.value,
+                     "review_decision": decision})
+    return ticket
 
 
 def approve_ticket(ticket_id: str, resolved_by: str = "user") -> ApprovalTicket | None:

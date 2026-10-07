@@ -33,6 +33,15 @@ describe('useChat history pagination', () => {
     vi.resetAllMocks()
   })
 
+  it('passes a new chat working folder to the stream request', () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    const { result } = renderHook(() => useChat(null))
+    act(() => result.current.sendMessage('Work on this project', [], vi.fn(), 'C:\\Projects\\demo'))
+    const args = vi.mocked(chatStream).mock.calls[0]
+    expect(args[1]).toBeNull()
+    expect(args[25]).toBe('C:\\Projects\\demo')
+  })
+
   it('stops offering older history when a page does not advance the cursor', async () => {
     vi.mocked(fetchMessages)
       .mockResolvedValueOnce({
@@ -101,6 +110,24 @@ describe('useChat answer handoff', () => {
     cleanup()
     vi.useRealTimers()
     vi.resetAllMocks()
+  })
+
+  it('replaces a pending approval with the review decision and preserves other tickets', () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    const { result } = renderHook(() => useChat(null))
+    act(() => result.current.sendMessage('Draft the report', [], vi.fn()))
+    const streamCall = vi.mocked(chatStream).mock.calls[0]
+    act(() => {
+      streamCall[8]?.({ ticket_id: 'a', action: 'Send report', reason: 'Sensitive action' })
+      streamCall[8]?.({ ticket_id: 'b', action: 'Write draft', reason: 'Unclear target' })
+      streamCall[9]?.({ ticket_id: 'a', action: 'Send report', reason: 'Draft only.', decision: 'deny', resolved_by: 'auto_review' })
+    })
+    const notices = result.current.messages.find((m) => m.role === 'assistant')!.approvals!
+    expect(notices).toHaveLength(2)
+    expect(notices[0]).toMatchObject({ type: 'resolved', decision: 'deny', reason: 'Draft only.' })
+    expect(notices[1]).toMatchObject({ ticket_id: 'b', type: 'required' })
+    act(() => streamCall[10]?.({ ticket_id: 'b', action: 'Write draft', reason: 'Unclear target', decision: 'approve' }))
+    expect(result.current.messages.find((m) => m.role === 'assistant')!.approvals![1].type).toBe('resumed')
   })
 
   it('steers a new chat, handles applied-before-ack, and keeps one running assistant', async () => {

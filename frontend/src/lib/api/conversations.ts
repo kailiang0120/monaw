@@ -1,5 +1,5 @@
-import { apiFetch, BASE, JSON_HEADERS } from './client'
-import type { ContextUsage, Conversation, MessagesResponse, SavedMessage } from './types'
+import { apiFetch, BASE, JSON_HEADERS, throwApiError } from './client'
+import type { ContextUsage, Conversation, ConversationWorkspace, MessagesResponse, SavedMessage } from './types'
 
 export async function fetchConversations(limit = 100, offset = 0): Promise<Conversation[]> {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
@@ -8,11 +8,11 @@ export async function fetchConversations(limit = 100, offset = 0): Promise<Conve
   return res.json()
 }
 
-export async function createConversation(title?: string): Promise<Conversation> {
+export async function createConversation(title?: string, workspaceDir = ''): Promise<Conversation> {
   const res = await apiFetch(`${BASE}/api/conversations`, {
     method: 'POST',
     headers: JSON_HEADERS,
-    body: JSON.stringify({ title: title ?? 'New Conversation' }),
+    body: JSON.stringify({ title: title ?? 'New Conversation', workspace_dir: workspaceDir }),
   })
   if (!res.ok) throw new Error('Failed to create conversation')
   return res.json()
@@ -29,6 +29,24 @@ export async function renameConversation(id: string, title: string): Promise<Con
     body: JSON.stringify({ title }),
   })
   if (!res.ok) throw new Error('Failed to rename conversation')
+  return res.json()
+}
+
+export async function setConversationWorkspace(id: string, workspaceDir: string): Promise<Conversation> {
+  const res = await apiFetch(`${BASE}/api/conversations/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ workspace_dir: workspaceDir }),
+  })
+  if (!res.ok) return throwApiError(res, 'Could not change the working folder')
+  return res.json()
+}
+
+export async function validateConversationWorkspace(workspaceDir: string): Promise<ConversationWorkspace> {
+  const res = await apiFetch(`${BASE}/api/conversations/workspace-validation`, {
+    method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ workspace_dir: workspaceDir }),
+  })
+  if (!res.ok) return throwApiError(res, 'Could not use the working folder')
   return res.json()
 }
 

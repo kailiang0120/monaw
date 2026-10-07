@@ -64,3 +64,7 @@ def get_steering(run_id: str, control_session_id: str) -> SteeringInbox | None:
 def unregister_steering(inbox: SteeringInbox) -> None:
     inbox.closed = True
     _inboxes.pop(inbox.run_id, None)
+
+
+def conversation_is_running(conversation_id: str) -> bool:
+    return any(inbox.conversation_id == conversation_id for inbox in _inboxes.values())

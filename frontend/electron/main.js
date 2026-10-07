@@ -628,7 +628,7 @@ ipcMain.handle('dialog:select-directory', async (event, defaultPath) => {
   assertTrustedIpcSender(event)
   const safeDefaultPath = assertOptionalIpcString(defaultPath, 'default path', 4096)
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Choose output folder',
+    title: 'Choose folder',
     defaultPath: safeDefaultPath || undefined,
     properties: ['openDirectory', 'createDirectory'],
   })
