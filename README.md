@@ -1,91 +1,93 @@
-# Monaw Agent: AI Desktop Assistant for Windows
+# Monaw Agent
 
 <p align="center">
-  <img src="docs/assets/monaw-agent-hero-v3.png" alt="Monaw Agent AI desktop assistant for Windows with chat and automation tools" width="100%" />
+  <img src="docs/assets/monaw-agent-hero-v3.png" alt="Monaw Agent desktop assistant for Windows" width="100%" />
 </p>
 
-**Monaw Agent is an open-source AI desktop assistant for Windows with computer use, browser automation, file editing, and shell commands in one chat interface.**
+**An open-source AI desktop assistant for Windows, built with Electron, React, and Python.**
 
-Work in a folder you choose, keep useful context in local memory, schedule recurring tasks, and connect tools through the **Model Context Protocol (MCP)**. Sign in with ChatGPT through the Codex SDK, or bring your own OpenAI or Google Gemini API key. An optional Telegram bot lets you send Monaw tasks remotely.
+Monaw connects a chat interface to an agent that can work with project files, run commands, automate Chrome and Windows apps, and use MCP tools. It supports OpenAI API keys, ChatGPT account sign-in through the Codex SDK, and Google Gemini API keys.
 
-Monaw runs on your PC and stores settings, chat history, memory, logs, and its default workspace locally. Model requests use your selected provider's service. Choose a permission mode, review tool access, and let the agent work with your Windows apps, Chrome browser, and project files.
+The application runs on your PC. Chat history, settings, memory, and artifacts are stored locally; model requests go to your selected provider. Windows 10 and 11 are supported; macOS has not been tested.
 
-Monaw currently targets Windows. macOS has not been tested yet.
+## Setup and Start
 
-## Why Monaw
+You need **Git**, an internet connection for installation and model access, and Windows 10 or 11. The setup script can install missing **uv** and **Node.js LTS** through Windows Package Manager (`winget`). If you install Node yourself, use **22.12+**, or **20.19+ on the 20.x line**, with npm. Python **3.11** is pinned in `backend/.python-version` and installed by uv.
 
-- **Desktop-first workflow.** Work with files, browser pages, local commands, app windows, and scheduled follow-ups from one agent UI.
-- **Local control.** Runtime data, memory files, logs, browser artifacts, and the default workspace stay under your local Monaw folder.
-- **Project workspaces.** Choose a folder for each conversation so file tools, commands, and project instructions use the right workspace.
-- **Choose your model connection.** Sign in with a ChatGPT account through the Codex SDK, or use OpenAI or Google Gemini through your own API keys.
-- **Context discipline.** Memory, context tracking, and compression help keep useful knowledge available without blindly stuffing every conversation.
-- **Four permission modes.** Use Default, Full Access, Auto Review, or a Custom config. Routine browsing works without repeated approvals.
-- **Windows-friendly setup.** The one-click setup prepares Python, Node, backend packages, and frontend packages for normal Windows users.
+Chrome **144+** is needed for browser automation. Docker Desktop is optional for isolated shell execution.
 
-## Example Tasks
+### 1. Clone the repository
 
-- **File organization:** "Organize the files in this folder by type and show me what changed."
-- **Browser research:** "Open this website in Chrome, collect the information I need, and save it as a CSV in my workspace."
-- **Coding assistance:** "Use this project folder, inspect the code, and run its tests."
-- **Windows app automation:** "Open this app, inspect its controls, and help me complete this form."
-- **Scheduled checks:** "Every weekday at 9 AM, check this website and summarize any updates."
+```powershell
+git clone https://github.com/kailiang0120/monaw.git
+cd monaw
+```
 
-## What Monaw Can Do
+### 2. Run setup.bat
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/assets/use-cases/multi-model-chat.png" alt="Monaw mascot chatting with multiple model options" width="100%" />
-      <br />
-      <strong>Choose Your Model</strong>
-      <br />
-      Sign in with ChatGPT or use OpenAI or Gemini API keys. Switch models and reasoning effort from the chat composer.
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/assets/use-cases/desktop-automation.png" alt="Monaw mascot automating browser files and local commands" width="100%" />
-      <br />
-      <strong>Work With Files, Apps, and Chrome</strong>
-      <br />
-      Read and edit files, run commands, and control Windows apps. Monaw launches your local Chrome profile with your existing logins and bookmarks.
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/assets/use-cases/memory-context.png" alt="Monaw mascot organizing memory and compressed context" width="100%" />
-      <br />
-      <strong>Keep Useful Context</strong>
-      <br />
-      Local memory, context tracking, and conversation compression help Monaw keep useful information available during longer tasks.
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/assets/use-cases/scheduled-tasks.png" alt="Monaw mascot setting up scheduled task automation" width="100%" />
-      <br />
-      <strong>Schedule Tasks</strong>
-      <br />
-      Set reminders, recurring checks, and tasks for later. View scheduled runs and their results in the app.
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/assets/use-cases/mcp-integrations.png" alt="Monaw mascot connecting MCP and external tool blocks" width="100%" />
-      <br />
-      <strong>Connect More Tools</strong>
-      <br />
-      Browser control includes Chrome DevTools on your own Chrome profile, and you can add your own MCP servers. An optional Telegram bridge lets you send Monaw tasks remotely.
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/assets/use-cases/permissions-local-control.png" alt="Monaw mascot guarding local permissions and sandbox controls" width="100%" />
-      <br />
-      <strong>Choose How Actions Are Approved</strong>
-      <br />
-      Default asks before changes and commands. Full Access runs without action prompts. Auto Review uses AI to review actions. Custom reads your config file. Optional Docker isolation contains shell commands.
-    </td>
-  </tr>
-</table>
+Double-click [setup.bat](setup.bat), or run it from PowerShell in the repository folder:
+
+```powershell
+.\setup.bat
+```
+
+Setup closes any running Monaw processes from this checkout, installs missing prerequisites, installs the pinned Python runtime, syncs `backend/.venv` from `uv.lock`, and runs `npm ci` in `frontend`. If another application owns a required port, setup stops and identifies it. When setup reports success, you can close its window.
+
+Run setup for the first installation, or again when dependencies change. If `winget` is unavailable, install uv and Node.js manually before retrying.
+
+### 3. Run start.bat
+
+Double-click [start.bat](start.bat), or run:
+
+```powershell
+.\start.bat
+```
+
+The launcher starts the Vite renderer server and opens Electron. Electron starts the FastAPI backend on `127.0.0.1:8435`; the launcher exits once startup succeeds. Use `start.bat` each time you want to open Monaw.
+
+### 4. Connect a model
+
+Open **Settings > Connections**, choose a connection below, then select the provider, model, and reasoning effort in the chat composer. Normal desktop setup uses the app settings; no `.env` editing is required.
+
+| Connection | How to configure it | Implementation |
+| --- | --- | --- |
+| **OpenAI API** | Save your OpenAI API key. | OpenAI Python SDK using the Responses API. |
+| **ChatGPT account** | Choose **Sign in with ChatGPT** and complete sign-in. | Codex SDK and its local app-server connection. This is separate from API-key access. |
+| **Google Gemini API** | Save your Google API key. | Google GenAI Python SDK. |
+
+Optional connections can be configured as needed:
+
+| Service | Used for | Configuration |
+| --- | --- | --- |
+| **Tavily API** | Web search. | Tavily API key in Settings > Connections. |
+| **Telegram Bot API** | Remote task input and results. | Bot token and allowed users/chats in Settings. |
+| **MCP servers** | Additional local or remote tools. | Settings > Tools > MCP; supports stdio and Streamable HTTP. |
+
+Choose a permission mode in Settings or the composer: **Default**, **Full Access**, **Auto Review**, or **Custom**. Browser profiles and allowed domains are configured under **Settings > Browser**; sandbox options are configured separately.
+
+## Capabilities
+
+- **Local work:** read and edit files, run shell commands, and control Windows apps and Chrome.
+- **Conversation context:** choose a workspace per chat, load its `AGENTS.md` instructions, retain memory, and steer or stop an active task.
+- **Automation and integrations:** schedule tasks, connect MCP servers, and optionally send tasks through Telegram.
+
+## Technology Stack
+
+| Layer | Technologies and role |
+| --- | --- |
+| Desktop | **Electron** hosts the application, manages the backend, and provides a restricted preload/IPC bridge. |
+| Interface | **React 18**, **TypeScript**, **Vite**, and **Tailwind CSS** provide chat, settings, workspace selection, and task controls. |
+| Backend | **Python 3.11**, **FastAPI**, **Uvicorn**, and **Pydantic** implement the local HTTP API, validation, and streamed events. |
+| Agent orchestration | A **custom Python runtime and turn loop** assemble prompts, call models, authorize actions, execute tools, and process observations. Skills and the tool registry expose capabilities to the model. |
+| Model clients | **OpenAI Python SDK**, **Codex SDK**, and **Google GenAI SDK** provide the three model connection routes. |
+| Browser and desktop automation | **Chrome DevTools MCP** controls the user's Chrome profile; **Scrapling** fetches pages. **pywinauto**, **pywin32**, and **mss** support Windows controls and screenshots. |
+| Tool integrations | The **MCP Python SDK** connects built-in and user-configured MCP servers. |
+| Storage and credentials | **SQLite** stores conversations, runs, and app state. **Markdown** stores global and workspace memory. Electron **safeStorage** encrypts saved provider keys and the Telegram token using the OS. |
+| Dependencies and tests | **uv** manages Python and its lockfile; **npm** manages the frontend. Checks use **pytest**, **Vitest**, Node's test runner, and TypeScript. |
 
 ## Architecture
 
-The system view shows where Monaw's components run. The agent view shows the repeating model-and-tools cycle. Both diagrams are native Mermaid, with editable source directly in this README.
+Monaw has an Electron desktop frontend and a local Python backend. Electron manages the backend process, session authentication, and encrypted credentials. The React UI sends HTTP requests to FastAPI and receives progress, tool activity, and responses through Server-Sent Events (SSE).
 
 ### System Architecture
 
@@ -221,202 +223,75 @@ block-beta
 
 See [docs/development.md](docs/development.md) for the module map and implementation details.
 
-## Requirements
+## Workspaces, Memory, and Local Data
 
-- Windows 10 or 11. macOS is not tested yet.
-- Git.
-- Node.js 18+ and npm. The one-click setup can install this for you.
-- `uv`. The one-click setup can install it for you, and `uv` installs the pinned Python 3.11 runtime automatically.
-- Optional: Docker Desktop for stronger shell-command sandboxing.
+Click **Default workspace** above the message box to choose a project folder for a conversation. That folder determines relative file paths, command locations, and project `AGENTS.md` instructions. Change it while the agent is idle, or reset it to the default workspace.
 
-## Install
+Memory has two scopes: **global** for information about you, and **workspace** for information specific to a folder. Rules and preferences are included in their scope's prompts; relevant facts are retrieved for the current request. Explicit memory tools and background learning save information from your own words. The Memory switch is under **Settings > Identity**. See [the memory guide](docs/memory.md).
 
-Clone the repo:
+By default, Monaw stores its data under `%USERPROFILE%\.monaw`:
+
+```text
+.monaw/
+  runtime/                 settings, SQLite databases, logs, Electron store
+  workspace/               default agent working folder
+  browser/                 browser screenshots and artifacts
+  memory/
+    global.md              global rules, preferences, and facts
+    workspaces/*.md        memory for each project folder
+```
+
+Your Chrome profile remains in Chrome's own folder. Override the main data folder with `MONAW_HOME` or `AGENT_HOME`; use `AGENT_RUNTIME_DIR`, `AGENT_WORKSPACE_DIR`, or `AGENT_MEMORY_DIR` to override individual locations.
+
+The backend is a privileged local API: `/api` requests require an Electron-issued session, and the server binds to loopback by default. Keep it local. Saved API keys are encrypted in Electron main and cannot be read back by renderer JavaScript. See [operations](docs/operations.md) for security, backup, and retention details.
+
+## Development
+
+For manual setup, install uv and a supported Node.js version, then run from the repository root:
 
 ```powershell
-git clone https://github.com/kailiang0120/monaw.git
-cd monaw
-```
-
-### Option A: One-Click Windows Setup
-
-For normal Windows users, double-click [setup.bat](setup.bat):
-
-```text
-setup.bat
-```
-
-The setup launcher will:
-
-- Close Monaw first if it is running. It only closes processes started from this folder. If another program holds one of Monaw's ports (Vite or the backend), setup stops and names it.
-- Install `uv` with Windows Package Manager if it is missing.
-- Install Node.js LTS with Windows Package Manager if Node/npm is missing.
-- Install the Python version pinned in `backend\.python-version`.
-- Create `backend\.venv` and sync the dependencies locked in `backend\uv.lock`.
-- Run `npm ci` in `frontend`.
-
-When setup finishes, double-click [start.bat](start.bat):
-
-```text
-start.bat
-```
-
-If setup fails, check:
-
-```text
-%USERPROFILE%\.monaw\runtime\setup\setup.log
-```
-
-### Option B: Manual Developer Setup
-
-Install `uv`, then sync the locked backend environment:
-
-```powershell
-winget install --id=astral-sh.uv -e
 cd backend
 uv sync --locked
-cd ..
-```
-
-Install the frontend packages:
-
-```powershell
-cd frontend
+cd ..\frontend
 npm ci
 cd ..
-```
-
-Start Monaw:
-
-```powershell
 .\start.bat
 ```
 
-## First-Run Setup
-
-Open Settings in Monaw Agent and configure only the services you use:
-
-- OpenAI account sign-in or an OpenAI API key. In Settings > Connections, choose **Sign in with ChatGPT** for the account route. The API key route remains available separately.
-- Google API key, if using Gemini.
-- Tavily API key, if using web search tools.
-- Telegram bot token and allowlist, if using Telegram.
-- Model provider, model, and reasoning effort in the chat composer.
-- Permission mode: Default, Full Access, Auto Review, or Custom. Custom rules are edited in the config file shown in Settings.
-- Sandbox mode.
-- Browser: the Chrome profile to use and allowed domains. Monaw drives your own Chrome through Chrome DevTools and handles launch and connection.
-- MCP servers.
-
-Normal desktop use does not require editing `.env`. Settings saves runtime configuration locally. Advanced Custom permission rules use the config file rather than individual setup switches.
-
-## Daily Use
-
-Start the app from the repo root:
+Run backend and frontend checks together:
 
 ```powershell
-.\start.bat
+.\scripts\verify.ps1
 ```
 
-The launcher starts the desktop app and exits after startup succeeds.
-
-`uv` selects the pinned Python runtime and keeps `backend\.venv` in sync. If
-`uv` is installed at a custom path, set `AGENT_UV_PATH` before launching:
-
-```powershell
-$env:AGENT_UV_PATH = "C:\path\to\uv.exe"
-.\start.bat
-```
-
-## Local Data
-
-Runtime app data is local. Monaw keeps user-visible data under:
-
-```text
-%USERPROFILE%\.monaw\
-```
-
-Main folders:
-
-```text
-%USERPROFILE%\.monaw\runtime\        settings, database, logs, Electron store
-%USERPROFILE%\.monaw\workspace\      default agent working directory
-%USERPROFILE%\.monaw\browser\        browser screenshots
-%USERPROFILE%\.monaw\memory\         global and workspace memory markdown files
-```
-
-Settings, config, logs, browser screenshots, memory, and the default agent workspace all stay under this folder. Your Chrome profile stays in Chrome's own folder.
-
-You can change the main data folder with `MONAW_HOME` or `AGENT_HOME`, the runtime folder with `AGENT_RUNTIME_DIR`, the default agent workspace with `AGENT_WORKSPACE_DIR`, and the memory folder with `AGENT_MEMORY_DIR`.
-
-Chats open immediately in the default workspace. To work on a project, click **Default workspace** above the message box and choose a folder. The selection is saved for that conversation and applies to commands, relative file paths, and project `AGENTS.md` instructions. Use the reset button beside the folder to return to the default workspace. Folder changes are available while the agent is idle; existing permission and sandbox rules still apply. Chat history stays in the runtime database.
-
-## Feature Docs
-
-While the agent is working, type a new instruction and press Enter or the send arrow to steer the same task. Stop remains available beside it. Steering takes effect after the current model or tool step, and the message shows whether it is waiting or applied. New text, pasted images, and attached files stay in the same chat history. If the turn finishes before delivery, the draft stays in the composer for sending as a new turn.
-
-Memory works in the background; turn it on or off with the Memory switch under Settings -> Identity. Memory files are local markdown files. See [docs/memory.md](docs/memory.md) for advanced configuration.
-
-Browser automation is configured in Settings -> Browser. See [docs/browser-automation.md](docs/browser-automation.md). Planned improvements, such as fuller control of your own Chrome profile, are listed in [docs/roadmap.md](docs/roadmap.md).
-
-Windows computer use combines screenshots and accessibility controls for desktop automation. See [docs/computer-use.md](docs/computer-use.md).
-
-MCP servers are configured in Settings -> Tools -> MCP. See [docs/mcp.md](docs/mcp.md).
-
-Scheduled tasks are configured in the app when scheduling is enabled. See [docs/scheduling.md](docs/scheduling.md).
-
-Telegram is optional. Keep the bot token private and keep the allowlist narrow. See [docs/telegram.md](docs/telegram.md).
-
-Choose one of four permission modes in Settings or the chat composer. Custom rules are configured only in the runtime config file; sandbox options remain in Settings. Auto Review uses conversation context to approve authorized actions, deny clear violations or ask you when uncertain. Denial reasons are visible, unchanged retries are blocked within the turn, and repeated denials pause it. Default, Full Access, and Auto Review still enforce protected-path and sensitive-app restrictions. See [docs/permissions.md](docs/permissions.md) and [docs/sandboxing.md](docs/sandboxing.md).
-
-The backend API is a privileged local control plane. The desktop application
-authenticates every `/api` request with a short-lived session and binds the
-backend to loopback by default. Do not expose the backend through port
-forwarding, reverse proxies, tunnels, permissive firewall rules, or non-loopback
-binds. See [docs/operations.md](docs/operations.md).
-
-Provider keys and the Telegram bot token are encrypted through Electron's
-OS-backed `safeStorage`. Saved credential values are write-only from the
-renderer: the UI can see whether a value exists, but cannot read it back.
-
-The generated endpoint reference is [docs/api.md](docs/api.md).
+Use `npm run dev` inside `frontend` to run Vite and Electron directly. Electron still starts the backend. Backend-only development, authentication, the module map, and packaging notes are in [the development guide](docs/development.md).
 
 ## Troubleshooting
 
-If `start.bat` fails before the app opens, check:
+| Problem | What to check |
+| --- | --- |
+| Setup fails | `%USERPROFILE%\.monaw\runtime\setup\setup.log`; confirm Git and winget are available, or install uv and Node.js manually. |
+| App does not open | Run `setup.bat` again, then check `runtime\launcher\vite.log` and `runtime\launcher\electron.log` under the Monaw data folder. |
+| Backend cannot start | Check `runtime\backend.log`; run `uv sync --locked` inside `backend`. |
+| Node engine or frontend dependency errors | Upgrade to a supported Node.js version, then run `npm ci` inside `frontend`. |
+| A port is occupied | Check Vite port `5275` and backend port `8435`; the launcher reports conflicts. |
+| Browser automation cannot connect | Check Chrome 144+, your selected profile, and the [browser automation guide](docs/browser-automation.md). |
 
-```text
-%USERPROFILE%\.monaw\runtime\launcher\vite.log
-%USERPROFILE%\.monaw\runtime\launcher\electron.log
-```
+For a custom uv installation, set `AGENT_UV_PATH` to the full path of `uv.exe` before starting Monaw.
 
-If the app opens but cannot connect to the backend, check:
+## Documentation
 
-```text
-%USERPROFILE%\.monaw\runtime\
-```
+| Topic | Guide |
+| --- | --- |
+| Architecture, modules, and testing | [Development](docs/development.md) |
+| Browser and Windows automation | [Browser automation](docs/browser-automation.md) / [Computer use](docs/computer-use.md) |
+| Memory and workspaces | [Memory](docs/memory.md) |
+| Tool integrations and remote tasks | [MCP](docs/mcp.md) / [Telegram](docs/telegram.md) / [Scheduling](docs/scheduling.md) |
+| Action approval and execution isolation | [Permissions](docs/permissions.md) / [Sandboxing](docs/sandboxing.md) |
+| Runtime operations and HTTP endpoints | [Operations](docs/operations.md) / [API reference](docs/api.md) |
+| Planned work | [Roadmap](docs/roadmap.md) |
 
-If backend imports fail, restore the locked backend environment:
-
-```powershell
-cd backend
-uv sync --locked
-```
-
-If frontend startup fails, reinstall frontend packages:
-
-```powershell
-cd frontend
-npm ci
-```
-
-If Vite reports port `5275` is already in use, stop the existing Vite process or reuse it intentionally.
-
-## Developer Docs
-
-Developer setup, architecture, module map, testing, and packaging notes are in [docs/development.md](docs/development.md).
-
-## Repository Status
-
-This public repository is currently intended for cloning, local use, and code review. External contributions are not being accepted yet; issues, pull requests, and Discussions may stay disabled until the project is ready for community maintenance.
+This repository is intended for cloning, local use, and code review. External contributions are not being accepted yet.
 
 ## License
 
