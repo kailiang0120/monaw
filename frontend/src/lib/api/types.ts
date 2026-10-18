@@ -302,37 +302,29 @@ export interface BrowserUseProfile {
   directory: string
 }
 
+export interface BrowserDevToolsStatus {
+  server: string
+  running: boolean
+  connected: boolean
+  state: string
+  startup_phase: string
+  tool_count: number
+  last_error: string
+  unhealthy_reason: string
+  connected_at: string | null
+}
+
 export interface BrowserUseDiagnostics {
-  available: boolean
   skill_enabled: boolean
   skill_available: boolean
   skill_unavailable_reason: string
-  session_active: boolean
-  preferred_mode: 'auto' | 'managed' | 'system'
-  current_mode: '' | 'managed' | 'system'
-  current_system_connection: '' | 'attach' | 'launch'
-  fallback_enabled: boolean
-  dom_inspection_engine: 'auto' | 'enhanced' | 'legacy'
-  paint_order_filtering: boolean
-  cross_origin_iframes: boolean
-  max_iframes: number
-  max_iframe_depth: number
-  last_error: string
-  system_connection_strategy: 'auto' | 'attach' | 'launch'
-  system_cdp_url: string
-  managed_profile_dir: string
-  downloads_dir: string
-  screenshots_dir: string
-  traces_dir: string
-  system_profile_directory: string
+  chrome_found: boolean
   chrome_executable: string
   available_system_profiles: BrowserUseProfile[]
-  current_page: {
-    target_id: string
-    url: string
-    title: string
-  } | null
-  tab_count: number
+  system_profile_directory: string
+  default_profile_directory: string
+  devtools: BrowserDevToolsStatus
+  last_error: string
 }
 
 export interface DiagnosticsSummary {
@@ -368,10 +360,9 @@ export interface DiagnosticsSummary {
     startup_error?: string
   }
   browser: {
-    available: boolean
-    session_active: boolean
-    preferred_mode: string
-    current_mode: string
+    chrome_found: boolean
+    devtools_state: string
+    devtools_connected: boolean
     last_error: string
   }
   sandbox: SandboxStatus
@@ -661,21 +652,7 @@ export interface AgentSettings {
     servers: MCPServerConfig[]
   }
   browser: {
-    mode: 'auto' | 'managed' | 'system'
-    enable_system_fallback: boolean
-    headless: boolean
-    keep_alive: boolean
-    dom_inspection_engine: 'auto' | 'enhanced' | 'legacy'
-    paint_order_filtering: boolean
-    cross_origin_iframes: boolean
-    max_iframes: number
-    max_iframe_depth: number
-    system_connection_strategy: 'auto' | 'attach' | 'launch'
-    system_cdp_url: string
-    managed_profile_dir: string
-    downloads_dir: string
     screenshots_dir: string
-    traces_dir: string
     system_profile_directory: string
     auto_approve_local_debugging?: boolean
     allowed_domains: string[]
@@ -742,6 +719,19 @@ export interface AgentSettings {
     user_identity: string
     communication_style: string
   }
+  decision_model: {
+    enabled: boolean
+    managed: boolean
+    provider: 'laya'
+    mode: 'shadow'
+    endpoint: string
+    model: string
+    timeout_ms: number
+    coverage: number
+    max_domains: number
+    min_confidence: number
+    pinned_domains: string[]
+  }
   settings_version: string
   available_skills: SkillDescriptor[]
   api_keys: {
@@ -779,6 +769,21 @@ export interface SpeechToTextStatus {
   loaded: boolean
 }
 
+export interface DecisionModelStatus {
+  state: 'off' | 'not_installed' | 'starting' | 'ready' | 'unreachable' | 'error'
+  enabled: boolean
+  managed: boolean
+  endpoint: string
+  installed: boolean
+  error: string
+  decisions_24h: number
+  scored_24h: number
+  covered_24h: number
+  last_decision_at: string | null
+  last_status: string
+  last_top_domain: string
+}
+
 export interface SpeechToTextTranscription {
   text: string
 }
@@ -799,6 +804,7 @@ export interface SettingsUpdatePayload {
   permissions?: AgentSettings['permissions']
   sandbox?: AgentSettings['sandbox']
   identity?: AgentSettings['identity']
+  decision_model?: AgentSettings['decision_model']
   openai_api_key?: string
   google_api_key?: string
   tavily_api_key?: string

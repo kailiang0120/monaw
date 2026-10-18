@@ -27,10 +27,7 @@ def tool_call_signature(name: str, arguments: dict) -> str:
 
 
 _OBSERVATION_TOOLS = {
-    "browser_snapshot",
-    "browser_screenshot",
-    "browser_tabs",
-    "browser_wait",
+    "browser_fetch",
     "computer_functions_list_apps",
     "computer_functions_get_window",
     "computer_functions_get_window_state",
@@ -49,30 +46,11 @@ _HIGH_RISK_TOOLS = {
     "exec",
     "computer_functions_act",
     "computer_functions_kill_process",
-    "browser_evaluate",
     "computer_functions_activate_window",
 }
 _MEDIUM_RISK_TOOLS = {
-    "browser_click",
-    "browser_type",
-    "browser_press",
-    "browser_select_option",
-    "browser_scroll",
     "write_file",
     "append_file",
-}
-
-_STATE_AWARE_BROWSER_REPEAT_TOOLS = {
-    "browser_open",
-    "browser_navigate",
-    "browser_back",
-    "browser_forward",
-    "browser_reload",
-    "browser_click",
-    "browser_type",
-    "browser_press",
-    "browser_select_option",
-    "browser_scroll",
 }
 
 
@@ -148,12 +126,4 @@ class ToolPolicy:
             return True
         if metadata.get("mutates_state") is False and str(metadata.get("risk_level") or "low") == "low":
             return True
-        if (
-            tool_name in _STATE_AWARE_BROWSER_REPEAT_TOOLS
-            and str((tool or {}).get("domain") or "") == "browser"
-        ):
-            return True
-        if tool_name == "browser_tabs":
-            action = str(arguments.get("action") or "list").strip().lower()
-            return action == "list"
         return tool_name in _OBSERVATION_TOOLS

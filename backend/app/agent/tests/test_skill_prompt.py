@@ -12,33 +12,31 @@ def _skill_body(folder: str) -> str:
 def test_build_skill_prompt_uses_browser_policy_from_skill_markdown():
     prompt = build_skill_prompt(
         [SkillSpec(slug="browser-use", name="browser-use", description="Browser", version="1.0.0", body=_skill_body("browser_use"), path=None)],  # type: ignore[arg-type]
-        {"mcp__Chrome-dev-tools__take_snapshot", "mcp__Chrome-dev-tools__evaluate_script", "screenshot"},
+        {"mcp__chrome-devtools__take_snapshot", "mcp__chrome-devtools__evaluate_script", "screenshot"},
     )
 
-    assert "mcp__Chrome-dev-tools__take_snapshot" in prompt
+    assert "mcp__chrome-devtools__take_snapshot" in prompt
     assert "Do not use generic screenshot-style tools to read webpage content" in prompt
-    assert "mcp__Chrome-dev-tools__evaluate_script" in prompt
+    assert "mcp__chrome-devtools__evaluate_script" in prompt
 
 
-def test_build_skill_prompt_instructs_browser_resume_and_field_verification():
+def test_build_skill_prompt_steers_interactive_browsing_to_devtools_tools():
     prompt = build_skill_prompt(
         [SkillSpec(slug="browser-use", name="browser-use", description="Browser", version="1.0.0", body=_skill_body("browser_use"), path=None)],  # type: ignore[arg-type]
-        {"browser_open", "browser_tabs", "browser_snapshot", "browser_type"},
+        {"mcp__chrome-devtools__list_pages", "mcp__chrome-devtools__take_snapshot", "browser_fetch"},
     )
 
-    assert "When resuming browser work" in prompt
-    assert "browser_tabs" in prompt
-    assert "stalled_repeat_detected" in prompt
-    assert 'browser_session(action="use_system")' in prompt
+    assert "mcp__chrome-devtools__list_pages" in prompt
     assert "observe -> decide -> act -> verify" in prompt
-    assert "target_hint" in prompt
-    assert "field_candidates" in prompt
-    assert "recipient, subject, and message body refs separately" in prompt
+    assert "take_snapshot` again to verify" in prompt
+    assert "`browser_fetch`" in prompt
+    assert "stalled_repeat_detected" in prompt
     assert "recipient chip/token" in prompt
-    assert "browser_snapshot(include_screenshot=true, limit=120)" in prompt
     assert "Do not repeat the same browser action" in prompt
-    assert "target_after" in prompt
-    assert "browser_full_page_screenshot" in prompt
+    assert "needs_browser_render" in prompt
+    # The removed browser-use engine's tools and fetch modes are not mentioned.
+    for removed in ("browser_open", "browser_snapshot", "browser_click", "browser_session", 'mode="dynamic"'):
+        assert removed not in prompt
 
 
 def test_build_skill_prompt_does_not_synthesize_browser_policy_for_unrelated_skill():

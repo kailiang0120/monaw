@@ -557,7 +557,7 @@ class TextThenToolLLM:
                 tool_calls=[
                     ToolCallRequest(
                         call_id="browser-open-1",
-                        tool_name="browser_open",
+                        tool_name="mcp__chrome-devtools__new_page",
                         arguments={"url": "https://example.com"},
                     )
                 ],
@@ -818,7 +818,7 @@ class ScreenshotToolLLM:
                 tool_calls=[
                     ToolCallRequest(
                         call_id="shot-1",
-                        tool_name="browser_screenshot",
+                        tool_name="computer_functions_get_window_state",
                         arguments={},
                     )
                 ],
@@ -831,7 +831,7 @@ class ScreenshotToolLLM:
 
 
 class RepeatBrowserLLM:
-    def __init__(self, tool_name: str = "browser_snapshot", arguments: dict | None = None) -> None:
+    def __init__(self, tool_name: str = "mcp__chrome-devtools__take_snapshot", arguments: dict | None = None) -> None:
         self.calls = 0
         self.tool_name = tool_name
         self.arguments = arguments or {}
@@ -928,7 +928,7 @@ class BrowserInspectThenRetryLLM:
                 tool_calls=[
                     ToolCallRequest(
                         call_id="click-1",
-                        tool_name="browser_click",
+                        tool_name="mcp__chrome-devtools__click",
                         arguments={"ref": "b22"},
                     )
                 ],
@@ -940,7 +940,7 @@ class BrowserInspectThenRetryLLM:
                 tool_calls=[
                     ToolCallRequest(
                         call_id="snapshot-1",
-                        tool_name="browser_snapshot",
+                        tool_name="mcp__chrome-devtools__take_snapshot",
                         arguments={},
                     )
                 ],
@@ -952,7 +952,7 @@ class BrowserInspectThenRetryLLM:
                 tool_calls=[
                     ToolCallRequest(
                         call_id="click-2",
-                        tool_name="browser_click",
+                        tool_name="mcp__chrome-devtools__click",
                         arguments={"ref": "b22"},
                     )
                 ],
@@ -973,7 +973,7 @@ class TimeoutBrowserLLM:
                 tool_calls=[
                     ToolCallRequest(
                         call_id="timeout-1",
-                        tool_name="browser_snapshot",
+                        tool_name="mcp__chrome-devtools__take_snapshot",
                         arguments={},
                     )
                 ],
@@ -1895,7 +1895,7 @@ def test_turn_loop_reprompts_once_when_model_returns_intent_text_before_tool_cal
     registry = ToolRegistry(
         [
             {
-                "name": "browser_open",
+                "name": "mcp__chrome-devtools__new_page",
                 "description": "Open URL",
                 "parameters": {
                     "type": "object",
@@ -1903,9 +1903,9 @@ def test_turn_loop_reprompts_once_when_model_returns_intent_text_before_tool_cal
                     "required": ["url"],
                 },
                 "callable": lambda url: json.dumps({"status": "ok", "url": url}),
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
+                "affinity_group": "mcp:chrome-devtools",
             }
         ]
     )
@@ -2489,13 +2489,13 @@ def test_turn_loop_attaches_browser_screenshot_ephemerally():
     registry = ToolRegistry(
         [
             {
-                "name": "browser_screenshot",
+                "name": "computer_functions_get_window_state",
                 "description": "Screenshot",
                 "parameters": {"type": "object", "properties": {}, "required": []},
                 "callable": lambda: json.dumps({"status": "ok", "path": str(screenshot_path)}),
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
+                "affinity_group": None,
             }
         ]
     )
@@ -2530,13 +2530,13 @@ def test_turn_loop_includes_generated_screenshot_when_user_requests_image_delive
     registry = ToolRegistry(
         [
             {
-                "name": "browser_screenshot",
+                "name": "computer_functions_get_window_state",
                 "description": "Screenshot",
                 "parameters": {"type": "object", "properties": {}, "required": []},
                 "callable": lambda: json.dumps({"status": "ok", "path": str(screenshot_path)}),
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
+                "affinity_group": None,
             }
         ]
     )
@@ -2582,13 +2582,13 @@ def test_turn_loop_attaches_tool_screenshots_for_the_model_to_read():
     registry = ToolRegistry(
         [
             {
-                "name": "browser_screenshot",
+                "name": "computer_functions_get_window_state",
                 "description": "Screenshot",
                 "parameters": {"type": "object", "properties": {}, "required": []},
                 "callable": lambda: json.dumps({"status": "ok", "path": str(screenshot_path)}),
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
+                "affinity_group": None,
             }
         ]
     )
@@ -2624,41 +2624,6 @@ def test_extract_image_attachments_supports_computer_window_state():
     ]
 
 
-def test_extract_image_attachments_supports_browser_full_page_screenshot():
-    output = json.dumps({"status": "ok", "path": r"C:\tmp\browser-full.png", "full_page": True})
-
-    assert _extract_image_attachments("browser_full_page_screenshot", output) == [
-        {"path": r"C:\tmp\browser-full.png", "mime_type": "image/png"}
-    ]
-
-
-def test_browser_repeat_key_includes_target_after_state():
-    base_output = {
-        "status": "ok",
-        "page": {"url": "https://example.test/form", "title": "Form"},
-        "selector": "[data-agent-ref='name']",
-        "target_after": {
-            "ref": "name",
-            "tag": "input",
-            "role": "textbox",
-            "value": "before",
-        },
-    }
-    changed_output = {
-        **base_output,
-        "target_after": {
-            **base_output["target_after"],
-            "value": "after",
-        },
-    }
-
-    assert _repeat_key("browser_type", {"ref": "name", "text": "after"}, json.dumps(base_output)) != _repeat_key(
-        "browser_type",
-        {"ref": "name", "text": "after"},
-        json.dumps(changed_output),
-    )
-
-
 def test_turn_loop_allows_repeated_browser_snapshot_inspection():
     snapshot_output = json.dumps(
         {
@@ -2670,13 +2635,13 @@ def test_turn_loop_allows_repeated_browser_snapshot_inspection():
     registry = ToolRegistry(
         [
             {
-                "name": "browser_snapshot",
+                "name": "mcp__chrome-devtools__take_snapshot",
                 "description": "Snapshot",
                 "parameters": {"type": "object", "properties": {}, "required": []},
                 "callable": lambda: snapshot_output,
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
+                "affinity_group": "mcp:chrome-devtools",
             }
         ]
     )
@@ -2699,47 +2664,6 @@ def test_turn_loop_allows_repeated_browser_snapshot_inspection():
     assert "recovered after inspection" in events[-1]["data"]["summary"].lower()
 
 
-def test_turn_loop_prompts_recovery_for_repeated_mutating_browser_action_with_unchanged_state():
-    click_output = json.dumps(
-        {
-            "status": "ok",
-            "page": {"url": "https://mail.google.com/mail/u/0/#inbox", "title": "Gmail"},
-        }
-    )
-    registry = ToolRegistry(
-        [
-            {
-                "name": "browser_click",
-                "description": "Click",
-                "parameters": {"type": "object", "properties": {"ref": {"type": "string"}}, "required": ["ref"]},
-                "callable": lambda ref: click_output,
-                "domain": "browser",
-                "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
-            }
-        ]
-    )
-    llm = RepeatBrowserLLM(tool_name="browser_click", arguments={"ref": "compose"})
-    loop = TurnLoop(llm_client=llm, registry=registry, memory=FakeMemory())
-
-    async def collect():
-        return [event async for event in loop.run("repeat click", "conv-repeat-click", system_prompt="system")]
-
-    events = asyncio.run(collect())
-    tool_end_outputs = [
-        json.loads(event["data"]["output"])
-        for event in events
-        if event["event"] == "tool_end"
-    ]
-
-    assert llm.calls == 3
-    assert tool_end_outputs[-1]["code"] == "stalled_repeat_detected"
-    assert tool_end_outputs[-1]["recovery_required"] is True
-    assert events[-1]["event"] == "done"
-    assert events[-1]["data"]["status"] == "complete"
-    assert "recovered after inspection" in events[-1]["data"]["summary"].lower()
-
-
 def test_turn_loop_allows_repeated_browser_press_when_page_state_changes():
     outputs = [
         json.dumps(
@@ -2747,6 +2671,7 @@ def test_turn_loop_allows_repeated_browser_press_when_page_state_changes():
                 "status": "ok",
                 "key": "Escape",
                 "page": {"url": f"https://example.test/post/{index}", "title": f"Post {index}"},
+                "content": [{"type": "text", "text": f"Pressed Escape on https://example.test/post/{index}"}],
             }
         )
         for index in range(1, 4)
@@ -2770,7 +2695,7 @@ def test_turn_loop_allows_repeated_browser_press_when_page_state_changes():
                 tool_calls=[
                     ToolCallRequest(
                         call_id=f"press-{self.calls}",
-                        tool_name="browser_press",
+                        tool_name="mcp__chrome-devtools__press_key",
                         arguments={"key": "Escape"},
                     )
                 ],
@@ -2780,13 +2705,15 @@ def test_turn_loop_allows_repeated_browser_press_when_page_state_changes():
     registry = ToolRegistry(
         [
             {
-                "name": "browser_press",
+                "name": "mcp__chrome-devtools__press_key",
                 "description": "Press key",
                 "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
                 "callable": press_output,
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
+                "affinity_group": "mcp:chrome-devtools",
+                # As reflected for built-in TYPE tools (mcp_bridge/registry.py).
+                "metadata": {"mutates_state": True, "risk_level": "medium", "repeat_safe": True},
             }
         ]
     )
@@ -2832,22 +2759,22 @@ def test_turn_loop_allows_retry_after_browser_inspection():
     registry = ToolRegistry(
         [
             {
-                "name": "browser_click",
+                "name": "mcp__chrome-devtools__click",
                 "description": "Click",
                 "parameters": {"type": "object", "properties": {"ref": {"type": "string"}}, "required": ["ref"]},
                 "callable": lambda ref: click_output,
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
+                "affinity_group": "mcp:chrome-devtools",
             },
             {
-                "name": "browser_snapshot",
+                "name": "mcp__chrome-devtools__take_snapshot",
                 "description": "Snapshot",
                 "parameters": {"type": "object", "properties": {}, "required": []},
                 "callable": lambda: snapshot_output,
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "sync_stateless",
-                "affinity_group": "browser-use",
+                "affinity_group": "mcp:chrome-devtools",
             },
         ]
     )
@@ -3095,13 +3022,13 @@ def test_turn_loop_browser_tool_timeout_returns_structured_error():
     registry = ToolRegistry(
         [
             {
-                "name": "browser_snapshot",
+                "name": "mcp__chrome-devtools__take_snapshot",
                 "description": "Snapshot",
                 "parameters": {"type": "object", "properties": {}, "required": []},
                 "callable": slow_snapshot,
-                "domain": "browser",
+                "domain": "general",
                 "execution_mode": "async",
-                "affinity_group": "browser-use",
+                "affinity_group": "mcp:chrome-devtools",
                 "timeout_seconds": 0.01,
             }
         ]
@@ -3342,3 +3269,78 @@ def test_turn_loop_recomputes_system_prompt_after_registry_refresh():
     assert llm.prompts[0].startswith("rev:1")
     assert llm.prompts[1].startswith("rev:2")
     assert "## Completion Protocol" in llm.prompts[0]
+
+
+def test_browser_helpers_cover_devtools_tools():
+    from app.agent import turn_loop as tl
+
+    devtools = "mcp__chrome-devtools__"
+    for name in ("click", "fill", "fill_form", "type_text", "press_key", "hover", "drag",
+                 "navigate_page", "new_page", "handle_dialog", "upload_file"):
+        assert tl._is_browser_repeat_guarded(devtools + name, {}) is True
+        assert tl._is_browser_observation_action(devtools + name, {}) is False
+    for name in ("take_snapshot", "take_screenshot", "list_pages", "wait_for"):
+        assert tl._is_browser_observation_action(devtools + name, {}) is True
+        assert tl._is_browser_repeat_guarded(devtools + name, {}) is False
+    assert tl._is_browser_repeat_guarded("mcp__notes__click", {}) is False
+
+    describe = TurnLoop._describe_tool_step
+    assert describe(devtools + "take_snapshot", {}) == "Inspect the current browser page"
+    assert describe(devtools + "click", {"uid": "1_2"}) == "Click the identified browser element"
+    assert describe(devtools + "fill", {"uid": "1_2"}) == "Fill the identified browser field"
+    assert describe(devtools + "list_pages", {}) == "Inspect open browser tabs"
+    assert describe(devtools + "navigate_page", {"type": "back"}) == "Go back in the browser page"
+    assert describe(devtools + "navigate_page", {"url": "https://example.com"}) == "Open the requested browser page"
+    # The read-only HTTP fetcher is neither guarded nor an observation reset.
+    assert describe("browser_fetch", {"url": "https://example.com"}) == "Fetch the requested web page"
+    assert tl._is_browser_repeat_guarded("browser_fetch", {}) is False
+    assert tl._is_browser_observation_action("browser_fetch", {}) is False
+
+    recovery = tl._build_repeat_recovery_prompt(
+        reason_code="stalled_repeat_detected", tool_name=devtools + "click", arguments={"uid": "1_2"},
+    )
+    assert "`mcp__chrome-devtools__take_snapshot`" in recovery
+    assert "`mcp__chrome-devtools__list_pages`" in recovery
+    assert "browser_session" not in recovery
+
+    output = json.dumps({"ok": True, "status": "ok", "content": [{"type": "text", "text": "Successfully clicked\nmore"}]})
+    assert tl._compact_tool_observation(devtools + "click", output) == "Successfully clicked"
+    changed = json.dumps({"ok": True, "status": "ok", "content": [{"type": "text", "text": "Navigated to /next"}]})
+    assert tl._repeat_key(devtools + "click", {"uid": "1_2"}, output) != tl._repeat_key(
+        devtools + "click", {"uid": "1_2"}, changed,
+    )
+
+
+def test_turn_loop_recovers_from_repeated_devtools_click_with_unchanged_page():
+    click_output = json.dumps(
+        {"ok": True, "status": "ok", "server": "chrome-devtools", "tool": "click",
+         "content": [{"type": "text", "text": "Successfully clicked on the element"}]}
+    )
+    tool_name = "mcp__chrome-devtools__click"
+    registry = ToolRegistry(
+        [
+            {
+                "name": tool_name,
+                "description": "Click",
+                "parameters": {"type": "object", "properties": {"uid": {"type": "string"}}, "required": ["uid"]},
+                "callable": lambda uid: click_output,
+                "domain": "general",
+                "execution_mode": "sync_stateless",
+                "affinity_group": "mcp:chrome-devtools",
+                "metadata": {"mutates_state": True, "risk_level": "medium", "repeat_safe": True},
+            }
+        ]
+    )
+    llm = RepeatBrowserLLM(tool_name=tool_name, arguments={"uid": "1_2"})
+    loop = TurnLoop(llm_client=llm, registry=registry, memory=FakeMemory())
+
+    async def collect():
+        return [event async for event in loop.run("repeat click", "conv-devtools-click", system_prompt="system")]
+
+    events = asyncio.run(collect())
+    tool_end_outputs = [json.loads(event["data"]["output"]) for event in events if event["event"] == "tool_end"]
+
+    assert llm.calls == 3
+    assert tool_end_outputs[-1]["code"] == "stalled_repeat_detected"
+    assert events[-1]["event"] == "done"
+    assert "recovered after inspection" in events[-1]["data"]["summary"].lower()

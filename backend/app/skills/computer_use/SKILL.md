@@ -5,7 +5,8 @@ display_name: Windows computer use
 summary: Inspect and control native Windows applications with focused, verified actions.
 version: 2.1.0
 enabled_by_default: true
-tier: recommended
+always: true
+tier: internal
 os:
   - windows
 ---

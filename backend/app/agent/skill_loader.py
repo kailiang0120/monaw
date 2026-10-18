@@ -169,10 +169,8 @@ def _env_allowed(frontmatter: dict[str, Any], settings) -> tuple[bool, str]:
 
 
 def _skill_toggle_enabled(frontmatter: dict[str, Any], settings, skill_name: str) -> bool:
-    if skill_name == "mcp-bridge" and not bool(
-        getattr(getattr(settings, "mcp", object()), "enabled", True)
-    ):
-        return False
+    # The MCP switch only stops the user's own servers (see mcp_bridge.tools);
+    # the bridge stays loaded because built-in skills ship MCP servers too.
     if frontmatter.get("always") is True:
         return True
 
@@ -370,7 +368,10 @@ def load_tools(settings, *, skills_dir: Path | None = None) -> tuple[list[SkillS
 
             staged_registry = ToolRegistry()
             _invoke_register_tools(register_tools, staged_registry, settings)
-            registry.extend(staged_registry.get_all_tools())
+            registry.extend(
+                {**tool, "metadata": {**(tool.get("metadata") or {}), "skill": skill.name}}
+                for tool in staged_registry.get_all_tools()
+            )
             _LAST_LOAD_ERRORS.pop(skill.name, None)
         except Exception as exc:
             message = str(exc)

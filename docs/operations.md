@@ -111,7 +111,7 @@ runtime\agent.db          conversations, scheduled tasks, and app state
 runtime\settings.json     local settings
 memory\                   long-term memory markdown files
 workspace\                default agent workspace
-browser\                  managed browser profile and artifacts
+browser\                  browser screenshots
 ```
 
 To restore, close Monaw, replace the target `.monaw` folder with the backup,
@@ -137,8 +137,9 @@ For manual deletion, close Monaw and remove:
 %USERPROFILE%\.monaw\
 ```
 
-Manual deletion removes runtime data, memory, browser profiles, workspace files,
-and local settings. Revoke external provider keys and Telegram tokens separately
+Manual deletion removes runtime data, memory, browser screenshots, workspace
+files, and local settings. Your Chrome profile lives in Chrome's own folder and
+is not affected. Revoke external provider keys and Telegram tokens separately
 because local deletion cannot revoke third-party credentials.
 
 ## Generated API Reference

@@ -17,6 +17,9 @@ from typing import Any, Literal
 from app.agent.settings_store import MCPServerConfig
 from app.agent.ui_events import publish_ui_event
 
+from .builtin import builtin_mcp_servers, is_builtin_server
+from .images import externalize_image_blocks
+
 logger = logging.getLogger(__name__)
 
 MCP_SERVER_STATES = {"stopped", "starting", "connected", "unhealthy", "failed"}
@@ -284,14 +287,32 @@ class ServerManager:
         payload = _to_jsonable(result)
         self.last_error = ""
         self.unhealthy_reason = ""
+        content = payload.get("content") or []
+        images: list[dict[str, Any]] = []
+        if isinstance(content, list):
+            try:
+                content, images = externalize_image_blocks(content, server=self.cfg.name, tool=tool_name)
+            except OSError as exc:
+                logger.warning("Could not save MCP image content for %s/%s: %s", self.cfg.name, tool_name, exc)
+                content = [
+                    {"type": "image", "skipped": {"reason_code": "image_save_failed"}}
+                    if isinstance(item, dict) and item.get("type") == "image" else item
+                    for item in content
+                ]
+        # Keep only fields not already returned above, so content is never sent twice.
+        extra = {
+            key: value for key, value in payload.items()
+            if key not in {"content", "structuredContent", "isError"} and value not in (None, {}, [])
+        }
         return _ok(
             status="ok",
             server=self.cfg.name,
             tool=tool_name,
             is_error=bool(getattr(result, "isError", False)),
             structured_content=payload.get("structuredContent"),
-            content=payload.get("content", []),
-            raw=payload,
+            content=content,
+            **({"images": images} if images else {}),
+            **({"raw": extra} if extra else {}),
         )
 
     def refresh_tools(self) -> bool:
@@ -363,7 +384,7 @@ class ServerManager:
             "chrome-devtools-mcp" in arg for arg in self.cfg.args
         ):
             from app.agent.settings_store import load_agent_settings
-            from app.skills.browser_use.manager import launch_local_chrome
+            from app.skills.browser_use.chrome_launch import launch_local_chrome
             from app.skills.browser_use.chrome_approval import approve_chrome_connection
 
             browser_settings = load_agent_settings().browser
@@ -699,15 +720,14 @@ def get_mcp_runtime_diagnostics() -> list[dict[str, Any]]:
 
 def _iter_enabled_configs(agent_settings) -> list[MCPServerConfig]:
     mcp_settings = getattr(agent_settings, "mcp", object())
-    if not bool(getattr(mcp_settings, "enabled", True)):
-        return []
-    raw_servers = getattr(mcp_settings, "servers", []) or []
     configs: list[MCPServerConfig] = []
-    for raw in raw_servers:
-        cfg = raw if isinstance(raw, MCPServerConfig) else MCPServerConfig.model_validate(raw)
-        if cfg.enabled:
-            configs.append(cfg)
-    return configs
+    # The user's MCP switch covers their own servers, not built-in ones.
+    if bool(getattr(mcp_settings, "enabled", True)):
+        for raw in getattr(mcp_settings, "servers", []) or []:
+            cfg = raw if isinstance(raw, MCPServerConfig) else MCPServerConfig.model_validate(raw)
+            if cfg.enabled and not is_builtin_server(cfg.name):
+                configs.append(cfg)
+    return [*configs, *builtin_mcp_servers()]
 
 
 def ensure_mcp_manager(cfg: MCPServerConfig) -> ServerManager:
@@ -733,7 +753,8 @@ def reconnect_mcp_server(name: str) -> dict[str, Any] | None:
         from app.config import settings as app_settings
 
         agent_settings = load_agent_settings(app_settings)
-        cfg = next((s for s in agent_settings.mcp.servers if s.name == name), None)
+        candidates = [*agent_settings.mcp.servers, *builtin_mcp_servers()]
+        cfg = next((s for s in candidates if s.name == name), None)
         if cfg is None:
             return None
         manager = ensure_mcp_manager(cfg)
@@ -742,8 +763,6 @@ def reconnect_mcp_server(name: str) -> dict[str, Any] | None:
 
 
 def restart_enabled_mcp_servers(agent_settings) -> list[dict[str, Any]]:
-    if not bool(getattr(getattr(agent_settings, "mcp", object()), "enabled", True)):
-        return []
     if importlib.util.find_spec("mcp") is None:
         return []
 

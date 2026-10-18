@@ -16,7 +16,6 @@ from app.agent.settings_store import (
     LLMSettings,
     MCPServerConfig,
     PathRule,
-    _LEGACY_BROWSER_DOWNLOADS_DIR,
     _LEGACY_BROWSER_SCREENSHOTS_DIR,
     confirmation_settings_for_mode,
     api_settings_payload,
@@ -363,10 +362,73 @@ def test_default_skills_use_recommended_profile():
 def test_default_browser_artifacts_live_under_monaw_home():
     browser = BrowserUseSettings()
 
-    assert Path(browser.downloads_dir).is_relative_to(MONAW_HOME_DIR / "browser")
     assert Path(browser.screenshots_dir).is_relative_to(MONAW_HOME_DIR / "browser")
-    assert Path(browser.traces_dir).is_relative_to(MONAW_HOME_DIR / "browser")
-    assert Path(browser.managed_profile_dir).is_relative_to(MONAW_HOME_DIR / "browser")
+    assert set(browser.model_dump()) == {
+        "screenshots_dir",
+        "system_profile_directory",
+        "auto_approve_local_debugging",
+        "allowed_domains",
+    }
+
+
+def test_load_settings_ignores_legacy_managed_browser_keys(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({
+        "browser": {
+            "mode": "managed",
+            "managed_profile_dir": "x",
+            "enable_system_fallback": True,
+            "system_profile_directory": "Profile 1",
+        },
+    }), encoding="utf-8")
+
+    loaded = load_agent_settings(settings_path=settings_path)
+
+    dumped = loaded.browser.model_dump()
+    for key in ("mode", "managed_profile_dir", "enable_system_fallback"):
+        assert key not in dumped
+    assert loaded.browser.system_profile_directory == "Profile 1"
+
+
+def test_load_settings_drops_removed_browser_use_engine_keys(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    removed = {
+        "headless": True,
+        "keep_alive": False,
+        "dom_inspection_engine": "legacy",
+        "paint_order_filtering": False,
+        "cross_origin_iframes": True,
+        "max_iframes": 99,
+        "max_iframe_depth": 9,
+        "system_connection_strategy": "attach",
+        "system_cdp_url": "http://127.0.0.1:9222",
+        "downloads_dir": str(tmp_path / "downloads"),
+        "traces_dir": str(tmp_path / "traces"),
+    }
+    settings_path.write_text(json.dumps({
+        "browser": {
+            **removed,
+            "screenshots_dir": str(tmp_path / "shots"),
+            "system_profile_directory": "Profile 2",
+            "auto_approve_local_debugging": False,
+            "allowed_domains": ["example.com"],
+        },
+    }), encoding="utf-8")
+
+    loaded = load_agent_settings(settings_path=settings_path)
+
+    dumped = loaded.browser.model_dump()
+    assert not set(removed) & set(dumped)
+    assert loaded.browser.screenshots_dir == str(tmp_path / "shots")
+    assert loaded.browser.system_profile_directory == "Profile 2"
+    assert loaded.browser.auto_approve_local_debugging is False
+    assert loaded.browser.allowed_domains == ["example.com"]
+    assert not (tmp_path / "downloads").exists()
+    assert not (tmp_path / "traces").exists()
+
+    save_agent_settings(loaded, settings_path=settings_path)
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))["browser"]
+    assert not set(removed) & set(saved)
 
 
 def test_load_settings_preserves_legacy_skill_defaults_when_keys_are_missing(tmp_path):
@@ -432,7 +494,6 @@ def test_load_settings_migrates_legacy_hidden_artifact_dirs(tmp_path):
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({
         "browser": {
-            "downloads_dir": str(_LEGACY_BROWSER_DOWNLOADS_DIR),
             "screenshots_dir": str(_LEGACY_BROWSER_SCREENSHOTS_DIR),
         },
     }), encoding="utf-8")
@@ -440,7 +501,6 @@ def test_load_settings_migrates_legacy_hidden_artifact_dirs(tmp_path):
     loaded = load_agent_settings(settings_path=settings_path)
     defaults = BrowserUseSettings()
 
-    assert loaded.browser.downloads_dir == defaults.downloads_dir
     assert loaded.browser.screenshots_dir == defaults.screenshots_dir
 
 

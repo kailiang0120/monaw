@@ -218,6 +218,60 @@ const answer = 42
     expect(screen.getByRole('link', { name: 'Open website' })).toHaveAttribute('rel', 'noreferrer')
   })
 
+  describe('screenshot previews', () => {
+    const screenshot = {
+      id: 'shot-1',
+      name: 'region_20261018_091042_653939.png',
+      path: 'attachment://shot-1',
+      mime_type: 'image/png',
+      size: 2048,
+      conversation_id: 'conv-1',
+    }
+
+    function renderScreenshotReply(content: string) {
+      vi.mocked(downloadAttachment).mockClear()
+      vi.mocked(fetchAttachmentObjectUrl).mockClear()
+      render(<MessageBubble message={{ id: 'msg-shot', role: 'assistant', content, attachments: [screenshot] }} />)
+    }
+
+    it('opens the thumbnail in an in-app preview instead of downloading it', async () => {
+      renderScreenshotReply('Here is the page.')
+
+      fireEvent.click(screen.getByRole('button', { name: `Open image ${screenshot.name}` }))
+
+      const dialog = await screen.findByRole('dialog', { name: `Image preview: ${screenshot.name}` })
+      expect(await within(dialog).findByRole('img', { name: screenshot.name })).toHaveAttribute('src', 'blob:attachment-preview')
+      expect(fetchAttachmentObjectUrl).toHaveBeenCalledWith(expect.objectContaining({ id: 'shot-1' }))
+      expect(downloadAttachment).not.toHaveBeenCalled()
+
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    it.each([
+      ['an attachment handle', 'attachment://shot-1'],
+      ['a Windows screenshot path', 'C:\\Users\\KL\\.monaw\\browser\\screenshots\\region_20261018_091042_653939.png'],
+      ['a file URL', 'file:///C:/Users/KL/.monaw/browser/screenshots/region_20261018_091042_653939.png'],
+      ['an API file URL', '/api/files/shot-1'],
+    ])('opens a markdown link to %s in the preview', async (_label, href) => {
+      renderScreenshotReply(`[view screenshot](<${href}>)`)
+
+      const link = screen.getByRole('link', { name: 'view screenshot' })
+      expect(link).not.toHaveAttribute('target')
+      fireEvent.click(link)
+
+      expect(await screen.findByRole('dialog', { name: `Image preview: ${screenshot.name}` })).toBeInTheDocument()
+    })
+
+    it('renders unresolved local links as text so they cannot open another window', () => {
+      renderScreenshotReply('[view screenshot](C:/Users/KL/.monaw/browser/screenshots/other.png) and [home](/)')
+
+      expect(screen.queryByRole('link', { name: 'view screenshot' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: 'home' })).not.toBeInTheDocument()
+      expect(screen.getByText('view screenshot')).toBeInTheDocument()
+    })
+  })
+
   it('renders assistant response attachments as authenticated files and image previews', async () => {
     render(
       <MessageBubble

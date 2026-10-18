@@ -14,7 +14,7 @@ Schedules store a timezone. If a timezone is invalid, runtime calculation falls 
 
 ## Where To Use It
 
-Scheduled tasks are available through the scheduling UI and through the hidden scheduling tools. The scheduling skill is optional and can be surfaced by tool search when the user asks for reminders, recurring work, cron jobs, or automation.
+Scheduled tasks are available through the scheduling UI and through the hidden scheduling tools. The scheduling skill is always on; its tools stay hidden until tool search surfaces them when the user asks for reminders, recurring work, cron jobs, or automation.
 
 The backend service starts during FastAPI startup. It polls SQLite for due work every 30 seconds.
 

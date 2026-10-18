@@ -280,30 +280,8 @@ const emptySandbox = (): AgentSettings['sandbox'] => ({
   },
 })
 
+// Chrome DevTools is built into browser use (backend/app/skills/mcp_bridge/builtin.py).
 export const MCP_SERVER_TEMPLATES = {
-  chromeDevToolsBrowserUrl9222: {
-    label: 'Chrome DevTools (browserUrl :9222)',
-    build: (): AgentSettings['mcp']['servers'][number] => ({
-      ...emptyMCPServer(),
-      name: 'Chrome-dev-tools',
-      command: 'npx',
-      args: ['-y', 'chrome-devtools-mcp@latest', '--browserUrl=http://127.0.0.1:9222'],
-      call_timeout_ms: 90000,
-      description: 'Connect to Chrome on localhost:9222. Launch Chrome separately with --remote-debugging-port=9222 and a non-default --user-data-dir.',
-    }),
-  },
-  chromeDevToolsAutoConnect: {
-    label: 'Chrome DevTools (my profile)',
-    build: (): AgentSettings['mcp']['servers'][number] => ({
-      ...emptyMCPServer(),
-      name: 'Chrome-dev-tools',
-      command: 'npx',
-      args: ['-y', 'chrome-devtools-mcp@latest', '--autoConnect'],
-      startup_timeout_ms: 60000,
-      call_timeout_ms: 90000,
-      description: 'Monaw opens your Chrome profile automatically. Allow Chrome’s connection prompt when shown (Chrome 144+).',
-    }),
-  },
   custom: {
     label: 'Custom stdio',
     build: (): AgentSettings['mcp']['servers'][number] => emptyMCPServer(),
@@ -322,16 +300,21 @@ export const MCP_SERVER_TEMPLATES = {
 
 export type MCPServerTemplateKey = keyof typeof MCP_SERVER_TEMPLATES
 
-export const SKILL_GROUP_COPY = {
-  recommended: {
-    title: 'Recommended capabilities',
-    description: 'Default-on tools the agent should rely on first.',
-  },
-  optional: {
-    title: 'Optional capabilities',
-    description: 'Extra surface area that should stay explicit.',
-  },
-} as const
+
+// Mirrors DecisionModelSettings in backend/app/agent/settings_store.py.
+const DEFAULT_DECISION_MODEL: AgentSettings['decision_model'] = {
+  enabled: true,
+  managed: true,
+  provider: 'laya',
+  mode: 'shadow',
+  endpoint: 'http://127.0.0.1:8421',
+  model: '',
+  timeout_ms: 3000,
+  coverage: 0.9,
+  max_domains: 4,
+  min_confidence: 0.4,
+  pinned_domains: ['core', 'memory', 'tool-search'],
+}
 
 export function normalizeDraft(
   settings: AgentSettings,
@@ -354,6 +337,7 @@ export function normalizeDraft(
   return {
     ...settings,
     settings_version: settings.settings_version || '',
+    decision_model: { ...DEFAULT_DECISION_MODEL, ...(settings.decision_model ?? {}) },
     telegram_allowed_user_ids: (settings.telegram_allowed_user_ids ?? '').trim(),
     telegram_allowed_chat_ids: (settings.telegram_allowed_chat_ids ?? '').trim(),
     identity: {

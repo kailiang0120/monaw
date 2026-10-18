@@ -4,8 +4,9 @@ description: Create and manage local scheduled agent tasks, including cron sched
 display_name: Scheduled tasks
 summary: Create and manage one-time, interval, and cron-based agent tasks.
 version: 1.0.0
-enabled_by_default: false
-tier: optional
+enabled_by_default: true
+always: true
+tier: internal
 ---
 
 Use scheduled task tools when the user asks the agent to run a prompt later, repeatedly, or on a cron schedule.

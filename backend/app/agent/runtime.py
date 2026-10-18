@@ -14,6 +14,7 @@ from app.agent.long_term_memory import get_long_term_memory
 from app.agent.memory_manager import MemoryManager
 from app.agent.skill_loader import load_tools
 from app.agent.skill_prompt import build_skill_prompt
+from app.agent.tool_selection import build_tool_selector
 from app.agent.turn_loop import TurnLoop
 from app.agent.steering import SteeringInbox
 from app.agent.database import get_db
@@ -142,6 +143,7 @@ class AgentRuntime:
             max_iterations=max_iterations,
             max_turn_seconds=max_turn_seconds,
             max_llm_call_seconds=max_llm_call_seconds,
+            tool_selector=build_tool_selector(settings, self.skills),
         )
         visible_tool_names = {
             tool["name"] for tool in self.tool_registry.get_all_tools(visible_only=True)
@@ -291,6 +293,14 @@ def _settings_cache_key(settings) -> str:
         ) if memory_settings is not None else ""
     except TypeError:
         memory_fingerprint = str(memory_settings)
+    decision_settings = getattr(settings, "decision_model", None)
+    try:
+        decision_fingerprint = json.dumps(
+            decision_settings if isinstance(decision_settings, dict) else vars(decision_settings),
+            sort_keys=True,
+        ) if decision_settings is not None else ""
+    except TypeError:
+        decision_fingerprint = str(decision_settings)
     parts = [
         provider,
         settings.model_name,
@@ -301,6 +311,8 @@ def _settings_cache_key(settings) -> str:
         browser_fingerprint,
         identity_fingerprint,
         memory_fingerprint,
+        decision_fingerprint,
+        _key_fingerprint(getattr(settings, "laya_api_key", "") or ""),
         str(getattr(llm_settings, "max_iterations_per_turn", "")),
         str(getattr(llm_settings, "max_turn_seconds", "")),
         str(getattr(llm_settings, "max_llm_call_seconds", "")),
@@ -319,30 +331,15 @@ def _provider_api_key(settings) -> str:
     return getattr(settings, "openai_api_key", "")
 
 
-def reset_runtime_cache(*, reset_mcp: bool = True, reset_browser: bool = False) -> None:
+def reset_runtime_cache(*, reset_mcp: bool = True) -> None:
     try:
         from app.skills.mcp_bridge.connection import reset_mcp_runtime
     except Exception:
         reset_mcp_runtime = None
-    try:
-        from app.skills.browser_use.manager import reset_browser_use_runtime
-    except Exception:
-        reset_browser_use_runtime = None
 
     if reset_mcp and reset_mcp_runtime is not None:
         try:
             reset_mcp_runtime()
-        except Exception:
-            pass
-    if reset_browser and reset_browser_use_runtime is not None:
-        try:
-            import asyncio
-
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(reset_browser_use_runtime())
-            except RuntimeError:
-                asyncio.run(reset_browser_use_runtime())
         except Exception:
             pass
 

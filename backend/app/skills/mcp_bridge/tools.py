@@ -8,6 +8,8 @@ from app.agent.approval_broker import create_ticket
 from app.agent.execution_resume import register_executor
 from app.agent.settings_store import MCPServerConfig
 
+from .builtin import builtin_mcp_servers, is_builtin_server
+
 from .connection import (
     ensure_mcp_manager,
     get_mcp_runtime_diagnostics,
@@ -37,19 +39,26 @@ def _mcp_available() -> bool:
     return importlib.util.find_spec("mcp") is not None
 
 
-def _iter_servers(settings) -> list[MCPServerConfig]:
+def _iter_user_servers(settings) -> list[MCPServerConfig]:
     raw_servers = getattr(getattr(settings, "mcp", object()), "servers", []) or []
     servers: list[MCPServerConfig] = []
     for raw in raw_servers:
         cfg = raw if isinstance(raw, MCPServerConfig) else MCPServerConfig.model_validate(raw)
-        servers.append(cfg)
+        if not is_builtin_server(cfg.name):
+            servers.append(cfg)
     return servers
 
 
+def _iter_servers(settings) -> list[MCPServerConfig]:
+    return [*_iter_user_servers(settings), *builtin_mcp_servers()]
+
+
 def _iter_enabled_servers(settings) -> list[MCPServerConfig]:
-    if not bool(getattr(getattr(settings, "mcp", object()), "enabled", True)):
-        return []
-    return [cfg for cfg in _iter_servers(settings) if cfg.enabled]
+    # The user's MCP switch covers their own servers, not built-in ones.
+    user_servers: list[MCPServerConfig] = []
+    if bool(getattr(getattr(settings, "mcp", object()), "enabled", True)):
+        user_servers = [cfg for cfg in _iter_user_servers(settings) if cfg.enabled]
+    return [*user_servers, *builtin_mcp_servers()]
 
 
 def _server_entry_predicate(server_name: str):

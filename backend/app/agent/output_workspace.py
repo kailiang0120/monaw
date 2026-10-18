@@ -9,10 +9,6 @@ def default_output_root() -> Path:
     return MONAW_HOME_DIR / "browser"
 
 
-def default_downloads_dir() -> Path:
-    return default_output_root() / "downloads"
-
-
 def default_screenshots_dir() -> Path:
     return default_output_root() / "screenshots"
 

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.agent.controller_policy import (
     AppEntry,
@@ -13,6 +13,7 @@ from app.agent.controller_policy import (
     set_permission_mode,
 )
 from app.agent.model_catalog import model_options_payload
+from app.api.routes.decision_model import managed_server
 from app.agent.settings_store import (
     api_settings_payload,
     load_agent_settings,
@@ -54,10 +55,10 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def reset_runtime_cache(*, reset_mcp: bool = True, reset_browser: bool = False) -> None:
+def reset_runtime_cache(*, reset_mcp: bool = True) -> None:
     from app.agent.runtime import reset_runtime_cache as runtime_reset
 
-    runtime_reset(reset_mcp=reset_mcp, reset_browser=reset_browser)
+    runtime_reset(reset_mcp=reset_mcp)
 
 
 def _normalize_permission_mode(value: str) -> str:
@@ -87,6 +88,8 @@ def _settings_patch_from_body(body: SettingsUpdate) -> dict:
         patch["sandbox"] = body.sandbox.model_dump(exclude_unset=True)
     if body.identity is not None:
         patch["identity"] = body.identity.model_dump(exclude_unset=True)
+    if body.decision_model is not None:
+        patch["decision_model"] = body.decision_model.model_dump(exclude_unset=True)
 
     if (
         body.model_provider is not None
@@ -109,11 +112,11 @@ def _settings_patch_from_body(body: SettingsUpdate) -> dict:
 
 
 @router.put("/settings", response_model=AgentSettingsPayload)
-async def update_settings(body: SettingsUpdate):
+async def update_settings(body: SettingsUpdate, request: Request):
     changed = False
+    decision_model_changed = False
     runtime_changed = False
     mcp_changed = False
-    browser_changed = False
     telegram_changed = False
     patch = _settings_patch_from_body(body)
     current = load_agent_settings(settings)
@@ -142,11 +145,7 @@ async def update_settings(body: SettingsUpdate):
                 if getattr(updated, section) != getattr(current, section)
             }
             mcp_changed = "mcp" in changed_sections
-            browser_changed = "browser" in changed_sections
-            if "tools" in changed_sections:
-                before_browser_skill = bool(current.tools.skills.get("browser-use", False))
-                after_browser_skill = bool(updated.tools.skills.get("browser-use", False))
-                browser_changed = browser_changed or before_browser_skill != after_browser_skill
+            decision_model_changed = "decision_model" in changed_sections
 
     def assign_if_changed(name: str, value: str | None, *, default: str | None = None) -> bool:
         if value is None:
@@ -194,16 +193,15 @@ async def update_settings(body: SettingsUpdate):
         set_permission_mode(mapped)
     if changed:
         logger.info(
-            "Settings updated provider=%s model=%s reasoning=%s runtime_changed=%s mcp_changed=%s browser_changed=%s",
+            "Settings updated provider=%s model=%s reasoning=%s runtime_changed=%s mcp_changed=%s",
             updated.llm.provider,
             updated.llm.model_name,
             updated.llm.reasoning_effort,
             runtime_changed,
             mcp_changed,
-            browser_changed,
         )
-        if runtime_changed or mcp_changed or browser_changed:
-            reset_runtime_cache(reset_mcp=mcp_changed, reset_browser=browser_changed)
+        if runtime_changed or mcp_changed:
+            reset_runtime_cache(reset_mcp=mcp_changed)
         if mcp_changed:
             mcp_statuses = restart_enabled_mcp_servers(updated) or []
             publish_ui_event(
@@ -225,6 +223,8 @@ async def update_settings(body: SettingsUpdate):
                     ],
                 },
             )
+        if decision_model_changed:
+            await managed_server(request).restart(updated.decision_model, api_key=settings.laya_api_key)
         if telegram_changed:
             try:
                 from app.integrations.telegram.service import restart_telegram_bot

@@ -27,20 +27,6 @@ from app.agent.run_context import current_conversation_id
 
 WORKER_STOP_GRACE_SECONDS = 0.25
 
-_BROWSER_TOOL_TIMEOUTS: dict[str, float] = {
-    "browser_session": 120.0,
-    "browser_open": 120.0,
-    # These inspections can be the first browser action and launch Chrome too.
-    "browser_snapshot": 120.0,
-    "browser_screenshot": 35.0,
-    "browser_tabs": 120.0,
-}
-
-
-def _is_browser_tool(tool_name: str) -> bool:
-    return tool_name.startswith("browser_")
-
-
 def tool_timeout_seconds(tool_dict: dict) -> float | None:
     raw_timeout = tool_dict.get("timeout_seconds")
     if raw_timeout is not None:
@@ -49,10 +35,7 @@ def tool_timeout_seconds(tool_dict: dict) -> float | None:
             return timeout if timeout > 0 else None
         except (TypeError, ValueError):
             return None
-    tool_name = str(tool_dict.get("name") or "")
-    if tool_name in _BROWSER_TOOL_TIMEOUTS:
-        return _BROWSER_TOOL_TIMEOUTS[tool_name]
-    return 30.0 if _is_browser_tool(tool_name) else None
+    return None
 
 
 def _status_from_output(output: str, fallback: ToolStatus = "ok") -> ToolStatus:

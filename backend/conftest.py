@@ -4,6 +4,10 @@ from pathlib import Path
 import pytest
 
 os.environ.setdefault("MONAW_CONTROL_SECRET", "test-control-secret-that-is-at-least-32-characters")
+# Never start the setup-installed Laya server from tests.
+os.environ["MONAW_DISABLE_MANAGED_LAYA"] = "1"
+# ...or launch the built-in Chrome DevTools MCP server through npx.
+os.environ["MONAW_DISABLE_BUILTIN_MCP"] = "1"
 
 TEST_GROUPS = {
     "api": {
@@ -35,6 +39,9 @@ TEST_GROUPS = {
         "test_tool_executor.py",
         "test_live_context_budget.py",
         "test_tool_registry_enhanced.py",
+        "test_tool_selection.py",
+        "test_decision_model_server.py",
+        "test_builtin_mcp.py",
         "test_turn_loop.py",
     },
     "policy": {
@@ -55,7 +62,7 @@ TEST_GROUPS = {
     "skills": {
         "test_computer_state.py",
         "test_computer_input.py",
-        "test_browser_tools.py",
+        "test_browser_fetch.py",
         "test_chrome_approval.py",
         "test_local_chrome_launch.py",
         "test_exec_tool.py",

@@ -16,10 +16,11 @@ from app.api.errors import (
 from app.api.routes import router
 from app.config import settings
 from app.agent.data_lifecycle import enforce_runtime_retention
+from app.agent.decision_model_server import ManagedLayaServer
+from app.agent.output_workspace import configured_screenshots_dir
 from app.agent.observability.recorder import get_observability_recorder, install_logging_handler
 from app.agent.workspace_instructions import ensure_workspace_instruction_file
 from app.agent.settings_store import load_agent_settings
-from app.skills.browser_use.manager import ensure_browser_use_runtime_dirs
 from app.security.request_limits import RequestSizeLimitMiddleware
 from app.startup_security import validate_startup_security
 
@@ -71,7 +72,10 @@ async def _start_mcp_runtime(app: FastAPI) -> None:
 async def lifespan(app: FastAPI):
     validate_startup_security()
     ensure_workspace_instruction_file()
-    ensure_browser_use_runtime_dirs()
+    try:
+        configured_screenshots_dir()
+    except OSError:
+        logger.exception("could not create the browser screenshots folder")
     try:
         app.state.retention_status = enforce_runtime_retention()
     except Exception:
@@ -119,9 +123,20 @@ async def lifespan(app: FastAPI):
                 "startup_error": "telegram bot startup failed",
             }
             logger.exception("Telegram bot startup failed.")
+    laya_server = ManagedLayaServer()
+    app.state.decision_model_server = laya_server
+    try:
+        app.state.decision_model_status = await laya_server.start(
+            load_agent_settings(settings).decision_model,
+            api_key=settings.laya_api_key,
+        )
+    except Exception:
+        app.state.decision_model_status = {"state": "error", "running": False}
+        logger.exception("decision model: could not read settings")
     try:
         yield
     finally:
+        await laya_server.stop()
         retention_stop.set()
         retention_task.cancel()
         await asyncio.gather(retention_task, return_exceptions=True)

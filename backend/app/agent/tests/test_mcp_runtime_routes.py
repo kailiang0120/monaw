@@ -7,15 +7,118 @@ from app.agent.settings_store import AgentSettings, MCPServerConfig
 from app.main import app
 
 
-def test_browser_diagnostics_preserves_public_boolean_and_profile_identifiers():
-    from app.api.routes.diagnostics import _safe_browser_diagnostics
-    safe = _safe_browser_diagnostics({"session_active": True, "system_cdp_url": "http://127.0.0.1:9222",
-        "available_system_profiles": [{"name": "Work", "directory": "Profile 1"},
-                                      {"name": "Invalid", "directory": "C:/private/profile"}]})
-    assert safe["session_active"] is True
-    assert safe["system_cdp_url"] == ""
-    assert safe["available_system_profiles"][0]["directory"] == "Profile 1"
-    assert safe["available_system_profiles"][1]["directory"] == ""
+def _patch_browser_discovery(monkeypatch, *, chrome="C:/Program Files/Google/Chrome/Application/chrome.exe", mcp=None):
+    module = "app.api.routes.diagnostics"
+    monkeypatch.setattr(f"{module}.find_chrome_executable", lambda: chrome)
+    monkeypatch.setattr(f"{module}.list_local_chrome_profiles", lambda: [
+        {"name": "Personal", "directory": "Default"},
+        {"name": "Work", "directory": "Profile 1"},
+        {"name": "Invalid", "directory": "C:/private/profile"},
+    ])
+    monkeypatch.setattr(f"{module}.last_used_chrome_profile", lambda: "Profile 1")
+    monkeypatch.setattr(f"{module}.get_mcp_runtime_diagnostics", lambda: list(mcp or []))
+
+
+def test_browser_status_reports_chrome_profiles_and_devtools_connection(monkeypatch):
+    settings_data = AgentSettings()
+    settings_data.browser.system_profile_directory = "Profile 1"
+    monkeypatch.setattr("app.api.routes.diagnostics.load_agent_settings", lambda _settings: settings_data)
+    _patch_browser_discovery(monkeypatch, mcp=[
+        {"name": "filesystem", "connected": False, "state": "failed"},
+        {
+            "name": "chrome-devtools",
+            "connected": True,
+            "state": "connected",
+            "startup_phase": "ready",
+            "tool_count": 26,
+            "last_error": None,
+            "unhealthy_reason": None,
+            "connected_at": "2026-10-18T00:00:00Z",
+        },
+    ])
+
+    response = TestClient(app).get("/api/diagnostics/browser-use")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["chrome_found"] is True
+    assert payload["chrome_executable"] == ""
+    assert payload["available_system_profiles"] == [
+        {"name": "Personal", "directory": "Default"},
+        {"name": "Work", "directory": "Profile 1"},
+    ]
+    assert payload["system_profile_directory"] == "Profile 1"
+    assert payload["default_profile_directory"] == "Profile 1"
+    assert payload["devtools"] == {
+        "server": "chrome-devtools",
+        "running": True,
+        "connected": True,
+        "state": "connected",
+        "startup_phase": "ready",
+        "tool_count": 26,
+        "last_error": "",
+        "unhealthy_reason": "",
+        "connected_at": "2026-10-18T00:00:00Z",
+    }
+    assert payload["last_error"] == ""
+    for removed in ("session_active", "headless", "dom_inspection_engine", "downloads_dir", "traces_dir"):
+        assert removed not in payload
+
+
+def test_browser_status_redacts_paths_in_devtools_errors_and_handles_missing_chrome(monkeypatch):
+    _patch_browser_discovery(monkeypatch, chrome="", mcp=[
+        {"name": "chrome-devtools", "connected": False, "state": "failed",
+         "last_error": r"spawn failed at C:\Users\someone\AppData\npx.cmd", "unhealthy_reason": None},
+    ])
+
+    payload = TestClient(app).get("/api/diagnostics/browser-use").json()
+
+    assert payload["chrome_found"] is False
+    assert payload["devtools"]["running"] is True
+    assert payload["devtools"]["state"] == "failed"
+    assert "someone" not in payload["devtools"]["last_error"]
+    assert payload["last_error"] == payload["devtools"]["last_error"]
+
+
+def test_browser_status_before_devtools_server_starts(monkeypatch):
+    _patch_browser_discovery(monkeypatch)
+
+    payload = TestClient(app).get("/api/diagnostics/browser-use").json()
+
+    assert payload["devtools"]["running"] is False
+    assert payload["devtools"]["state"] == "stopped"
+    assert payload["devtools"]["connected"] is False
+
+
+def test_browser_reset_reconnects_builtin_devtools_server(monkeypatch):
+    reconnects: list[str] = []
+    _patch_browser_discovery(monkeypatch)
+    monkeypatch.setattr(
+        "app.api.routes.diagnostics.reconnect_mcp_server",
+        lambda name: reconnects.append(name) or {"name": name},
+    )
+
+    response = TestClient(app).post("/api/diagnostics/browser-use/reset")
+
+    assert response.status_code == 200
+    assert reconnects == ["chrome-devtools"]
+    assert response.json()["chrome_found"] is True
+
+
+def test_diagnostics_summary_browser_section_reports_devtools_state(monkeypatch):
+    _patch_browser_discovery(monkeypatch, mcp=[
+        {"name": "chrome-devtools", "connected": False, "state": "unhealthy", "unhealthy_reason": "Chrome closed"},
+    ])
+
+    response = TestClient(app).get("/api/diagnostics/summary")
+
+    assert response.status_code == 200
+    assert response.json()["browser"] == {
+        "chrome_found": True,
+        "devtools_state": "unhealthy",
+        "devtools_connected": False,
+        "last_error": "Chrome closed",
+    }
 
 
 def test_reset_runtime_cache_calls_mcp_reset(monkeypatch):
@@ -228,7 +331,7 @@ def test_update_settings_restarts_enabled_mcp_servers_after_save(monkeypatch):
 
     assert response.status_code == 200
     assert len(saved) == 1
-    assert reset_calls == [{"reset_mcp": True, "reset_browser": False}]
+    assert reset_calls == [{"reset_mcp": True}]
     assert restarted == [["filesystem"]]
 
 
@@ -270,7 +373,7 @@ def test_model_options_endpoint_returns_backend_model_catalog():
     assert "vision_fallback_models" not in payload
 
 
-def test_update_settings_key_change_does_not_reset_browser_runtime(monkeypatch):
+def test_update_settings_key_change_does_not_restart_mcp_servers(monkeypatch):
     reset_calls: list[dict] = []
     restarted: list[str] = []
 
@@ -289,7 +392,7 @@ def test_update_settings_key_change_does_not_reset_browser_runtime(monkeypatch):
     response = client.put("/api/settings", json={"openai_api_key": "new-key"})
 
     assert response.status_code == 200
-    assert reset_calls == [{"reset_mcp": False, "reset_browser": False}]
+    assert reset_calls == [{"reset_mcp": False}]
     assert restarted == []
 
 

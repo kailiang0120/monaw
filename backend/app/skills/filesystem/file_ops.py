@@ -896,12 +896,6 @@ def file_patch(
     budget_error = _validate_write_budget(new, encoding)
     if budget_error:
         return budget_error
-    shape_error = _validate_path_shape(path, operation="patch")
-    if shape_error:
-        return shape_error
-    budget_error = _validate_write_budget(new, encoding)
-    if budget_error:
-        return budget_error
     payload_args = {"path": path, "old": old, "new": new, "count": count, "encoding": encoding, "dry_run": dry_run}
     if not _bypass_gate:
         pending = _gate_path(
@@ -913,6 +907,9 @@ def file_patch(
         )
         if pending:
             return pending
+    revalidate = _revalidate_mutation_target(path)
+    if revalidate:
+        return revalidate
     resolved = _resolve_path(path)
     if not resolved.exists():
         return _json({"status": "error", "error": f"File does not exist: {resolved}"})
@@ -943,9 +940,6 @@ def fs_mkdir(
 ) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
-    shape_error = _validate_path_shape(path, operation="mkdir")
-    if shape_error:
-        return shape_error
     shape_error = _validate_path_shape(path, operation="mkdir")
     if shape_error:
         return shape_error
@@ -1441,4 +1435,3 @@ register_executor("file_write", _resume_file_write)
 register_executor("file_append", _resume_file_append)
 register_executor("create_file", _resume_create_file)
 register_executor("file_patch", _resume_file_patch)
-

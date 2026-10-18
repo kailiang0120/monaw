@@ -153,9 +153,6 @@ def _delete_memory_root() -> dict[str, int]:
 def _diagnostic_roots() -> list[Path]:
     return [
         MONAW_HOME_DIR / "browser" / "screenshots",
-        MONAW_HOME_DIR / "browser" / "traces",
-        MONAW_HOME_DIR / "browser" / "downloads",
-        RUNTIME_DIR / "browser-use",
         RUNTIME_DIR / "harness_logs",
         RUNTIME_DIR / "mcp",
         RUNTIME_DIR / "mcp_bridge",

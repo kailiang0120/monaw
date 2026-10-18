@@ -5,7 +5,6 @@ description = "Local FastAPI backend for Monaw"
 requires-python = ">=3.11,<4.0"
 dependencies = [
     "aiosqlite>=0.20.0",
-    "browser-use>=0.12.6,<0.13.0",
     "comtypes>=1.2.0",
     "croniter~=6.0",
     "fastapi>=0.115.0",
@@ -37,7 +36,6 @@ dependencies = [
     "tiktoken>=0.8.0",
     "tzdata>=2025.2; sys_platform == 'win32'",
     "uvicorn[standard]>=0.30.6",
-    "websockets>=15.0,<17.0",
 ]
 
 [dependency-groups]

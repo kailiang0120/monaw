@@ -137,7 +137,7 @@ def test_cancellation_with_reused_call_ids_only_reaches_its_own_worker():
 
 def test_tool_executor_preserves_exception_reason_code():
     class ReasonedError(RuntimeError):
-        reason_code = "managed_chrome_exited"
+        reason_code = "system_attach_failed"
 
     async def failing_tool():
         raise ReasonedError("Chrome exited")
@@ -146,7 +146,7 @@ def test_tool_executor_preserves_exception_reason_code():
     try:
         result = asyncio.run(
             executor.execute(
-                tool_dict={"name": "browser_open", "callable": failing_tool, "execution_mode": "async"},
+                tool_dict={"name": "mcp__chrome-devtools__new_page", "callable": failing_tool, "execution_mode": "async"},
                 arguments={},
                 budget=IterationBudget(),
                 call_id="call-1",
@@ -157,6 +157,6 @@ def test_tool_executor_preserves_exception_reason_code():
 
     payload = json.loads(result.output)
     assert result.status == "error"
-    assert payload["reason_code"] == "managed_chrome_exited"
-    assert payload["tool"] == "browser_open"
+    assert payload["reason_code"] == "system_attach_failed"
+    assert payload["tool"] == "mcp__chrome-devtools__new_page"
     assert payload["error"] == "Chrome exited"

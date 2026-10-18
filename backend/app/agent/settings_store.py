@@ -17,8 +17,8 @@ from app.agent.llm_constants import (
     normalize_chat_model,
 )
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
-from app.agent.output_workspace import default_downloads_dir, default_screenshots_dir
-from app.agent.runtime_paths import MONAW_HOME_DIR, RUNTIME_DIR, WORKSPACE_DIR
+from app.agent.output_workspace import default_screenshots_dir
+from app.agent.runtime_paths import RUNTIME_DIR, WORKSPACE_DIR
 
 _USER_HOME = Path(os.path.expanduser("~"))
 _RUNTIME_DIR = RUNTIME_DIR
@@ -46,16 +46,9 @@ def _default_skill_flags() -> dict[str, bool]:
 
     return default_skill_flags()
 
-_BROWSER_RUNTIME_DIR = MONAW_HOME_DIR / "browser"
-_BROWSER_MANAGED_PROFILE_DIR = _BROWSER_RUNTIME_DIR / "profiles" / "managed"
-_BROWSER_DOWNLOADS_DIR = default_downloads_dir()
 _BROWSER_SCREENSHOTS_DIR = default_screenshots_dir()
-_BROWSER_TRACES_DIR = _BROWSER_RUNTIME_DIR / "traces"
-_LEGACY_BROWSER_RUNTIME_DIR = _RUNTIME_DIR / "browser-use"
-_LEGACY_BROWSER_DOWNLOADS_DIR = _LEGACY_BROWSER_RUNTIME_DIR / "downloads"
-_LEGACY_BROWSER_SCREENSHOTS_DIR = _LEGACY_BROWSER_RUNTIME_DIR / "screenshots"
+_LEGACY_BROWSER_SCREENSHOTS_DIR = _RUNTIME_DIR / "browser-use" / "screenshots"
 _LEGACY_PUBLIC_OUTPUT_ROOT = (_USER_HOME / "Documents" if (_USER_HOME / "Documents").exists() else _USER_HOME) / "Monaw Agent"
-_LEGACY_PUBLIC_DOWNLOADS_DIR = _LEGACY_PUBLIC_OUTPUT_ROOT / "Downloads"
 _LEGACY_PUBLIC_SCREENSHOTS_DIR = _LEGACY_PUBLIC_OUTPUT_ROOT / "Screenshots"
 
 
@@ -184,28 +177,10 @@ class MCPSettings(BaseModel):
 
 
 class BrowserUseSettings(BaseModel):
-    mode: Literal["auto", "managed", "system"] = "system"
-    enable_system_fallback: bool = True
-    headless: bool = False
-    keep_alive: bool = True
-    dom_inspection_engine: Literal["auto", "enhanced", "legacy"] = "auto"
-    paint_order_filtering: bool = True
-    cross_origin_iframes: bool = False
-    max_iframes: int = Field(5, ge=0, le=20)
-    max_iframe_depth: int = Field(2, ge=0, le=5)
-    system_connection_strategy: Literal["auto", "attach", "launch"] = "launch"
-    system_cdp_url: str = "http://127.0.0.1:9222"
-    managed_profile_dir: str = Field(
-        default_factory=lambda: _default_browser_path(_BROWSER_MANAGED_PROFILE_DIR)
-    )
-    downloads_dir: str = Field(
-        default_factory=lambda: _default_browser_path(_BROWSER_DOWNLOADS_DIR)
-    )
+    """Browser control drives the user's own Chrome through Chrome DevTools MCP."""
+
     screenshots_dir: str = Field(
         default_factory=lambda: _default_browser_path(_BROWSER_SCREENSHOTS_DIR)
-    )
-    traces_dir: str = Field(
-        default_factory=lambda: _default_browser_path(_BROWSER_TRACES_DIR)
     )
     system_profile_directory: str = ""
     auto_approve_local_debugging: bool = True
@@ -313,6 +288,33 @@ class IdentitySettings(BaseModel):
         return self
 
 
+class DecisionModelSettings(BaseModel):
+    """Optional System 1 decision model that scores which skills a turn needs.
+
+    Only ``shadow`` mode exists today: the model's choice is logged next to the
+    tools the LLM actually used, and the LLM still receives every visible tool.
+    With ``managed`` on, the backend runs the Laya server that setup.bat
+    installs, and the selector stays off when that install is missing.
+    """
+
+    enabled: bool = True
+    managed: bool = True
+    provider: Literal["laya"] = "laya"
+    mode: Literal["shadow"] = "shadow"
+    endpoint: str = "http://127.0.0.1:8421"
+    model: str = ""
+    timeout_ms: int = Field(3000, ge=100, le=30000)
+    coverage: float = Field(0.9, ge=0.5, le=1.0)
+    max_domains: int = Field(4, ge=1, le=32)
+    min_confidence: float = Field(0.4, ge=0.0, le=1.0)
+    pinned_domains: list[str] = Field(default_factory=lambda: ["core", "memory", "tool-search"])
+
+    @field_validator("endpoint", "model", mode="before")
+    @classmethod
+    def normalize_text(cls, value: Any) -> str:
+        return str(value or "").strip()
+
+
 class AgentSettings(BaseModel):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     speech_to_text: SpeechToTextSettings = Field(default_factory=SpeechToTextSettings)
@@ -323,6 +325,7 @@ class AgentSettings(BaseModel):
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     identity: IdentitySettings = Field(default_factory=IdentitySettings)
+    decision_model: DecisionModelSettings = Field(default_factory=DecisionModelSettings)
 
 
 def confirmation_settings_for_mode(
@@ -412,6 +415,9 @@ def _normalize_browser_payload(browser: Any) -> dict[str, Any]:
     if not isinstance(browser, dict):
         return defaults
 
+    # Keys of the removed browser-use engine (headless, keep_alive, DOM/iframe
+    # options, CDP strategy, downloads/traces folders) are dropped here so old
+    # settings files still load.
     merged = dict(defaults)
     merged.update(
         {
@@ -420,25 +426,13 @@ def _normalize_browser_payload(browser: Any) -> dict[str, Any]:
             if key in defaults
         }
     )
-    legacy_artifacts = {
-        "downloads_dir": (
-            _LEGACY_BROWSER_DOWNLOADS_DIR,
-            _LEGACY_PUBLIC_DOWNLOADS_DIR,
-        ),
-        "screenshots_dir": (
-            _LEGACY_BROWSER_SCREENSHOTS_DIR,
-            _LEGACY_PUBLIC_SCREENSHOTS_DIR,
-        ),
-    }
-    for key, legacy_paths in legacy_artifacts.items():
-        current = os.path.normcase(os.path.normpath(str(merged.get(key) or "")))
-        if any(current == os.path.normcase(os.path.normpath(str(path))) for path in legacy_paths):
-            merged[key] = defaults[key]
-    for key in ("managed_profile_dir", "downloads_dir", "screenshots_dir", "traces_dir"):
-        if not merged.get(key):
-            merged[key] = defaults[key]
-        Path(str(merged[key])).mkdir(parents=True, exist_ok=True)
-    merged["system_cdp_url"] = str(merged.get("system_cdp_url", defaults["system_cdp_url"]) or "").strip()
+    current = os.path.normcase(os.path.normpath(str(merged.get("screenshots_dir") or "")))
+    legacy_paths = (_LEGACY_BROWSER_SCREENSHOTS_DIR, _LEGACY_PUBLIC_SCREENSHOTS_DIR)
+    if any(current == os.path.normcase(os.path.normpath(str(path))) for path in legacy_paths):
+        merged["screenshots_dir"] = defaults["screenshots_dir"]
+    if not merged.get("screenshots_dir"):
+        merged["screenshots_dir"] = defaults["screenshots_dir"]
+    Path(str(merged["screenshots_dir"])).mkdir(parents=True, exist_ok=True)
     return merged
 
 
@@ -547,6 +541,17 @@ def _normalize_loaded_payload(data: dict[str, Any]) -> dict[str, Any]:
             "enabled",
             True if raw_mcp_bridge_enabled is None else raw_mcp_bridge_enabled,
         )
+        # Chrome DevTools now ships as the built-in browser server (mcp_bridge/builtin.py),
+        # so a saved copy would start a second server.
+        servers = payload["mcp"].get("servers")
+        if isinstance(servers, list):
+            payload["mcp"]["servers"] = [
+                server for server in servers
+                if not (
+                    isinstance(server, dict)
+                    and any("chrome-devtools-mcp" in str(arg) for arg in server.get("args") or [])
+                )
+            ]
     payload["browser"] = _normalize_browser_payload(payload.get("browser"))
     if not isinstance(payload.get("memory"), dict):
         payload["memory"] = MemorySettings().model_dump()
@@ -734,6 +739,8 @@ def build_runtime_namespace(base_settings, agent_settings: AgentSettings):
         ),
         browser=SimpleNamespace(**agent_settings.browser.model_dump()),
         sandbox=SimpleNamespace(**agent_settings.sandbox.model_dump()),
+        decision_model=SimpleNamespace(**agent_settings.decision_model.model_dump()),
+        laya_api_key=getattr(base_settings, "laya_api_key", ""),
         allow_arbitrary_app_paths=getattr(base_settings, "allow_arbitrary_app_paths", False),
     )
 

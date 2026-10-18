@@ -3,6 +3,7 @@ import type {
   AgentSettings,
   AppEntry,
   ControllerPolicy,
+  DecisionModelStatus,
   ModelOptions,
   SandboxStatus,
   SettingsUpdatePayload,
@@ -89,6 +90,12 @@ export async function resetWorkspaceInstructions(): Promise<WorkspaceInstruction
 export async function fetchSpeechToTextStatus(signal?: AbortSignal): Promise<SpeechToTextStatus> {
   const res = await apiFetch(`${BASE}/api/settings/speech-to-text`, { signal })
   if (!res.ok) await throwApiError(res, 'Failed to fetch speech-to-text status')
+  return res.json()
+}
+
+export async function fetchDecisionModelStatus(signal?: AbortSignal): Promise<DecisionModelStatus> {
+  const res = await apiFetch(`${BASE}/api/decision-model/status`, { signal })
+  if (!res.ok) await throwApiError(res, 'Failed to fetch decision model status')
   return res.json()
 }
 

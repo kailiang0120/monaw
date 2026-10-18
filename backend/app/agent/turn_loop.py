@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 from urllib.parse import urlparse
 
@@ -27,7 +28,13 @@ from app.agent.observability.recorder import (
     usage_from_any,
 )
 from app.agent.observability.ports import ObservabilityPort
-from app.agent.response_attachments import collect_response_attachments, public_runtime_attachments
+from app.agent.output_workspace import configured_screenshots_dir
+from app.agent.response_attachments import (
+    collect_response_attachments,
+    get_image_dimensions,
+    public_runtime_attachments,
+    screenshot_dimension_problem,
+)
 from app.agent.run_events import RunEventPublisher
 from app.agent.run_context import (
     reset_current_conversation_id,
@@ -43,6 +50,7 @@ from app.agent.approval_review import AutoReviewState
 from app.agent.harness.tool_protocol import ToolCallRequest as HarnessToolCallRequest
 from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.tool_registry import ToolRegistry, can_parallelize
+from app.agent.tool_selection import ToolSelector, evaluate_selection
 from app.agent.tool_cancellation import set_tool_scope, reset_tool_scope
 from app.agent.harness.workers import unfinished_workers
 
@@ -73,34 +81,48 @@ RECOVERY_RESULT_LIMIT = 1400
 FINAL_RESPONSE_TYPEWRITER_CHARS = 8
 FINAL_RESPONSE_TYPEWRITER_MAX_CHUNKS = 240
 
-_BROWSER_MUTATING_TOOLS = {
-    "browser_close_chrome",
-    "browser_open",
-    "browser_navigate",
-    "browser_back",
-    "browser_forward",
-    "browser_reload",
-    "browser_tabs",
-    "browser_click",
-    "browser_type",
-    "browser_press",
-    "browser_select_option",
-    "browser_scroll",
+# Reflected names of the built-in Chrome DevTools MCP server (mcp_bridge/builtin.py).
+_DEVTOOLS_PREFIX = "mcp__chrome-devtools__"
+_DEVTOOLS_SNAPSHOT_TOOL = f"{_DEVTOOLS_PREFIX}take_snapshot"
+_DEVTOOLS_LIST_PAGES_TOOL = f"{_DEVTOOLS_PREFIX}list_pages"
+_DEVTOOLS_MUTATING_TOOLS = {
+    f"{_DEVTOOLS_PREFIX}{name}"
+    for name in (
+        "click", "fill", "fill_form", "type_text", "press_key", "hover", "drag",
+        "navigate_page", "new_page", "handle_dialog", "upload_file",
+        # Also exempt from the blanket identical-call cap (registry repeat_safe),
+        # so this page-state-aware guard must cover them.
+        "click_at", "close_page", "resize_page", "emulate",
+    )
 }
-
-_BROWSER_OBSERVATION_TOOLS = {
-    "browser_snapshot",
-    "browser_screenshot",
-    "browser_full_page_screenshot",
-    "browser_evaluate",
-    "browser_wait",
+_DEVTOOLS_OBSERVATION_TOOLS = {
+    f"{_DEVTOOLS_PREFIX}{name}" for name in ("take_snapshot", "take_screenshot", "list_pages", "wait_for")
+}
+_DEVTOOLS_STEP_DESCRIPTIONS = {
+    "take_snapshot": "Inspect the current browser page",
+    "list_pages": "Inspect open browser tabs",
+    "select_page": "Switch to the relevant browser tab",
+    "take_screenshot": "Capture a screenshot of the browser page",
+    "new_page": "Open the requested browser page in a new tab",
+    "close_page": "Close the browser tab",
+    "click": "Click the identified browser element",
+    "hover": "Hover over the identified browser element",
+    "drag": "Drag the identified browser element",
+    "fill": "Fill the identified browser field",
+    "type_text": "Type into the focused browser field",
+    "fill_form": "Fill the identified browser form fields",
+    "press_key": "Press a key in the browser page",
+    "handle_dialog": "Handle the browser dialog",
+    "wait_for": "Wait for the expected text on the browser page",
+    "upload_file": "Upload a file through the browser page",
+    "evaluate_script": "Run a script in the browser page",
 }
 
 FINAL_ANSWER_TOOL_NAME = "final_answer"
 
 
-def _is_browser_tool(tool_name: str) -> bool:
-    return tool_name.startswith("browser_")
+def _is_devtools_tool(tool_name: str) -> bool:
+    return tool_name.startswith(_DEVTOOLS_PREFIX)
 
 
 def _completion_protocol_prompt(system_prompt: str) -> str:
@@ -147,10 +169,10 @@ def _build_repeat_recovery_prompt(
     arguments_text = _compact_for_recovery(arguments, limit=900)
     result_text = _compact_for_recovery(last_result)
     if reason_code == "stalled_repeat_detected":
+        observations = f"`{_DEVTOOLS_SNAPSHOT_TOOL}`, `{_DEVTOOLS_LIST_PAGES_TOOL}`, "
         next_steps = (
             "For the next step, use a browser observation or finish the turn: "
-            "`browser_snapshot`, `browser_tabs(action=\"list\")`, "
-            "`browser_session(action=\"status\")`, `browser_session(action=\"doctor\")`, "
+            f"{observations}"
             "or answer the user directly. After inspection, only act again if the target or arguments change."
         )
     elif reason_code == "repeated_blocked_tool_result":
@@ -406,31 +428,11 @@ def _plain_text_describes_next_action(text: str) -> bool:
 
 
 def _is_browser_repeat_guarded(tool_name: str, arguments: dict) -> bool:
-    if not _is_browser_tool(tool_name):
-        return False
-    if tool_name in _BROWSER_OBSERVATION_TOOLS:
-        return False
-    if tool_name == "browser_tabs":
-        action = str(arguments.get("action") or "list").strip().lower()
-        return action != "list"
-    if tool_name == "browser_session":
-        action = str(arguments.get("action") or "status").strip().lower()
-        return action not in {"status", "list_profiles"}
-    return tool_name in _BROWSER_MUTATING_TOOLS or tool_name == "browser_session"
+    return tool_name in _DEVTOOLS_MUTATING_TOOLS
 
 
 def _is_browser_observation_action(tool_name: str, arguments: dict) -> bool:
-    if not _is_browser_tool(tool_name):
-        return False
-    if tool_name in _BROWSER_OBSERVATION_TOOLS:
-        return True
-    if tool_name == "browser_tabs":
-        action = str(arguments.get("action") or "list").strip().lower()
-        return action == "list"
-    if tool_name == "browser_session":
-        action = str(arguments.get("action") or "status").strip().lower()
-        return action in {"status", "doctor", "list_profiles"}
-    return False
+    return tool_name in _DEVTOOLS_OBSERVATION_TOOLS
 
 
 def _parse_tool_json(tool_output: str) -> dict:
@@ -450,13 +452,41 @@ def _tool_error_code(tool_output: str) -> str:
     return "tool_error"
 
 
+_MAX_MCP_IMAGE_ATTACHMENTS = 4
+
+
+def _extract_mcp_image_attachments(tool_output: str) -> list[dict]:
+    """Attach images the MCP bridge saved to the screenshots folder (never arbitrary paths)."""
+    payload = _parse_tool_json(tool_output)
+    images = payload.get("images") if isinstance(payload.get("images"), list) else []
+    if not images:
+        return []
+    try:
+        screenshots_dir = configured_screenshots_dir().resolve()
+    except OSError:
+        return []
+    attachments: list[dict] = []
+    for image in images[:_MAX_MCP_IMAGE_ATTACHMENTS]:
+        if not isinstance(image, dict):
+            continue
+        raw_path = str(image.get("path") or "").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path).resolve()
+        if path.parent != screenshots_dir or not path.is_file():
+            continue
+        dimensions = get_image_dimensions(path)
+        if dimensions is not None and screenshot_dimension_problem(*dimensions):
+            continue
+        mime_type = str(image.get("mime_type") or "") or mimetypes.guess_type(str(path))[0] or "image/png"
+        attachments.append({"path": str(path), "mime_type": mime_type})
+    return attachments
+
+
 def _extract_image_attachments(tool_name: str, tool_output: str) -> list[dict]:
-    if tool_name not in {
-        "browser_snapshot",
-        "browser_screenshot",
-        "browser_full_page_screenshot",
-        "computer_functions_get_window_state",
-    }:
+    if tool_name.startswith("mcp__"):
+        return _extract_mcp_image_attachments(tool_output)
+    if tool_name != "computer_functions_get_window_state":
         return []
     payload = _parse_tool_json(tool_output)
     screenshot = payload.get("screenshot") if isinstance(payload.get("screenshot"), dict) else {}
@@ -488,54 +518,25 @@ def _attachment_image_payloads(attachments: list[dict] | None) -> list[dict]:
 
 
 def _browser_state_fingerprint(tool_output: str) -> str:
+    """Describe the page state a DevTools result reports (its text content)."""
     payload = _parse_tool_json(tool_output)
-    page = payload.get("page") if isinstance(payload.get("page"), dict) else {}
-    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
-    page_state = snapshot.get("page_state") if isinstance(snapshot.get("page_state"), dict) else {}
-    clicked = payload.get("clicked") if isinstance(payload.get("clicked"), dict) else {}
-    verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else {}
     stable = {
-        "url": page.get("url") or snapshot.get("url") or "",
-        "title": page.get("title") or snapshot.get("title") or "",
-        "loading_state": page_state.get("loading_state") or "",
-        "is_blank_page": page_state.get("is_blank_page"),
-        "tab_count": len(payload.get("tabs") or []) if isinstance(payload.get("tabs"), list) else None,
-        "selector": payload.get("selector") or clicked.get("selector") or "",
-        "clicked_ref": clicked.get("ref") or "",
-        "target": _stable_target_fingerprint(payload.get("target") or clicked.get("element")),
-        "target_after": _stable_target_fingerprint(payload.get("target_after") or clicked.get("element_after")),
-        "verification": {
-            "status": verification.get("status") or "",
-            "verified": verification.get("verified"),
-            "reason_code": verification.get("reason_code") or "",
-            "actual_value": verification.get("actual_value") or "",
-        },
+        "is_error": bool(payload.get("is_error")),
+        # DevTools results describe the page only in text (page list, snapshot).
+        "mcp_text": _mcp_text_content(payload),
     }
     return json.dumps(stable, sort_keys=True, ensure_ascii=False)
 
 
-def _stable_target_fingerprint(metadata: object) -> dict | None:
-    if not isinstance(metadata, dict):
-        return None
-    keys = (
-        "ref",
-        "tag",
-        "role",
-        "type",
-        "id",
-        "name",
-        "aria_label",
-        "placeholder",
-        "text",
-        "value",
-        "contenteditable",
-        "checked",
-        "selected",
-        "disabled",
-        "expanded",
-        "aria_expanded",
-    )
-    return {key: metadata.get(key) for key in keys if key in metadata}
+def _mcp_text_content(payload: dict) -> str:
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(item.get("text") or "")
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "text"
+    ).strip()
 
 
 def _repeat_key(tool_name: str, arguments: dict, tool_output: str) -> str:
@@ -578,16 +579,16 @@ def _compact_tool_observation(tool_name: str, tool_output: str) -> str:
         page_label = page.get("title") or page.get("url")
         if page_label:
             parts.append(f"page={page_label}")
-    if tool_name == "browser_type" and isinstance(payload.get("target_after"), dict):
-        target = payload["target_after"]
-        label = target.get("aria_label") or target.get("placeholder") or target.get("name") or target.get("role")
-        value = str(target.get("value") or "")[:80]
-        parts.append(f"target={label or 'field'} value={value!r}")
-    if tool_name == "browser_snapshot" and isinstance(payload.get("snapshot"), dict):
-        snapshot = payload["snapshot"]
-        candidates = snapshot.get("field_candidates")
-        if isinstance(candidates, dict):
-            parts.append(f"field_candidates={','.join(sorted(candidates.keys()))}")
+    if _is_devtools_tool(tool_name):
+        if payload.get("is_error"):
+            parts.append("error")
+        first_line = next((line.strip() for line in _mcp_text_content(payload).splitlines() if line.strip()), "")
+        if first_line:
+            parts.append(first_line[:160])
+        images = payload.get("images") if isinstance(payload.get("images"), list) else []
+        parts.extend(
+            f"screenshot={image.get('path')}" for image in images if isinstance(image, dict) and image.get("path")
+        )
     return "; ".join(parts) or "Tool completed."
 
 
@@ -626,6 +627,7 @@ class TurnLoop:
         max_llm_call_seconds: float = 600.0,
         observability: ObservabilityPort | None = None,
         max_parallel_tool_calls: int = 4,
+        tool_selector: ToolSelector | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.registry = registry
@@ -640,6 +642,70 @@ class TurnLoop:
         self.max_identical_calls = 2
         self.execution_gate = ExecutionGateService(executor=self.executor)
         self.observability: ObservabilityPort = observability or get_observability_recorder()
+        self.tool_selector = tool_selector
+
+    def _start_tool_selection(
+        self,
+        message: str,
+        history: list[dict],
+        visible_tools: list[dict],
+        attachment_count: int,
+    ) -> asyncio.Task | None:
+        """Ask the decision model about this turn without blocking the loop."""
+        if self.tool_selector is None:
+            return None
+        return asyncio.create_task(
+            self.tool_selector.decide(
+                message,
+                visible_tools=visible_tools,
+                history=history,
+                attachment_count=attachment_count,
+            )
+        )
+
+    async def _record_tool_selection(
+        self,
+        task: asyncio.Task,
+        *,
+        deadline: float,
+        visible_tools: list[dict],
+        tool_calls: list[dict],
+        log_event: Callable[..., None],
+        all_tools: list[dict] | None = None,
+    ) -> None:
+        """Log the shadow decision next to the tools the LLM actually called."""
+        try:
+            remaining = max(0.05, deadline - time.monotonic())
+            try:
+                decision = await asyncio.wait_for(task, timeout=remaining)
+            except asyncio.TimeoutError:
+                decision = self.tool_selector.timeout_decision()
+            metadata = evaluate_selection(
+                decision,
+                visible_tools=visible_tools,
+                used_tool_names=[str(call.get("tool_name") or "") for call in tool_calls],
+                lookup_tool=self.registry.get_tool,
+                all_tools=all_tools,
+            )
+            log_event(
+                "tool_selection_shadow",
+                status=decision.status,
+                duration_ms=decision.latency_ms,
+                error_message=decision.error,
+                metadata=metadata,
+            )
+            logger.info(
+                "tool_selection_shadow status=%s top=%s p=%.3f kept=%s used=%s missed=%s latency_ms=%s",
+                decision.status,
+                decision.top_domain,
+                decision.top_probability,
+                metadata["kept_domains"],
+                metadata["used_domains"],
+                metadata["missed_domains"],
+                decision.latency_ms,
+            )
+        except Exception:
+            logger.debug("tool selection shadow logging failed", exc_info=True)
 
     def shutdown(self) -> None:
         self.executor.shutdown()
@@ -686,22 +752,18 @@ class TurnLoop:
 
     @staticmethod
     def _describe_tool_step(tool_name: str, arguments: dict) -> str:
-        if tool_name == "browser_snapshot":
-            return "Inspect the current browser page"
-        if tool_name == "browser_tabs":
-            return "Inspect open browser tabs"
-        if tool_name == "browser_open":
-            if arguments.get("reuse_existing", True):
-                return "Open or reuse the matching browser tab"
-            return "Open the requested browser page"
-        if tool_name == "browser_click":
-            return "Click the identified browser element"
-        if tool_name == "browser_type":
-            return "Fill the identified browser field"
-        if tool_name == "browser_select_option":
-            return "Select the requested browser option"
-        if tool_name.startswith("browser_"):
-            return f"Run browser action `{tool_name}`"
+        if _is_devtools_tool(tool_name):
+            short_name = tool_name[len(_DEVTOOLS_PREFIX):]
+            if short_name == "navigate_page":
+                direction = str(arguments.get("type") or "url").strip().lower()
+                if direction in {"back", "forward"}:
+                    return f"Go {direction} in the browser page"
+                if direction == "reload":
+                    return "Reload the browser page"
+                return "Open the requested browser page"
+            return _DEVTOOLS_STEP_DESCRIPTIONS.get(short_name, f"Run browser action `{short_name}`")
+        if tool_name == "browser_fetch":
+            return "Fetch the requested web page"
         return f"Run `{tool_name}`"
 
     @classmethod
@@ -790,6 +852,8 @@ class TurnLoop:
         active_tool_tasks: dict[str, asyncio.Task] = {}
         turn_persisted = False
         obs_usage_total = UsageStats()
+        tool_selection_task: asyncio.Task | None = None
+        tool_selection_deadline = 0.0
 
         def _obs_event(event_type: str, **kwargs) -> None:
             if not obs_run_id:
@@ -1003,6 +1067,16 @@ class TurnLoop:
                 initial_message["ephemeral"] = True
             messages.append(initial_message)
             latest_round_start = len(messages) - 1
+            # Include tools hidden until tool search loads them (e.g. scheduling),
+            # so the decision model can still pick their domain.
+            selectable_tools = self.registry.get_all_tools()
+            tool_selection_task = self._start_tool_selection(
+                message, messages[:-1], selectable_tools, len(attachments or [])
+            )
+            if tool_selection_task is not None:
+                # Give the decision its own timeout plus slack before the turn
+                # stops waiting for it.
+                tool_selection_deadline = time.monotonic() + self.tool_selector.timeout_seconds + 0.5
 
             def _current_user_request() -> str:
                 applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
@@ -2447,6 +2521,16 @@ class TurnLoop:
                 "data": done_data,
             })
 
+            if tool_selection_task is not None:
+                await self._record_tool_selection(
+                    tool_selection_task,
+                    deadline=tool_selection_deadline,
+                    visible_tools=initial_visible_tools,
+                    all_tools=selectable_tools,
+                    tool_calls=persisted_tool_calls,
+                    log_event=_obs_event,
+                )
+
             # Per-turn long-term learning runs heuristic extraction plus blocking
             # SQLite writes. Run it after the user-visible `done` and off the event
             # loop so it neither delays completion nor stalls other conversations.
@@ -2548,6 +2632,8 @@ class TurnLoop:
             except Exception:
                 pass
         finally:
+            if tool_selection_task is not None and not tool_selection_task.done():
+                tool_selection_task.cancel()
             reset_tool_scope(tool_scope_token)
             if obs_context_token is not None:
                 reset_current_run_id(obs_context_token)

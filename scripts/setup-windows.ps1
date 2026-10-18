@@ -15,6 +15,20 @@ $runtimeDir = if ($env:AGENT_RUNTIME_DIR) {
 } else {
   Join-Path $monawHome 'runtime'
 }
+$layaVersion = '0.4.11'
+$layaDir = Join-Path $monawHome 'laya'
+$backendPort = 8420
+$runtimeConfigPath = Join-Path $frontendDir 'config\runtime.json'
+if (Test-Path $runtimeConfigPath) {
+  try {
+    $configuredPort = (Get-Content -Raw -Path $runtimeConfigPath | ConvertFrom-Json).backendPort
+    if ($configuredPort) { $backendPort = [int]$configuredPort }
+  } catch {
+    # A malformed runtime.json is start.bat's problem to report; keep the default here.
+  }
+}
+# Vite, the backend, and the Laya decision model.
+$monawPorts = @(5275, $backendPort, 8421)
 $setupLogDir = Join-Path $runtimeDir 'setup'
 $setupLog = Join-Path $setupLogDir 'setup.log'
 
@@ -66,39 +80,80 @@ function Invoke-LoggedCommand {
   }
 }
 
-function Assert-MonawStopped {
-  $escapedRepoRoot = [regex]::Escape($repoRoot)
-  $blockingProcesses = @(
+function Get-SetupAncestry {
+  # This setup run and the windows that launched it must never be closed.
+  $ids = @()
+  $current = $PID
+  while ($current -and $ids -notcontains $current) {
+    $ids += $current
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $current" -ErrorAction SilentlyContinue
+    $current = if ($process) { $process.ParentProcessId } else { $null }
+  }
+  return $ids
+}
+
+function Get-MonawProcesses {
+  $ownedPaths = @([regex]::Escape($repoRoot), [regex]::Escape($layaDir))
+  $ancestry = Get-SetupAncestry
+  return @(
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
       Where-Object {
-        $_.Name -in @('electron.exe', 'node.exe', 'npm.exe', 'uv.exe', 'uvicorn.exe', 'python.exe') -and
-        $_.CommandLine -and
-        $_.CommandLine -match $escapedRepoRoot
+        $commandLine = $_.CommandLine
+        $_.Name -in @('electron.exe', 'node.exe', 'npm.exe', 'uv.exe', 'uvicorn.exe', 'python.exe', 'laya-serve.exe') -and
+        $commandLine -and
+        $ancestry -notcontains $_.ProcessId -and
+        @($ownedPaths | Where-Object { $commandLine -match $_ }).Count -gt 0
       }
   )
+}
 
-  $blockingPorts = @(
-    Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-      Where-Object { $_.LocalPort -in @(5275, 8420) }
-  )
+function Stop-MonawIfRunning {
+  # taskkill writes to stderr when a process is already gone; that is fine here.
+  $ErrorActionPreference = 'Continue'
 
-  if ($blockingProcesses.Count -eq 0 -and $blockingPorts.Count -eq 0) {
-    return
+  $processes = @(Get-MonawProcesses)
+  if ($processes.Count -gt 0) {
+    $names = $processes | ForEach-Object { "$($_.Name) (PID $($_.ProcessId))" }
+    Write-Host "Closing the running Monaw: $($names -join ', ')"
+    "[$(Get-Date -Format o)] Closing running Monaw: $($names -join ', ')" | Add-Content -Path $setupLog
+
+    # Closing the window first lets Electron stop its backend and Laya itself.
+    $closedWindow = $false
+    foreach ($process in $processes | Where-Object { $_.Name -eq 'electron.exe' }) {
+      $window = Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue
+      if ($window -and $window.MainWindowHandle -ne [IntPtr]::Zero) {
+        $closedWindow = $window.CloseMainWindow() -or $closedWindow
+      }
+    }
+    if ($closedWindow) {
+      $deadline = (Get-Date).AddSeconds(5)
+      while ((Get-Date) -lt $deadline -and @(Get-MonawProcesses).Count -gt 0) {
+        Start-Sleep -Milliseconds 500
+      }
+    }
+    foreach ($process in @(Get-MonawProcesses)) {
+      & taskkill.exe /PID $process.ProcessId /T /F 2>&1 | Out-Null
+    }
   }
 
-  $details = @()
-  if ($blockingProcesses.Count -gt 0) {
-    $processDetails = $blockingProcesses |
-      ForEach-Object { "$($_.Name) (PID $($_.ProcessId))" }
-    $details += "processes: $($processDetails -join ', ')"
-  }
-  if ($blockingPorts.Count -gt 0) {
-    $portDetails = $blockingPorts |
-      ForEach-Object { "$($_.LocalPort) (PID $($_.OwningProcess))" }
-    $details += "ports: $($portDetails -join ', ')"
-  }
+  # Wait for the sockets to close, but never stop a process Monaw does not own.
+  $deadline = (Get-Date).AddSeconds(15)
+  do {
+    $busyPorts = @(
+      Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalPort -in $monawPorts }
+    )
+    if ($busyPorts.Count -eq 0) {
+      return
+    }
+    Start-Sleep -Milliseconds 500
+  } while ((Get-Date) -lt $deadline)
 
-  throw "Monaw appears to be running ($($details -join '; ')). Close Monaw and its launcher, then run setup.bat again."
+  $details = $busyPorts | ForEach-Object {
+    $owner = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+    "$($_.LocalPort) ($(if ($owner) { $owner.ProcessName } else { 'unknown' }), PID $($_.OwningProcess))"
+  }
+  throw "Monaw's ports are still in use: $($details -join ', '). Close those programs, then run setup.bat again."
 }
 
 function Install-WithWinget {
@@ -177,13 +232,40 @@ function Ensure-Node {
   return $npm.Source
 }
 
+function Install-DecisionModel {
+  param([Parameter(Mandatory = $true)] [string] $Uv)
+
+  $venvDir = Join-Path $layaDir '.venv'
+  $python = Join-Path $venvDir 'Scripts\python.exe'
+  New-Item -ItemType Directory -Force -Path $layaDir | Out-Null
+
+  # Laya brings torch and transformers, so it gets its own environment
+  # instead of the locked backend one.
+  if (-not (Test-Path $python)) {
+    Invoke-LoggedCommand -FilePath $Uv -ArgumentList @('venv', $venvDir, '--python', '3.11') -WorkingDirectory $layaDir
+  }
+  Invoke-LoggedCommand `
+    -FilePath $Uv `
+    -ArgumentList @('pip', 'install', '--python', $python, "laya[serve]==$layaVersion") `
+    -WorkingDirectory $layaDir
+
+  Write-Host "Downloading the Laya English checkpoint (about 800 MB the first time)..."
+  $env:USE_TF = '0'
+  $env:HF_HUB_DISABLE_TELEMETRY = '1'
+  $env:HF_HUB_DISABLE_SYMLINKS_WARNING = '1'
+  Invoke-LoggedCommand `
+    -FilePath $python `
+    -ArgumentList @('-c', "import laya; laya.load('convaiinnovations/laya', device='cpu'); print('Laya checkpoint ready')") `
+    -WorkingDirectory $layaDir
+}
+
 try {
   Write-Host "Monaw Agent one-click setup"
   Write-Host "Log file: $setupLog"
   "[$(Get-Date -Format o)] Monaw Agent setup started" | Set-Content -Path $setupLog
 
-  Write-Step "Checking for running Monaw processes"
-  Assert-MonawStopped
+  Write-Step "Closing Monaw if it is running"
+  Stop-MonawIfRunning
 
   $uv = Ensure-Uv
   $npm = Ensure-Node
@@ -193,6 +275,20 @@ try {
 
   Write-Step "Installing frontend packages"
   Invoke-LoggedCommand -FilePath $npm -ArgumentList @('ci') -WorkingDirectory $frontendDir
+
+  Write-Step "Installing the Laya decision model"
+  if ($env:MONAW_SKIP_LAYA -eq '1') {
+    Write-Host "Skipped because MONAW_SKIP_LAYA=1."
+  } else {
+    # Laya only feeds shadow-mode logging, so Monaw still works without it.
+    try {
+      Install-DecisionModel -Uv $uv
+    } catch {
+      Write-Warning "Laya setup failed: $($_.Exception.Message)"
+      Write-Warning "Monaw works without it. Run setup.bat again to retry."
+      "[$(Get-Date -Format o)] WARNING: Laya setup failed: $($_.Exception.Message)" | Add-Content -Path $setupLog
+    }
+  }
 
   Write-Step "Setup complete"
   Write-Host "You can now double-click start.bat to run Monaw Agent."

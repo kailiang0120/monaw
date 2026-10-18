@@ -71,7 +71,7 @@ Monaw currently targets Windows. macOS has not been tested yet.
       <br />
       <strong>Connect More Tools</strong>
       <br />
-      Add MCP servers, including Chrome DevTools for browser control. An optional Telegram bridge lets you send Monaw tasks remotely.
+      Browser control includes Chrome DevTools on your own Chrome profile, and you can add your own MCP servers. An optional Telegram bridge lets you send Monaw tasks remotely.
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/use-cases/permissions-local-control.png" alt="Monaw mascot guarding local permissions and sandbox controls" width="100%" />
@@ -110,11 +110,13 @@ setup.bat
 
 The setup launcher will:
 
+- Close Monaw first if it is running. It only closes processes started from this folder or the Laya install. If another program holds one of Monaw's ports (Vite, the backend, or Laya on 8421), setup stops and names it.
 - Install `uv` with Windows Package Manager if it is missing.
 - Install Node.js LTS with Windows Package Manager if Node/npm is missing.
 - Install the Python version pinned in `backend\.python-version`.
 - Create `backend\.venv` and sync the dependencies locked in `backend\uv.lock`.
 - Run `npm ci` in `frontend`.
+- Install the Laya decision model into `%USERPROFILE%\.monaw\laya` and download its checkpoint (about 800 MB the first time). This step is optional: if it fails, setup still finishes.
 
 When setup finishes, double-click [start.bat](start.bat):
 
@@ -164,7 +166,7 @@ Open Settings in Monaw Agent and configure only the services you use:
 - Model provider, model, and reasoning effort in the chat composer.
 - Permission mode: Default, Full Access, Auto Review, or Custom. Custom rules are edited in the config file shown in Settings.
 - Sandbox mode.
-- Browser choice. Your local Chrome profile is the default; Monaw handles launch and connection.
+- Browser: the Chrome profile to use and allowed domains. Monaw drives your own Chrome through Chrome DevTools and handles launch and connection.
 - MCP servers.
 
 Normal desktop use does not require editing `.env`. Settings saves runtime configuration locally. Advanced Custom permission rules use the config file rather than individual setup switches.
@@ -200,11 +202,11 @@ Main folders:
 ```text
 %USERPROFILE%\.monaw\runtime\        settings, database, logs, Electron store
 %USERPROFILE%\.monaw\workspace\      default agent working directory
-%USERPROFILE%\.monaw\browser\        managed browser profile, downloads, screenshots, traces
+%USERPROFILE%\.monaw\browser\        browser screenshots
 %USERPROFILE%\.monaw\memory\         long-term memory markdown files
 ```
 
-Settings, config, logs, browser downloads, screenshots, managed profiles, traces, memory, and the default agent workspace all stay under this folder.
+Settings, config, logs, browser screenshots, memory, and the default agent workspace all stay under this folder. Your Chrome profile stays in Chrome's own folder.
 
 You can change the main data folder with `MONAW_HOME` or `AGENT_HOME`, the runtime folder with `AGENT_RUNTIME_DIR`, the default agent workspace with `AGENT_WORKSPACE_DIR`, and the memory folder with `AGENT_MEMORY_DIR`.
 
@@ -216,11 +218,13 @@ While the agent is working, type a new instruction and press Enter or the send a
 
 Memory works in the background and is hidden from Settings. Memory files are local markdown files. See [docs/memory.md](docs/memory.md) for advanced configuration.
 
-Browser automation is configured in Settings -> Browser. See [docs/browser-automation.md](docs/browser-automation.md).
+Browser automation is configured in Settings -> Browser. See [docs/browser-automation.md](docs/browser-automation.md). Planned improvements, such as fuller control of your own Chrome profile, are listed in [docs/roadmap.md](docs/roadmap.md).
 
 Windows computer use combines screenshots and accessibility controls for desktop automation. See [docs/computer-use.md](docs/computer-use.md).
 
 MCP servers are configured in Settings -> Tools -> MCP. See [docs/mcp.md](docs/mcp.md).
+
+setup.bat also installs a small local decision model, Laya, which scores which skills each request needs and logs it next to the tools the model used (shadow mode). See [docs/decision-model.md](docs/decision-model.md).
 
 Scheduled tasks are configured in the app when scheduling is enabled. See [docs/scheduling.md](docs/scheduling.md).
 

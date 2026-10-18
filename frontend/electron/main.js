@@ -13,6 +13,7 @@ const {
   normalizeBackendHost,
 } = require('./control-auth')
 const { SECRET_FIELDS, createCredentialVault } = require('./credential-vault')
+const { isExternalOpenableUrl, windowOpenTarget } = require('./navigation-policy')
 const CREDENTIAL_IDS = new Set(Object.keys(SECRET_FIELDS))
 const MAX_IPC_STRING_LENGTH = 20_000
 
@@ -370,15 +371,6 @@ function assertTheme(value) {
   return value
 }
 
-function isExternalOpenableUrl(value) {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:'
-  } catch {
-    return false
-  }
-}
-
 function openExternalUrl(value) {
   if (!isExternalOpenableUrl(value)) return false
   shell.openExternal(value).catch((err) => {
@@ -464,8 +456,9 @@ function createWindow() {
   }
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isTrustedRendererUrl(url)) return { action: 'allow' }
-    if (openExternalUrl(url)) return { action: 'deny' }
+    if (windowOpenTarget(url, { isTrustedRendererUrl, backendBaseUrl: BACKEND_BASE_URL }) === 'external') {
+      openExternalUrl(url)
+    }
     return { action: 'deny' }
   })
 

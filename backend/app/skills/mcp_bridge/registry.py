@@ -5,13 +5,19 @@ import json
 import logging
 import re
 import threading
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlparse
 
+from app.agent import controller_policy
 from app.agent.approval_broker import create_ticket
 from app.agent.controller_policy import resolve_external_tool_permission
-from app.agent.permission_actions import external_tool_action
+from app.agent.permission_actions import ActionType, external_tool_action
 from app.agent.execution_resume import register_executor
 from app.agent.settings_store import MCPServerConfig
+from app.skills.browser_use.url_policy import browser_url_policy
+
+from .builtin import BUILTIN_SERVER_SKILLS, builtin_tool_policy, builtin_url_tool
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +26,11 @@ MAX_ARGUMENT_BYTES = 64 * 1024
 MAX_ARGUMENT_DEPTH = 12
 MAX_SCALAR_LENGTH = 16 * 1024
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+
+_BLOCKED_URL_SCHEMES = frozenset({
+    "file", "javascript", "vbscript", "data", "blob", "filesystem", "about",
+    "chrome", "chrome-extension", "chrome-untrusted", "devtools", "view-source",
+})
 
 _REFLECTED_TOOL_MAP: dict[str, dict[str, Any]] = {}
 _REFLECTED_TOOL_LOCK = threading.RLock()
@@ -171,6 +182,19 @@ def _validate_arguments(arguments: dict[str, Any]) -> str:
 
 
 def _approval_decision(cfg: MCPServerConfig, tool_name: str, description: str, annotations: Any) -> dict[str, Any]:
+    policy = builtin_tool_policy(cfg.name, tool_name)
+    if policy is not None:
+        decision = {
+            "requires_approval": policy.prompts,
+            "risk": policy.risk,
+            "reason": policy.reason,
+            "action": policy.action.value,
+            "read_only": policy.read_only,
+        }
+        if policy.always_confirm:
+            decision["always_confirm"] = True
+        return decision
+
     haystack = f"{tool_name} {description}".lower()
     destructive = any(keyword in haystack for keyword in _DESTRUCTIVE_KEYWORDS)
     open_world = any(keyword in haystack for keyword in _OPEN_WORLD_KEYWORDS)
@@ -214,17 +238,95 @@ def _approval_decision(cfg: MCPServerConfig, tool_name: str, description: str, a
 
 def _runtime_approval_decision(decision: dict[str, Any], tool_name: str) -> dict[str, Any]:
     """Apply the current desktop profile at call time, after MCP risk classification."""
-    action = external_tool_action(tool_name, read_only=decision["reason"] == "untrusted_read_tool")
+    explicit_action = decision.get("action")
+    if explicit_action:
+        action = ActionType(explicit_action)
+    else:
+        action = external_tool_action(tool_name, read_only=decision["reason"] == "untrusted_read_tool")
     permission = resolve_external_tool_permission(
         action, default_confirmation=decision["requires_approval"], reason=decision["reason"],
     )
+    blocked = permission.blocked or not permission.allowed
+    requires_approval = permission.requires_confirmation
+    reason_code = permission.reason_code
+    if decision.get("always_confirm") and not blocked and not requires_approval:
+        requires_approval = True
+        reason_code = "confirmation_required"
     return {
         **decision,
-        "requires_approval": permission.requires_confirmation,
-        "blocked": permission.blocked or not permission.allowed,
+        "requires_approval": requires_approval,
+        "blocked": blocked,
         "reason": permission.reason if permission.blocked or decision["requires_approval"] else decision["reason"],
-        "reason_code": permission.reason_code,
+        "reason_code": reason_code,
     }
+
+
+def _tool_metadata(decision: dict[str, Any], annotations: Any) -> dict[str, Any]:
+    """Harness metadata: read-only tools are observations the repeat guard allows."""
+    if "action" in decision:
+        if decision.get("read_only"):
+            return {"observation": True, "mutates_state": False, "risk_level": "low"}
+        metadata: dict[str, Any] = {"mutates_state": True, "risk_level": decision["risk"]}
+        if decision["action"] in {ActionType.CLICK.value, ActionType.TYPE.value, ActionType.LAUNCH_APP.value}:
+            # The turn loop's page-state-aware stall guard handles repeats
+            # instead of the blanket identical-call cap.
+            metadata["repeat_safe"] = True
+        return metadata
+    if (
+        _annotation_value(annotations, "readOnlyHint") is True
+        and _annotation_value(annotations, "destructiveHint") is not True
+        and decision["risk"] != "high"
+    ):
+        return {"observation": True, "mutates_state": False, "risk_level": decision["risk"]}
+    return {}
+
+
+def _url_guard(server_name: str, tool_name: str, arguments: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Check built-in navigation URLs with Monaw's browser URL policy before the server sees them.
+
+    Returns the (possibly normalized) arguments and, when blocked, a JSON result for the model.
+    """
+    if not builtin_url_tool(server_name, tool_name):
+        return arguments, None
+
+    def _blocked(reason_code: str, error: str, **details: Any) -> str:
+        return json.dumps(
+            {"status": "blocked", "reason_code": reason_code, "reason": error, "error": error,
+             "server": server_name, "tool": tool_name, **details},
+            ensure_ascii=False,
+        )
+
+    if arguments.get("initScript"):
+        return arguments, _blocked(
+            "init_script_not_allowed",
+            "navigate_page initScript runs page JavaScript; use evaluate_script, which asks for approval.",
+        )
+    raw_url = arguments.get("url")
+    raw_text = str(raw_url or "").strip()
+    if not raw_text and tool_name == "navigate_page":
+        # navigate_page back/forward/reload carries no URL.
+        return arguments, None
+    scheme = urlparse(raw_text).scheme.lower()
+    if scheme in _BLOCKED_URL_SCHEMES or (scheme and "://" in raw_text and scheme not in {"http", "https"}):
+        return arguments, _blocked(
+            "url_scheme_not_allowed",
+            "Only http and https URLs can be opened in the browser.",
+            url=raw_text,
+            scheme=scheme,
+        )
+    browser_settings = getattr(controller_policy._load_runtime_settings(), "browser", None)
+    domains = [str(item) for item in (getattr(browser_settings, "allowed_domains", None) or [])]
+    normalized_url, policy_error = browser_url_policy(
+        SimpleNamespace(config={"allowed_domains": domains}), raw_text, action=tool_name,
+    )
+    if policy_error is not None:
+        details = {key: value for key, value in policy_error.items() if key not in {"status", "reason_code", "error"}}
+        return arguments, _blocked(
+            str(policy_error.get("reason_code") or "url_not_allowed"),
+            str(policy_error.get("error") or "URL is not allowed."),
+            **details,
+        )
+    return {**arguments, "url": normalized_url}, None
 
 
 def _pending_mcp_approval(
@@ -295,6 +397,9 @@ def _call_mcp_tool(manager, reflected_name: str, tool_name: str, arguments: dict
             },
             ensure_ascii=False,
         )
+    arguments, url_blocked = _url_guard(str(current.get("server_name") or ""), tool_name, arguments)
+    if url_blocked is not None:
+        return url_blocked
     return manager.call_tool_sync(tool_name, arguments)
 
 
@@ -368,6 +473,10 @@ def build_tool_entries(cfg: MCPServerConfig, manager, mcp_tools: list[Any]) -> l
             if effective.get("blocked"):
                 return json.dumps({"status": "blocked", "reason": effective["reason"],
                                    "reason_code": effective["reason_code"]})
+            # Don't ask the user to approve a URL that would be refused anyway.
+            _, url_blocked = _url_guard(cfg.name, _tool_name, arguments)
+            if url_blocked is not None:
+                return url_blocked
             if effective["requires_approval"]:
                 return _pending_mcp_approval(
                     reflected_name=_reflected_name,
@@ -388,8 +497,11 @@ def build_tool_entries(cfg: MCPServerConfig, manager, mcp_tools: list[Any]) -> l
                 "domain": "general",
                 "execution_mode": "sync_thread_affine",
                 "affinity_group": f"mcp:{cfg.name}",
+                "metadata": _tool_metadata(decision, annotations),
                 "mcp_bridge": {
                     "server_name": cfg.name,
+                    # Built-in servers count as part of the skill that ships them.
+                    "skill": BUILTIN_SERVER_SKILLS.get(cfg.name, ""),
                     "original_tool_name": tool_name,
                     "annotations": annotations_payload,
                     "approval": decision,

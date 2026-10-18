@@ -31,6 +31,7 @@ unauthenticated runtime endpoint.
 | `PATCH` | `/api/conversations/{conv_id}` | `agent:run` | `ConversationOut` |
 | `GET` | `/api/conversations/{conv_id}/context-usage` | `agent:run` | `ContextUsagePayload` |
 | `GET` | `/api/conversations/{conv_id}/messages` | `agent:run` | `MessagesResponse` |
+| `GET` | `/api/decision-model/status` | `agent:run` | `DecisionModelStatusPayload` |
 | `GET` | `/api/diagnostics/browser-use` | `diagnostics:read` | `BrowserUseDiagnosticsOut` |
 | `POST` | `/api/diagnostics/browser-use/reset` | `diagnostics:control` | `BrowserUseDiagnosticsOut` |
 | `GET` | `/api/diagnostics/mcp` | `diagnostics:read` | `list` |

@@ -49,8 +49,9 @@ from app.integrations.telegram.bridge import (
 from app.integrations.telegram.session import TelegramSessionStore, default_conversation_id
 
 
-def _workspace_tmp_dir(name: str) -> Path:
-    path = Path.cwd() / f".tmp-{name}-{uuid.uuid4().hex}"
+def _workspace_tmp_dir() -> Path:
+    # Short name: Windows rejects paths over 260 characters, and uploads nest a few levels deeper.
+    path = Path.cwd() / f".tmp-{uuid.uuid4().hex[:12]}"
     path.mkdir(parents=True, exist_ok=False)
     return path
 
@@ -65,7 +66,7 @@ def test_telegram_conversation_id_is_stable_and_valid():
 
 
 def test_telegram_session_store_persists_current_and_new_session():
-    tmp_dir = _workspace_tmp_dir("telegram-session-store")
+    tmp_dir = _workspace_tmp_dir()
     try:
         store = TelegramSessionStore(tmp_dir / "sessions.json")
 
@@ -86,7 +87,7 @@ def test_telegram_session_store_persists_current_and_new_session():
 
 
 def test_telegram_session_store_persists_model_selection():
-    tmp_dir = _workspace_tmp_dir("telegram-model-store")
+    tmp_dir = _workspace_tmp_dir()
     try:
         store = TelegramSessionStore(tmp_dir / "sessions.json")
 
@@ -109,7 +110,7 @@ def test_telegram_session_store_persists_model_selection():
 
 
 def test_telegram_session_store_persists_effort_selection():
-    tmp_dir = _workspace_tmp_dir("telegram-effort-store")
+    tmp_dir = _workspace_tmp_dir()
     try:
         store = TelegramSessionStore(tmp_dir / "sessions.json")
 
@@ -235,7 +236,7 @@ def test_simplify_telegram_text_removes_markdown_formatting():
 
 def test_telegram_agent_bridge_returns_simplified_reply_but_keeps_attachment_detection(monkeypatch):
     monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
-    tmp_dir = _workspace_tmp_dir("telegram-plain-reply")
+    tmp_dir = _workspace_tmp_dir()
     try:
         output_path = tmp_dir / "report.md"
         output_path.write_text("result", encoding="utf-8")
@@ -264,7 +265,7 @@ def test_telegram_agent_bridge_returns_simplified_reply_but_keeps_attachment_det
 
 def test_telegram_agent_bridge_reuses_chat_session(monkeypatch):
     monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
-    tmp_dir = _workspace_tmp_dir("telegram-agent-bridge")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
         output_path = tmp_dir / "output.txt"
@@ -308,7 +309,7 @@ def test_telegram_agent_bridge_reuses_chat_session(monkeypatch):
 
 
 def test_telegram_agent_bridge_passes_input_attachments_to_runner():
-    tmp_dir = _workspace_tmp_dir("telegram-input-attachments")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
         attachment = {
@@ -346,7 +347,7 @@ def test_telegram_agent_bridge_passes_input_attachments_to_runner():
 
 
 def test_telegram_bridge_sets_model_for_chat_runtime():
-    tmp_dir = _workspace_tmp_dir("telegram-model-bridge")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
 
@@ -395,7 +396,7 @@ def test_telegram_bridge_sets_model_for_chat_runtime():
 
 
 def test_telegram_bridge_lists_models_and_selects_by_number_or_name():
-    tmp_dir = _workspace_tmp_dir("telegram-model-list")
+    tmp_dir = _workspace_tmp_dir()
     try:
         store = TelegramSessionStore(tmp_dir / "sessions.json")
         bridge = TelegramAgentBridge(
@@ -446,7 +447,7 @@ def test_telegram_bridge_lists_models_and_selects_by_number_or_name():
 
 
 def test_telegram_bridge_sets_and_clears_reasoning_effort():
-    tmp_dir = _workspace_tmp_dir("telegram-effort-bridge")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
         base_settings = SimpleNamespace(
@@ -503,7 +504,7 @@ def test_telegram_bridge_sets_and_clears_reasoning_effort():
 
 
 def test_telegram_bridge_lists_and_resumes_by_chat_name():
-    tmp_dir = _workspace_tmp_dir("telegram-resume")
+    tmp_dir = _workspace_tmp_dir()
     try:
         conversations = [
             {"id": "conv-beta", "title": "Beta project"},
@@ -543,7 +544,7 @@ def test_telegram_bridge_lists_and_resumes_by_chat_name():
 
 
 def test_telegram_bridge_renames_current_session():
-    tmp_dir = _workspace_tmp_dir("telegram-rename")
+    tmp_dir = _workspace_tmp_dir()
     try:
         conversations = {}
         store = TelegramSessionStore(tmp_dir / "sessions.json")
@@ -824,7 +825,7 @@ def test_telegram_permission_callback_refuses_desktop_ticket(monkeypatch):
 
 def test_collect_response_attachments_from_tool_output(monkeypatch):
     monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
-    tmp_dir = _workspace_tmp_dir("telegram-attachments")
+    tmp_dir = _workspace_tmp_dir()
     try:
         image_path = tmp_dir / "result image.png"
         doc_path = tmp_dir / "report.pdf"
@@ -858,7 +859,7 @@ def test_collect_response_attachments_from_tool_output(monkeypatch):
 
 
 def test_send_response_attachments_falls_back_to_document_for_invalid_photo_dimensions():
-    tmp_dir = _workspace_tmp_dir("telegram-photo-fallback")
+    tmp_dir = _workspace_tmp_dir()
     try:
         image_path = tmp_dir / "wide.png"
         image_path.write_bytes(b"png")
@@ -893,7 +894,7 @@ def test_send_response_attachments_falls_back_to_document_for_invalid_photo_dime
 
 
 def test_prepare_telegram_message_input_downloads_photo_and_document(monkeypatch):
-    tmp_dir = _workspace_tmp_dir("telegram-input-download")
+    tmp_dir = _workspace_tmp_dir()
     try:
         class TelegramFile:
             def __init__(self, data: bytes):
@@ -962,7 +963,7 @@ def test_prepare_telegram_message_input_downloads_photo_and_document(monkeypatch
 
 
 def test_telegram_file_download_timeout_returns_clear_error(monkeypatch):
-    tmp_dir = _workspace_tmp_dir("telegram-download-timeout")
+    tmp_dir = _workspace_tmp_dir()
     try:
         class Bot:
             async def get_file(self, _file_id: str):
@@ -977,7 +978,7 @@ def test_telegram_file_download_timeout_returns_clear_error(monkeypatch):
 
 
 def test_prepare_telegram_message_input_transcribes_voice(monkeypatch):
-    tmp_dir = _workspace_tmp_dir("telegram-voice-input")
+    tmp_dir = _workspace_tmp_dir()
     try:
         class TelegramFile:
             async def download_to_drive(self, custom_path: str):
@@ -1021,7 +1022,7 @@ def test_prepare_telegram_message_input_transcribes_voice(monkeypatch):
 
 
 def test_telegram_voice_missing_model_returns_clear_message(monkeypatch):
-    tmp_dir = _workspace_tmp_dir("telegram-missing-voice-model")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
 
@@ -1060,7 +1061,7 @@ def test_telegram_voice_missing_model_returns_clear_message(monkeypatch):
 
 
 def test_telegram_voice_cloud_missing_key_returns_clear_message(monkeypatch):
-    tmp_dir = _workspace_tmp_dir("telegram-missing-cloud-stt-key")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
 
@@ -1099,7 +1100,7 @@ def test_telegram_voice_cloud_missing_key_returns_clear_message(monkeypatch):
 
 
 def test_telegram_handler_sends_failure_when_agent_run_raises(monkeypatch):
-    tmp_dir = _workspace_tmp_dir("telegram-agent-run-failure")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
 
@@ -1148,7 +1149,7 @@ def test_telegram_handler_sends_failure_when_agent_run_raises(monkeypatch):
 
 
 def test_telegram_handler_reports_delivery_failure(monkeypatch):
-    tmp_dir = _workspace_tmp_dir("telegram-delivery-failure")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
 
@@ -1204,7 +1205,7 @@ def test_telegram_handler_reports_delivery_failure(monkeypatch):
 
 
 def test_telegram_agent_bridge_rate_limits_per_user():
-    tmp_dir = _workspace_tmp_dir("telegram-rate-limit")
+    tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
 

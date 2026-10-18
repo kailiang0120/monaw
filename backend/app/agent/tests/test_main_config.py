@@ -4,7 +4,6 @@ import os
 import pytest
 
 from app.main import _split_csv_setting
-from app.skills.browser_use import manager as browser_manager_module
 from app import main as main_module
 from app.agent import scheduler as scheduler_module
 from app import startup_security
@@ -19,25 +18,14 @@ def test_split_csv_setting_drops_empty_cors_entries():
     ]
 
 
-def test_lifespan_does_not_prewarm_browser(monkeypatch):
+def test_lifespan_only_prepares_screenshots_folder(monkeypatch):
     runtime_calls: list[str] = []
-    browser_calls: list[str] = []
     scheduler_events: list[str] = []
 
-    monkeypatch.setattr(main_module, "ensure_browser_use_runtime_dirs", lambda: runtime_calls.append("dirs"))
+    monkeypatch.setattr(main_module, "configured_screenshots_dir", lambda: runtime_calls.append("dirs"))
     monkeypatch.setattr(main_module.settings, "telegram_bot_token", "")
     # Startup moves the secret out of os.environ; restore it for later tests.
     monkeypatch.setenv("MONAW_CONTROL_SECRET", os.environ["MONAW_CONTROL_SECRET"])
-
-    def fake_configure_browser_use_manager(_settings):
-        browser_calls.append("configure")
-        raise AssertionError("browser prewarm should not run during startup")
-
-    monkeypatch.setattr(
-        browser_manager_module,
-        "configure_browser_use_manager",
-        fake_configure_browser_use_manager,
-    )
 
     class FakeScheduledTaskService:
         def __init__(self, *, settings_factory):
@@ -58,7 +46,6 @@ def test_lifespan_does_not_prewarm_browser(monkeypatch):
     asyncio.run(run())
 
     assert runtime_calls == ["dirs"]
-    assert browser_calls == []
     assert scheduler_events == ["start", "stop"]
 
 

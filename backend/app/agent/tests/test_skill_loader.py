@@ -17,6 +17,20 @@ def _base_settings() -> SimpleNamespace:
     )
 
 
+BUILTIN_SKILLS = {
+    "browser-use",
+    "computer-use",
+    "core",
+    "exec",
+    "filesystem",
+    "mcp-bridge",
+    "memory",
+    "scheduling",
+    "skill-creator",
+    "web-search",
+}
+
+
 def test_load_tools_returns_enabled_skills_only():
     settings_data = AgentSettings()
     runtime_settings = build_runtime_namespace(_base_settings(), settings_data)
@@ -28,7 +42,8 @@ def test_load_tools_returns_enabled_skills_only():
     assert "core" in names
     assert "exec" in names
     assert "mcp-bridge" in names
-    assert "skill-creator" not in names
+    # Every built-in skill is always on now, including the formerly optional ones.
+    assert {"scheduling", "skill-creator", "browser-use", "computer-use"} <= names
     assert "exec" in tool_names
     assert "memory" in names
     assert "calculator" in tool_names
@@ -46,15 +61,17 @@ def test_load_tools_returns_enabled_skills_only():
     assert "precision_click" not in tool_names
 
 
-def test_load_tools_omits_mcp_feature_when_disabled():
+def test_mcp_switch_keeps_the_bridge_for_builtin_servers():
     settings_data = AgentSettings()
     settings_data.mcp.enabled = False
     runtime_settings = build_runtime_namespace(_base_settings(), settings_data)
 
-    _skills, registry = load_tools(runtime_settings)
+    skills, registry = load_tools(runtime_settings)
     tool_names = {tool["name"] for tool in registry.get_all_tools()}
 
-    assert "mcp_status" not in tool_names
+    # The switch only stops the user's own servers; built-in ones still need the bridge.
+    assert "mcp-bridge" in {skill.name for skill in skills}
+    assert "mcp_status" in tool_names
 
 
 def test_available_skill_payload_omits_removed_email_skill():
@@ -68,53 +85,32 @@ def test_available_skill_payload_omits_removed_email_skill():
     assert next(item for item in payload if item["name"] == "mcp-bridge")["hidden"] is True
     browser = next(item for item in payload if item["name"] == "browser-use")
     assert browser["display_name"] == "Browser automation"
-    assert browser["summary"] == "Browse, inspect, and interact with websites using managed or system Chrome."
+    assert browser["summary"] == "Browse, inspect, and interact with websites using your own Chrome profile."
     assert browser["load_error"] == ""
 
 
-def test_available_skill_payload_keeps_recommended_skills():
+def test_available_skill_payload_hides_every_builtin_skill():
     settings_data = AgentSettings()
     runtime_settings = build_runtime_namespace(_base_settings(), settings_data)
 
     payload = available_skill_payload(runtime_settings)
-    recommended = {item["name"] for item in payload if item["tier"] == "recommended"}
 
-    assert recommended == {
-        "browser-use",
-        "computer-use",
-        "web-search",
-    }
-    assert {item["name"] for item in payload if not item["hidden"]} == {
-        "browser-use",
-        "computer-use",
-        "scheduling",
-        "skill-creator",
-        "web-search",
-    }
-    assert {item["name"] for item in payload if item["hidden"]} >= {
-        "core",
-        "exec",
-        "filesystem",
-        "memory",
-        "mcp-bridge",
-    }
+    # Settings only lists skills the user added; Monaw ships none of those.
+    assert {item["name"] for item in payload if not item["hidden"]} == set()
+    assert {item["name"] for item in payload if item["hidden"]} >= BUILTIN_SKILLS
+    assert all(item["always"] for item in payload if item["name"] in BUILTIN_SKILLS)
 
 
 def test_internal_skills_are_always_enabled_but_hidden_from_settings_payload():
     settings_data = AgentSettings()
-    settings_data.tools.skills.update({
-        "core": False,
-        "exec": False,
-        "filesystem": False,
-        "memory": False,
-        "mcp-bridge": False,
-    })
+    settings_data.tools.skills.update({name: False for name in BUILTIN_SKILLS})
     runtime_settings = build_runtime_namespace(_base_settings(), settings_data)
 
     skills, registry = load_tools(runtime_settings)
     internal = {skill.name: skill for skill in skills if skill.tier == "internal"}
 
-    assert set(internal) == {"core", "exec", "filesystem", "memory", "mcp-bridge"}
+    # web-search also needs a Tavily key, which these settings leave blank.
+    assert set(internal) == BUILTIN_SKILLS - {"web-search"}
     assert all(skill.always and skill.enabled for skill in internal.values())
     assert registry.get_tool("exec") is not None
     assert registry.get_tool("mcp_status") is not None

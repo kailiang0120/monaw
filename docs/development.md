@@ -9,7 +9,7 @@ This document is for contributors and maintainers. The root README is for end us
 - Python environment and dependencies: `uv`, `pyproject.toml`, and `uv.lock`.
 - LLM providers: OpenAI SDK with API key, Codex SDK with ChatGPT account sign-in, and Google GenAI SDK.
 - Storage: SQLite plus local markdown memory files.
-- Automation: `browser-use`, MCP, and Windows desktop automation packages.
+- Automation: Chrome DevTools MCP (`chrome-devtools-mcp`, run through `npx`), Scrapling for `browser_fetch`, MCP, and Windows desktop automation packages.
 
 ## Development Commands
 
@@ -131,7 +131,7 @@ Runtime layout:
 ```text
 %USERPROFILE%\.monaw\runtime\        settings.json, agent.db, backend.log, Electron store
 %USERPROFILE%\.monaw\workspace\      default workdir for agent shell commands
-%USERPROFILE%\.monaw\browser\        managed browser data and artifacts
+%USERPROFILE%\.monaw\browser\        browser artifacts
 %USERPROFILE%\.monaw\memory\         long-term memory markdown files
 ```
 
@@ -184,7 +184,7 @@ docs/telegram.md                       Telegram bridge setup and operations
 Current built-in skills:
 
 ```text
-browser_use       Browser automation
+browser_use       Browser automation (Chrome DevTools MCP + browser_fetch)
 computer_use      Windows desktop observation and control helpers
 core              Core utilities (internal)
 exec              Command execution (internal)
@@ -274,13 +274,11 @@ Each section is editable through the Settings UI and memory API. The legacy `sty
 
 ## Browser Automation
 
-Browser settings and diagnostics live in Settings -> Browser.
-
-For direct control of the user's running Chrome, use **Connect to my Chrome** in Settings -> Browser. Chrome 144 or later must have remote debugging enabled at `chrome://inspect/#remote-debugging`, and the user must approve Chrome's connection prompt. The MCP templates in Settings -> Tools -> MCP also support manual setup.
+Browser settings and status live in Settings -> Browser. Monaw drives the user's own Chrome through the built-in Chrome DevTools MCP server (`backend/app/skills/mcp_bridge/builtin.py`). `backend/app/skills/browser_use/chrome_launch.py` finds Chrome, prepares the profile, and launches it on the first DevTools call; `chrome_approval.py` clicks Chrome's native Allow prompt on Windows; `url_policy.py` holds the URL allow-list and SSRF checks shared by DevTools navigation and `browser_fetch` (`tools.py`). Chrome 144 or later is required. See [browser-automation.md](browser-automation.md).
 
 ## MCP
 
-MCP servers are configured in Settings -> Tools -> MCP. The app supports filesystem, Chrome DevTools, and custom stdio or streamable HTTP server entries.
+MCP servers are configured in Settings -> Tools -> MCP. The app supports custom stdio and streamable HTTP server entries. Chrome DevTools ships built into the browser automation skill (`backend/app/skills/mcp_bridge/builtin.py`) and is not configured here.
 
 Diagnostics in the same panel show server connection state, reflected tools, process state, and startup errors.
 

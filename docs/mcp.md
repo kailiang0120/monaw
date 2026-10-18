@@ -4,7 +4,7 @@ Monaw includes an MCP bridge that connects configured MCP servers and exposes th
 
 ## What MCP Adds
 
-MCP lets Monaw use external tools from local or remote servers. Typical examples are filesystem servers, Chrome DevTools servers, database tools, or custom internal tools.
+MCP lets Monaw use external tools from local or remote servers. Typical examples are database tools or custom internal tools. Chrome DevTools is already built into the browser automation skill (see [browser-automation.md](browser-automation.md)), so you do not add it here.
 
 The bridge has two parts:
 
@@ -17,7 +17,7 @@ The bridge has two parts:
 
 Open Settings -> Tools -> MCP.
 
-The template menu offers Chrome DevTools, custom stdio, and Streamable HTTP connections. File tools are built in, so Filesystem is not offered as a template. Existing filesystem MCP connections remain editable.
+The template menu offers custom stdio and Streamable HTTP connections. File tools are built in, so Filesystem is not offered as a template. Existing filesystem MCP connections remain editable.
 
 MCP server configuration is saved in runtime settings under `%USERPROFILE%\.monaw\runtime\settings.json`.
 

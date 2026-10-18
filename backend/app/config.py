@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     google_api_key: str = ""
     tavily_api_key: str = ""
+    laya_api_key: str = ""
     model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: str = "medium"
     port: int = 8435

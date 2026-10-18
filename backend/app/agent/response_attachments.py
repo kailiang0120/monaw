@@ -594,6 +594,19 @@ def _is_invalid_generated_screenshot(
     )
 
 
+def screenshot_dimension_problem(width: int, height: int) -> str:
+    """Return a reason code when a screenshot is too small or too large to preview, else ""."""
+    if width < MIN_SCREENSHOT_PREVIEW_DIMENSION_PX or height < MIN_SCREENSHOT_PREVIEW_DIMENSION_PX:
+        return "screenshot_too_small"
+    if (
+        width > MAX_GENERATED_SCREENSHOT_DIMENSION_PX
+        or height > MAX_GENERATED_SCREENSHOT_DIMENSION_PX
+        or width * height > MAX_GENERATED_SCREENSHOT_PIXELS
+    ):
+        return "screenshot_too_large"
+    return ""
+
+
 def get_image_dimensions(path: str | Path) -> tuple[int, int] | None:
     try:
         data = Path(path).read_bytes()

@@ -26,17 +26,19 @@ export async function fetchMCPDiagnostics(signal?: AbortSignal): Promise<MCPServ
   return res.json()
 }
 
-export async function fetchBrowserUseDiagnostics(signal?: AbortSignal): Promise<BrowserUseDiagnostics> {
+/** Chrome discovery, profiles, and the built-in Chrome DevTools connection. */
+export async function fetchBrowserDiagnostics(signal?: AbortSignal): Promise<BrowserUseDiagnostics> {
   const res = await apiFetch(`${BASE}/api/diagnostics/browser-use`, { signal })
-  if (!res.ok) throw new Error('Failed to fetch browser-use diagnostics')
+  if (!res.ok) throw new Error('Failed to fetch browser status')
   return res.json()
 }
 
-export async function resetBrowserUseSession(): Promise<BrowserUseDiagnostics> {
+/** Restart the built-in Chrome DevTools server. The user's Chrome stays open. */
+export async function reconnectBrowser(): Promise<BrowserUseDiagnostics> {
   const res = await apiFetch(`${BASE}/api/diagnostics/browser-use/reset`, {
     method: 'POST',
   })
-  if (!res.ok) throw new Error('Failed to reset browser-use session')
+  if (!res.ok) throw new Error('Failed to reconnect the browser')
   return res.json()
 }
 

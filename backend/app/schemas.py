@@ -252,21 +252,7 @@ class MCPSettingsPayload(BaseModel):
 
 
 class BrowserUseSettingsPayload(BaseModel):
-    mode: str = Field("auto", pattern="^(auto|managed|system)$")
-    enable_system_fallback: bool = True
-    headless: bool = False
-    keep_alive: bool = True
-    dom_inspection_engine: str = Field("auto", pattern="^(auto|enhanced|legacy)$")
-    paint_order_filtering: bool = True
-    cross_origin_iframes: bool = False
-    max_iframes: int = Field(5, ge=0, le=20)
-    max_iframe_depth: int = Field(2, ge=0, le=5)
-    system_connection_strategy: str = Field("auto", pattern="^(auto|attach|launch)$")
-    system_cdp_url: str = "http://127.0.0.1:9222"
-    managed_profile_dir: str = ""
-    downloads_dir: str = ""
     screenshots_dir: str = ""
-    traces_dir: str = ""
     system_profile_directory: str = ""
     auto_approve_local_debugging: bool = True
     allowed_domains: list[str] = Field(default_factory=list)
@@ -367,6 +353,20 @@ class IdentitySettingsPayload(BaseModel):
     communication_style: str = Field("", max_length=1000)
 
 
+class DecisionModelSettingsPayload(BaseModel):
+    enabled: bool = True
+    managed: bool = True
+    provider: str = Field("laya", pattern="^laya$")
+    mode: str = Field("shadow", pattern="^shadow$")
+    endpoint: str = Field("http://127.0.0.1:8421", max_length=500)
+    model: str = Field("", max_length=200)
+    timeout_ms: int = Field(3000, ge=100, le=30000)
+    coverage: float = Field(0.9, ge=0.5, le=1.0)
+    max_domains: int = Field(4, ge=1, le=32)
+    min_confidence: float = Field(0.4, ge=0.0, le=1.0)
+    pinned_domains: list[str] = Field(default_factory=lambda: ["core", "memory", "tool-search"])
+
+
 class ApiKeyStatusPayload(BaseModel):
     has_openai_key: bool
     has_google_key: bool
@@ -386,6 +386,7 @@ class AgentSettingsPayload(BaseModel):
     permissions: PermissionSettingsPayload
     sandbox: SandboxSettingsPayload
     identity: IdentitySettingsPayload
+    decision_model: DecisionModelSettingsPayload = Field(default_factory=DecisionModelSettingsPayload)
     settings_version: str = ""
     available_skills: list[SkillDescriptorPayload] = Field(default_factory=list)
     api_keys: ApiKeyStatusPayload | None = None
@@ -406,6 +407,21 @@ class ModelOptionsPayload(BaseModel):
 class WorkspaceInstructionsPayload(BaseModel):
     path: str
     content: str
+
+
+class DecisionModelStatusPayload(BaseModel):
+    state: str = Field(..., pattern="^(off|not_installed|starting|ready|unreachable|error)$")
+    enabled: bool
+    managed: bool
+    endpoint: str
+    installed: bool
+    error: str = ""
+    decisions_24h: int = 0
+    scored_24h: int = 0
+    covered_24h: int = 0
+    last_decision_at: str | None = None
+    last_status: str = ""
+    last_top_domain: str = ""
 
 
 class SpeechToTextStatusPayload(BaseModel):
@@ -442,6 +458,7 @@ class SettingsUpdate(BaseModel):
     permissions: Optional[PermissionSettingsPayload] = None
     sandbox: Optional[SandboxSettingsPayload] = None
     identity: Optional[IdentitySettingsPayload] = None
+    decision_model: Optional[DecisionModelSettingsPayload] = None
     model_provider: Optional[str] = Field(None, pattern="^(openai|gemini|codex)$")
     openai_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
@@ -530,10 +547,9 @@ class DiagnosticsMcpSummaryPayload(BaseModel):
 
 
 class DiagnosticsBrowserSummaryPayload(BaseModel):
-    available: bool
-    session_active: bool
-    preferred_mode: str
-    current_mode: str
+    chrome_found: bool
+    devtools_state: str
+    devtools_connected: bool
     last_error: str
 
 
@@ -774,39 +790,34 @@ class BrowserUseProfileOut(BaseModel):
     directory: str
 
 
-class BrowserUsePageOut(BaseModel):
-    target_id: str
-    url: str
-    title: str
+class BrowserDevToolsStatusOut(BaseModel):
+    """State of the built-in chrome-devtools MCP server that drives the browser."""
+
+    server: str
+    # False until the server has been started (it starts with the backend).
+    running: bool = False
+    connected: bool = False
+    state: str = "stopped"
+    startup_phase: str = ""
+    tool_count: int = 0
+    last_error: str = ""
+    unhealthy_reason: str = ""
+    connected_at: str | None = None
 
 
 class BrowserUseDiagnosticsOut(BaseModel):
-    available: bool
     skill_enabled: bool
     skill_available: bool
-    skill_unavailable_reason: str
-    session_active: bool
-    preferred_mode: str
-    current_mode: str = ""
-    current_system_connection: str = ""
-    fallback_enabled: bool = True
-    dom_inspection_engine: str = "auto"
-    paint_order_filtering: bool = True
-    cross_origin_iframes: bool = False
-    max_iframes: int = 5
-    max_iframe_depth: int = 2
-    last_error: str = ""
-    system_connection_strategy: str = "auto"
-    system_cdp_url: str = ""
-    managed_profile_dir: str = ""
-    downloads_dir: str = ""
-    screenshots_dir: str = ""
-    traces_dir: str = ""
-    system_profile_directory: str = ""
+    skill_unavailable_reason: str = ""
+    chrome_found: bool
+    # Always "": local paths are not returned by diagnostics.
     chrome_executable: str = ""
     available_system_profiles: list[BrowserUseProfileOut] = Field(default_factory=list)
-    current_page: BrowserUsePageOut | None = None
-    tab_count: int = 0
+    # Configured profile ("" = Chrome's last-used profile, shown as default_profile_directory).
+    system_profile_directory: str = ""
+    default_profile_directory: str = ""
+    devtools: BrowserDevToolsStatusOut
+    last_error: str = ""
 
 
 class ObservabilityUsageOut(BaseModel):

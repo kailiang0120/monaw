@@ -39,27 +39,10 @@ _NEVER_PARALLEL = {
     "rename",
     "delete",
     "computer_functions_get_window_state",
-    "browser_session",
-    "browser_close_chrome",
-    "browser_open",
-    "browser_navigate",
-    "browser_back",
-    "browser_forward",
-    "browser_reload",
-    "browser_tabs",
-    "browser_snapshot",
-    "browser_click",
-    "browser_type",
-    "browser_press",
-    "browser_select_option",
-    "browser_scroll",
-    "browser_wait",
-    "browser_screenshot",
-    "browser_full_page_screenshot",
-    "browser_evaluate",
 }
 _PARALLEL_SAFE = {
     "web_search",
+    "browser_fetch",
     "calculator",
     "datetime",
     "memory_search",
@@ -106,12 +89,12 @@ def _tool_metadata(name: str, tool_lookup=None) -> dict:
 def _tool_is_parallel_safe(name: str, metadata: dict, *, default: bool = False) -> bool:
     """Return whether a tool may share an invocation batch with another tool.
 
-    Browser tools and thread-affine tools retain their serial semantics even when
+    Never-parallel and thread-affine tools retain their serial semantics even when
     a dynamically loaded descriptor accidentally marks them as read-only.  An
     unknown tool is also kept behind a serial barrier until its descriptor can
     be inspected by the normal dispatch/policy path.
     """
-    if name in _NEVER_PARALLEL or name.startswith("browser_"):
+    if name in _NEVER_PARALLEL:
         return False
     if metadata.get("unknown") or metadata.get("mutates_state") is True:
         return False

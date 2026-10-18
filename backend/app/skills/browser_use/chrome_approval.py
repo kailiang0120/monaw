@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlparse
 
 logger = logging.getLogger("uvicorn.error.chrome_approval")
@@ -26,8 +27,7 @@ def _endpoint_chrome_pid(endpoint: str) -> int:
             or not parsed.path.startswith("/devtools/browser/")
             or parsed.query or parsed.fragment or parsed.username or parsed.password):
         return 0
-    from browser_use.skill_cli.utils import find_chrome_executable
-    from pathlib import Path
+    from .chrome_launch import find_chrome_executable
 
     executable = find_chrome_executable()
     if not executable:

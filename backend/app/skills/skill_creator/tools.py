@@ -125,7 +125,7 @@ def _enable_skill(skill_name: str, enabled: bool) -> None:
 def _reload_runtime() -> None:
     from app.agent.runtime import reset_runtime_cache
 
-    reset_runtime_cache(reset_mcp=False, reset_browser=False)
+    reset_runtime_cache(reset_mcp=False)
 
 
 def _content_hash(files: dict[str, str]) -> str:

@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import re
 from pathlib import Path
@@ -13,11 +14,12 @@ from app.agent.skill_loader import available_skill_payload
 from app.config import settings
 from app.agent.observability.recorder import redact
 from app.schemas import BrowserUseDiagnosticsOut, DiagnosticsSummaryPayload, MCPServerDiagnosticsOut
-from app.skills.browser_use.manager import (
-    ensure_browser_use_runtime_dirs,
-    get_browser_use_diagnostics,
-    reset_browser_use_runtime,
+from app.skills.browser_use.chrome_launch import (
+    find_chrome_executable,
+    last_used_chrome_profile,
+    list_local_chrome_profiles,
 )
+from app.skills.mcp_bridge.builtin import CHROME_DEVTOOLS_SERVER, is_builtin_server
 from app.skills.mcp_bridge.connection import get_mcp_runtime_diagnostics, reconnect_mcp_server
 
 router = APIRouter()
@@ -96,31 +98,56 @@ def _redact_mcp_args(values: object) -> list[str]:
     return output
 
 
-def _safe_browser_diagnostics(diagnostics: dict) -> dict:
-    safe = redact(diagnostics)
-    # "session" is a secret-key pattern, but this field is a public boolean.
-    safe["session_active"] = diagnostics.get("session_active") is True
-    for key in (
-        "system_cdp_url",
-        "managed_profile_dir",
-        "downloads_dir",
-        "screenshots_dir",
-        "traces_dir",
-        "system_profile_directory",
-        "chrome_executable",
-    ):
-        safe[key] = ""
-    profiles = safe.get("available_system_profiles")
-    if isinstance(profiles, list):
-        for profile in profiles:
-            if isinstance(profile, dict):
-                # This is a profile identifier (Default / Profile N), not a path.
-                directory = str(profile.get("directory") or "")
-                if directory not in {"Default", "Guest Profile"} and not (
-                    directory.startswith("Profile ") and directory.removeprefix("Profile ").isdigit()
-                ):
-                    profile["directory"] = ""
-    return safe
+def _safe_profile_directory(value: object) -> str:
+    """Keep Chrome profile identifiers (Default / Profile N), never anything path-like."""
+    directory = str(value or "").strip()
+    if directory in {"Default", "Guest Profile"}:
+        return directory
+    if directory.startswith("Profile ") and directory.removeprefix("Profile ").isdigit():
+        return directory
+    return ""
+
+
+def _devtools_status() -> dict:
+    entry = next(
+        (item for item in get_mcp_runtime_diagnostics() if item.get("name") == CHROME_DEVTOOLS_SERVER),
+        None,
+    )
+    if entry is None:
+        return {"server": CHROME_DEVTOOLS_SERVER, "running": False, "connected": False, "state": "stopped"}
+    return {
+        "server": CHROME_DEVTOOLS_SERVER,
+        "running": True,
+        "connected": bool(entry.get("connected")),
+        "state": str(entry.get("state") or ""),
+        "startup_phase": str(entry.get("startup_phase") or ""),
+        "tool_count": int(entry.get("tool_count") or 0),
+        "last_error": str(redact(entry.get("last_error") or "")),
+        "unhealthy_reason": str(redact(entry.get("unhealthy_reason") or "")),
+        "connected_at": entry.get("connected_at"),
+    }
+
+
+def _browser_status(runtime_settings, runtime_namespace) -> dict:
+    available_skills = {item["name"]: item for item in available_skill_payload(runtime_namespace)}
+    browser_skill = available_skills.get("browser-use", {})
+    profiles = [
+        {"name": str(profile.get("name") or ""), "directory": _safe_profile_directory(profile.get("directory"))}
+        for profile in list_local_chrome_profiles()
+    ]
+    devtools = _devtools_status()
+    return {
+        "skill_enabled": bool(runtime_settings.tools.skills.get("browser-use", False)),
+        "skill_available": bool(browser_skill.get("available", False)),
+        "skill_unavailable_reason": str(browser_skill.get("unavailable_reason", "") or ""),
+        "chrome_found": bool(find_chrome_executable()),
+        "chrome_executable": "",
+        "available_system_profiles": [profile for profile in profiles if profile["directory"]],
+        "system_profile_directory": _safe_profile_directory(runtime_settings.browser.system_profile_directory),
+        "default_profile_directory": _safe_profile_directory(last_used_chrome_profile()),
+        "devtools": devtools,
+        "last_error": devtools.get("last_error", "") or devtools.get("unhealthy_reason", ""),
+    }
 
 
 @router.get("/diagnostics/summary", response_model=DiagnosticsSummaryPayload)
@@ -146,7 +173,7 @@ async def get_diagnostics_summary(request: Request):
 
     mcp_diagnostics = get_mcp_runtime_diagnostics()
     mcp_startup = dict(getattr(request.app.state, "mcp_status", {}) or {})
-    browser_diagnostics = await get_browser_use_diagnostics(runtime_namespace)
+    browser_status = await asyncio.to_thread(_browser_status, runtime_settings, runtime_namespace)
     sandbox_status = get_sandbox_status(runtime_settings.sandbox)
     db_path = RUNTIME_DIR / "agent.db"
 
@@ -170,11 +197,10 @@ async def get_diagnostics_summary(request: Request):
             "startup_error": str(mcp_startup.get("startup_error", "") or ""),
         },
         "browser": {
-            "available": bool(browser_diagnostics.get("available")),
-            "session_active": bool(browser_diagnostics.get("session_active")),
-            "preferred_mode": browser_diagnostics.get("preferred_mode", ""),
-            "current_mode": browser_diagnostics.get("current_mode", ""),
-            "last_error": browser_diagnostics.get("last_error", ""),
+            "chrome_found": browser_status["chrome_found"],
+            "devtools_state": browser_status["devtools"]["state"],
+            "devtools_connected": browser_status["devtools"]["connected"],
+            "last_error": browser_status["last_error"],
         },
         "sandbox": sandbox_status,
     }
@@ -186,9 +212,11 @@ async def get_mcp_diagnostics():
     feature_enabled = bool(runtime_settings.mcp.enabled)
     feature_available = importlib.util.find_spec("mcp") is not None
     feature_unavailable_reason = "" if feature_available else "missing_backend_dependency"
+    # Built-in servers belong to their skill, not to the user's MCP list.
     diagnostics = {
         item["name"]: dict(item)
         for item in get_mcp_runtime_diagnostics()
+        if not is_builtin_server(item["name"])
     }
 
     payload: list[dict] = []
@@ -277,23 +305,15 @@ async def reconnect_mcp(name: str):
 
 
 @router.get("/diagnostics/browser-use", response_model=BrowserUseDiagnosticsOut)
-async def get_browser_use_status():
-    ensure_browser_use_runtime_dirs()
+async def get_browser_status():
+    """Chrome discovery, profiles, and the built-in Chrome DevTools connection."""
     runtime_settings = load_agent_settings(settings)
     runtime_namespace = build_runtime_namespace(settings, runtime_settings)
-    available_skills = {
-        item["name"]: item
-        for item in available_skill_payload(runtime_namespace)
-    }
-    browser_skill = available_skills.get("browser-use", {})
-    diagnostics = await get_browser_use_diagnostics(runtime_namespace)
-    diagnostics["skill_enabled"] = bool(runtime_settings.tools.skills.get("browser-use", False))
-    diagnostics["skill_available"] = bool(browser_skill.get("available", False))
-    diagnostics["skill_unavailable_reason"] = str(browser_skill.get("unavailable_reason", "") or "")
-    return _safe_browser_diagnostics(diagnostics)
+    return await asyncio.to_thread(_browser_status, runtime_settings, runtime_namespace)
 
 
 @router.post("/diagnostics/browser-use/reset", response_model=BrowserUseDiagnosticsOut)
-async def reset_browser_use_status():
-    await reset_browser_use_runtime(clear_managed_session=True)
-    return await get_browser_use_status()
+async def reconnect_browser_devtools():
+    """Reconnect the built-in chrome-devtools server. The user's Chrome stays open."""
+    await asyncio.to_thread(reconnect_mcp_server, CHROME_DEVTOOLS_SERVER)
+    return await get_browser_status()

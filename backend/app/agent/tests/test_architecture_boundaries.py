@@ -79,7 +79,7 @@ def test_browser_url_policy_is_separate_from_browser_execution(monkeypatch):
     assert fetch_domain_allowed("https://docs.example.com/page", ["example.com"])
     assert not fetch_domain_allowed("https://evil.test/page", ["example.com"])
 
-    _url, policy_error = browser_url_policy(Manager(), "https://evil.test", action="browser_open")
+    _url, policy_error = browser_url_policy(Manager(), "https://evil.test", action="navigate_page")
     assert policy_error is not None
     assert policy_error["reason_code"] == "domain_not_allowed"
 

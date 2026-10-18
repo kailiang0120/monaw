@@ -17,9 +17,9 @@ export interface SettingsPageCopy {
 
 export const PAGE_COPY = {
   model: {
-    label: 'Voice',
-    blurb: 'Configure voice input.',
-    keywords: 'speech voice whisper transcription',
+    label: 'Local models',
+    blurb: 'Configure voice input and the Laya tool-selection model.',
+    keywords: 'speech voice whisper transcription laya decision tool selection shadow',
   },
   apiKeys: {
     label: 'Connections',
@@ -38,13 +38,13 @@ export const PAGE_COPY = {
   },
   tools: {
     label: 'Tools',
-    blurb: 'Manage skills, MCP connections, and plugins in one place.',
+    blurb: 'Add your own skills, MCP connections, and plugins. Built-in tools are always on.',
     keywords: 'skills capabilities tools browser computer use memory scheduling web search mcp model context protocol stdio http server integration plugins extensions',
   },
   browser: {
     label: 'Browser',
-    blurb: 'Choose which browser the agent drives and where it saves screenshots and downloads.',
-    keywords: 'chrome chromium headless cdp profile downloads screenshots automation domains',
+    blurb: 'Choose the Chrome profile the agent drives, which sites it may open, and where it saves screenshots.',
+    keywords: 'chrome devtools profile connection allow prompt screenshots automation domains reconnect',
   },
   observability: {
     label: 'Activity log',
@@ -73,6 +73,8 @@ export const MODEL_COPY = {
   reasoningEffort: 'How long the model is allowed to think before it answers. Higher settings give better results on hard problems but are slower and cost more.',
   vision: 'Screenshots and image attachments go straight to the model you picked above, which reads them natively. No separate vision model is needed.',
   speechEngine: 'Local needs a one-time download. Cloud sends audio to Google and requires an API key.',
+  decisionModel: 'A small model on this computer guesses which skills each request needs. Its guesses are only logged next to the tools the agent actually used. It never changes what the agent can do.',
+  decisionModelToggle: 'Changes apply when you save, without restarting Monaw.',
   speechLocalIntro: 'Voice input needs the Whisper model downloaded once (about 142 MB). It then runs entirely on this machine.',
   runtimeLimits: 'Safety brakes for a single request. If the agent gets stuck in a loop, these stop it instead of letting it run forever.',
   maxIterations: 'How many tool calls the agent may make while answering one message.',
@@ -94,40 +96,23 @@ export const IDENTITY_COPY = {
 /* ----------------------------------------------------------------- skills --- */
 
 export const SKILLS_COPY = {
-  intro: 'Recommended skills are enabled by default. Keep these settings as they are, or customize what the agent can use.',
+  intro: 'Built-in skills such as browser use, computer use, web search and scheduling are always on, so they are not listed here.',
+  title: 'Your skills',
+  empty: 'No skills added yet. Ask Monaw to create one, and it will appear here.',
   unavailable: 'This skill cannot be turned on until the missing backend dependency is installed.',
 } as const
 
 /* ---------------------------------------------------------------- browser --- */
 
 export const BROWSER_COPY = {
-  modeLabels: {
-    auto: 'Separate profile with fallback',
-    managed: 'Separate Chrome profile',
-    system: 'My Chrome profile',
-  },
-  modeHelp: {
-    auto: 'Starts a separate Chrome profile; falls back to your Chrome if launch fails.',
-    managed: 'Uses a separate profile with its own logins and tabs.',
-    system: 'Uses your Chrome profile, with your saved logins and tabs.',
-  },
-  systemConnection: 'Launch your Chrome profile or connect to an explicit debugging endpoint.',
-  cdpUrl: 'Address of Chrome’s remote debugging connection.',
-  chromeProfile: 'The profile Monaw opens when launching your Chrome.',
-  allowedDomains: 'Leave empty to allow all sites.',
-  systemFallback: 'If the managed browser fails to start, fall back to your own Chrome instead of giving up.',
-  headless: 'Run the browser invisibly. Faster, but you cannot watch what the agent is doing.',
-  keepAlive: 'Leave the browser open between requests so logins and tabs survive. Turn off to start clean every time.',
-  advanced: 'These affect how the agent reads a page. The defaults are right for almost everyone — change them only if pages are being misread.',
-  domEngine: 'Automatic uses enhanced page inspection when available.',
-  paintOrder: 'Ignore elements that are visually covered by something else, so the agent does not click hidden buttons.',
-  crossOrigin: 'Includes embedded payment and sign-in widgets from other sites.',
-  maxIframes: 'How many embedded frames to read per page. Higher is slower.',
-  frameDepth: 'How deep to follow frames nested inside other frames.',
-  outputWorkspace: 'Where files the agent produces end up, so you can find them in Explorer.',
-  managedProfile: 'Internal storage for the managed browser. Read-only.',
-  traces: 'Internal recordings of browser sessions, used for diagnostics. Read-only.',
-  resetSession: 'Close the current browser session and start fresh. Use this if the browser is stuck.',
+  usesYourProfile:
+    'Monaw drives your own Chrome profile, with your saved logins and tabs, through Chrome DevTools. It opens Chrome when a browser tool first needs it.',
+  chromeProfile: 'The profile Monaw opens when it launches your Chrome.',
+  autoApprove: 'On Windows, clicks Allow on Chrome’s “Allow remote debugging?” prompt while Monaw connects.',
+  allowedDomains: 'Leave empty to allow all sites. Applies to pages the browser opens and to page fetches.',
+  screenshots: 'Where browser screenshots are saved. Your Chrome profile stays in Chrome’s own folder.',
+  chromeMissing: 'Google Chrome was not found. Install Chrome (version 144 or later) to use browser automation.',
+  reconnect: 'Restart Monaw’s connection to Chrome. Your Chrome and its tabs stay open.',
 } as const
 
 /* -------------------------------------------------------------------- mcp --- */

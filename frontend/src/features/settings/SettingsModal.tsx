@@ -60,9 +60,9 @@ import {
   type SettingsPageId,
 } from './settingsCopy'
 import {
-  fetchBrowserUseDiagnostics,
+  fetchBrowserDiagnostics,
   fetchMCPDiagnostics,
-  resetBrowserUseSession,
+  reconnectBrowser,
   reconnectMCPServer,
 } from '../../lib/api/diagnostics'
 import {
@@ -70,6 +70,7 @@ import {
   downloadSpeechToTextModel,
   fetchModelOptions,
   fetchOpenAIAccountStatus,
+  fetchDecisionModelStatus,
   fetchSettings,
   fetchSandboxStatus,
   fetchSpeechToTextStatus,
@@ -88,6 +89,7 @@ import { DEFAULT_AGENT_NAME } from '../../lib/identity'
 import type {
   AgentSettings,
   BrowserUseDiagnostics,
+  DecisionModelStatus,
   MCPServerDiagnostics,
   SandboxStatus,
   SpeechToTextStatus,
@@ -95,7 +97,6 @@ import type {
 import {
   MCP_SERVER_TEMPLATES,
   PERMISSION_PROFILES,
-  SKILL_GROUP_COPY,
   applyPermissionProfile,
   duplicateMcpServerNames,
   FALLBACK_MODEL_OPTIONS,
@@ -167,6 +168,7 @@ function draftSignature(
     permissions: draft.permissions,
     sandbox: draft.sandbox,
     identity: draft.identity,
+    decision_model: draft.decision_model,
     telegramUserIds: telegramUserIds.trim(),
     telegramChatIds: telegramChatIds.trim(),
   })
@@ -183,6 +185,41 @@ function accountUsageWindowLabel(minutes: number | null, window: 'primary' | 'se
 function accountResetTime(timestamp: number | null): string {
   if (!timestamp || !Number.isFinite(timestamp)) return 'Reset time unavailable'
   return `Resets ${new Date(timestamp * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
+}
+
+const DECISION_MODEL_BADGES: Record<DecisionModelStatus['state'], { tone: 'neutral' | 'ok' | 'warn' | 'danger' | 'accent'; label: string }> = {
+  off: { tone: 'neutral', label: 'Off' },
+  not_installed: { tone: 'warn', label: 'Not installed' },
+  starting: { tone: 'accent', label: 'Starting' },
+  ready: { tone: 'ok', label: 'Ready' },
+  unreachable: { tone: 'danger', label: 'Unreachable' },
+  error: { tone: 'danger', label: 'Error' },
+}
+
+function decisionModelBadge(status: DecisionModelStatus | null) {
+  return status ? DECISION_MODEL_BADGES[status.state] : { tone: 'neutral' as const, label: 'Unknown' }
+}
+
+function decisionModelSummary(status: DecisionModelStatus | null): string {
+  if (!status) return 'Status unavailable.'
+  if (!status.decisions_24h) return 'No decisions logged yet.'
+  const parts = [`${status.decisions_24h} decision${status.decisions_24h === 1 ? '' : 's'} logged.`]
+  if (status.scored_24h) {
+    parts.push(`The needed skill was kept in ${status.covered_24h} of ${status.scored_24h}.`)
+  }
+  if (status.last_decision_at) {
+    const when = new Date(status.last_decision_at).toLocaleTimeString(undefined, { timeStyle: 'short' })
+    parts.push(`Last at ${when}${status.last_top_domain ? `, picked ${status.last_top_domain}` : ''}.`)
+  }
+  return parts.join(' ')
+}
+
+function decisionModelProblem(status: DecisionModelStatus | null): string {
+  if (!status) return ''
+  if (status.state === 'not_installed') return 'Laya is not installed. Run setup.bat to install it.'
+  if (status.state === 'unreachable') return status.error || `Monaw can't reach Laya at ${status.endpoint}.`
+  if (status.state === 'error') return status.error || 'Laya failed to start.'
+  return ''
 }
 
 export function SettingsModal({
@@ -216,6 +253,8 @@ export function SettingsModal({
   const [resolvingDockerImage, setResolvingDockerImage] = useState(false)
   const [dockerResolveMessage, setDockerResolveMessage] = useState('')
   const [speechToTextStatus, setSpeechToTextStatus] = useState<SpeechToTextStatus | null>(null)
+  const [decisionModelStatus, setDecisionModelStatus] = useState<DecisionModelStatus | null>(null)
+  const [refreshingDecisionModel, setRefreshingDecisionModel] = useState(false)
   const [customInstructions, setCustomInstructions] = useState('')
   const [customInstructionsPath, setCustomInstructionsPath] = useState('')
   const [customInstructionsSavedContent, setCustomInstructionsSavedContent] = useState('')
@@ -224,7 +263,7 @@ export function SettingsModal({
   const [customInstructionsError, setCustomInstructionsError] = useState('')
   const [openMcpAdvanced, setOpenMcpAdvanced] = useState<Record<number, boolean>>({})
   const [reconnectingServer, setReconnectingServer] = useState('')
-  const [resettingBrowserSession, setResettingBrowserSession] = useState(false)
+  const [reconnectingBrowser, setReconnectingBrowser] = useState(false)
   const [downloadingSpeechToText, setDownloadingSpeechToText] = useState(false)
   const [offloadingSpeechToText, setOffloadingSpeechToText] = useState(false)
   const [deletingSpeechToText, setDeletingSpeechToText] = useState(false)
@@ -233,8 +272,6 @@ export function SettingsModal({
   const [saved, setSaved] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null)
-  const [diagOpen, setDiagOpen] = useState(false)
-  const [browserAdvancedOpen, setBrowserAdvancedOpen] = useState(false)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [baselineSignature, setBaselineSignature] = useState('')
 
@@ -324,7 +361,7 @@ export function SettingsModal({
 
   const loadBrowserDiagnostics = async (signal?: AbortSignal) => {
     try {
-      setBrowserDiagnostics(await fetchBrowserUseDiagnostics(signal))
+      setBrowserDiagnostics(await fetchBrowserDiagnostics(signal))
     } catch {
       if (signal?.aborted) return
       setBrowserDiagnostics(null)
@@ -337,6 +374,24 @@ export function SettingsModal({
     } catch {
       if (signal?.aborted) return
       setSandboxStatus(null)
+    }
+  }
+
+  const loadDecisionModelStatus = async (signal?: AbortSignal) => {
+    try {
+      setDecisionModelStatus(await fetchDecisionModelStatus(signal))
+    } catch {
+      if (signal?.aborted) return
+      setDecisionModelStatus(null)
+    }
+  }
+
+  const refreshDecisionModelStatus = async () => {
+    setRefreshingDecisionModel(true)
+    try {
+      await loadDecisionModelStatus()
+    } finally {
+      setRefreshingDecisionModel(false)
     }
   }
 
@@ -408,6 +463,7 @@ export function SettingsModal({
         loadBrowserDiagnostics(signal),
         loadSandboxStatus(signal),
         loadSpeechToTextStatus(signal),
+        loadDecisionModelStatus(signal),
         loadWorkspaceInstructions(signal),
       ])
 
@@ -452,6 +508,14 @@ export function SettingsModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [diagnosticsRefreshKey])
 
+  // Laya takes a few seconds to load its checkpoint; keep checking until it settles.
+  useEffect(() => {
+    if (decisionModelStatus?.state !== 'starting') return
+    const timer = window.setTimeout(() => { void loadDecisionModelStatus() }, 3000)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [decisionModelStatus])
+
   // Switching pages should start you at the top, not halfway down the last one.
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0
@@ -483,12 +547,14 @@ export function SettingsModal({
     }
   }
 
-  const handleResetBrowserSession = async () => {
-    setResettingBrowserSession(true)
+  const handleReconnectBrowser = async () => {
+    setReconnectingBrowser(true)
     try {
-      setBrowserDiagnostics(await resetBrowserUseSession())
+      setBrowserDiagnostics(await reconnectBrowser())
+    } catch {
+      await loadBrowserDiagnostics()
     } finally {
-      setResettingBrowserSession(false)
+      setReconnectingBrowser(false)
     }
   }
 
@@ -563,37 +629,13 @@ export function SettingsModal({
     return window.electronAPI.selectDirectory(currentPath)
   }
 
-  const joinOutputPath = (root: string, folder: string) => {
-    const trimmed = root.trim().replace(/[\\/]+$/, '')
-    if (!trimmed) return folder
-    const separator = trimmed.includes('\\') ? '\\' : '/'
-    return `${trimmed}${separator}${folder}`
-  }
-
-  const setOutputRoot = async () => {
+  const chooseScreenshotsFolder = async () => {
     if (!draft) return
-    const currentRoot = draft.browser.screenshots_dir || draft.browser.downloads_dir
-    const selected = await chooseDirectory(currentRoot)
+    const selected = await chooseDirectory(draft.browser.screenshots_dir)
     if (!selected) return
     updateDraft((current) => ({
       ...current,
-      browser: {
-        ...current.browser,
-        screenshots_dir: joinOutputPath(selected, 'Screenshots'),
-        downloads_dir: joinOutputPath(selected, 'Downloads'),
-      },
-    }))
-  }
-
-  const chooseBrowserFolder = async (
-    key: 'downloads_dir' | 'screenshots_dir',
-  ) => {
-    if (!draft) return
-    const selected = await chooseDirectory(draft.browser[key])
-    if (!selected) return
-    updateDraft((current) => ({
-      ...current,
-      browser: { ...current.browser, [key]: selected },
+      browser: { ...current.browser, screenshots_dir: selected },
     }))
   }
 
@@ -664,6 +706,7 @@ export function SettingsModal({
         permissions: draft.permissions,
         sandbox: draft.sandbox,
         identity: draft.identity,
+        decision_model: draft.decision_model,
         telegram_allowed_user_ids: telegramAllowedUserIds.trim(),
         telegram_allowed_chat_ids: telegramAllowedChatIds.trim(),
         ...browserSecretPayload,
@@ -688,7 +731,7 @@ export function SettingsModal({
         normalizedSavedSettings.telegram_allowed_chat_ids,
       ))
       setDirtySecrets(new Set())
-      await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
+      await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus(), loadDecisionModelStatus()])
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } finally {
@@ -781,10 +824,8 @@ export function SettingsModal({
   }
 
   const browserSkill = draft.available_skills.find((skill) => skill.name === 'browser-use')
-  const skillGroups = {
-    recommended: draft.available_skills.filter((skill) => !skill.hidden && skill.tier === 'recommended'),
-    optional: draft.available_skills.filter((skill) => !skill.hidden && skill.tier === 'optional'),
-  }
+  // Built-in skills are always on and hidden; only skills the user added are listed.
+  const userSkills = draft.available_skills.filter((skill) => !skill.hidden && skill.tier !== 'internal')
   const browserSkillEnabled = !!draft.tools.skills['browser-use'] && (browserSkill?.available ?? true)
   const mcpFeatureEnabled = !!draft.mcp.enabled
   const mcpFeatureDiagnostics = Object.values(mcpDiagnostics)
@@ -830,10 +871,7 @@ export function SettingsModal({
     if (skill.name === 'browser-use') {
       if (!browserSkillEnabled) return draft.tools.skills['browser-use'] ? 'Unavailable' : 'Off'
       if (!browserDiagnostics) return 'Checking'
-      if (browserDiagnostics.session_active && browserDiagnostics.current_mode) {
-        return browserDiagnostics.current_mode === 'managed' ? 'Managed active' : 'System active'
-      }
-      if (browserDiagnostics.last_error) return 'Degraded'
+      if (!browserDiagnostics.chrome_found || browserDiagnostics.last_error) return 'Degraded'
       return 'Ready'
     }
     return skill.recommended ? 'On by default' : 'Optional'
@@ -842,7 +880,7 @@ export function SettingsModal({
   const skillHealthTone = (skill: AgentSettings['available_skills'][number]) => {
     const health = getSkillHealth(skill)
     if (health.startsWith('Unavailable') || health === 'Degraded') return 'warn' as const
-    if (['Ready', 'On by default', 'Managed active', 'System active'].includes(health)) return 'ok' as const
+    if (['Ready', 'On by default'].includes(health)) return 'ok' as const
     return 'neutral' as const
   }
 
@@ -1031,6 +1069,51 @@ export function SettingsModal({
                       {speechToTextError && (
                         <div className="px-4 pb-4">
                           <Note tone="danger">{speechToTextError}</Note>
+                        </div>
+                      )}
+                    </SettingsCard>
+
+                    <SettingsCard
+                      title="Tool selection (Laya)"
+                      description={MODEL_COPY.decisionModel}
+                      action={
+                        <Badge tone={decisionModelBadge(decisionModelStatus).tone}>
+                          {decisionModelBadge(decisionModelStatus).label}
+                        </Badge>
+                      }
+                    >
+                      <SwitchRow
+                        label="Shadow mode"
+                        description={MODEL_COPY.decisionModelToggle}
+                        checked={draft.decision_model.enabled}
+                        onChange={(enabled) => updateDraft((current) => ({
+                          ...current,
+                          decision_model: { ...current.decision_model, enabled },
+                        }))}
+                      />
+                      <div className="st-row">
+                        <div className="min-w-0">
+                          <p className="st-label">Last 24 hours</p>
+                          <p className="st-desc mt-1">{decisionModelSummary(decisionModelStatus)}</p>
+                        </div>
+                        <div className="st-row-control-auto flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => void refreshDecisionModelStatus()}
+                            disabled={refreshingDecisionModel}
+                            aria-label="Refresh Laya status"
+                            title="Check Laya again"
+                            className="st-btn st-btn-secondary st-btn-icon"
+                          >
+                            <RotateCcw size={13} className={refreshingDecisionModel ? 'animate-spin' : ''} />
+                          </button>
+                        </div>
+                      </div>
+                      {decisionModelProblem(decisionModelStatus) && (
+                        <div className="px-4 pb-4">
+                          <Note tone={decisionModelStatus?.state === 'not_installed' ? 'warn' : 'danger'}>
+                            {decisionModelProblem(decisionModelStatus)}
+                          </Note>
                         </div>
                       )}
                     </SettingsCard>
@@ -1287,25 +1370,6 @@ export function SettingsModal({
                   <PageHeader
                     title={PAGE_COPY.tools.label}
                     description={PAGE_COPY.tools.blurb}
-                    action={toolsTab === 'skills' ? (
-                      <button
-                        type="button"
-                        className="st-btn st-btn-secondary"
-                        onClick={() => updateDraft((current) => ({
-                          ...current,
-                          tools: {
-                            ...current.tools,
-                            skills: current.available_skills.reduce((flags, skill) => ({
-                              ...flags,
-                              [skill.name]: skill.always || skill.enabled_by_default,
-                            }), { ...current.tools.skills }),
-                          },
-                        }))}
-                      >
-                        <RotateCcw size={13} />
-                        Use skill defaults
-                      </button>
-                    ) : undefined}
                   />
                   <div role="tablist" aria-label="Tool types" className="st-segment mb-5 w-full sm:w-auto">
                     {TOOLS_TABS.map((tab, index) => (
@@ -1342,16 +1406,14 @@ export function SettingsModal({
                 <>
                   <div role="tabpanel" id="settings-tools-panel-skills" aria-labelledby="settings-tools-tab-skills" className="space-y-4" tabIndex={0}>
                     <Note tone="info">{SKILLS_COPY.intro}</Note>
-                    {(['recommended', 'optional'] as const).map((tier) => (
-                      <SettingsCard
-                        key={tier}
-                        title={SKILL_GROUP_COPY[tier].title}
-                        action={<Badge>{skillGroups[tier].length}</Badge>}
+                    <SettingsCard
+                        title={SKILLS_COPY.title}
+                        action={<Badge>{userSkills.length}</Badge>}
                       >
-                        {skillGroups[tier].length === 0 ? (
-                          <p className="st-hint p-4">Nothing here.</p>
+                        {userSkills.length === 0 ? (
+                          <p className="st-hint p-4">{SKILLS_COPY.empty}</p>
                         ) : (
-                          skillGroups[tier].map((skill) => {
+                          userSkills.map((skill) => {
                             const effectiveEnabled = skill.available && !!draft.tools.skills[skill.name]
                             const isExpanded = expandedSkill === skill.name
                             return (
@@ -1401,8 +1463,7 @@ export function SettingsModal({
                             )
                           })
                         )}
-                      </SettingsCard>
-                    ))}
+                    </SettingsCard>
                   </div>
                 </>
               )}
@@ -1415,101 +1476,52 @@ export function SettingsModal({
                     action={
                       <button
                         type="button"
-                        onClick={handleResetBrowserSession}
-                        disabled={resettingBrowserSession || !browserSkillEnabled}
-                        title={BROWSER_COPY.resetSession}
+                        onClick={handleReconnectBrowser}
+                        disabled={reconnectingBrowser || !browserSkillEnabled}
+                        title={BROWSER_COPY.reconnect}
                         className="st-btn st-btn-secondary"
                       >
                         <RotateCcw size={13} />
-                        {resettingBrowserSession ? 'Resetting' : 'Reset session'}
+                        {reconnectingBrowser ? 'Reconnecting' : 'Reconnect'}
                       </button>
                     }
                   />
                   <div className="space-y-4">
-                    {browserSkill?.available === false && (
-                      <Note tone="warn" icon={AlertCircle}>
-                        The browser-use package is not installed in the backend Python environment, so browser
-                        automation is unavailable.
-                      </Note>
-                    )}
-
                     <SettingsCard title="Status">
-                      <div className="grid grid-cols-3">
-                        <StatusCell label="Skill" value={browserSkillEnabled ? 'On' : 'Off'} />
+                      <div className="grid grid-cols-2">
                         <StatusCell
-                          label="Session"
-                          value={
-                            browserSkill?.available === false
-                              ? 'Unavailable'
-                              : browserDiagnostics?.session_active && browserDiagnostics.current_mode
-                                ? `${BROWSER_COPY.modeLabels[browserDiagnostics.current_mode as keyof typeof BROWSER_COPY.modeLabels] ?? browserDiagnostics.current_mode} active`
-                                : browserDiagnostics?.last_error
-                                  ? 'Degraded'
-                                  : browserSkillEnabled ? 'Idle' : 'Off'
-                          }
+                          label="Chrome"
+                          value={!browserDiagnostics ? 'Checking' : browserDiagnostics.chrome_found ? 'Found' : 'Not found'}
                         />
-                        <StatusCell label="Open tabs" value={String(browserDiagnostics?.tab_count ?? 0)} />
+                        <StatusCell
+                          label="DevTools connection"
+                          value={browserConnectionStatus(browserDiagnostics, browserSkillEnabled)}
+                        />
                       </div>
+                      {browserDiagnostics && !browserDiagnostics.chrome_found && (
+                        <div className="st-row-stacked">
+                          <Note tone="warn" icon={AlertCircle}>{BROWSER_COPY.chromeMissing}</Note>
+                        </div>
+                      )}
+                      {browserDiagnostics?.last_error && (
+                        <div className="st-row-stacked">
+                          <Note tone="warn">{browserDiagnostics.last_error}</Note>
+                        </div>
+                      )}
                     </SettingsCard>
 
-                    <SettingsCard title="Browser session">
-                      <SettingRow label="Browser mode" description={BROWSER_COPY.modeHelp[draft.browser.mode]}>
-                        <Dropdown<AgentSettings['browser']['mode']>
-                          ariaLabel="Browser mode"
-                          value={draft.browser.mode}
-                          options={[
-                            { value: 'auto', label: BROWSER_COPY.modeLabels.auto },
-                            { value: 'managed', label: BROWSER_COPY.modeLabels.managed },
-                            { value: 'system', label: BROWSER_COPY.modeLabels.system },
-                          ]}
-                          onChange={(mode) => updateDraft((current) => ({
-                            ...current,
-                            browser: { ...current.browser, mode, system_connection_strategy: mode === 'system' ? 'launch' : current.browser.system_connection_strategy },
-                          }))}
-                        />
-                      </SettingRow>
-                      <SwitchRow
-                        label="Fall back to your Chrome"
-                        checked={draft.browser.enable_system_fallback}
-                        onChange={(checked) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, enable_system_fallback: checked },
-                        }))}
-                      />
-                      <SwitchRow
-                        label="Hide browser window"
-                        checked={draft.browser.headless}
-                        onChange={(checked) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, headless: checked },
-                        }))}
-                      />
-                      <SwitchRow
-                        label="Keep browser open between requests"
-                        checked={draft.browser.keep_alive}
-                        onChange={(checked) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, keep_alive: checked },
-                        }))}
-                      />
-                    </SettingsCard>
-
-                    <SettingsCard title="My Chrome" description="Monaw opens your profile and prepares the browser automatically.">
-                      <SwitchRow
-                        label="Auto-approve Chrome connections"
-                        description="On Windows, clicks Allow while Monaw connects to Chrome."
-                        checked={draft.browser.auto_approve_local_debugging ?? true}
-                        onChange={(auto_approve_local_debugging) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, auto_approve_local_debugging },
-                        }))}
-                      />
+                    <SettingsCard title="My Chrome" description={BROWSER_COPY.usesYourProfile}>
                       <SettingRow label="Chrome profile" description={BROWSER_COPY.chromeProfile}>
                         <Dropdown
                           ariaLabel="Chrome profile"
                           value={draft.browser.system_profile_directory || ''}
                           options={[
-                            { value: '', label: 'Detect automatically' },
+                            {
+                              value: '',
+                              label: browserDiagnostics?.default_profile_directory
+                                ? `Last used (${browserDiagnostics.default_profile_directory})`
+                                : 'Detect automatically',
+                            },
                             ...(browserDiagnostics?.available_system_profiles ?? []).map((p) => ({
                               value: p.directory,
                               label: `${p.name} (${p.directory})`,
@@ -1521,6 +1533,15 @@ export function SettingsModal({
                           }))}
                         />
                       </SettingRow>
+                      <SwitchRow
+                        label="Auto-approve Chrome's connection prompt"
+                        description={BROWSER_COPY.autoApprove}
+                        checked={draft.browser.auto_approve_local_debugging ?? true}
+                        onChange={(auto_approve_local_debugging) => updateDraft((current) => ({
+                          ...current,
+                          browser: { ...current.browser, auto_approve_local_debugging },
+                        }))}
+                      />
                       <SettingRow label="Allowed domains" description={BROWSER_COPY.allowedDomains} wide>
                         <input
                           value={allowedDomainsInput}
@@ -1538,19 +1559,8 @@ export function SettingsModal({
                       </SettingRow>
                     </SettingsCard>
 
-                    <SettingsCard
-                      title="Browser folders"
-                      description={draft.browser.mode === 'system'
-                        ? 'Chrome keeps your profile in its own folder. Monaw saves screenshots, downloads, and traces here.'
-                        : undefined}
-                      action={window.electronAPI?.selectDirectory ? (
-                        <button type="button" onClick={setOutputRoot} className="st-btn st-btn-secondary">
-                          <Folder size={13} />
-                          Choose folder
-                        </button>
-                      ) : undefined}
-                    >
-                      <StackedRow label="Screenshots">
+                    <SettingsCard title="Screenshots" description={BROWSER_COPY.screenshots}>
+                      <StackedRow label="Screenshots folder">
                         <OutputFolderInput
                           label="Screenshots folder"
                           value={draft.browser.screenshots_dir}
@@ -1558,96 +1568,10 @@ export function SettingsModal({
                             ...current,
                             browser: { ...current.browser, screenshots_dir },
                           }))}
-                          onBrowse={window.electronAPI?.selectDirectory ? () => chooseBrowserFolder('screenshots_dir') : undefined}
+                          onBrowse={window.electronAPI?.selectDirectory ? chooseScreenshotsFolder : undefined}
                         />
                       </StackedRow>
-                      <StackedRow label="Downloads">
-                        <OutputFolderInput
-                          label="Downloads folder"
-                          value={draft.browser.downloads_dir}
-                          onChange={(downloads_dir) => updateDraft((current) => ({
-                            ...current,
-                            browser: { ...current.browser, downloads_dir },
-                          }))}
-                          onBrowse={window.electronAPI?.selectDirectory ? () => chooseBrowserFolder('downloads_dir') : undefined}
-                        />
-                      </StackedRow>
-                      <div className="st-row-stacked grid gap-3 sm:grid-cols-2">
-                        {draft.browser.mode !== 'system' && (
-                          <ReadOnlyValue label="Managed profile folder" value={draft.browser.managed_profile_dir} />
-                        )}
-                        <ReadOnlyValue label="Browser trace folder" value={draft.browser.traces_dir} />
-                      </div>
                     </SettingsCard>
-
-                    <Disclosure
-                      open={browserAdvancedOpen}
-                      onToggle={() => setBrowserAdvancedOpen((v) => !v)}
-                      title="Advanced page reading"
-                    >
-                      <SettingRow label="Page inspection engine" description={BROWSER_COPY.domEngine}>
-                        <Dropdown<AgentSettings['browser']['dom_inspection_engine']>
-                          ariaLabel="Page analysis engine"
-                          value={draft.browser.dom_inspection_engine}
-                          options={[
-                            { value: 'auto', label: 'Automatic' },
-                            { value: 'enhanced', label: 'Enhanced' },
-                            { value: 'legacy', label: 'Legacy' },
-                          ]}
-                          onChange={(dom_inspection_engine) => updateDraft((current) => ({
-                            ...current,
-                            browser: { ...current.browser, dom_inspection_engine },
-                          }))}
-                        />
-                      </SettingRow>
-                      <SwitchRow
-                        label="Skip covered elements"
-                        checked={draft.browser.paint_order_filtering}
-                        onChange={(paint_order_filtering) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, paint_order_filtering },
-                        }))}
-                      />
-                      <SwitchRow
-                        label="Read third-party frames"
-                        description={BROWSER_COPY.crossOrigin}
-                        checked={draft.browser.cross_origin_iframes}
-                        onChange={(cross_origin_iframes) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, cross_origin_iframes },
-                        }))}
-                      />
-                      <NumberRow
-                        label="Maximum frames per page"
-                        ariaLabel="Maximum frames per page"
-                        min={0}
-                        max={20}
-                        value={draft.browser.max_iframes}
-                        onChange={(value) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, max_iframes: Number(value) },
-                        }))}
-                      />
-                      <NumberRow
-                        label="Maximum frame nesting depth"
-                        ariaLabel="Maximum frame depth"
-                        min={0}
-                        max={5}
-                        value={draft.browser.max_iframe_depth}
-                        onChange={(value) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, max_iframe_depth: Number(value) },
-                        }))}
-                      />
-                    </Disclosure>
-
-                    <Disclosure
-                      open={diagOpen}
-                      onToggle={() => setDiagOpen((v) => !v)}
-                      title="Diagnostics"
-                    >
-                      <BrowserDiagnosticsCard diagnostics={browserDiagnostics} draft={draft} />
-                    </Disclosure>
                   </div>
                 </>
               )}
@@ -2145,41 +2069,6 @@ function StatusCell({ label, value }: { label: string; value: string }) {
   )
 }
 
-function Disclosure({
-  open,
-  onToggle,
-  title,
-  description,
-  children,
-}: {
-  open: boolean
-  onToggle: () => void
-  title: string
-  description?: string
-  children: ReactNode
-}) {
-  return (
-    <section className="st-card">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-start justify-between gap-4 px-4 py-3.5 text-left"
-      >
-        <span className="min-w-0">
-          <span className="st-label block">{title}</span>
-          {description && <span className="st-desc mt-1 block">{description}</span>}
-        </span>
-        <ChevronDown
-          size={14}
-          className={`mt-0.5 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
-          style={{ color: 'var(--st-text-faint)' }}
-        />
-      </button>
-      {open && <div className="st-divider-t">{children}</div>}
-    </section>
-  )
-}
-
 function OutputFolderInput({
   label,
   value,
@@ -2209,34 +2098,15 @@ function OutputFolderInput({
     </div>
   )
 }
-function BrowserDiagnosticsCard({
-  diagnostics,
-  draft,
-}: {
-  diagnostics: BrowserUseDiagnostics | null
-  draft: AgentSettings
-}) {
-  return (
-    <div className="space-y-2 p-4">
-      <p className="st-label">
-        {diagnostics?.session_active
-          ? `Session active — ${BROWSER_COPY.modeLabels[diagnostics.current_mode as keyof typeof BROWSER_COPY.modeLabels] ?? (diagnostics.current_mode || 'unknown')}`
-          : 'No active browser session'}
-      </p>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {diagnostics?.current_mode === 'system' && diagnostics.current_system_connection && (
-          <ReadOnlyValue label="Connection" value={diagnostics.current_system_connection} />
-        )}
-        <ReadOnlyValue label="Strategy" value={diagnostics?.system_connection_strategy ?? draft.browser.system_connection_strategy} />
-        <ReadOnlyValue label="Debugging address" value={diagnostics?.system_cdp_url || draft.browser.system_cdp_url} />
-        {diagnostics?.chrome_executable && <ReadOnlyValue label="Chrome" value={diagnostics.chrome_executable} />}
-        {diagnostics?.current_page && (
-          <ReadOnlyValue label="Current page" value={diagnostics.current_page.title || diagnostics.current_page.url} />
-        )}
-      </div>
-      {diagnostics?.last_error && <Note tone="warn">{diagnostics.last_error}</Note>}
-    </div>
-  )
+function browserConnectionStatus(diagnostics: BrowserUseDiagnostics | null, skillEnabled: boolean): string {
+  if (!skillEnabled) return 'Off'
+  if (!diagnostics) return 'Checking'
+  const { devtools } = diagnostics
+  if (devtools.connected) return 'Ready'
+  if (!devtools.running) return 'Not started'
+  if (devtools.state === 'starting') return 'Starting'
+  if (devtools.state === 'stopped') return 'Stopped'
+  return 'Needs attention'
 }
 
 function McpServerCard({

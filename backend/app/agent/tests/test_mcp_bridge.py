@@ -3,6 +3,7 @@ import json
 import threading
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -66,7 +67,7 @@ def test_stderr_buffer_finalizer_closes_file_before_removing_folder():
 def test_chrome_mcp_launches_local_profile_before_first_tool_only(monkeypatch):
     from contextlib import asynccontextmanager
     from unittest.mock import AsyncMock
-    from app.skills.browser_use import manager as browser_module
+    from app.skills.browser_use import chrome_launch as browser_module
     from app.skills.browser_use import chrome_approval
     from app.agent import settings_store
 
@@ -688,3 +689,93 @@ def test_clear_reflected_tools_for_server_only_removes_matching_server():
     mapping = get_reflected_tool_map()
     assert "mcp__one__list_one" not in mapping
     assert mapping["mcp__two__list_two"]["server_name"] == "two"
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+
+
+class _ImageSession:
+    def __init__(self, *images: bytes) -> None:
+        self.images = images
+
+    async def call_tool(self, name: str, arguments: dict):  # noqa: ARG002
+        import base64
+        return SimpleNamespace(
+            isError=False,
+            structuredContent=None,
+            content=[
+                SimpleNamespace(type="text", text="Took a screenshot of the current page."),
+                *[SimpleNamespace(type="image", data=base64.b64encode(image).decode(), mimeType="image/png")
+                  for image in self.images],
+            ],
+        )
+
+
+def _call_with_session(session, tool_name: str) -> str:
+    manager = ServerManager(MCPServerConfig(name="chrome-devtools", command="npx", call_timeout_ms=2000))
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=_run_loop, args=(loop,), daemon=True)
+    thread.start()
+    try:
+        manager._loop = loop
+        manager._session = session
+        manager.connected = True
+        return manager.call_tool_sync(tool_name, {})
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+
+def test_mcp_image_blocks_are_saved_as_files_and_attached(monkeypatch, tmp_path):
+    import base64
+    from app.agent import turn_loop
+    from app.skills.mcp_bridge import images as images_module
+
+    monkeypatch.setattr(images_module, "configured_screenshots_dir", lambda: tmp_path)
+    monkeypatch.setattr(turn_loop, "configured_screenshots_dir", lambda: tmp_path)
+    image = _png_bytes(800, 600)
+
+    output = _call_with_session(_ImageSession(image), "take_screenshot")
+    payload = json.loads(output)
+
+    assert base64.b64encode(image).decode() not in output
+    assert "raw" not in payload
+    [text_block, image_block] = payload["content"]
+    assert text_block["text"].startswith("Took a screenshot")
+    assert "data" not in image_block
+    assert (image_block["width"], image_block["height"]) == (800, 600)
+    saved = Path(image_block["image_path"])
+    assert saved.parent == tmp_path and saved.suffix == ".png"
+    assert saved.read_bytes() == image
+    assert payload["images"] == [{"path": str(saved), "mime_type": "image/png", "width": 800, "height": 600}]
+
+    assert turn_loop._extract_image_attachments("mcp__chrome-devtools__take_screenshot", output) == [
+        {"path": str(saved), "mime_type": "image/png"}
+    ]
+
+
+def test_mcp_images_too_small_to_preview_are_dropped(monkeypatch, tmp_path):
+    from app.agent import turn_loop
+    from app.skills.mcp_bridge import images as images_module
+
+    monkeypatch.setattr(images_module, "configured_screenshots_dir", lambda: tmp_path)
+    monkeypatch.setattr(turn_loop, "configured_screenshots_dir", lambda: tmp_path)
+
+    payload = json.loads(_call_with_session(_ImageSession(_png_bytes(4, 4)), "take_screenshot"))
+
+    assert payload["content"][1]["skipped"]["reason_code"] == "screenshot_too_small"
+    assert "images" not in payload
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_mcp_image_attachments_ignore_paths_outside_the_screenshots_folder(monkeypatch, tmp_path):
+    from app.agent import turn_loop
+
+    outside = tmp_path / "elsewhere.png"
+    outside.write_bytes(_png_bytes(100, 100))
+    monkeypatch.setattr(turn_loop, "configured_screenshots_dir", lambda: tmp_path / "screenshots")
+    forged = json.dumps({"ok": True, "status": "ok", "images": [{"path": str(outside), "mime_type": "image/png"}]})
+
+    assert turn_loop._extract_image_attachments("mcp__notes__render", forged) == []

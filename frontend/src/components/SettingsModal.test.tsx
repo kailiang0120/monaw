@@ -18,6 +18,7 @@ import {
   fetchMemoryFile,
   fetchMemoryStats,
 } from '../lib/api/memories'
+import { fetchBrowserDiagnostics, reconnectBrowser } from '../lib/api/diagnostics'
 import { SettingsModal } from '../features/settings/SettingsModal'
 
 const mocks = vi.hoisted(() => ({
@@ -28,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   logoutOpenAIAccount: vi.fn(),
   fetchSandboxStatus: vi.fn(),
   fetchSpeechToTextStatus: vi.fn(),
+  fetchDecisionModelStatus: vi.fn(),
   fetchWorkspaceInstructions: vi.fn(),
   downloadSpeechToTextModel: vi.fn(),
   offloadSpeechToTextModel: vi.fn(),
@@ -47,34 +49,39 @@ const mocks = vi.hoisted(() => ({
   updateMemoryCandidate: vi.fn(),
 }))
 
-vi.mock('../lib/api/diagnostics', () => ({
-  fetchBrowserUseDiagnostics: vi.fn().mockResolvedValue({
-    available: true,
+vi.mock('../lib/api/diagnostics', () => {
+  const browserStatus = {
     skill_enabled: true,
     skill_available: true,
     skill_unavailable_reason: '',
-    session_active: false,
-    preferred_mode: 'auto',
-    current_mode: '',
-    current_system_connection: '',
-    fallback_enabled: true,
-    last_error: '',
-    system_connection_strategy: 'auto',
-    system_cdp_url: 'http://127.0.0.1:9222',
-    managed_profile_dir: 'C:/runtime/browser/managed-profile',
-    downloads_dir: 'C:/runtime/browser/downloads',
-    screenshots_dir: 'C:/runtime/browser/screenshots',
-    traces_dir: 'C:/runtime/browser/traces',
+    chrome_found: true,
+    chrome_executable: '',
+    available_system_profiles: [
+      { name: 'Personal', directory: 'Default' },
+      { name: 'Work', directory: 'Profile 1' },
+    ],
     system_profile_directory: '',
-    chrome_executable: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    available_system_profiles: [],
-    current_page: null,
-    tab_count: 0,
-  }),
-  fetchMCPDiagnostics: vi.fn().mockResolvedValue([]),
-  resetBrowserUseSession: vi.fn(),
-  reconnectMCPServer: vi.fn(),
-}))
+    default_profile_directory: 'Default',
+    devtools: {
+      server: 'chrome-devtools',
+      running: true,
+      connected: true,
+      state: 'connected',
+      startup_phase: 'ready',
+      tool_count: 26,
+      last_error: '',
+      unhealthy_reason: '',
+      connected_at: null,
+    },
+    last_error: '',
+  }
+  return {
+    fetchBrowserDiagnostics: vi.fn().mockResolvedValue(browserStatus),
+    fetchMCPDiagnostics: vi.fn().mockResolvedValue([]),
+    reconnectBrowser: vi.fn().mockResolvedValue(browserStatus),
+    reconnectMCPServer: vi.fn(),
+  }
+})
 
 vi.mock('../lib/api/settings', () => ({
   fetchSettings: mocks.fetchSettings,
@@ -84,6 +91,7 @@ vi.mock('../lib/api/settings', () => ({
   logoutOpenAIAccount: mocks.logoutOpenAIAccount,
   fetchSandboxStatus: mocks.fetchSandboxStatus,
   fetchSpeechToTextStatus: mocks.fetchSpeechToTextStatus,
+  fetchDecisionModelStatus: mocks.fetchDecisionModelStatus,
   fetchWorkspaceInstructions: mocks.fetchWorkspaceInstructions,
   downloadSpeechToTextModel: mocks.downloadSpeechToTextModel,
   offloadSpeechToTextModel: mocks.offloadSpeechToTextModel,
@@ -173,16 +181,7 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
       servers: [],
     },
     browser: {
-      mode: 'auto',
-      enable_system_fallback: true,
-      headless: false,
-      keep_alive: true,
-      system_connection_strategy: 'auto',
-      system_cdp_url: 'http://127.0.0.1:9222',
-      managed_profile_dir: 'C:/runtime/browser/managed-profile',
-      downloads_dir: 'C:/runtime/browser/downloads',
       screenshots_dir: 'C:/runtime/browser/screenshots',
-      traces_dir: 'C:/runtime/browser/traces',
       system_profile_directory: '',
       allowed_domains: [],
     },
@@ -199,6 +198,7 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
     },
     tools: {
       skills: {
+        'notion-sync': true,
         'browser-use': true,
         core: true,
         exec: true,
@@ -248,6 +248,22 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
     settings_version: 'settings-v1',
     available_skills: [
       {
+        slug: 'notion_sync',
+        name: 'notion-sync',
+        display_name: 'Notion sync',
+        summary: 'Sync notes with Notion.',
+        description: 'User-added skill',
+        version: '1.0.0',
+        enabled_by_default: true,
+        enabled: true,
+        available: true,
+        always: false,
+        unavailable_reason: '',
+        load_error: '',
+        tier: 'recommended',
+        recommended: true,
+      },
+      {
         slug: 'browser_use',
         name: 'browser-use',
         display_name: 'Browser automation',
@@ -257,10 +273,10 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
         enabled_by_default: true,
         enabled: true,
         available: true,
-        always: false,
+        always: true,
         unavailable_reason: '',
         load_error: '',
-        tier: 'recommended',
+        tier: 'internal',
         recommended: true,
       },
       {
@@ -305,10 +321,10 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
         enabled_by_default: true,
         enabled: true,
         available: true,
-        always: false,
+        always: true,
         unavailable_reason: '',
         load_error: '',
-        tier: 'recommended',
+        tier: 'internal',
         recommended: true,
       },
       {
@@ -394,6 +410,20 @@ describe('SettingsModal', () => {
       default_network: 'deny',
       default_write_strategy: 'copy_out',
       backends: {},
+    })
+    mocks.fetchDecisionModelStatus.mockResolvedValue({
+      state: 'ready',
+      enabled: true,
+      managed: true,
+      endpoint: 'http://127.0.0.1:8421',
+      installed: true,
+      error: '',
+      decisions_24h: 3,
+      scored_24h: 2,
+      covered_24h: 2,
+      last_decision_at: '2026-10-18T03:46:27+00:00',
+      last_status: 'ok',
+      last_top_domain: 'browser-use',
     })
     mocks.fetchSpeechToTextStatus.mockResolvedValue({
       provider: 'faster-whisper',
@@ -501,40 +531,127 @@ describe('SettingsModal', () => {
   it('keeps model selection and image help out of Settings', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
-    expect(await screen.findByRole('heading', { name: 'Voice' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Local models' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Provider' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reasoning effort' })).not.toBeInTheDocument()
     expect(screen.queryByText('Reading images and screenshots')).not.toBeInTheDocument()
   })
 
-  it('saves automatic launch of the local Chrome profile', async () => {
+  it('shows Laya status and saves the shadow mode switch', async () => {
+    render(<SettingsModal onClose={() => {}} />)
+
+    expect(await screen.findByText('Tool selection (Laya)')).toBeInTheDocument()
+    expect(await screen.findByText('Ready')).toBeInTheDocument()
+    expect(screen.getByText(/3 decisions logged. The needed skill was kept in 2 of 2./)).toBeInTheDocument()
+    expect(screen.getByText(/picked browser-use/)).toBeInTheDocument()
+
+    const shadowMode = screen.getByRole('checkbox', { name: 'Shadow mode' })
+    expect(shadowMode).toBeChecked()
+    fireEvent.click(shadowMode)
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      decision_model: expect.objectContaining({ enabled: false }),
+    })))
+  })
+
+  it('tells the user to run setup when Laya is not installed', async () => {
+    mocks.fetchDecisionModelStatus.mockResolvedValue({
+      state: 'not_installed',
+      enabled: true,
+      managed: true,
+      endpoint: 'http://127.0.0.1:8421',
+      installed: false,
+      error: '',
+      decisions_24h: 0,
+      scored_24h: 0,
+      covered_24h: 0,
+      last_decision_at: null,
+      last_status: '',
+      last_top_domain: '',
+    })
+    render(<SettingsModal onClose={() => {}} />)
+
+    expect(await screen.findByText('Not installed')).toBeInTheDocument()
+    expect(screen.getByText('Laya is not installed. Run setup.bat to install it.')).toBeInTheDocument()
+    expect(screen.getByText('No decisions logged yet.')).toBeInTheDocument()
+  })
+
+  it('shows Chrome status and only the DevTools-era browser settings', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
-    expect(screen.getByText('Managed profile folder')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Browser mode' }))
-    fireEvent.click(screen.getByRole('option', { name: 'My Chrome profile' }))
-    expect(screen.queryByText('Managed profile folder')).not.toBeInTheDocument()
-    expect(screen.getByText('Chrome keeps your profile in its own folder. Monaw saves screenshots, downloads, and traces here.')).toBeInTheDocument()
-    expect(screen.getByText('Browser trace folder')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Connection method' })).not.toBeInTheDocument()
+    expect(await screen.findByText('Found')).toBeInTheDocument()
+    expect(screen.getByText('DevTools connection')).toBeInTheDocument()
+    expect(screen.getByText('Ready')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Chrome profile' })).toHaveTextContent('Last used (Default)')
+    expect(screen.getByRole('checkbox', { name: "Auto-approve Chrome's connection prompt" })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Allowed domains' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Screenshots folder' })).toHaveValue('C:/runtime/browser/screenshots')
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument()
+    for (const removed of [
+      'Hide browser window',
+      'Keep browser open between requests',
+      'Advanced page reading',
+      'Browser trace folder',
+      'Downloads folder',
+      'Diagnostics',
+    ]) {
+      expect(screen.queryByText(removed)).not.toBeInTheDocument()
+    }
+    expect(screen.queryByText(/browser-use package/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Browser mode' })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('CDP endpoint')).not.toBeInTheDocument()
+  })
+
+  it('saves the selected Chrome profile without removed browser keys', async () => {
+    mocks.updateSettings.mockClear()
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    await screen.findByText('Found')
+    fireEvent.click(screen.getByRole('button', { name: 'Chrome profile' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Work (Profile 1)' }))
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        browser: expect.objectContaining({
-          mode: 'system',
-          system_connection_strategy: 'launch',
-        }),
+        browser: expect.objectContaining({ system_profile_directory: 'Profile 1' }),
       }))
     })
+    const calls = vi.mocked(updateSettings).mock.calls
+    const savedBrowser = calls[calls.length - 1]?.[0]?.browser ?? {}
+    for (const removed of ['headless', 'keep_alive', 'dom_inspection_engine', 'downloads_dir', 'traces_dir', 'mode']) {
+      expect(savedBrowser).not.toHaveProperty(removed)
+    }
+  })
+
+  it('reconnects the Chrome DevTools connection from the Browser page', async () => {
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect' }))
+
+    await waitFor(() => expect(reconnectBrowser).toHaveBeenCalledTimes(1))
+  })
+
+  it('warns when Chrome is not installed', async () => {
+    vi.mocked(fetchBrowserDiagnostics).mockResolvedValueOnce({
+      ...(await fetchBrowserDiagnostics()),
+      chrome_found: false,
+      available_system_profiles: [],
+    })
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    expect(await screen.findByText('Not found')).toBeInTheDocument()
+    expect(screen.getByText(/Google Chrome was not found/)).toBeInTheDocument()
   })
 
   it('defaults Chrome approval on and saves the manual approval choice', async () => {
     render(<SettingsModal onClose={() => {}} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
-    const approval = screen.getByRole('checkbox', { name: 'Auto-approve Chrome connections' })
+    const approval = screen.getByRole('checkbox', { name: "Auto-approve Chrome's connection prompt" })
     expect(approval).toBeChecked()
     fireEvent.click(approval)
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
@@ -543,7 +660,7 @@ describe('SettingsModal', () => {
     })))
   })
 
-  it('manages skills and MCP through Tools tabs and preserves edits when switching', async () => {
+  it('lists only user-added skills and MCP servers in Tools and preserves edits when switching', async () => {
     mocks.updateSettings.mockClear()
     render(<SettingsModal onClose={() => {}} />)
 
@@ -551,20 +668,18 @@ describe('SettingsModal', () => {
 
     expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Skills', 'MCP', 'Plugins'])
     expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.queryByRole('button', { name: 'Skills' })).not.toBeInTheDocument()
-    expect(await screen.findByText('Browser automation')).toBeInTheDocument()
-    expect(screen.getByText('Browse and interact with websites.')).toBeInTheDocument()
+    expect(await screen.findByText('Notion sync')).toBeInTheDocument()
+    expect(screen.queryByText('Browser automation')).not.toBeInTheDocument()
     expect(screen.queryByText('Core utilities')).not.toBeInTheDocument()
-    expect(screen.queryByText('MCP integrations')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Use skill defaults' })).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Browser automation' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Notion sync' }))
     fireEvent.keyDown(screen.getByRole('tab', { name: 'Skills' }), { key: 'ArrowRight' })
     expect(screen.getByRole('tab', { name: 'MCP' })).toHaveFocus()
-    expect(screen.getByRole('tabpanel', { name: 'MCP' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Server template' })).toHaveTextContent('Custom stdio')
     fireEvent.click(screen.getByRole('button', { name: 'Server template' }))
-    expect(screen.queryByRole('option', { name: 'Filesystem' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('option', { name: 'Chrome DevTools (my profile)' }))
+    expect(screen.queryByRole('option', { name: /Chrome DevTools/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: 'Custom stdio' }))
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }))
     fireEvent.change(screen.getByRole('textbox', { name: 'Server name 1' }), { target: { value: 'my-files' } })
 
@@ -573,15 +688,24 @@ describe('SettingsModal', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Manage MCP connections' }))
     expect(screen.getByRole('textbox', { name: 'Server name 1' })).toHaveValue('my-files')
     fireEvent.click(screen.getByRole('tab', { name: 'Skills' }))
-    expect(screen.getByRole('checkbox', { name: 'Browser automation' })).not.toBeChecked()
-    fireEvent.click(screen.getByRole('button', { name: 'Use skill defaults' }))
-    expect(screen.getByRole('checkbox', { name: 'Browser automation' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Notion sync' })).not.toBeChecked()
     expect(updateSettings).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
     await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-      tools: expect.objectContaining({ skills: expect.objectContaining({ 'browser-use': true, core: true }) }),
+      tools: expect.objectContaining({ skills: expect.objectContaining({ 'notion-sync': false }) }),
       mcp: expect.objectContaining({ servers: [expect.objectContaining({ name: 'my-files' })] }),
     })))
+  })
+
+  it('shows an empty state when the user has not added skills', async () => {
+    const settings = buildSettings() as any
+    settings.available_skills = settings.available_skills.filter((skill: any) => skill.tier === 'internal')
+    vi.mocked(fetchSettings).mockResolvedValue(settings)
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+
+    expect(await screen.findByText('No skills added yet. Ask Monaw to create one, and it will appear here.')).toBeInTheDocument()
   })
 
   it('shows faster-whisper speech-to-text status and downloads the local model', async () => {
@@ -845,7 +969,7 @@ describe('SettingsModal', () => {
 
   it('hides memory, request limits, and the redundant identity summary', async () => {
     render(<SettingsModal onClose={() => {}} />)
-    await screen.findByRole('heading', { name: 'Voice' })
+    await screen.findByRole('heading', { name: 'Local models' })
     expect(screen.queryByRole('button', { name: /^Memory$/i })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Tool iteration limit')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Turn timeout seconds')).not.toBeInTheDocument()

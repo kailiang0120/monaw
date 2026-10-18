@@ -634,14 +634,16 @@ def _browser_runtime_roots(settings_data: AgentSettings | None) -> list[str]:
             str(local_base / "AI Agent" / "runtime"),
         ]
     )
-    browser = getattr(settings_data, "browser", None) if settings_data is not None else None
-    if browser is None:
-        return roots
-    for field_name in ("downloads_dir", "screenshots_dir", "traces_dir", "managed_profile_dir"):
-        value = str(getattr(browser, field_name, "") or "").strip()
-        if value:
-            roots.append(value)
+    screenshots_dir = _browser_screenshots_dir(settings_data)
+    if screenshots_dir:
+        roots.append(screenshots_dir)
     return roots
+
+
+def _browser_screenshots_dir(settings_data: AgentSettings | None) -> str:
+    """The folder where browser screenshots are saved (kept readable and writable)."""
+    browser = getattr(settings_data, "browser", None) if settings_data is not None else None
+    return str(getattr(browser, "screenshots_dir", "") or "").strip() if browser is not None else ""
 
 
 def _is_trusted_runtime_path(canon_path: str, settings_data: AgentSettings | None = None) -> bool:
@@ -670,12 +672,9 @@ def _protected_control_roots() -> list[str]:
 
 def _agent_writable_carve_outs(settings_data: AgentSettings | None) -> list[str]:
     roots = [str(WORKSPACE_DIR)]
-    browser = getattr(settings_data, "browser", None) if settings_data is not None else None
-    if browser is not None:
-        for field_name in ("downloads_dir", "screenshots_dir", "traces_dir"):
-            value = str(getattr(browser, field_name, "") or "").strip()
-            if value:
-                roots.append(value)
+    screenshots_dir = _browser_screenshots_dir(settings_data)
+    if screenshots_dir:
+        roots.append(screenshots_dir)
     return roots
 
 

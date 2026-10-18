@@ -5,7 +5,8 @@ summary: Search the web for current information when a live answer is needed.
 description: Search the web for current information using the configured Tavily connection.
 version: 1.0.0
 enabled_by_default: true
-tier: recommended
+always: true
+tier: internal
 metadata:
   openclaw:
     requires:

@@ -215,6 +215,24 @@ def test_filesystem_write_uses_canonical_approval_tool_name(policy_env, monkeypa
     assert captured["tool_name"] == "fs_write"
 
 
+def test_filesystem_patch_revalidates_mutation_target(policy_env, monkeypatch):
+    policy_env.save_settings(_settings_for_root(policy_env.root))
+    target = policy_env.root / "notes.txt"
+    target.write_text("alpha beta", encoding="utf-8")
+
+    monkeypatch.setattr(
+        file_ops,
+        "_revalidate_mutation_target",
+        lambda _path: file_ops._error("symlink_target_rejected", "Refusing to mutate a symlink or junction."),
+    )
+
+    result = json.loads(file_ops.file_patch(str(target), "beta", "gamma"))
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "symlink_target_rejected"
+    assert target.read_text(encoding="utf-8") == "alpha beta"
+
+
 def test_batch_results_stops_on_error():
     from app.skills.filesystem.tools import _batch_results
 

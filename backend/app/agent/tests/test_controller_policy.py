@@ -509,7 +509,7 @@ class TestProtectedControlState:
         monkeypatch.setattr(cp, "WORKSPACE_DIR", cp.RUNTIME_DIR.parent)
         settings_data = AgentSettings()
         settings_data.permissions.mode = "full_access"
-        settings_data.browser.downloads_dir = str(cp.RUNTIME_DIR)
+        settings_data.browser.screenshots_dir = str(cp.RUNTIME_DIR)
         save_agent_settings(settings_data, settings_path=cp._settings_json_path())
 
         dec = resolve_permission(ActionType.MUTATE, target_path=str(cp.RUNTIME_DIR / "settings.json"))

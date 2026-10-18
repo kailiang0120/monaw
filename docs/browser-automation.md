@@ -1,216 +1,131 @@
 # Browser Automation
 
-Monaw uses the `browser-use` skill for browser automation. It can fetch known URLs, open pages, inspect DOM state, click, type, switch tabs, take screenshots, extract text, and run focused JavaScript.
+Monaw drives your own Chrome, with your saved logins, bookmarks, and tabs, through the Chrome DevTools MCP server ([`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)). The `browser-use` skill bundles two things:
 
-## Where To Configure
+| Part | What it does |
+| --- | --- |
+| Chrome DevTools tools (`mcp__chrome-devtools__*`) | Open and switch tabs, read pages as accessibility snapshots, click, fill forms, type, press keys, handle dialogs, upload files, take screenshots, and read console and network activity. |
+| `browser_fetch` | Read-only HTTP fetch of a known URL, parsed with Scrapling. It never opens a browser and does not run JavaScript. |
+
+There is no separate isolated browser profile and no other browser engine.
+
+## How It Connects To Your Chrome
+
+The DevTools server is built in (`backend/app/skills/mcp_bridge/builtin.py`). It starts with the backend as `npx -y chrome-devtools-mcp@1.11.0 --autoConnect`, with usage statistics, update checks, file-URL navigation, and the memory, performance, and extension tool categories turned off. It is not listed under Settings -> Tools -> MCP and it runs even when your own MCP connections are switched off. Older saved Chrome DevTools MCP entries are removed from settings automatically so only one server runs.
+
+Chrome is not touched until the first browser tool call. Then Monaw:
+
+1. Finds Chrome. On Windows it checks the standard install folders (`Program Files`, `Program Files (x86)`, `%LOCALAPPDATA%\Google\Chrome\Application`) and then the `App Paths\chrome.exe` registry key. On other systems it checks `/Applications` (macOS) or `google-chrome` / `chromium` on `PATH`.
+2. Picks the profile: the one chosen in Settings -> Browser, otherwise Chrome's last-used profile from `Local State`.
+3. Prepares the profile once. While Chrome is closed, it sets Chrome's supported remote-debugging preference in `Local State`, preserving every other setting. If Chrome is already running at that moment, Monaw asks you to close it once and retry (`chrome_setup_requires_restart`), rather than overwriting live preferences.
+4. Reuses a running Chrome when its `DevToolsActivePort` endpoint is alive. Otherwise it launches the profile with `--enable-features=DevToolsAcceptDebuggingConnections` in a new window, detached from Monaw so Chrome survives Monaw exiting, and waits up to 20 seconds for the endpoint.
+5. Lets `chrome-devtools-mcp --autoConnect` attach to that endpoint.
+
+Chrome 136+ refuses `--remote-debugging-port` on the default user-data folder, so Monaw relies on Chrome 144+'s user-approved connection instead. Monaw never closes your Chrome; disconnecting or reconnecting leaves it and its tabs open.
+
+### The Allow Prompt
+
+Chrome 144 and later shows **Allow remote debugging?** when a tool connects. Chrome has no remembered approval, so it can ask again after a reconnection.
+
+With **Auto-approve Chrome's connection prompt** on (the default, Windows only), Monaw watches for that native dialog only while a DevTools call is in progress. It first checks that the local debugging port belongs to the installed Chrome executable, ignores any prompt that was already open before the call, refuses to act when several prompts are open, and never clicks anything inside a web page. It then focuses the dialog and clicks **Allow**. If accessibility is unavailable or the prompt is translated, you click **Allow** yourself. Turn the setting off to always approve manually.
+
+## Permissions
+
+Each DevTools tool has an explicit entry in Monaw's permission table (`BUILTIN_TOOL_POLICIES` in `builtin.py`) instead of a guess from its name:
+
+| Tools | Treated as | Asks first? |
+| --- | --- | --- |
+| `list_pages`, `select_page`, `take_snapshot`, `take_screenshot`, `wait_for`, console and network readers, `get_css_styles` | Read | No |
+| `click`, `click_at`, `hover`, `drag`, `handle_dialog` | Click | Follows your permission mode (no prompt in the default interactive mode) |
+| `fill`, `fill_form`, `type_text`, `press_key` | Type | Follows your permission mode |
+| `navigate_page`, `new_page`, `close_page`, `resize_page`, `emulate` | Navigation | Follows your permission mode |
+| `evaluate_script` | Run code (high risk) | Yes, outside Full access |
+| `upload_file` | File change (high risk) | Always |
+| `lighthouse_audit`, screencast tools | File change | Follows your permission mode |
+
+Before `navigate_page` or `new_page` reaches Chrome, Monaw checks the URL:
+
+- Only `http` and `https` are allowed. `file:`, `javascript:`, `data:`, `blob:`, `about:`, `chrome:`, `chrome-extension:`, `devtools:`, and `view-source:` URLs are blocked with a `reason_code`.
+- Hosts outside **Allowed domains** are blocked.
+- Scheduled and other non-interactive runs need an allowed-domains list and may only open public hosts.
+- `navigate_page` with `initScript` is refused; page JavaScript goes through `evaluate_script`, which asks first.
+
+Mutating browser tools are guarded against loops: repeating the same action with unchanged page text inserts a recovery checkpoint (`stalled_repeat_detected`) that tells the model to take a snapshot or list pages before trying again.
+
+## Screenshots
+
+Images returned by DevTools tools (for example `take_screenshot`) are saved as `mcp_screenshot_*` files in the screenshots folder and shown to the model for that step only. They are not attached to the final answer unless you ask for the image. The default folder is:
+
+```text
+%USERPROFILE%\.monaw\browser\screenshots\
+```
+
+The screenshots folder stays readable and writable for the agent even though the rest of Monaw's runtime folder is protected.
+
+## browser_fetch
+
+Use `browser_fetch` when you give Monaw a URL and only need its text, links, metadata, HTML, or a CSS-selector extract. It returns JSON with `status`, `url`, `final_url`, `fetcher`, `http_status`, `title`, `content`, `links`, `metadata`, and `truncated`.
+
+| Argument | Meaning |
+| --- | --- |
+| `mode` | `auto` (default) flags pages that look empty, script-only, or bot-blocked; `http` returns the raw HTTP result as is. |
+| `selector` | CSS selector to extract instead of the whole page. |
+| `output` | `text`, `markdown`, `html`, `links`, or `metadata`. |
+| `max_chars` | Content limit (500 to 200,000). |
+| `timeout_ms` | Request timeout (1 to 120 seconds). |
+
+When a page needs JavaScript, `browser_fetch` returns `status: "needs_browser_render"` with whatever it fetched and a `hint` to open the URL with `mcp__chrome-devtools__new_page` (or `navigate_page`) and read it with `take_snapshot`. The old `dynamic` and `stealth` modes now return that same hint without fetching.
+
+URL safety:
+
+- Only `http` and `https` URLs, and only hosts in **Allowed domains** when that list is set.
+- Hosts that resolve to private, loopback, link-local, reserved, or multicast addresses are refused (`blocked_host`).
+- Every redirect hop is checked against the same rules before it is followed (`redirect_domain_not_allowed`, `blocked_redirect_host`), and the final URL is checked again.
+- Non-interactive runs need an allowed-domains list.
+
+`browser_fetch` holds no browser state, so it can run in parallel with other read-only tools.
+
+## Settings
 
 Open Settings -> Browser.
 
-**My Chrome profile** is the default. Ask Monaw to open a website: it detects Chrome and your last-used profile, prepares the automation connection, and opens Chrome itself. Your existing logins, bookmarks, and tabs stay in the real profile. There is no manual debugging port or attach step.
-
-Chrome 144 or later displays **Allow remote debugging?** when Monaw connects. Click **Allow** in Chrome. Chrome controls this consent and may ask again after a reconnection. If Chrome is already running before its first setup, close it once and retry so Monaw can safely prepare the profile without overwriting live preferences.
-
-The built-in connection waits up to one minute for that consent before starting page automation, then keeps the same connection between actions. This avoids the underlying browser library's ten-second handshake deadline. The relay accepts one client on loopback with an unpredictable connection path and rejects browser origins.
-
-The optional Chrome DevTools MCP preset uses the same automatic launch preparation and adds page snapshots, hover, drag, dialogs, uploads, and other browser actions.
-
-Browser settings are stored in runtime settings. Runtime browser folders are under:
-
-```text
-%USERPROFILE%\.monaw\browser\
-```
-
-Default runtime folders:
-
-```text
-browser\profiles\managed\
-browser\downloads\
-browser\screenshots\
-browser\traces\
-browser\chrome.log
-```
-
-## Browser Modes
-
-| Mode | Meaning |
-| --- | --- |
-| `auto` | Launch a separate profile, with optional fallback to your Chrome. |
-| `managed` | Launch an isolated Chrome profile controlled by Monaw. |
-| `system` | Automatically launch or reuse your local Chrome profile. Default. |
-
-Managed mode is safest for automation because it uses an isolated profile and dedicated runtime folder.
-
-System mode discovers Chrome's approved connection from `DevToolsActivePort` in the real user-data folder. It keeps personal Chrome open when Monaw disconnects. An explicit endpoint is still available through advanced runtime configuration for integrations that already manage Chrome.
-
-## Important Settings
-
 | Setting | Meaning |
 | --- | --- |
-| `mode` | `auto`, `managed`, or `system`. |
-| `enable_system_fallback` | Allows fallback to system connection when configured. |
-| `headless` | Runs managed Chrome without a visible window. |
-| `keep_alive` | Keeps the browser session alive between actions. |
-| `dom_inspection_engine` | `auto`, `enhanced`, or `legacy`. Auto tries enhanced upstream-style DOM inspection and falls back to legacy JS. |
-| `paint_order_filtering` | Prefer topmost clickable elements when enhanced DOM metadata is available. |
-| `cross_origin_iframes` | Allow deeper cross-origin iframe inspection when supported. Default off. |
-| `max_iframes` | Maximum iframes to inspect in enhanced mode. |
-| `max_iframe_depth` | Maximum iframe nesting depth in enhanced mode. |
-| `system_connection_strategy` | Advanced configuration: `launch` (default), `auto`, or explicit `attach`. |
-| `system_cdp_url` | Advanced explicit endpoint for `attach` or `auto`; unnecessary for normal launch. |
-| `managed_profile_dir` | Isolated Chrome profile directory. |
-| `downloads_dir` | Managed browser downloads directory. |
-| `screenshots_dir` | Screenshot output directory. |
-| `traces_dir` | Trace output directory. |
-| `system_profile_directory` | Optional Chrome profile directory name for system-profile workflows. |
-| `auto_approve_local_debugging` | On Windows, click Chrome's native Allow button during Monaw's local connection attempt. Default on; disable for manual approval. |
-| `allowed_domains` | Optional domain allow list. Empty means no domain restriction. |
+| Status | Whether Chrome was found and the state of the DevTools connection. **Reconnect** restarts the built-in DevTools server; Chrome stays open. |
+| Chrome profile (`system_profile_directory`) | The profile to open. Empty uses Chrome's last-used profile. |
+| Auto-approve Chrome's connection prompt (`auto_approve_local_debugging`) | Windows only. Default on. |
+| Allowed domains (`allowed_domains`) | Optional allow list for both DevTools navigation and `browser_fetch`. Empty allows all sites in interactive chats. |
+| Screenshots folder (`screenshots_dir`) | Where browser screenshots are saved. |
 
-## Automatic Local Chrome Launch
+Settings files from earlier versions may still contain options of the removed Python browser engine (`headless`, `keep_alive`, `dom_inspection_engine`, iframe options, `system_connection_strategy`, `system_cdp_url`, `downloads_dir`, `traces_dir`). They are ignored when the file loads and dropped on the next save.
 
-Monaw locates Chrome's user-data folder and uses the saved profile selection or Chrome's last-used profile. While Chrome is closed, it enables the supported remote-debugging preference in `Local State`, preserving unrelated settings. It launches the real profile with `--enable-features=DevToolsAcceptDebuggingConnections` and discovers the local connection automatically. A live endpoint is reused without opening another window for every tool call.
-
-Chrome 136+ rejects `--remote-debugging-port` and `--remote-debugging-pipe` on the default user-data folder. Monaw therefore uses Chrome 144+'s approved connection for your personal profile. Separate managed profiles continue to use a dedicated debugging port.
-
-On Windows, **Auto-approve Chrome connections** defaults to on. Monaw checks that the local debugging port belongs to the installed Chrome executable, then focuses and clicks the native Allow button during the connection attempt. It does not approve website buttons, existing prompts, or multiple ambiguous dialogs. The watcher stops when the attempt finishes. Unsupported systems, translated prompts, or unavailable accessibility fall back to manual approval. Chrome has no remembered approval setting.
-
-If a restart is needed, `browser_close_chrome` can close Chrome and its background processes after explicit approval. It can lose unsaved work, so Monaw never runs it as an automatic launch step.
-
-## Main Browser Tools
-
-| Tool | Purpose |
-| --- | --- |
-| `browser_session` | Inspect, doctor, reset, stop, list profiles, or one-off switch modes. |
-| `browser_close_chrome` | Explicitly close Chrome and background processes after approval, for restart recovery. |
-| `browser_fetch` | Read-only URL fetch and extraction. Tries local HTTP plus Scrapling parsing first, with dynamic and explicit stealth modes through Monaw's browser session. |
-| `browser_open` | Start or reuse a browser session and optionally open a URL. |
-| `browser_navigate` | Navigate the current tab. |
-| `browser_tabs` | List, create, switch, or close tabs. |
-| `browser_snapshot` | Capture DOM state and stable refs for visible interactive elements. |
-| `browser_get_element` | Inspect one snapshot ref with cached enhanced metadata and current element state. |
-| `browser_click` | Click by ref, selector, text, or coordinates. |
-| `browser_type` | Fill text into an input or editable element. |
-| `browser_press` | Send a key press. |
-| `browser_select_option` | Select values in a `select` element. |
-| `browser_scroll` | Scroll by pixel deltas. |
-| `browser_wait` | Wait by time, selector, visible text, or URL substring. |
-| `browser_find` | Find visible elements by text, label, or role. |
-| `browser_extract_text` | Extract visible page text. |
-| `browser_fill_form` | Fill multiple fields and optionally submit. |
-| `browser_downloads` | List or clear managed downloads. |
-| `browser_console` | Read browser console diagnostics when available. |
-| `browser_network_summary` | Summarize recent resource timing entries. |
-| `browser_screenshot` | Capture current tab or element screenshot. |
-| `browser_full_page_screenshot` | Capture full-page screenshots with optional declutter and fallback suggestions. |
-| `browser_evaluate` | Run focused JavaScript in the active tab. |
-
-## Recommended Automation Flow
-
-Use this flow for reliable browser work:
-
-```text
-open -> snapshot -> decide -> act -> verify
-```
-
-For read-only page retrieval, use this lighter flow first:
-
-```text
-fetch -> extract -> answer
-```
-
-Practical rules:
-
-| Rule | Reason |
-| --- | --- |
-| Start with `browser_open`. | Creates or reuses the session. |
-| Start with `browser_fetch` for known public URLs. | Avoids launching Chrome when the task is only extraction or summarization. |
-| Use `browser_snapshot` before mutating. | Gets stable refs and visible state. |
-| Prefer refs over selectors. | Refs come from observed state and reduce selector guessing. |
-| Use `browser_get_element` when one ref is ambiguous. | Returns cached role/state/bounds data plus current value/text. |
-| Verify after every click or type. | Pages can rerender, reject input, or open new tabs. |
-| Do not repeat the same failed action. | Inspect, take a screenshot, or run doctor first. |
-| Use `browser_evaluate` only when snapshot is insufficient. | Keeps automation safer and more explainable. |
-
-## DOM Inspection
-
-`browser_snapshot` now supports three inspection engines:
-
-| Engine | Behavior |
-| --- | --- |
-| `auto` | Uses the saved setting. The default setting tries enhanced inspection first, then falls back to legacy JS. |
-| `enhanced` | Requires compatible browser-use DOM state APIs. Returns richer accessibility, frame, bounds, state, and selector metadata when available. |
-| `legacy` | Uses Monaw's existing in-page JS scanner only. |
-
-Enhanced snapshots keep the existing `snapshot.elements` and `field_candidates` shape, but may add fields such as `backend_node_id`, `frame_id`, `ax_name`, `states`, `bounds`, `scroll`, `context`, and `control`.
-
-After navigation, tab switches, reloads, clicks, typing, selecting, key presses, or scrolls, refs are treated as stale. Take a fresh `browser_snapshot` before the next DOM action.
-
-## Browser Fetch
-
-`browser_fetch` is the preferred tool when the user gives a URL and only needs text, links, metadata, HTML, or CSS-selector extraction. It uses Scrapling locally for parsing and returns structured JSON with `status`, `url`, `final_url`, `fetcher`, `http_status`, `title`, `content`, `links`, `metadata`, and `truncated`.
-
-Modes:
-
-| Mode | Meaning |
-| --- | --- |
-| `auto` | Try HTTP first, then dynamic rendering if the page appears empty, blocked, or JavaScript-dependent. |
-| `http` | Fast non-browser fetch. Best for static pages and documentation. |
-| `dynamic` | Browser-rendered fetch for JavaScript pages through Monaw's existing browser session. |
-| `stealth` | Browser-rendered fetch with Monaw's stealth init scripts. Use only when requested or when safer modes report blockers. |
-
-If Scrapling is missing, `browser_fetch` returns `reason_code: missing_browser_dependencies` and a setup command. Existing browser tools continue working even if this happens.
-
-## Screenshots And Downloads
-
-Screenshots are saved under the configured screenshots directory. Managed downloads are saved under the configured downloads directory.
-
-`browser_full_page_screenshot` can optionally remove common fixed banners and popups. It can also return public archive/proxy fallback URLs when public content remains blocked, but third-party fallbacks should only be used when sending the URL to that service is acceptable.
-
-## Diagnostics
-
-Use:
-
-```text
-browser_session(action="doctor")
-```
-
-Doctor output can show:
-
-| Field | Meaning |
-| --- | --- |
-| `last_error` | Last browser manager error. |
-| `cdp_endpoint_alive` | Whether the configured CDP endpoint is reachable. |
-| `recent_launches` | Recent launch attempts and reason codes. |
-| `current_mode` | Current active mode. |
-| `current_cdp_url` | Active CDP URL. |
-| `chrome_executable` | Chrome executable used by managed mode. |
+The same status is available from `GET /api/diagnostics/browser-use`: `chrome_found`, the Chrome profiles, the selected and last-used profile, and a `devtools` object with the built-in server's `running`, `connected`, `state`, `tool_count`, and `last_error`. `POST /api/diagnostics/browser-use/reset` reconnects the server. Paths are not returned.
 
 ## Common Reason Codes
 
-| Reason Code | Meaning | Action |
+| Reason code | Meaning | Action |
 | --- | --- | --- |
-| `managed_cdp_timeout` | Managed Chrome did not expose CDP in time. | Reset once, then check `chrome.log`. |
-| `managed_chrome_exited` | Managed Chrome exited during launch. | Check `chrome.log` and profile lock state. |
-| `chrome_executable_missing` | Chrome executable could not be found. | Install Chrome or set a valid path if supported by settings. |
-| `chrome_setup_requires_restart` | Chrome is using preferences that need first-time preparation. | Close Chrome once, then retry. |
-| `chrome_profile_setup_failed` | Profile preparation failed. | Check profile access and diagnostics. |
-| `system_debugging_not_enabled` | Chrome launched but its supported endpoint is unavailable. | Use Chrome 144+, close Chrome once, then retry. |
-| `system_debugging_approval_required` | Chrome is waiting for consent or declined the connection. | Click Allow in Chrome, then resume. |
-| `tool_timeout` | A browser tool timed out. | Narrow the operation or inspect with doctor/screenshot. |
+| `chrome_executable_missing` | Chrome was not found. | Install Google Chrome 144 or later. |
+| `chrome_profile_missing` | The chosen profile does not exist. | Pick a profile in Settings -> Browser. |
+| `chrome_setup_requires_restart` | First-time setup needs Chrome closed. | Close Chrome once, then retry. |
+| `chrome_profile_setup_failed` | `Local State` could not be updated. | Check access to Chrome's profile folder. |
+| `system_debugging_not_enabled` | Chrome opened but its approved endpoint did not appear. | Use Chrome 144+, close Chrome once, then retry. |
+| `domain_not_allowed`, `url_scheme_not_allowed`, `blocked_host` | The URL policy refused the page. | Adjust **Allowed domains** or use a public http(s) URL. |
+| `needs_browser_render` (status) | `browser_fetch` could not read a JavaScript page. | Open it with `new_page` and `take_snapshot`. |
+| `tool_timeout` | A browser call took too long. | Narrow the action instead of repeating it. |
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| Browser does not open. | Confirm `browser-use` is installed and check `browser\chrome.log` under the active runtime folder. |
-| Personal Chrome cannot connect. | Check the native Chrome consent prompt, run doctor, and follow its reason code. |
-| Actions hit the wrong field. | Use `browser_snapshot(include_screenshot=true)` and identify the target by ref, label, role, placeholder, and nearby text. |
-| A ref is stale. | Call `browser_snapshot` again; refs are invalidated after page-changing or mutating actions. |
-| Tab state is stale. | Run `browser_tabs(action="list")` and switch to the expected tab. |
-| Downloads are missing. | Check the configured `downloads_dir`, not the normal Windows Downloads folder. |
-| Repeated action fails. | Stop repeating it; inspect snapshot, screenshot, console, or network summary. |
+| Status shows Chrome **Not found**. | Install Google Chrome. Monaw does not use other Chromium browsers on Windows. |
+| Chrome opens but nothing happens. | Look for the **Allow remote debugging?** prompt in Chrome and click **Allow**. |
+| Every call asks for Allow again. | Expected after reconnections; keep auto-approve on (Windows). |
+| First run says to close Chrome. | Close all Chrome windows once so Monaw can prepare the profile, then retry. |
+| DevTools connection shows an error. | Click **Reconnect**. If it persists, check that Node.js and `npx` work, since the server runs through `npx`. |
+| Wrong profile opens. | Choose the profile in Settings -> Browser, then **Reconnect**. A Chrome that is already running keeps its own profiles open. |
+| A page fetch returns `needs_browser_render`. | Expected for JavaScript-heavy pages; the model should switch to the DevTools tools. |
 
 ## Safety Notes
 
-Browser automation can click, type, submit forms, and interact with authenticated sessions. For sensitive pages, prefer explicit user confirmation before submitting or sending data.
-
-Use managed mode for untrusted automation. Use system mode only when the task needs an existing logged-in browser session.
+Browser automation acts in your logged-in Chrome profile: it can click, type, submit forms, and read authenticated pages. Use **Allowed domains** to limit which sites it may open, and keep sensitive actions behind your permission mode's approval prompts.

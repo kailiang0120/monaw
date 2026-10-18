@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -25,11 +25,13 @@ import mascotThinking from '../assets/mascots/thinking.gif'
 import mascotAlertStill from '../assets/mascots/curious.png'
 import mascotSuccessStill from '../assets/mascots/good.png'
 import mascotThinkingStill from '../assets/mascots/thinking.png'
+import { ImagePreviewDialog } from './ImagePreviewDialog'
 import { PlanProgress } from './PlanProgress'
 import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
 import { fetchMessageToolCalls } from '../lib/api/conversations'
 import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
+import { chatMarkdownUrlTransform, resolveChatLink } from '../lib/chatLinks'
 import { formatAgentResponse } from '../lib/formatAgentResponse'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
 import type { UploadedAttachment } from '../lib/api/types'
@@ -77,13 +79,18 @@ export const MessageBubble = memo(function MessageBubble({
 }) {
   const isUser = message.role === 'user'
   const assistantLabel = resolveAgentName(agentName)
+  const [previewAttachment, setPreviewAttachment] = useState<UploadedAttachment | null>(null)
+  const closePreview = useCallback(() => setPreviewAttachment(null), [])
+  const previewDialog = previewAttachment
+    ? <ImagePreviewDialog attachment={previewAttachment} onClose={closePreview} />
+    : null
 
   if (isUser) {
     return (
       <div className="mb-2 flex justify-end animate-slide-up">
         <div className="max-w-[78%] rounded-2xl rounded-tr-md bg-accent px-3.5 py-2 text-sm leading-relaxed text-white shadow-lg shadow-accent/10">
           <div>{message.content}</div>
-          <AttachmentStrip attachments={message.attachments} compact />
+          <AttachmentStrip attachments={message.attachments} compact onPreview={setPreviewAttachment} />
           {message.steeringStatus && (
             <p className="mt-1 text-[10px] text-white/70">
               {message.steeringStatus === 'applied' ? 'Applied to the running task'
@@ -91,6 +98,7 @@ export const MessageBubble = memo(function MessageBubble({
             </p>
           )}
         </div>
+        {previewDialog}
       </div>
     )
   }
@@ -154,6 +162,7 @@ export const MessageBubble = memo(function MessageBubble({
         <div className="agent-prose max-w-none text-sm leading-relaxed text-neutral-200">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
+            urlTransform={chatMarkdownUrlTransform}
             components={{
               pre({ children }) {
                 return (
@@ -205,11 +214,34 @@ export const MessageBubble = memo(function MessageBubble({
                 )
               },
               a({ children, href }) {
-                return (
-                  <a href={href} target="_blank" rel="noreferrer">
-                    {children}
-                  </a>
-                )
+                const target = resolveChatLink(href, message.attachments)
+                if (target.kind === 'external') {
+                  return (
+                    <a href={target.href} target="_blank" rel="noreferrer">
+                      {children}
+                    </a>
+                  )
+                }
+                if (target.kind === 'anchor') return <a href={target.href}>{children}</a>
+                if (target.kind === 'attachment') {
+                  const { attachment } = target
+                  const isImage = attachment.mime_type.startsWith('image/')
+                  return (
+                    <a
+                      href="#"
+                      title={attachment.name}
+                      onClick={(event) => {
+                        event.preventDefault()
+                        if (isImage) setPreviewAttachment(attachment)
+                        else void downloadAttachment(attachment)
+                      }}
+                    >
+                      {children}
+                    </a>
+                  )
+                }
+                // Local or in-app targets have nowhere to go; keep the text only.
+                return <span title={href}>{children}</span>
               },
             }}
           >
@@ -218,7 +250,8 @@ export const MessageBubble = memo(function MessageBubble({
         </div>
       )}
 
-      <AttachmentStrip attachments={message.attachments} />
+      <AttachmentStrip attachments={message.attachments} onPreview={setPreviewAttachment} />
+      {previewDialog}
     </article>
   )
 })
@@ -292,9 +325,11 @@ function PlanActivity({ steps }: { steps: NonNullable<Message['stepProgress']> }
 function AttachmentStrip({
   attachments,
   compact = false,
+  onPreview,
 }: {
   attachments?: UploadedAttachment[]
   compact?: boolean
+  onPreview: (attachment: UploadedAttachment) => void
 }) {
   if (!attachments?.length) return null
   const images = attachments.filter(
@@ -311,6 +346,7 @@ function AttachmentStrip({
               key={attachment.id}
               attachment={attachment}
               compact={compact}
+              onPreview={onPreview}
             />
           ))}
         </div>
@@ -350,9 +386,11 @@ function hasTinyImageDimensions(attachment: UploadedAttachment): boolean {
 function ImageAttachmentCard({
   attachment,
   compact,
+  onPreview,
 }: {
   attachment: UploadedAttachment
   compact: boolean
+  onPreview: (attachment: UploadedAttachment) => void
 }) {
   const [previewFailed, setPreviewFailed] = useState(false)
   const [tooSmall, setTooSmall] = useState(false)
@@ -381,13 +419,13 @@ function ImageAttachmentCard({
   return (
     <button
       type="button"
-      onClick={() => void downloadAttachment(attachment)}
+      onClick={() => onPreview(attachment)}
       className={`group block shrink-0 overflow-hidden rounded-xl border transition-colors ${
         compact
           ? 'w-36 border-white/15 bg-black/10 hover:bg-black/15'
           : 'w-44 border-white/[0.08] bg-white/[0.025] hover:border-white/[0.16] hover:bg-white/[0.04]'
       }`}
-      title="Download image"
+      title="Open image preview"
       aria-label={`Open image ${attachment.name}`}
     >
       <span
@@ -441,8 +479,12 @@ function ToolActivityGroup({
   const [expanded, setExpanded] = useState(false)
   const pendingTool = toolCalls.find((call) => call.pending)
   const allCommands = toolCalls.every((call) => /^exec(?:_|$)/.test(call.tool))
+  // browser_ covers browser_fetch and the removed browser_* tools in older saved
+  // conversations; mcp__Chrome-dev-tools__ is the name older saved MCP entries used.
   const allBrowser = toolCalls.every((call) =>
-    call.tool.startsWith('browser_') || call.tool.startsWith('mcp__Chrome-dev-tools__'))
+    call.tool.startsWith('browser_')
+    || call.tool.startsWith('mcp__chrome-devtools__')
+    || call.tool.startsWith('mcp__Chrome-dev-tools__'))
   const label = pendingTool
     ? toolCallActivityLabel(pendingTool)
     : allCommands ? `Ran ${toolCalls.length === 1 ? 'command' : 'commands'}`

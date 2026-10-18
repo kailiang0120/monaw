@@ -4,8 +4,9 @@ description: Create optional Monaw runtime skills from inside the agent. Use whe
 display_name: Skill creator
 summary: Create, review, and reload optional runtime skills with administrator approval.
 version: 1.0.0
-enabled_by_default: false
-tier: optional
+enabled_by_default: true
+always: true
+tier: internal
 ---
 
 # Skill Creator
