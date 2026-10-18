@@ -1,7 +1,7 @@
 # Monaw Agent
 
 <p align="center">
-  <img src="docs/assets/monaw-agent-hero-v3.png" alt="Monaw Agent desktop assistant for Windows" width="100%" />
+  <img src="frontend/src/assets/Logo.png" alt="Monaw Agent logo" width="128" />
 </p>
 
 **An open-source AI desktop assistant for Windows, built with Electron, React, and Python.**
@@ -176,42 +176,9 @@ Electron handles startup, credentials, and the authentication bridge; the React 
 
 ### Agent Design
 
-Follow the arrows clockwise: **context → budget → model → authorization → execution → observation → context**. Tool results close the loop and inform the next model call. A completed answer exits from the model stage.
+The agent repeats **update context → fit context → call model → authorize → execute → observe**. Observations feed the next iteration. A complete answer exits from the model stage; denied actions return feedback without execution, and pending approvals wait for resolution.
 
-```mermaid
-%%{init: {"theme": "base", "fontFamily": "Arial", "block": {"padding": 22}, "themeVariables": {"fontSize": "18px", "primaryColor": "#eff6ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#172c40", "lineColor": "#0f766e"}}}%%
-block-beta
-  columns 3
-
-  Entry["<b>NEW REQUEST</b><br/>Chat / scheduler / Telegram"] space Done(["<b>COMPLETE</b><br/>Answer + attachments"])
-  space:3
-
-  Context["<b>01 / CONTEXT</b><br/>History + memory<br/>Workspace instructions"] Budget["<b>02 / BUDGET</b><br/>Trim observations<br/>Compact older rounds"] Model["<b>03 / MODEL</b><br/>Context + visible tools<br/>Selected provider"]
-  space:3
-
-  Observe["<b>06 / OBSERVE</b><br/>Results + errors<br/>Update history"] Cycle["<b>THE AGENT LOOP</b><br/>Repeat until complete"] Gate["<b>04 / AUTHORIZE</b><br/>Permission policies<br/>Approvals + access grants"]
-  space:3
-
-  space Execute["<b>05 / EXECUTE</b><br/>Skills + MCP tools<br/>Shell sandbox policy"] space
-
-  Entry --> Context
-  Context ==> Budget
-  Budget ==> Model
-  Model ==> Gate
-  Gate ==> Execute
-  Execute ==> Observe
-  Observe ==> Context
-  Model --> Done
-
-  classDef input fill:#172c40,color:#ffffff,stroke:#172c40,stroke-width:2px
-  classDef thinking fill:#eff6ff,color:#1e3a8a,stroke:#3b82f6,stroke-width:2px,rx:14,ry:14
-  classDef action fill:#ecfdf5,color:#064e3b,stroke:#10b981,stroke-width:2px,rx:14,ry:14
-  classDef center fill:transparent,color:#0f766e,stroke:none,font-size:23px,font-weight:bold
-  class Entry input
-  class Context,Budget,Model thinking
-  class Gate,Execute,Observe,Done action
-  class Cycle center
-```
+[![Monaw agent loop: a clockwise cycle from working context and budget checks through model calls, authorization, tool execution, and observations. A completed answer exits the loop, pending approvals return to authorization, and denied actions bypass execution.](docs/assets/monaw-agent-loop.png)](docs/assets/monaw-agent-loop.png)
 
 | Alongside the loop | What happens |
 | --- | --- |
