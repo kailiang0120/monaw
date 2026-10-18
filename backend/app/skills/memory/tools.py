@@ -2,162 +2,121 @@ from __future__ import annotations
 
 import json
 
-from app.agent.long_term_memory import get_long_term_memory
+from app.agent.conversation_workspace import selected_workspace_dir
+from app.agent.database import get_db
+from app.agent.memory_store import KINDS, MemoryWriteError, get_memory_store, grounded_in
 from app.agent.run_context import current_execution_principal, current_interactive
 
 _MAX_MEMORY_QUERY_CHARS = 500
 _MAX_MEMORY_RETRIEVAL_BATCH = 12
+_SEARCH_SCOPES = ["all", "global", "workspace"]
+_WRITE_SCOPES = ["global", "workspace"]
 
 
 def _json(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _bounded_memory_query(query: str) -> tuple[str, bool]:
-    value = str(query or "").strip()
-    if len(value) <= _MAX_MEMORY_QUERY_CHARS:
-        return value, False
-    return value[:_MAX_MEMORY_QUERY_CHARS], True
+def _blocked(reason_code: str, error: str) -> str:
+    return _json({"status": "blocked", "reason_code": reason_code, "error": error})
 
 
-def _bounded_memory_limit(limit: int) -> int:
-    return max(1, min(_MAX_MEMORY_RETRIEVAL_BATCH, int(limit)))
+def _current_user_request() -> str:
+    """The user's message for the running turn (the turn loop stores it as the task goal)."""
+    conversation_id = current_execution_principal().conversation_id
+    if not conversation_id:
+        return ""
+    row = get_db().get_conversation(conversation_id) or {}
+    return str(row.get("task_goal") or "")
 
 
-def _memory_search(query: str, category: str = "", limit: int = 6) -> str:
-    store = get_long_term_memory()
-    bounded_query, query_truncated = _bounded_memory_query(query)
-    bounded_limit = _bounded_memory_limit(limit)
-    memories = store.search(
-        bounded_query,
-        category=category,
-        limit=bounded_limit,
-        mark_used=False,
-    )
-    return _json({
-        "status": "ok",
-        "memories": memories,
-        "count": len(memories),
-        "budget": {
-            "query_chars": len(bounded_query),
-            "query_truncated": query_truncated,
-            "limit": bounded_limit,
-            "max_limit": _MAX_MEMORY_RETRIEVAL_BATCH,
-        },
-    })
-
-
-def _recall_memory(query: str, category: str = "", limit: int = 6) -> str:
-    store = get_long_term_memory()
-    payload = _memory_search(query=query, category=category, limit=limit)
-    store._audit(
-        action="RECALL",
-        reason="recall_memory tool called",
-        candidate_content=json.dumps(
-            {
-                "recall_memory_called": True,
-                "query": _bounded_memory_query(query)[0][:200],
-                "category": str(category or ""),
-                "limit": _bounded_memory_limit(limit),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-    )
-    return payload
-
-
-def _memory_get(id: str) -> str:
-    memory = get_long_term_memory().get(str(id))
-    if memory is None:
-        return _json({"status": "error", "error": f"Memory {id} not found."})
-    return _json({"status": "ok", "memory": memory})
-
-
-def _memory_remember(content: str, category: str = "fact") -> str:
+def _write_guard(content: str | None = None) -> str | None:
     if not current_interactive():
-        return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Memory writes require an interactive session."})
-    principal = current_execution_principal()
-    store = get_long_term_memory()
-    policy = store.write_policy
-    if policy == "off":
-        return _json({"status": "blocked", "reason_code": "memory_writes_disabled", "error": "Memory writes are turned off in Settings."})
-    if policy != "auto_reviewed":
-        # Text the agent chooses to remember may come from a web page or file it
-        # read; queue it for the user instead of trusting it in future prompts.
-        candidate = store.add_candidate(
-            content,
-            category=category,
-            confidence=1.0,
-            reason="memory_remember tool",
-            source_conversation_id=principal.conversation_id,
+        return _blocked("memory_mutation_non_interactive_restricted", "Memory changes require an interactive session.")
+    if not get_memory_store().enabled:
+        return _blocked("memory_disabled", "Memory is turned off in Settings.")
+    # Text the agent chooses to remember may come from a web page or file it read.
+    # Saved memories reach every future prompt, so only keep what the user said.
+    if content is not None and not grounded_in(content, _current_user_request()):
+        return _blocked(
+            "memory_not_user_stated",
+            "Only save what the user asked you to remember in this turn, phrased in their own words.",
         )
-        if candidate is None:
-            return _json({"status": "error", "error": "Memory was rejected by safety filters."})
-        return _json(
-            {
-                "status": "pending_review",
-                "candidate": candidate,
-                "message": "Saved for the user to review in Settings > Memory; it is not used until approved.",
-            }
-        )
-    memory = store.remember(
-        content,
-        category=category,
-        confidence=1.0,
-        review_state="reviewed",
-        source="tool",
-        source_conversation_id=principal.conversation_id,
-        source_principal_id=principal.principal_id,
-        source_permission_profile_id=principal.permission_profile_id,
-        source_execution_source=principal.source,
+    return None
+
+
+def _memory_search(query: str, scope: str = "all", limit: int = 6) -> str:
+    bounded_query = str(query or "").strip()[:_MAX_MEMORY_QUERY_CHARS]
+    bounded_limit = max(1, min(_MAX_MEMORY_RETRIEVAL_BATCH, int(limit)))
+    memories = get_memory_store().search(
+        bounded_query,
+        workspace=selected_workspace_dir(),
+        scope="" if scope == "all" else scope,
+        limit=bounded_limit,
     )
-    if memory is None:
-        return _json({"status": "error", "error": "Memory was rejected by safety filters."})
-    return _json({"status": "ok", "memory": memory})
+    return _json({"status": "ok", "memories": memories, "count": len(memories)})
+
+
+def _memory_remember(content: str, scope: str = "global", kind: str = "fact", importance: int = 5) -> str:
+    blocked = _write_guard(content)
+    if blocked:
+        return blocked
+    try:
+        entry = get_memory_store().add(
+            content,
+            scope=scope,
+            kind=kind,
+            importance=importance,
+            workspace=selected_workspace_dir(),
+            source="user",
+        )
+    except MemoryWriteError as exc:
+        return _json({"status": "error", "error": str(exc)})
+    return _json({"status": "ok", "memory": entry.public()})
+
+
+def _memory_update(id: str, content: str) -> str:
+    blocked = _write_guard(content)
+    if blocked:
+        return blocked
+    try:
+        entry = get_memory_store().update(str(id), workspace=selected_workspace_dir(), content=content)
+    except MemoryWriteError as exc:
+        return _json({"status": "error", "error": str(exc)})
+    if entry is None:
+        return _json({"status": "error", "error": f"Memory {id} not found."})
+    return _json({"status": "ok", "memory": entry.public()})
 
 
 def _memory_forget(id: str) -> str:
-    if not current_interactive():
-        return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Memory deletes require an interactive session."})
-    memory = get_long_term_memory().archive(str(id))
-    if memory is None:
-        return _json({"status": "error", "error": f"Memory {id} not found."})
-    return _json({"status": "ok", "memory": memory})
-
-
-def _memory_delete(id: str) -> str:
-    if not current_interactive():
-        return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Permanent memory deletion requires an interactive session."})
-    deleted = get_long_term_memory().delete(str(id))
-    if not deleted:
+    blocked = _write_guard()
+    if blocked:
+        return blocked
+    if not get_memory_store().delete(str(id), workspace=selected_workspace_dir()):
         return _json({"status": "error", "error": f"Memory {id} not found."})
     return _json({"status": "ok", "deleted": True, "id": str(id)})
 
 
-def _memory_curate_session(conversation_id: str) -> str:
-    if not current_interactive():
-        return _json({"status": "blocked", "reason_code": "memory_mutation_non_interactive_restricted", "error": "Memory curation requires an interactive session."})
-    result = get_long_term_memory().reconcile_session(str(conversation_id))
-    return _json({"status": "ok", "conversation_id": conversation_id, "result": result})
-
-
 def register_tools(registry, _settings=None) -> None:
-    searchable_categories = ["", "preference", "behavior", "fact", "workflow", "project", "reflection"]
-    writable_categories = ["preference", "behavior", "fact", "workflow", "project", "reflection"]
+    read_metadata = {"parallel_safe": True, "resource_locks": [], "mutates_state": False, "risk_level": "low"}
+    write_metadata = {"parallel_safe": False, "resource_locks": ["memory"], "mutates_state": True, "risk_level": "low"}
     registry.extend(
         [
             {
                 "name": "memory_search",
-                "description": "Search durable long-term user memories by natural-language query.",
+                "description": (
+                    "Search saved memories. Rules, preferences, and relevant facts are already in your context each turn; "
+                    "search only when you need something that is not there. Returns ids for memory_update and memory_forget."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Search query."},
-                        "category": {
+                        "query": {"type": "string", "description": "What to look for."},
+                        "scope": {
                             "type": "string",
-                            "enum": searchable_categories,
-                            "default": "",
+                            "enum": _SEARCH_SCOPES,
+                            "default": "all",
+                            "description": "global = about the user; workspace = the current folder; all = both.",
                         },
                         "limit": {"type": "integer", "default": 6},
                     },
@@ -167,111 +126,62 @@ def register_tools(registry, _settings=None) -> None:
                 "domain": "general",
                 "execution_mode": "sync_stateless",
                 "affinity_group": None,
-                "metadata": {"parallel_safe": True, "resource_locks": [], "mutates_state": False, "risk_level": "low"},
+                "metadata": read_metadata,
             },
             {
-                "name": "recall_memory",
+                "name": "memory_remember",
                 "description": (
-                    "Recall durable long-term user memories on demand. Call this when the current task "
-                    "requires user context that is not already in the injected memory block, such as project "
-                    "specifics, past decisions, or preferences not covered by the identity tier. Skip it if "
-                    "the injected memories already answer the question."
+                    "Save something the user asked you to remember. Use scope 'global' for things about the user or that "
+                    "apply in every folder, and 'workspace' for conventions, commands, and decisions that belong to the "
+                    "current folder. Use kind 'rule' for how you must behave, 'preference' for likes and dislikes, and "
+                    "'fact' for anything else. Phrase it as one short sentence in the user's own words."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Natural-language memory query."},
-                        "category": {
-                            "type": "string",
-                            "enum": searchable_categories,
-                            "default": "",
-                        },
-                        "limit": {"type": "integer", "default": 6},
+                        "content": {"type": "string", "description": "One short, self-contained sentence."},
+                        "scope": {"type": "string", "enum": _WRITE_SCOPES, "default": "global"},
+                        "kind": {"type": "string", "enum": list(KINDS), "default": "fact"},
+                        "importance": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                     },
-                    "required": ["query"],
-                },
-                "callable": _recall_memory,
-                "domain": "general",
-                "execution_mode": "sync_stateless",
-                "affinity_group": None,
-                "metadata": {"parallel_safe": True, "resource_locks": [], "mutates_state": False, "risk_level": "low"},
-            },
-            {
-                "name": "memory_get",
-                "description": "Get a durable Markdown-backed long-term memory by id.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"id": {"type": "string", "description": "Memory id."}},
-                    "required": ["id"],
-                },
-                "callable": _memory_get,
-                "domain": "general",
-                "execution_mode": "sync_stateless",
-                "affinity_group": None,
-                "metadata": {"parallel_safe": True, "resource_locks": [], "mutates_state": False, "risk_level": "low"},
-            },
-            {
-                "name": "memory_remember",
-                "description": "Save an explicit durable user memory. Use only when the user asks to remember something or gives a stable preference. If you mention the save afterward, keep it brief and neutral.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "content": {"type": "string", "description": "Self-contained memory content."},
-                        "category": {
-                            "type": "string",
-                            "enum": writable_categories,
-                            "default": "fact",
-                        },
-                    },
-                    "required": ["content"],
+                    "required": ["content", "scope", "kind"],
                 },
                 "callable": _memory_remember,
                 "domain": "general",
                 "execution_mode": "sync_stateless",
                 "affinity_group": None,
-                "metadata": {"parallel_safe": False, "resource_locks": ["long_term_memory"], "mutates_state": True, "risk_level": "low"},
+                "metadata": write_metadata,
+            },
+            {
+                "name": "memory_update",
+                "description": "Correct a saved memory when the user changes or contradicts it. Find the id with memory_search.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Memory id."},
+                        "content": {"type": "string", "description": "The corrected sentence, in the user's words."},
+                    },
+                    "required": ["id", "content"],
+                },
+                "callable": _memory_update,
+                "domain": "general",
+                "execution_mode": "sync_stateless",
+                "affinity_group": None,
+                "metadata": write_metadata,
             },
             {
                 "name": "memory_forget",
-                "description": "Archive a durable Markdown-backed user memory by id so it is no longer retrieved. If you confirm the change, keep it brief and neutral.",
+                "description": "Delete a saved memory when the user asks you to forget it. Find the id with memory_search.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"id": {"type": "string", "description": "Memory id to archive."}},
+                    "properties": {"id": {"type": "string", "description": "Memory id."}},
                     "required": ["id"],
                 },
                 "callable": _memory_forget,
                 "domain": "general",
                 "execution_mode": "sync_stateless",
                 "affinity_group": None,
-                "metadata": {"parallel_safe": False, "resource_locks": ["long_term_memory"], "mutates_state": True, "risk_level": "low"},
-            },
-            {
-                "name": "memory_delete",
-                "description": "Permanently delete a durable user memory by id. Use only when the user explicitly asks to delete it permanently.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"id": {"type": "string", "description": "Memory id to permanently delete."}},
-                    "required": ["id"],
-                },
-                "callable": _memory_delete,
-                "domain": "general",
-                "execution_mode": "sync_stateless",
-                "affinity_group": None,
-                "metadata": {"parallel_safe": False, "resource_locks": ["long_term_memory"], "mutates_state": True, "risk_level": "medium"},
-            },
-            {
-                "name": "memory_curate_session",
-                "description": "Run the Markdown memory curator for a completed conversation session. Use only for manual debugging or explicit user requests.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"conversation_id": {"type": "string", "description": "Conversation id to curate."}},
-                    "required": ["conversation_id"],
-                },
-                "callable": _memory_curate_session,
-                "domain": "general",
-                "execution_mode": "sync_stateless",
-                "affinity_group": None,
-                "metadata": {"parallel_safe": False, "resource_locks": ["long_term_memory"], "mutates_state": True, "risk_level": "low"},
+                "metadata": write_metadata,
             },
         ]
     )

@@ -1,213 +1,77 @@
 from fastapi import APIRouter, HTTPException, Query
 
-from app.agent.memory_consolidation import close_session_async
-from app.agent.long_term_memory import get_long_term_memory
+from app.agent.memory_store import MemoryWriteError, get_memory_store
 from app.agent.ui_events import publish_ui_event
 from app.schemas import (
-    MemoryAuditOut,
-    MemoryCandidateOut,
-    MemoryCandidateUpdate,
-    MemoryCheckpointOut,
     MemoryCreate,
-    MemoryEpisodeOut,
-    MemoryFileOut,
-    MemoryFileSectionOut,
-    MemoryFileUpdate,
     MemoryOut,
     MemorySearchOut,
-    MemorySectionUpdate,
-    MemorySessionCloseIn,
-    MemorySessionCloseOut,
-    MemoryStatsOut,
     MemoryUpdate,
+    MemoryWorkspaceOut,
     OkResponse,
 )
 
 router = APIRouter()
 
+# ``workspace`` is a folder path; empty means Monaw's default workspace. Global
+# memories are always included alongside the workspace's own.
+
 
 @router.get("/memories", response_model=list[MemoryOut])
 async def list_memories(
-    query: str = "",
-    category: str = "",
-    status: str = Query("active", pattern="^(active|archived|)$"),
-    review_state: str = Query("", pattern="^(new|reviewed|)$"),
-    limit: int = Query(100, ge=1, le=500),
+    workspace: str = "",
+    scope: str = Query("", pattern="^(global|workspace|)$"),
 ):
-    store = get_long_term_memory()
-    return store.list_memories(
-        query=query,
-        category=category,
-        status=status,
-        review_state=review_state,
-        limit=limit,
-    )
-
-
-@router.post("/memories", response_model=MemoryOut)
-async def create_memory(body: MemoryCreate):
-    store = get_long_term_memory()
-    memory = store.remember(
-        body.content,
-        category=body.category,
-        confidence=body.confidence,
-        review_state=body.review_state,
-        importance=body.importance,
-        kind=body.kind,
-        source="manual",
-    )
-    if memory is None:
-        raise HTTPException(status_code=400, detail="Memory was rejected by safety filters")
-    publish_ui_event("memory.changed", {"memory_id": memory.get("id", ""), "action": "created"})
-    return memory
+    return [entry.public() for entry in get_memory_store().entries(workspace, scope=scope)]
 
 
 @router.get("/memories/search", response_model=list[MemorySearchOut])
 async def search_memories(
     query: str = Query(..., min_length=1),
-    category: str = "",
-    include_archived: bool = False,
-    review_state: str = Query("", pattern="^(new|reviewed|)$"),
+    workspace: str = "",
+    scope: str = Query("", pattern="^(global|workspace|)$"),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return get_long_term_memory().score(
-        query,
-        category=category,
-        include_archived=include_archived,
-        review_state=review_state,
-        limit=limit,
-        mark_used=False,
-    )
+    return get_memory_store().search(query, workspace=workspace, scope=scope, limit=limit)
 
 
-@router.get("/memories/stats", response_model=MemoryStatsOut)
-async def memory_stats():
-    return get_long_term_memory().stats()
+@router.get("/memories/workspaces", response_model=list[MemoryWorkspaceOut])
+async def list_memory_workspaces():
+    return get_memory_store().list_workspaces()
 
 
-@router.get("/memories/audit", response_model=list[MemoryAuditOut])
-async def memory_audit(
-    conversation_id: str = "",
-    memory_id: str | None = None,
-    limit: int = Query(100, ge=1, le=500),
-):
-    return get_long_term_memory().audit_log(
-        conversation_id=conversation_id,
-        memory_id=memory_id,
-        limit=limit,
-    )
-
-
-@router.post("/memories/session/close", response_model=MemorySessionCloseOut)
-async def close_memory_session(body: MemorySessionCloseIn):
-    result = await close_session_async(body.conversation_id)
-    publish_ui_event("memory.changed", {"conversation_id": body.conversation_id, "action": "session_closed"})
-    return result
-
-
-@router.get("/memories/candidates", response_model=list[MemoryCandidateOut])
-async def list_memory_candidates(
-    status: str = Query("new", pattern="^(new|approved|rejected|)$"),
-    limit: int = Query(100, ge=1, le=500),
-):
-    return get_long_term_memory().list_candidates(status=status, limit=limit)
-
-
-@router.patch("/memories/candidates/{candidate_id}", response_model=MemoryCandidateOut)
-async def update_memory_candidate(candidate_id: str, body: MemoryCandidateUpdate):
+@router.post("/memories", response_model=MemoryOut)
+async def create_memory(body: MemoryCreate):
     try:
-        candidate = get_long_term_memory().update_candidate(
-            candidate_id,
-            status=body.status,
-            approve=body.approve,
+        entry = get_memory_store().add(
+            body.content,
+            scope=body.scope,
+            kind=body.kind,
+            importance=body.importance,
+            workspace=body.workspace,
+            source="manual",
         )
-    except ValueError as exc:
+    except MemoryWriteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if candidate is None:
-        raise HTTPException(status_code=404, detail="Memory candidate not found")
-    publish_ui_event("memory.changed", {"candidate_id": candidate_id, "action": "candidate_updated"})
-    return candidate
-
-
-@router.get("/memories/episodes", response_model=list[MemoryEpisodeOut])
-async def list_memory_episodes(
-    conversation_id: str = "",
-    limit: int = Query(100, ge=1, le=500),
-):
-    return get_long_term_memory().list_episodes(conversation_id=conversation_id, limit=limit)
-
-
-@router.get("/memories/checkpoints", response_model=list[MemoryCheckpointOut])
-async def list_memory_checkpoints(
-    status: str = Query("active", pattern="^(active|paused|blocked|completed|stale|)$"),
-    limit: int = Query(100, ge=1, le=500),
-):
-    return get_long_term_memory().list_checkpoints(status=status, limit=limit)
-
-
-@router.get("/memories/files/{category}", response_model=MemoryFileOut)
-async def get_memory_file(category: str):
-    store = get_long_term_memory()
-    normalized = store._normalize_category(category)
-    if normalized != category:
-        raise HTTPException(status_code=400, detail="Invalid memory category")
-    return store.memory_file(category)
-
-
-@router.put("/memories/files/{category}", response_model=MemoryFileOut)
-async def save_memory_file(category: str, body: MemoryFileUpdate):
-    store = get_long_term_memory()
-    normalized = store._normalize_category(category)
-    if normalized != category:
-        raise HTTPException(status_code=400, detail="Invalid memory category")
-    try:
-        memory_file = store.save_memory_file(category, body.raw_markdown)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    publish_ui_event("memory.changed", {"category": category, "action": "file_saved"})
-    return memory_file
-
-
-@router.patch("/memories/sections/{section_id}", response_model=MemoryFileSectionOut)
-async def update_memory_section(section_id: str, body: MemorySectionUpdate):
-    try:
-        section = get_long_term_memory().update_section(
-            section_id,
-            **body.model_dump(exclude_unset=True),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if section is None:
-        raise HTTPException(status_code=404, detail="Memory section not found")
-    publish_ui_event("memory.changed", {"section_id": section_id, "action": "section_updated"})
-    return section
-
-
-@router.get("/memories/{memory_id}", response_model=MemoryOut)
-async def get_memory(memory_id: str):
-    memory = get_long_term_memory().get(memory_id)
-    if memory is None:
-        raise HTTPException(status_code=404, detail="Memory not found")
-    return memory
+    publish_ui_event("memory.changed", {"memory_id": entry.id, "action": "created"})
+    return entry.public()
 
 
 @router.patch("/memories/{memory_id}", response_model=MemoryOut)
-async def update_memory(memory_id: str, body: MemoryUpdate):
+async def update_memory(memory_id: str, body: MemoryUpdate, workspace: str = ""):
     try:
-        memory = get_long_term_memory().update(
-            memory_id,
-            **body.model_dump(exclude_unset=True),
-        )
-    except ValueError as exc:
+        entry = get_memory_store().update(memory_id, workspace=workspace, **body.model_dump(exclude_unset=True))
+    except MemoryWriteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if memory is None:
+    if entry is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    return memory
+    publish_ui_event("memory.changed", {"memory_id": memory_id, "action": "updated"})
+    return entry.public()
 
 
 @router.delete("/memories/{memory_id}", response_model=OkResponse)
-async def delete_memory(memory_id: str):
-    if not get_long_term_memory().delete(memory_id):
+async def delete_memory(memory_id: str, workspace: str = ""):
+    if not get_memory_store().delete(memory_id, workspace=workspace):
         raise HTTPException(status_code=404, detail="Memory not found")
     publish_ui_event("memory.changed", {"memory_id": memory_id, "action": "deleted"})
     return {"ok": True}

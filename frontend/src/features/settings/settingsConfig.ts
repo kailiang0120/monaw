@@ -229,18 +229,6 @@ const emptyIdentity = (): AgentSettings['identity'] => ({
   communication_style: '',
 })
 
-const emptyMemory = (): AgentSettings['memory'] => ({
-  enabled: true,
-  auto_learn: true,
-  curate_on_session_close: true,
-  write_policy: 'auto_with_review',
-  retrieval_limit: 6,
-  max_injected_chars: 2500,
-  min_confidence: 0.75,
-  min_relevance_score: 0.15,
-  maintenance_cooldown_hours: 24,
-})
-
 const emptySpeechToText = (): AgentSettings['speech_to_text'] => ({
   engine: 'local',
   local_model: 'base',
@@ -301,21 +289,6 @@ export const MCP_SERVER_TEMPLATES = {
 export type MCPServerTemplateKey = keyof typeof MCP_SERVER_TEMPLATES
 
 
-// Mirrors DecisionModelSettings in backend/app/agent/settings_store.py.
-const DEFAULT_DECISION_MODEL: AgentSettings['decision_model'] = {
-  enabled: true,
-  managed: true,
-  provider: 'laya',
-  mode: 'shadow',
-  endpoint: 'http://127.0.0.1:8421',
-  model: '',
-  timeout_ms: 3000,
-  coverage: 0.9,
-  max_domains: 4,
-  min_confidence: 0.4,
-  pinned_domains: ['core', 'memory', 'tool-search'],
-}
-
 export function normalizeDraft(
   settings: AgentSettings,
   catalog: ModelOptionsCatalog = FALLBACK_MODEL_OPTIONS,
@@ -337,7 +310,6 @@ export function normalizeDraft(
   return {
     ...settings,
     settings_version: settings.settings_version || '',
-    decision_model: { ...DEFAULT_DECISION_MODEL, ...(settings.decision_model ?? {}) },
     telegram_allowed_user_ids: (settings.telegram_allowed_user_ids ?? '').trim(),
     telegram_allowed_chat_ids: (settings.telegram_allowed_chat_ids ?? '').trim(),
     identity: {
@@ -362,13 +334,11 @@ export function normalizeDraft(
       })),
     },
     memory: {
-      ...emptyMemory(),
-      ...(settings.memory ?? {}),
+      enabled: settings.memory?.enabled ?? true,
+      auto_learn: settings.memory?.auto_learn ?? true,
       retrieval_limit: clampInteger(settings.memory?.retrieval_limit, 6, 1, 20),
       max_injected_chars: clampInteger(settings.memory?.max_injected_chars, 2500, 500, 10000),
-      min_confidence: Math.min(1, Math.max(0, Number(settings.memory?.min_confidence ?? 0.75))),
       min_relevance_score: Math.min(1, Math.max(0, Number(settings.memory?.min_relevance_score ?? 0.15))),
-      maintenance_cooldown_hours: clampInteger(settings.memory?.maintenance_cooldown_hours, 24, 0, 168),
     },
     speech_to_text: {
       ...emptySpeechToText(),

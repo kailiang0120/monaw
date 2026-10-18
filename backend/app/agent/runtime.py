@@ -10,11 +10,10 @@ from typing import AsyncIterator
 
 from app.agent.llm_client import LLMClient
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
-from app.agent.long_term_memory import get_long_term_memory
+from app.agent.memory_store import get_memory_store
 from app.agent.memory_manager import MemoryManager
 from app.agent.skill_loader import load_tools
 from app.agent.skill_prompt import build_skill_prompt
-from app.agent.tool_selection import build_tool_selector
 from app.agent.turn_loop import TurnLoop
 from app.agent.steering import SteeringInbox
 from app.agent.database import get_db
@@ -123,13 +122,8 @@ class AgentRuntime:
         )
         self.skills, self.tool_registry = load_tools(settings)
         self.memory = MemoryManager(self.llm_client)
-        self.long_term_memory = get_long_term_memory(self.llm_client, settings)
-        self.memory.set_long_term_memory(self.long_term_memory)
-        threading.Thread(
-            target=self._catch_up_memory,
-            name="memory-catch-up",
-            daemon=True,
-        ).start()
+        self.memory_store = get_memory_store(self.llm_client, settings)
+        self.memory.set_memory_store(self.memory_store)
 
         llm_cfg = getattr(settings, "llm", None)
         max_iterations = getattr(llm_cfg, "max_iterations_per_turn", None) or 200
@@ -143,7 +137,6 @@ class AgentRuntime:
             max_iterations=max_iterations,
             max_turn_seconds=max_turn_seconds,
             max_llm_call_seconds=max_llm_call_seconds,
-            tool_selector=build_tool_selector(settings, self.skills),
         )
         visible_tool_names = {
             tool["name"] for tool in self.tool_registry.get_all_tools(visible_only=True)
@@ -159,14 +152,6 @@ class AgentRuntime:
             build_workspace_instruction_prompt(),
         ]
         return "\n\n".join(prompt for prompt in prompts if prompt)
-
-    def _catch_up_memory(self) -> None:
-        try:
-            caught_up = self.long_term_memory.catch_up_unprocessed_sessions(max_sessions=3)
-            if caught_up:
-                logger.info("Markdown memory catch-up curated %d sessions", caught_up)
-        except Exception as exc:
-            logger.debug("Markdown memory catch-up skipped: %s", exc)
 
     def current_system_prompt(self) -> str:
         revision = self.tool_registry.revision
@@ -293,14 +278,6 @@ def _settings_cache_key(settings) -> str:
         ) if memory_settings is not None else ""
     except TypeError:
         memory_fingerprint = str(memory_settings)
-    decision_settings = getattr(settings, "decision_model", None)
-    try:
-        decision_fingerprint = json.dumps(
-            decision_settings if isinstance(decision_settings, dict) else vars(decision_settings),
-            sort_keys=True,
-        ) if decision_settings is not None else ""
-    except TypeError:
-        decision_fingerprint = str(decision_settings)
     parts = [
         provider,
         settings.model_name,
@@ -311,8 +288,6 @@ def _settings_cache_key(settings) -> str:
         browser_fingerprint,
         identity_fingerprint,
         memory_fingerprint,
-        decision_fingerprint,
-        _key_fingerprint(getattr(settings, "laya_api_key", "") or ""),
         str(getattr(llm_settings, "max_iterations_per_turn", "")),
         str(getattr(llm_settings, "max_turn_seconds", "")),
         str(getattr(llm_settings, "max_llm_call_seconds", "")),

@@ -472,7 +472,10 @@ const answer = 42
       }],
     }} />)
 
-    expect(screen.getByRole('button', { name: 'Used browser' })).toBeInTheDocument()
+    const heading = screen.getByRole('button', { name: 'Used browser' })
+    fireEvent.click(heading)
+    expect(screen.getByRole('button', { name: 'Used browser · read page' })).toBeInTheDocument()
+    expect(screen.queryByText(/mcp__/)).not.toBeInTheDocument()
   })
 
   it('loads full tool details on demand for preview-only history rows', async () => {

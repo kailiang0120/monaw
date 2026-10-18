@@ -12,7 +12,6 @@ from app.agent.run_context import reset_current_interactive, set_current_interac
 from app.agent.settings_store import AgentSettings, MCPServerConfig, _normalize_loaded_payload, build_runtime_namespace
 from app.agent.settings_store import merge_agent_settings
 from app.agent.tool_registry import ToolRegistry
-from app.agent.tool_selection import tool_domain
 from app.main import app
 from app.skills.mcp_bridge import builtin, connection
 from app.skills.mcp_bridge import tools as bridge_tools
@@ -21,7 +20,7 @@ from app.skills.mcp_bridge.registry import build_tool_entries, clear_all_reflect
 
 def _runtime(settings_data: AgentSettings):
     base = type("Base", (), {
-        "openai_api_key": "", "google_api_key": "", "tavily_api_key": "", "laya_api_key": "",
+        "openai_api_key": "", "google_api_key": "", "tavily_api_key": "",
     })()
     return build_runtime_namespace(base, settings_data)
 
@@ -62,15 +61,6 @@ def test_a_user_server_cannot_shadow_the_builtin_name(monkeypatch):
     servers = bridge_tools._iter_enabled_servers(_runtime(settings_data))
 
     assert [cfg.command for cfg in servers] == ["npx"]
-
-
-def test_builtin_tools_count_as_browser_use_for_tool_selection():
-    builtin_tool = {"name": "mcp__chrome-devtools__take_snapshot",
-                    "mcp_bridge": {"server_name": "chrome-devtools", "skill": "browser-use"}}
-    user_tool = {"name": "mcp__notes__find", "mcp_bridge": {"server_name": "notes", "skill": ""}}
-
-    assert tool_domain(builtin_tool) == "browser-use"
-    assert tool_domain(user_tool) == "mcp:notes"
 
 
 def test_saved_chrome_devtools_entries_are_dropped_on_load():

@@ -4,7 +4,6 @@ from app.api.routes.access_grants import router as access_grants_router
 from app.api.routes.approvals import router as approvals_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.conversations import router as conversations_router
-from app.api.routes.decision_model import router as decision_model_router
 from app.api.routes.diagnostics import router as diagnostics_router
 from app.api.routes.events import router as events_router
 from app.api.routes.files import router as files_router
@@ -35,5 +34,4 @@ router.include_router(sandbox_router)
 router.include_router(files_router)
 router.include_router(uploads_router)
 router.include_router(speech_to_text_router)
-router.include_router(decision_model_router)
 router.include_router(scheduled_tasks_router)

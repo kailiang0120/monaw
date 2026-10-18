@@ -47,11 +47,8 @@ def test_load_tools_returns_enabled_skills_only():
     assert "exec" in tool_names
     assert "memory" in names
     assert "calculator" in tool_names
-    assert "memory_search" in tool_names
-    assert "recall_memory" in tool_names
-    recall_tool = registry.get_tool("recall_memory")
-    assert recall_tool is not None
-    assert "Skip it if the injected memories already answer the question" in recall_tool["description"]
+    assert {"memory_search", "memory_remember", "memory_update", "memory_forget"} <= tool_names
+    assert "recall_memory" not in tool_names
     assert "mcp_status" in tool_names
     assert "computer_functions_list_apps" in tool_names
     assert "computer_functions_get_window_state" in tool_names

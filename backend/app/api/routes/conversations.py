@@ -291,7 +291,11 @@ async def get_context_usage(conv_id: str):
         if part
     )
     long_term_query = infer_context_query(runtime.memory, conv_id)
-    long_term_context = runtime.memory.build_long_term_memory_context(long_term_query, mark_used=False)
+    long_term_context = runtime.memory.build_long_term_memory_context(
+        long_term_query,
+        conversation_id=conv_id,
+        workspace=conversation.get("workspace_dir", ""),
+    )
 
     return build_context_usage_report(
         memory=runtime.memory,

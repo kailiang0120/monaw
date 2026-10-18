@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 
 from app.agent.controller_policy import (
     AppEntry,
@@ -13,7 +13,6 @@ from app.agent.controller_policy import (
     set_permission_mode,
 )
 from app.agent.model_catalog import model_options_payload
-from app.api.routes.decision_model import managed_server
 from app.agent.settings_store import (
     api_settings_payload,
     load_agent_settings,
@@ -88,8 +87,6 @@ def _settings_patch_from_body(body: SettingsUpdate) -> dict:
         patch["sandbox"] = body.sandbox.model_dump(exclude_unset=True)
     if body.identity is not None:
         patch["identity"] = body.identity.model_dump(exclude_unset=True)
-    if body.decision_model is not None:
-        patch["decision_model"] = body.decision_model.model_dump(exclude_unset=True)
 
     if (
         body.model_provider is not None
@@ -112,9 +109,8 @@ def _settings_patch_from_body(body: SettingsUpdate) -> dict:
 
 
 @router.put("/settings", response_model=AgentSettingsPayload)
-async def update_settings(body: SettingsUpdate, request: Request):
+async def update_settings(body: SettingsUpdate):
     changed = False
-    decision_model_changed = False
     runtime_changed = False
     mcp_changed = False
     telegram_changed = False
@@ -145,7 +141,6 @@ async def update_settings(body: SettingsUpdate, request: Request):
                 if getattr(updated, section) != getattr(current, section)
             }
             mcp_changed = "mcp" in changed_sections
-            decision_model_changed = "decision_model" in changed_sections
 
     def assign_if_changed(name: str, value: str | None, *, default: str | None = None) -> bool:
         if value is None:
@@ -223,8 +218,6 @@ async def update_settings(body: SettingsUpdate, request: Request):
                     ],
                 },
             )
-        if decision_model_changed:
-            await managed_server(request).restart(updated.decision_model, api_key=settings.laya_api_key)
         if telegram_changed:
             try:
                 from app.integrations.telegram.service import restart_telegram_bot

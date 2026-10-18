@@ -661,11 +661,9 @@ def test_runtime_namespace_includes_memory_settings():
     settings_data.memory.retrieval_limit = 10
     settings_data.memory.max_injected_chars = 4000
     settings_data.memory.min_relevance_score = 0.25
-    settings_data.memory.maintenance_cooldown_hours = 12
 
     runtime = build_runtime_namespace(_base_settings(), settings_data)
 
     assert runtime.memory.retrieval_limit == 10
     assert runtime.memory.max_injected_chars == 4000
     assert runtime.memory.min_relevance_score == 0.25
-    assert runtime.memory.maintenance_cooldown_hours == 12

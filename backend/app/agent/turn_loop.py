@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.iteration_budget import IterationBudget
 from app.agent.llm_client import LLMClient, build_tool_result_message
+from app.agent.conversation_workspace import selected_workspace_dir
 from app.agent.memory_manager import MemoryManager
 from app.agent.observability.recorder import (
     UsageStats,
@@ -50,7 +51,6 @@ from app.agent.approval_review import AutoReviewState
 from app.agent.harness.tool_protocol import ToolCallRequest as HarnessToolCallRequest
 from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.tool_registry import ToolRegistry, can_parallelize
-from app.agent.tool_selection import ToolSelector, evaluate_selection
 from app.agent.tool_cancellation import set_tool_scope, reset_tool_scope
 from app.agent.harness.workers import unfinished_workers
 
@@ -627,7 +627,6 @@ class TurnLoop:
         max_llm_call_seconds: float = 600.0,
         observability: ObservabilityPort | None = None,
         max_parallel_tool_calls: int = 4,
-        tool_selector: ToolSelector | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.registry = registry
@@ -642,70 +641,6 @@ class TurnLoop:
         self.max_identical_calls = 2
         self.execution_gate = ExecutionGateService(executor=self.executor)
         self.observability: ObservabilityPort = observability or get_observability_recorder()
-        self.tool_selector = tool_selector
-
-    def _start_tool_selection(
-        self,
-        message: str,
-        history: list[dict],
-        visible_tools: list[dict],
-        attachment_count: int,
-    ) -> asyncio.Task | None:
-        """Ask the decision model about this turn without blocking the loop."""
-        if self.tool_selector is None:
-            return None
-        return asyncio.create_task(
-            self.tool_selector.decide(
-                message,
-                visible_tools=visible_tools,
-                history=history,
-                attachment_count=attachment_count,
-            )
-        )
-
-    async def _record_tool_selection(
-        self,
-        task: asyncio.Task,
-        *,
-        deadline: float,
-        visible_tools: list[dict],
-        tool_calls: list[dict],
-        log_event: Callable[..., None],
-        all_tools: list[dict] | None = None,
-    ) -> None:
-        """Log the shadow decision next to the tools the LLM actually called."""
-        try:
-            remaining = max(0.05, deadline - time.monotonic())
-            try:
-                decision = await asyncio.wait_for(task, timeout=remaining)
-            except asyncio.TimeoutError:
-                decision = self.tool_selector.timeout_decision()
-            metadata = evaluate_selection(
-                decision,
-                visible_tools=visible_tools,
-                used_tool_names=[str(call.get("tool_name") or "") for call in tool_calls],
-                lookup_tool=self.registry.get_tool,
-                all_tools=all_tools,
-            )
-            log_event(
-                "tool_selection_shadow",
-                status=decision.status,
-                duration_ms=decision.latency_ms,
-                error_message=decision.error,
-                metadata=metadata,
-            )
-            logger.info(
-                "tool_selection_shadow status=%s top=%s p=%.3f kept=%s used=%s missed=%s latency_ms=%s",
-                decision.status,
-                decision.top_domain,
-                decision.top_probability,
-                metadata["kept_domains"],
-                metadata["used_domains"],
-                metadata["missed_domains"],
-                decision.latency_ms,
-            )
-        except Exception:
-            logger.debug("tool selection shadow logging failed", exc_info=True)
 
     def shutdown(self) -> None:
         self.executor.shutdown()
@@ -852,8 +787,6 @@ class TurnLoop:
         active_tool_tasks: dict[str, asyncio.Task] = {}
         turn_persisted = False
         obs_usage_total = UsageStats()
-        tool_selection_task: asyncio.Task | None = None
-        tool_selection_deadline = 0.0
 
         def _obs_event(event_type: str, **kwargs) -> None:
             if not obs_run_id:
@@ -1035,7 +968,7 @@ class TurnLoop:
                 return
             build_long_term_context = getattr(self.memory, "build_long_term_memory_context", None)
             long_term_context = (
-                build_long_term_context(message)
+                build_long_term_context(message, conversation_id=conversation_id, workspace=selected_workspace_dir())
                 if callable(build_long_term_context)
                 else ""
             )
@@ -1067,16 +1000,6 @@ class TurnLoop:
                 initial_message["ephemeral"] = True
             messages.append(initial_message)
             latest_round_start = len(messages) - 1
-            # Include tools hidden until tool search loads them (e.g. scheduling),
-            # so the decision model can still pick their domain.
-            selectable_tools = self.registry.get_all_tools()
-            tool_selection_task = self._start_tool_selection(
-                message, messages[:-1], selectable_tools, len(attachments or [])
-            )
-            if tool_selection_task is not None:
-                # Give the decision its own timeout plus slack before the turn
-                # stops waiting for it.
-                tool_selection_deadline = time.monotonic() + self.tool_selector.timeout_seconds + 0.5
 
             def _current_user_request() -> str:
                 applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
@@ -2521,30 +2444,15 @@ class TurnLoop:
                 "data": done_data,
             })
 
-            if tool_selection_task is not None:
-                await self._record_tool_selection(
-                    tool_selection_task,
-                    deadline=tool_selection_deadline,
-                    visible_tools=initial_visible_tools,
-                    all_tools=selectable_tools,
-                    tool_calls=persisted_tool_calls,
-                    log_event=_obs_event,
-                )
-
-            # Per-turn long-term learning runs heuristic extraction plus blocking
-            # SQLite writes. Run it after the user-visible `done` and off the event
-            # loop so it neither delays completion nor stalls other conversations.
-            schedule_long_term_learning = getattr(self.memory, "schedule_long_term_learning", None)
-            if callable(schedule_long_term_learning):
+            # Memory learning reads only the user's words (including steering sent
+            # mid-turn) and runs as a background task after the user-visible `done`,
+            # so it never delays the turn.
+            schedule_memory_learning = getattr(self.memory, "schedule_memory_learning", None)
+            if callable(schedule_memory_learning):
                 try:
-                    await asyncio.to_thread(
-                        schedule_long_term_learning,
-                        conversation_id=conversation_id,
-                        user_message=message,
-                        assistant_message=final_text,
-                    )
+                    schedule_memory_learning(user_message=_current_user_request(), workspace=selected_workspace_dir())
                 except Exception:
-                    logger.exception("schedule_long_term_learning failed")
+                    logger.exception("schedule_memory_learning failed")
         except asyncio.CancelledError:
             cleanup_active_tasks = locals().get("_cancel_active_tool_tasks")
             if callable(cleanup_active_tasks):
@@ -2632,8 +2540,6 @@ class TurnLoop:
             except Exception:
                 pass
         finally:
-            if tool_selection_task is not None and not tool_selection_task.done():
-                tool_selection_task.cancel()
             reset_tool_scope(tool_scope_token)
             if obs_context_token is not None:
                 reset_current_run_id(obs_context_token)

@@ -17,9 +17,9 @@ export interface SettingsPageCopy {
 
 export const PAGE_COPY = {
   model: {
-    label: 'Local models',
-    blurb: 'Configure voice input and the Laya tool-selection model.',
-    keywords: 'speech voice whisper transcription laya decision tool selection shadow',
+    label: 'Voice',
+    blurb: 'Configure voice input.',
+    keywords: 'speech voice whisper transcription',
   },
   apiKeys: {
     label: 'Connections',
@@ -30,11 +30,6 @@ export const PAGE_COPY = {
     label: 'Identity',
     blurb: 'Tell the agent what to call itself, what to call you, and how to write.',
     keywords: 'name nickname tone style persona about me agents.md custom instructions',
-  },
-  memory: {
-    label: 'Memory',
-    blurb: 'Decide what the agent is allowed to remember between conversations, and review what it already knows.',
-    keywords: 'remember recall facts preferences learning retrieval curation',
   },
   tools: {
     label: 'Tools',
@@ -73,8 +68,6 @@ export const MODEL_COPY = {
   reasoningEffort: 'How long the model is allowed to think before it answers. Higher settings give better results on hard problems but are slower and cost more.',
   vision: 'Screenshots and image attachments go straight to the model you picked above, which reads them natively. No separate vision model is needed.',
   speechEngine: 'Local needs a one-time download. Cloud sends audio to Google and requires an API key.',
-  decisionModel: 'A small model on this computer guesses which skills each request needs. Its guesses are only logged next to the tools the agent actually used. It never changes what the agent can do.',
-  decisionModelToggle: 'Changes apply when you save, without restarting Monaw.',
   speechLocalIntro: 'Voice input needs the Whisper model downloaded once (about 142 MB). It then runs entirely on this machine.',
   runtimeLimits: 'Safety brakes for a single request. If the agent gets stuck in a loop, these stop it instead of letting it run forever.',
   maxIterations: 'How many tool calls the agent may make while answering one message.',
@@ -91,6 +84,7 @@ export const IDENTITY_COPY = {
   communicationStyle: 'How you want replies written: length, tone, language, formatting, how blunt to be.',
   customInstructions: 'Applied to every conversation and saved in your workspace.',
   customInstructionsLimit: 'Permission checks still apply.',
+  memory: 'Let the agent remember your preferences and project context between conversations.',
 } as const
 
 /* ----------------------------------------------------------------- skills --- */

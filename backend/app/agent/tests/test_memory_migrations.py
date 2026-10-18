@@ -22,7 +22,7 @@ def test_sql_statement_splitter_keeps_trigger_body_together():
     assert statements[0].rstrip().upper().endswith("END;")
 
 
-def test_fresh_database_does_not_create_sqlite_memory_schema(tmp_path):
+def test_fresh_database_has_no_sqlite_memory_tables(tmp_path):
     db = Database(tmp_path / "agent.db")
     db.init_db()
     db.init_db()
@@ -41,17 +41,10 @@ def test_fresh_database_does_not_create_sqlite_memory_schema(tmp_path):
     }
 
     assert "messages_archive" in tables
-    assert "memories" not in tables
-    assert "memory_audit" in tables
-    assert "memory_audit_counters" in tables
-    assert "memory_candidates" in tables
-    assert "memory_profile_fields" not in tables
-    assert "memory_episodes" in tables
-    assert "memory_checkpoints" in tables
     assert "conversation_compactions" in tables
-    assert "memory_embeddings" not in tables
-    assert "memory_fts" not in tables
-    assert versions == [5, 6, 7, 8, 9, 10, 11, 12, 13]
+    # Memory lives in markdown files; no memory table survives the migrations.
+    assert not {name for name in tables if name.startswith("memor")}
+    assert versions == [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     assert {
         "idx_conversations_updated",
         "idx_tool_calls_conversation",
@@ -59,31 +52,19 @@ def test_fresh_database_does_not_create_sqlite_memory_schema(tmp_path):
         "idx_plan_steps_conversation_status",
         "idx_scheduled_tasks_created",
         "idx_scheduled_task_runs_status",
-        "idx_memory_candidates_status_updated",
-        "idx_memory_checkpoints_status_updated",
-        "idx_memory_episodes_updated",
-        "idx_memory_audit_created",
-        "idx_memory_audit_conversation_created",
     }.issubset(indexes)
+    assert not {name for name in indexes if name.startswith("idx_memory")}
 
 
-def test_memory_migration_adds_deletion_cascade_and_trims_operational_layers(tmp_path):
+def test_message_archive_cascades_with_conversation_deletion(tmp_path):
     db = Database(tmp_path / "agent.db")
     db.init_db()
 
     archive_columns = {
         row["name"] for row in db.fetchall("PRAGMA table_info(messages_archive)")
     }
-    episode_columns = {
-        row["name"] for row in db.fetchall("PRAGMA table_info(memory_episodes)")
-    }
-    checkpoint_columns = {
-        row["name"] for row in db.fetchall("PRAGMA table_info(memory_checkpoints)")
-    }
 
     assert "conversation_id" in archive_columns
-    assert "browser_url" not in checkpoint_columns
-    assert "decisions_json" not in episode_columns
     foreign_keys = db.fetchall("PRAGMA foreign_key_list(messages_archive)")
     assert any(row["table"] == "conversations" and row["on_delete"] == "CASCADE" for row in foreign_keys)
 

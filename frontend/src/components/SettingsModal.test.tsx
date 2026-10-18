@@ -11,13 +11,6 @@ import {
   updateWorkspaceInstructions,
   startOpenAIAccountLogin,
 } from '../lib/api/settings'
-import {
-  fetchMemoryCandidates,
-  fetchMemoryEpisodes,
-  fetchMemories,
-  fetchMemoryFile,
-  fetchMemoryStats,
-} from '../lib/api/memories'
 import { fetchBrowserDiagnostics, reconnectBrowser } from '../lib/api/diagnostics'
 import { SettingsModal } from '../features/settings/SettingsModal'
 
@@ -29,7 +22,6 @@ const mocks = vi.hoisted(() => ({
   logoutOpenAIAccount: vi.fn(),
   fetchSandboxStatus: vi.fn(),
   fetchSpeechToTextStatus: vi.fn(),
-  fetchDecisionModelStatus: vi.fn(),
   fetchWorkspaceInstructions: vi.fn(),
   downloadSpeechToTextModel: vi.fn(),
   offloadSpeechToTextModel: vi.fn(),
@@ -37,16 +29,6 @@ const mocks = vi.hoisted(() => ({
   updateWorkspaceInstructions: vi.fn(),
   resetWorkspaceInstructions: vi.fn(),
   updateSettings: vi.fn(),
-  fetchMemories: vi.fn(),
-  fetchMemoryFile: vi.fn(),
-  fetchMemoryStats: vi.fn(),
-  fetchMemoryCandidates: vi.fn(),
-  fetchMemoryEpisodes: vi.fn(),
-  searchMemories: vi.fn(),
-  createMemory: vi.fn(),
-  updateMemory: vi.fn(),
-  deleteMemory: vi.fn(),
-  updateMemoryCandidate: vi.fn(),
 }))
 
 vi.mock('../lib/api/diagnostics', () => {
@@ -91,7 +73,6 @@ vi.mock('../lib/api/settings', () => ({
   logoutOpenAIAccount: mocks.logoutOpenAIAccount,
   fetchSandboxStatus: mocks.fetchSandboxStatus,
   fetchSpeechToTextStatus: mocks.fetchSpeechToTextStatus,
-  fetchDecisionModelStatus: mocks.fetchDecisionModelStatus,
   fetchWorkspaceInstructions: mocks.fetchWorkspaceInstructions,
   downloadSpeechToTextModel: mocks.downloadSpeechToTextModel,
   offloadSpeechToTextModel: mocks.offloadSpeechToTextModel,
@@ -100,65 +81,6 @@ vi.mock('../lib/api/settings', () => ({
   resetWorkspaceInstructions: mocks.resetWorkspaceInstructions,
   updateSettings: mocks.updateSettings,
 }))
-
-vi.mock('../lib/api/memories', () => ({
-  fetchMemories: mocks.fetchMemories,
-  fetchMemoryFile: mocks.fetchMemoryFile,
-  fetchMemoryStats: mocks.fetchMemoryStats,
-  fetchMemoryCandidates: mocks.fetchMemoryCandidates,
-  fetchMemoryEpisodes: mocks.fetchMemoryEpisodes,
-  searchMemories: mocks.searchMemories,
-  createMemory: mocks.createMemory,
-  updateMemory: mocks.updateMemory,
-  deleteMemory: mocks.deleteMemory,
-  saveMemoryFile: vi.fn(),
-  updateSection: vi.fn(),
-  updateMemoryCandidate: mocks.updateMemoryCandidate,
-}))
-
-function buildMemoryStats(overrides: Record<string, unknown> = {}) {
-  return {
-    total: 0,
-    active: 0,
-    archived: 0,
-    new: 0,
-    reviewed: 0,
-    fact: 0,
-    reflection: 0,
-    candidates: 0,
-    unresolved_candidates: 0,
-    short_term: 0,
-    personalities: 0,
-    curated_sessions: 0,
-    audit_events: 0,
-    archived_messages: 0,
-    episodes: 0,
-    audit_counters: {},
-    memory_root: 'C:/runtime/memory',
-    ...overrides,
-  }
-}
-
-function buildMemoryRecord(overrides: Record<string, unknown> = {}) {
-  return {
-    id: 'memory-1',
-    content: 'Memory one',
-    category: 'fact',
-    status: 'active',
-    review_state: 'new',
-    confidence: 0.9,
-    importance: 5,
-    kind: 'fact',
-    source: 'memory_curator',
-    source_conversation_id: 'conv-1',
-    source_message_id: null,
-    created_at: '2026-05-08T00:00:00Z',
-    updated_at: '2026-05-08T00:00:00Z',
-    last_used_at: '',
-    use_count: 0,
-    ...overrides,
-  }
-}
 
 function buildSettings(overrides: Record<string, unknown> = {}) {
   return {
@@ -188,13 +110,9 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
     memory: {
       enabled: true,
       auto_learn: true,
-      curate_on_session_close: true,
-      write_policy: 'auto_with_review',
       retrieval_limit: 6,
       max_injected_chars: 2500,
-      min_confidence: 0.75,
       min_relevance_score: 0.15,
-      maintenance_cooldown_hours: 24,
     },
     tools: {
       skills: {
@@ -411,20 +329,6 @@ describe('SettingsModal', () => {
       default_write_strategy: 'copy_out',
       backends: {},
     })
-    mocks.fetchDecisionModelStatus.mockResolvedValue({
-      state: 'ready',
-      enabled: true,
-      managed: true,
-      endpoint: 'http://127.0.0.1:8421',
-      installed: true,
-      error: '',
-      decisions_24h: 3,
-      scored_24h: 2,
-      covered_24h: 2,
-      last_decision_at: '2026-10-18T03:46:27+00:00',
-      last_status: 'ok',
-      last_top_domain: 'browser-use',
-    })
     mocks.fetchSpeechToTextStatus.mockResolvedValue({
       provider: 'faster-whisper',
       label: 'Powered by faster-whisper',
@@ -498,29 +402,6 @@ describe('SettingsModal', () => {
       content: '# AGENTS.md\n\n- Ignore this file if the task is not coding.\n',
     })
     vi.mocked(updateSettings).mockResolvedValue(buildSettings() as any)
-    vi.mocked(fetchMemories).mockResolvedValue([])
-    vi.mocked(fetchMemoryFile).mockResolvedValue(null as any)
-    vi.mocked(fetchMemoryStats).mockResolvedValue(buildMemoryStats() as any)
-    vi.mocked(fetchMemoryCandidates).mockResolvedValue([])
-    vi.mocked(fetchMemoryEpisodes).mockResolvedValue([])
-    mocks.searchMemories.mockResolvedValue([])
-    mocks.createMemory.mockResolvedValue(buildMemoryRecord())
-    mocks.updateMemory.mockResolvedValue(buildMemoryRecord())
-    mocks.deleteMemory.mockResolvedValue(undefined)
-    mocks.updateMemoryCandidate.mockResolvedValue({
-      id: 'candidate-1',
-      category: 'preference',
-      content: 'Candidate memory',
-      confidence: 0.9,
-      importance: 5,
-      kind: 'fact',
-      status: 'approved',
-      reason: 'turn_feature_extract',
-      source_conversation_id: 'conv-1',
-      source_message_id: null,
-      created_at: '2026-05-08T00:00:00Z',
-      updated_at: '2026-05-08T00:00:00Z',
-    })
     delete (window as any).electronAPI
   })
 
@@ -531,50 +412,10 @@ describe('SettingsModal', () => {
   it('keeps model selection and image help out of Settings', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
-    expect(await screen.findByRole('heading', { name: 'Local models' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Voice' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Provider' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reasoning effort' })).not.toBeInTheDocument()
     expect(screen.queryByText('Reading images and screenshots')).not.toBeInTheDocument()
-  })
-
-  it('shows Laya status and saves the shadow mode switch', async () => {
-    render(<SettingsModal onClose={() => {}} />)
-
-    expect(await screen.findByText('Tool selection (Laya)')).toBeInTheDocument()
-    expect(await screen.findByText('Ready')).toBeInTheDocument()
-    expect(screen.getByText(/3 decisions logged. The needed skill was kept in 2 of 2./)).toBeInTheDocument()
-    expect(screen.getByText(/picked browser-use/)).toBeInTheDocument()
-
-    const shadowMode = screen.getByRole('checkbox', { name: 'Shadow mode' })
-    expect(shadowMode).toBeChecked()
-    fireEvent.click(shadowMode)
-    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
-
-    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-      decision_model: expect.objectContaining({ enabled: false }),
-    })))
-  })
-
-  it('tells the user to run setup when Laya is not installed', async () => {
-    mocks.fetchDecisionModelStatus.mockResolvedValue({
-      state: 'not_installed',
-      enabled: true,
-      managed: true,
-      endpoint: 'http://127.0.0.1:8421',
-      installed: false,
-      error: '',
-      decisions_24h: 0,
-      scored_24h: 0,
-      covered_24h: 0,
-      last_decision_at: null,
-      last_status: '',
-      last_top_domain: '',
-    })
-    render(<SettingsModal onClose={() => {}} />)
-
-    expect(await screen.findByText('Not installed')).toBeInTheDocument()
-    expect(screen.getByText('Laya is not installed. Run setup.bat to install it.')).toBeInTheDocument()
-    expect(screen.getByText('No decisions logged yet.')).toBeInTheDocument()
   })
 
   it('shows Chrome status and only the DevTools-era browser settings', async () => {
@@ -967,9 +808,23 @@ describe('SettingsModal', () => {
     expect(await screen.findByDisplayValue(/Ignore this file if the task is not coding/i)).toBeInTheDocument()
   })
 
-  it('hides memory, request limits, and the redundant identity summary', async () => {
+  it('saves the memory switch from the Identity page', async () => {
     render(<SettingsModal onClose={() => {}} />)
-    await screen.findByRole('heading', { name: 'Local models' })
+    fireEvent.click((await screen.findAllByRole('button', { name: /Identity/i }))[0])
+
+    const memory = await screen.findByRole('checkbox', { name: 'Memory' })
+    expect(memory).toBeChecked()
+    fireEvent.click(memory)
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      memory: expect.objectContaining({ enabled: false }),
+    })))
+  })
+
+  it('has no memory page, request limits, or redundant identity summary', async () => {
+    render(<SettingsModal onClose={() => {}} />)
+    await screen.findByRole('heading', { name: 'Voice' })
     expect(screen.queryByRole('button', { name: /^Memory$/i })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Tool iteration limit')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Turn timeout seconds')).not.toBeInTheDocument()

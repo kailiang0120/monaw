@@ -96,7 +96,6 @@ export default function App() {
   const [eventChannelConnected, setEventChannelConnected] = useState(false)
   const [approvalRefreshKey, setApprovalRefreshKey] = useState(0)
   const [usageRefreshKey, setUsageRefreshKey] = useState(0)
-  const [memoryRefreshKey, setMemoryRefreshKey] = useState(0)
   const [observabilityRefreshKey, setObservabilityRefreshKey] = useState(0)
   const [diagnosticsRefreshKey, setDiagnosticsRefreshKey] = useState(0)
   const activeConvIdRef = useRef<string | null>(activeConvId)
@@ -257,10 +256,6 @@ export default function App() {
       }
       if (event.event === 'usage.changed') {
         if (affectsActiveConversation) setUsageRefreshKey((value) => value + 1)
-        return
-      }
-      if (event.event === 'memory.changed') {
-        setMemoryRefreshKey((value) => value + 1)
         return
       }
       if (event.event === 'observability.changed') {
@@ -575,7 +570,6 @@ export default function App() {
         <Suspense fallback={null}>
           <SettingsModal
             diagnosticsRefreshKey={diagnosticsRefreshKey}
-            memoryRefreshKey={memoryRefreshKey}
             observabilityRefreshKey={observabilityRefreshKey}
             onClose={() => {
               setShowSettings(false)

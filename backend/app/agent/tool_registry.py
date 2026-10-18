@@ -46,7 +46,6 @@ _PARALLEL_SAFE = {
     "calculator",
     "datetime",
     "memory_search",
-    "memory_get",
     "fs_stat",
     "fs_list",
     "fs_tree",

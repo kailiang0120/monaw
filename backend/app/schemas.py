@@ -261,13 +261,9 @@ class BrowserUseSettingsPayload(BaseModel):
 class MemorySettingsPayload(BaseModel):
     enabled: bool = True
     auto_learn: bool = True
-    curate_on_session_close: bool = True
-    write_policy: str = Field("auto_with_review", pattern="^(off|manual|auto_with_review|auto_reviewed)$")
     retrieval_limit: int = Field(6, ge=1, le=20)
     max_injected_chars: int = Field(2500, ge=500, le=10000)
-    min_confidence: float = Field(0.75, ge=0.0, le=1.0)
     min_relevance_score: float = Field(0.15, ge=0.0, le=1.0)
-    maintenance_cooldown_hours: int = Field(24, ge=0, le=168)
 
 
 class ToolSettingsPayload(BaseModel):
@@ -353,20 +349,6 @@ class IdentitySettingsPayload(BaseModel):
     communication_style: str = Field("", max_length=1000)
 
 
-class DecisionModelSettingsPayload(BaseModel):
-    enabled: bool = True
-    managed: bool = True
-    provider: str = Field("laya", pattern="^laya$")
-    mode: str = Field("shadow", pattern="^shadow$")
-    endpoint: str = Field("http://127.0.0.1:8421", max_length=500)
-    model: str = Field("", max_length=200)
-    timeout_ms: int = Field(3000, ge=100, le=30000)
-    coverage: float = Field(0.9, ge=0.5, le=1.0)
-    max_domains: int = Field(4, ge=1, le=32)
-    min_confidence: float = Field(0.4, ge=0.0, le=1.0)
-    pinned_domains: list[str] = Field(default_factory=lambda: ["core", "memory", "tool-search"])
-
-
 class ApiKeyStatusPayload(BaseModel):
     has_openai_key: bool
     has_google_key: bool
@@ -386,7 +368,6 @@ class AgentSettingsPayload(BaseModel):
     permissions: PermissionSettingsPayload
     sandbox: SandboxSettingsPayload
     identity: IdentitySettingsPayload
-    decision_model: DecisionModelSettingsPayload = Field(default_factory=DecisionModelSettingsPayload)
     settings_version: str = ""
     available_skills: list[SkillDescriptorPayload] = Field(default_factory=list)
     api_keys: ApiKeyStatusPayload | None = None
@@ -407,21 +388,6 @@ class ModelOptionsPayload(BaseModel):
 class WorkspaceInstructionsPayload(BaseModel):
     path: str
     content: str
-
-
-class DecisionModelStatusPayload(BaseModel):
-    state: str = Field(..., pattern="^(off|not_installed|starting|ready|unreachable|error)$")
-    enabled: bool
-    managed: bool
-    endpoint: str
-    installed: bool
-    error: str = ""
-    decisions_24h: int = 0
-    scored_24h: int = 0
-    covered_24h: int = 0
-    last_decision_at: str | None = None
-    last_status: str = ""
-    last_top_domain: str = ""
 
 
 class SpeechToTextStatusPayload(BaseModel):
@@ -458,7 +424,6 @@ class SettingsUpdate(BaseModel):
     permissions: Optional[PermissionSettingsPayload] = None
     sandbox: Optional[SandboxSettingsPayload] = None
     identity: Optional[IdentitySettingsPayload] = None
-    decision_model: Optional[DecisionModelSettingsPayload] = None
     model_provider: Optional[str] = Field(None, pattern="^(openai|gemini|codex)$")
     openai_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
@@ -1006,170 +971,41 @@ class DataDeletionResult(BaseModel):
     deleted_at: str = ""
 
 
-# ── Long-term memory schemas ────────────────────────────────────────────────
+# ── Memory schemas ──────────────────────────────────────────────────────────
 
 
 class MemoryOut(BaseModel):
     id: str
+    scope: str
+    kind: str
     content: str
-    category: str
-    status: str
-    review_state: str
-    confidence: float
     importance: int = 5
-    kind: str = "fact"
-    source: str = ""
-    source_conversation_id: str = ""
-    source_message_id: int | None = None
-    created_at: str
-    updated_at: str
-    last_used_at: str = ""
-    use_count: int = 0
-
-
-class MemoryScoreBreakdown(BaseModel):
-    exact: float = 0.0
-    token: float = 0.0
-    category: float = 0.0
-    recency: float = 0.0
-    importance: float = 0.0
-    use: float = 0.0
+    source: str = "user"
+    created_at: str = ""
+    updated_at: str = ""
+    workspace: str = ""
 
 
 class MemorySearchOut(MemoryOut):
     score: float = 0.0
-    score_breakdown: MemoryScoreBreakdown = Field(default_factory=MemoryScoreBreakdown)
+    relevance: float = 0.0
 
 
 class MemoryCreate(BaseModel):
-    content: str = Field(..., min_length=1, max_length=1000)
-    category: str = Field("fact", pattern="^(preference|behavior|fact|workflow|project|reflection)$")
-    review_state: str = Field("reviewed", pattern="^(new|reviewed)$")
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
+    content: str = Field(..., min_length=1, max_length=500)
+    scope: str = Field("global", pattern="^(global|workspace)$")
+    kind: str = Field("fact", pattern="^(rule|preference|fact)$")
     importance: int = Field(5, ge=1, le=10)
-    kind: str = Field("fact", pattern="^(fact|reflection)$")
+    workspace: str = Field("", max_length=1000)
 
 
 class MemoryUpdate(BaseModel):
-    content: Optional[str] = Field(None, min_length=1, max_length=1000)
-    category: Optional[str] = Field(None, pattern="^(preference|behavior|fact|workflow|project|reflection)$")
-    status: Optional[str] = Field(None, pattern="^(active|archived)$")
-    review_state: Optional[str] = Field(None, pattern="^(new|reviewed)$")
-    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    content: Optional[str] = Field(None, min_length=1, max_length=500)
+    kind: Optional[str] = Field(None, pattern="^(rule|preference|fact)$")
     importance: Optional[int] = Field(None, ge=1, le=10)
-    kind: Optional[str] = Field(None, pattern="^(fact|reflection)$")
 
 
-class MemoryStatsOut(BaseModel):
-    total: int
-    active: int
-    archived: int
-    new: int
-    reviewed: int
-    fact: int = 0
-    reflection: int = 0
-    candidates: int = 0
-    unresolved_candidates: int = 0
-    short_term: int = 0
-    personalities: int = 0
-    curated_sessions: int = 0
-    audit_events: int = 0
-    archived_messages: int = 0
-    episodes: int = 0
-    active_checkpoints: int = 0
-    audit_counters: dict[str, int] = Field(default_factory=dict)
-    memory_root: str = ""
-    categories: dict[str, int] = Field(default_factory=dict)
-
-
-class MemoryFileSectionOut(MemoryOut):
-    title: str
-    body: str
-
-
-class MemoryFileOut(BaseModel):
-    category: str
-    raw_markdown: str
-    sections: list[MemoryFileSectionOut] = Field(default_factory=list)
-    updated_at: str = ""
-
-
-class MemoryFileUpdate(BaseModel):
-    raw_markdown: str = Field(..., min_length=1)
-
-
-class MemorySectionUpdate(BaseModel):
-    title: Optional[str] = Field(None, min_length=1, max_length=120)
-    body: Optional[str] = Field(None, min_length=1, max_length=10000)
-    importance: Optional[int] = Field(None, ge=1, le=10)
-    review_state: Optional[str] = Field(None, pattern="^(new|reviewed)$")
-
-
-class MemoryAuditOut(BaseModel):
-    id: str
-    memory_id: str | None = None
-    action: str
-    reason: str = ""
-    source_conversation_id: str | None = ""
-    candidate_content: str | None = ""
-    created_at: str
-
-
-class MemorySessionCloseIn(BaseModel):
-    conversation_id: str = Field(..., min_length=1, max_length=64)
-
-
-class MemorySessionCloseOut(BaseModel):
-    conversation_id: str
-    reconciliation: dict[str, int]
-    archived_messages: int
-    maintenance: dict[str, int] = Field(default_factory=dict)
-    hot_messages_before: int
-    hot_messages_after: int
-    reflection_id: str | None = None
-
-
-class MemoryCandidateOut(BaseModel):
-    id: str
-    kind: str = "fact"
-    content: str
-    category: str
-    confidence: float = 0.8
-    importance: int = 5
-    status: str = "new"
-    reason: str = ""
-    source_conversation_id: str = ""
-    source_message_id: int | None = None
-    created_at: str
-    updated_at: str
-
-
-class MemoryCandidateUpdate(BaseModel):
-    status: str = Field(..., pattern="^(new|approved|rejected)$")
-    approve: bool = False
-
-
-class MemoryCheckpointOut(BaseModel):
-    id: str
-    scope: str = "conversation"
-    status: str = "active"
-    conversation_id: str = ""
-    goal: str = ""
-    last_known_state: str = ""
-    next_action: str = ""
-    created_at: str
-    updated_at: str
-
-
-class MemoryEpisodeOut(BaseModel):
-    id: str
-    conversation_id: str
-    channel: str = "desktop"
-    summary: str
-    artifacts: list = Field(default_factory=list)
-    errors: list = Field(default_factory=list)
-    source_message_start_id: int | None = None
-    source_message_end_id: int | None = None
-    tool_call_ids: list[int] = Field(default_factory=list)
-    created_at: str
-    updated_at: str
+class MemoryWorkspaceOut(BaseModel):
+    workspace: str
+    path: str
+    count: int

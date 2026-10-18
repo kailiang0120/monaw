@@ -5,8 +5,6 @@ from pathlib import Path
 from conftest import TEST_GROUPS
 
 from app.agent.db_bootstrap import SCHEMA_VERSION, initialize_database
-from app.agent.memory_repository import MemorySectionRepository
-from app.agent.memory_documents import Section
 from app.agent.observability.redaction import redact, safe_preview
 from app.skills.browser_use.url_policy import (
     browser_url_policy,
@@ -35,29 +33,6 @@ def test_database_bootstrap_owns_schema_and_forward_upgrade_columns():
     assert version["version"] == SCHEMA_VERSION
     assert {"owner_principal_id", "permission_profile_id", "permission_profile_snapshot"} <= task_columns
     assert {"idempotency_key", "lease_owner", "lease_expires_at"} <= run_columns
-
-
-def test_memory_section_repository_round_trips_sectioned_documents(tmp_path):
-    repo = MemorySectionRepository(tmp_path, ("fact", "preference"), now=lambda: "2026-06-28T00:00:00+00:00")
-
-    repo.save_sections(
-        "style",
-        [
-            Section(
-                id="sec-tone",
-                title="Tone",
-                meta={"id": "sec-tone", "importance": 7},
-                body="Prefer focused updates.",
-            )
-        ],
-    )
-
-    loaded = repo.load_sections("preference")
-    assert repo.normalize_category("style") == "preference"
-    assert loaded[0].id == "sec-tone"
-    assert loaded[0].body == "Prefer focused updates."
-    assert repo.remove_section_by_id("sec-tone") is True
-    assert repo.load_sections("preference") == []
 
 
 def test_observability_redaction_is_independent_of_recorder_storage():

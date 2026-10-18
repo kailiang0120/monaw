@@ -10,14 +10,13 @@ auto-compacts before the provider hard limit.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.agent.long_term_memory import LongTermMemory
+from app.agent.memory_store import MemoryStore
 from app.agent.context_usage import (
     DEFAULT_CONTEXT_TOKEN_LIMIT,
     build_context_usage_report,
@@ -143,7 +142,7 @@ class MemoryManager:
         self._active_states: dict[str, ConversationState] = {}
         self.llm_client = llm_client
         self._db = get_db()
-        self.long_term_memory: LongTermMemory | None = None
+        self.memory_store: MemoryStore | None = None
 
     def _ensure_state(self, conversation_id: str, title: str = "") -> ConversationState:
         """Load or create a ConversationState, populating from SQLite."""
@@ -246,8 +245,8 @@ class MemoryManager:
         parts = [str(value or "").strip() for value in (newest, older) if str(value or "").strip()]
         return cls._cap_summary("\n\n".join(parts))
 
-    def set_long_term_memory(self, memory: LongTermMemory | None) -> None:
-        self.long_term_memory = memory
+    def set_memory_store(self, store: MemoryStore | None) -> None:
+        self.memory_store = store
 
     def record_compaction(self, conversation_id: str, result: dict) -> None:
         """Persist the compaction checkpoint without exposing the database layer."""
@@ -268,50 +267,41 @@ class MemoryManager:
             tokens_after=int(result.get("tokens_after") or 0),
         )
 
-    def build_long_term_memory_context(self, query: str, *, mark_used: bool = True) -> str:
-        if self.long_term_memory is None:
+    def build_long_term_memory_context(
+        self,
+        query: str,
+        *,
+        conversation_id: str = "",
+        workspace: str = "",
+    ) -> str:
+        """Global and workspace memory relevant to this turn, ready for the system prompt."""
+        if self.memory_store is None:
             return ""
         try:
-            return self.long_term_memory.build_prompt(query, mark_used=mark_used)
+            return self.memory_store.build_prompt(self._memory_query(query, conversation_id), workspace=workspace)
         except Exception as exc:
-            logger.warning("Long-term memory prompt unavailable: %s", exc)
+            logger.warning("Memory prompt unavailable: %s", exc)
             return ""
 
-    def schedule_long_term_learning(
-        self,
-        *,
-        conversation_id: str,
-        user_message: str,
-        assistant_message: str,
-    ) -> None:
-        if self.long_term_memory is None:
+    def _memory_query(self, query: str, conversation_id: str) -> str:
+        if not conversation_id or self.memory_store is None:
+            return query
+        state = self.get_or_create(conversation_id)
+        earlier = [
+            str(message.get("content") or "")
+            for message in state.recent_messages
+            if str(message.get("role") or "") == "user"
+        ]
+        return self.memory_store.expand_query(query, earlier)
+
+    def schedule_memory_learning(self, *, user_message: str, workspace: str = "") -> None:
+        """Learn from the user's message in the background; never delays the turn."""
+        if self.memory_store is None:
             return
         try:
-            self.long_term_memory.capture_turn_candidates(
-                conversation_id=conversation_id,
-                user_message=user_message,
-                assistant_message=assistant_message,
-            )
+            self.memory_store.schedule_learning(user_message=user_message, workspace=workspace)
         except Exception as exc:
-            logger.warning("Long-term memory candidate capture failed: %s", exc)
-
-    def close_session(self, conversation_id: str) -> dict:
-        from app.agent.memory_consolidation import close_session
-
-        return close_session(
-            conversation_id,
-            store=self.long_term_memory,
-            db=self._db,
-        )
-
-    @staticmethod
-    def _log_learning_error(task: asyncio.Task) -> None:
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            logger.warning("Long-term memory learning failed: %s", exc)
+            logger.warning("Memory learning could not start: %s", exc)
 
     def build_approval_review_context(self, conversation_id: str) -> dict:
         """Visible chat context only; summaries are background, never authorization."""
@@ -684,19 +674,6 @@ class MemoryManager:
         state.task_goal = goal.strip()
         state.updated_at = datetime.now(timezone.utc)
         self._db.update_conversation(conversation_id, task_goal=state.task_goal)
-        if self.long_term_memory is not None and state.task_goal:
-            try:
-                self.long_term_memory.upsert_checkpoint(
-                    f"conversation-{conversation_id}",
-                    scope="conversation",
-                    status="active",
-                    conversation_id=conversation_id,
-                    goal=state.task_goal,
-                    last_known_state="Task started.",
-                    next_action="Continue the active task.",
-                )
-            except Exception as exc:
-                logger.debug("Unable to persist memory checkpoint: %s", exc)
 
     def sync_plan_progress(self, conversation_id: str, plan) -> None:
         """Persist current pending/completed plan progress."""
@@ -715,22 +692,6 @@ class MemoryManager:
         state.completed_steps = completed
         state.updated_at = datetime.now(timezone.utc)
         self._db.sync_plan_steps(conversation_id, pending, completed)
-        if self.long_term_memory is not None:
-            try:
-                next_step = pending[0]["description"] if pending else ""
-                self.long_term_memory.upsert_checkpoint(
-                    f"conversation-{conversation_id}",
-                    scope="conversation",
-                    status="active",
-                    conversation_id=conversation_id,
-                    goal=state.task_goal,
-                    last_known_state=(
-                        f"Completed: {completed[-1]}" if completed else "Plan is in progress."
-                    ),
-                    next_action=next_step or "Finish the current task.",
-                )
-            except Exception as exc:
-                logger.debug("Unable to update memory checkpoint from plan: %s", exc)
 
     def clear_task_progress(self, conversation_id: str) -> None:
         """Clear the persisted active goal and remaining steps after completion."""
@@ -741,19 +702,6 @@ class MemoryManager:
         state.updated_at = datetime.now(timezone.utc)
         self._db.update_conversation(conversation_id, task_goal="")
         self._db.clear_plan_steps(conversation_id)
-        if self.long_term_memory is not None:
-            try:
-                self.long_term_memory.upsert_checkpoint(
-                    f"conversation-{conversation_id}",
-                    scope="conversation",
-                    status="completed",
-                    conversation_id=conversation_id,
-                    goal="",
-                    last_known_state="Task completed.",
-                    next_action="",
-                )
-            except Exception as exc:
-                logger.debug("Unable to clear memory checkpoint: %s", exc)
 
     def set_active_task(self, conversation_id: str, task: TaskState | None) -> None:
         """Set or clear the active task (transient — not persisted)."""

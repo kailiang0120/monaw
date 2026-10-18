@@ -4,9 +4,7 @@ from pathlib import Path
 import pytest
 
 os.environ.setdefault("MONAW_CONTROL_SECRET", "test-control-secret-that-is-at-least-32-characters")
-# Never start the setup-installed Laya server from tests.
-os.environ["MONAW_DISABLE_MANAGED_LAYA"] = "1"
-# ...or launch the built-in Chrome DevTools MCP server through npx.
+# Never launch the built-in Chrome DevTools MCP server through npx from tests.
 os.environ["MONAW_DISABLE_BUILTIN_MCP"] = "1"
 
 TEST_GROUPS = {
@@ -39,8 +37,6 @@ TEST_GROUPS = {
         "test_tool_executor.py",
         "test_live_context_budget.py",
         "test_tool_registry_enhanced.py",
-        "test_tool_selection.py",
-        "test_decision_model_server.py",
         "test_builtin_mcp.py",
         "test_turn_loop.py",
     },
@@ -73,13 +69,10 @@ TEST_GROUPS = {
         "test_screen_redaction.py",
     },
     "memory": {
-        "test_long_term_memory.py",
-        "test_long_term_memory_reconcile.py",
+        "test_memory_store.py",
         "test_memory_archive.py",
-        "test_memory_consolidation.py",
         "test_memory_context_management.py",
         "test_context_compression.py",
-        "test_memory_hybrid_search.py",
         "test_memory_migrations.py",
         "test_data_lifecycle.py",
         "test_observability_recorder.py",
@@ -124,6 +117,17 @@ def isolate_approval_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     broker._resume_events.clear()
     broker._resume_decisions.clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_memory_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Keep memory files out of the developer's real ~/.monaw/memory folder."""
+    from app.agent.memory_store import reset_memory_store
+
+    monkeypatch.setenv("AGENT_MEMORY_DIR", str(tmp_path / "memory"))
+    reset_memory_store()
+    yield
+    reset_memory_store()
 
 
 @pytest.fixture(autouse=True)

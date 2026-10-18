@@ -59,10 +59,10 @@ def test_memory_search_tool_schema_is_valid_for_gemini_enum_rules():
     memory_search = next(tool for tool in tools if tool["name"] == "memory_search")
 
     gemini_tool = _tools_to_gemini([memory_search])
-    category_schema = gemini_tool.function_declarations[0].parameters.properties["category"]
+    scope_schema = gemini_tool.function_declarations[0].parameters.properties["scope"]
 
-    assert "" not in category_schema.enum
-    assert category_schema.enum == ["preference", "behavior", "fact", "workflow", "project", "reflection"]
+    assert "" not in scope_schema.enum
+    assert scope_schema.enum == ["all", "global", "workspace"]
 
 
 def test_openai_message_normalization_attaches_image_parts():

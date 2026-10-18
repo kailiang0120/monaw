@@ -524,113 +524,6 @@ export interface DataDeletionResult {
   deleted_at: string
 }
 
-export type MemoryCategory = 'preference' | 'behavior' | 'fact' | 'workflow' | 'project' | 'reflection'
-export type MemoryStatus = 'active' | 'archived'
-export type MemoryReviewState = 'new' | 'reviewed'
-export type MemoryKind = 'fact' | 'reflection'
-
-export interface MemoryRecord {
-  id: string
-  content: string
-  category: MemoryCategory
-  status: MemoryStatus
-  review_state: MemoryReviewState
-  confidence: number
-  importance: number
-  kind: MemoryKind
-  source: string
-  source_conversation_id: string
-  source_message_id: number | null
-  created_at: string
-  updated_at: string
-  last_used_at: string
-  use_count: number
-}
-
-export interface MemorySectionRecord extends MemoryRecord {
-  title: string
-  body: string
-}
-
-export interface MemoryFileRecord {
-  category: MemoryCategory
-  raw_markdown: string
-  sections: MemorySectionRecord[]
-  updated_at: string
-}
-
-export interface MemorySearchRecord extends MemoryRecord {
-  score: number
-  score_breakdown: {
-    exact: number
-    token: number
-    category: number
-    recency: number
-    importance: number
-    use: number
-  }
-}
-
-export interface MemoryAuditRecord {
-  id: string
-  memory_id: string | null
-  action: string
-  reason: string
-  source_conversation_id: string
-  candidate_content: string
-  created_at: string
-}
-
-export interface MemoryStats {
-  total: number
-  active: number
-  archived: number
-  new: number
-  reviewed: number
-  fact: number
-  reflection: number
-  candidates: number
-  unresolved_candidates: number
-  short_term: number
-  personalities: number
-  curated_sessions: number
-  audit_events: number
-  archived_messages: number
-  episodes: number
-  audit_counters: Record<string, number>
-  memory_root: string
-  categories: Partial<Record<MemoryCategory, number>>
-}
-
-export interface MemoryCandidate {
-  id: string
-  kind: MemoryKind
-  content: string
-  category: MemoryCategory
-  confidence: number
-  importance: number
-  status: 'new' | 'approved' | 'rejected'
-  reason: string
-  source_conversation_id: string
-  source_message_id: number | null
-  created_at: string
-  updated_at: string
-}
-
-export interface MemoryEpisode {
-  id: string
-  conversation_id: string
-  channel: string
-  summary: string
-  artifacts: unknown[]
-  errors: unknown[]
-  source_message_start_id: number | null
-  source_message_end_id: number | null
-  tool_call_ids: number[]
-  created_at: string
-  updated_at: string
-}
-
 export interface AgentSettings {
   permissions_config_path?: string
   llm: {
@@ -660,13 +553,9 @@ export interface AgentSettings {
   memory: {
     enabled: boolean
     auto_learn: boolean
-    curate_on_session_close: boolean
-    write_policy: 'off' | 'manual' | 'auto_with_review' | 'auto_reviewed'
     retrieval_limit: number
     max_injected_chars: number
-    min_confidence: number
     min_relevance_score: number
-    maintenance_cooldown_hours: number
   }
   tools: {
     skills: Record<string, boolean>
@@ -719,19 +608,6 @@ export interface AgentSettings {
     user_identity: string
     communication_style: string
   }
-  decision_model: {
-    enabled: boolean
-    managed: boolean
-    provider: 'laya'
-    mode: 'shadow'
-    endpoint: string
-    model: string
-    timeout_ms: number
-    coverage: number
-    max_domains: number
-    min_confidence: number
-    pinned_domains: string[]
-  }
   settings_version: string
   available_skills: SkillDescriptor[]
   api_keys: {
@@ -769,21 +645,6 @@ export interface SpeechToTextStatus {
   loaded: boolean
 }
 
-export interface DecisionModelStatus {
-  state: 'off' | 'not_installed' | 'starting' | 'ready' | 'unreachable' | 'error'
-  enabled: boolean
-  managed: boolean
-  endpoint: string
-  installed: boolean
-  error: string
-  decisions_24h: number
-  scored_24h: number
-  covered_24h: number
-  last_decision_at: string | null
-  last_status: string
-  last_top_domain: string
-}
-
 export interface SpeechToTextTranscription {
   text: string
 }
@@ -804,7 +665,6 @@ export interface SettingsUpdatePayload {
   permissions?: AgentSettings['permissions']
   sandbox?: AgentSettings['sandbox']
   identity?: AgentSettings['identity']
-  decision_model?: AgentSettings['decision_model']
   openai_api_key?: string
   google_api_key?: string
   tavily_api_key?: string

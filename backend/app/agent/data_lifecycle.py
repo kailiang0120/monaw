@@ -9,7 +9,7 @@ from pathlib import Path
 
 from app.agent import access_grant_broker, approval_broker
 from app.agent.database import get_db
-from app.agent.long_term_memory import get_long_term_memory, reset_long_term_memory
+from app.agent.memory_store import get_memory_store, reset_memory_store
 from app.agent.observability.recorder import (
     BACKEND_LOG_PATH,
     MAX_STORAGE_BYTES,
@@ -134,20 +134,15 @@ def _rotate_backend_log() -> dict[str, int]:
 
 
 def _delete_memory_root() -> dict[str, int]:
-    memory = get_long_term_memory()
-    root = Path(memory.root)
-    deleted: dict[str, int] = {}
-    clear_records = getattr(memory, "clear_database_records", None)
-    if callable(clear_records):
-        deleted.update(clear_records())
-    deleted["memory_files_deleted"] = _delete_tree_contents(root)
+    root = Path(get_memory_store().root)
+    deleted = {"memory_files_deleted": _delete_tree_contents(root)}
     try:
         if _approved_root(root):
             shutil.rmtree(root, ignore_errors=True)
     except OSError:
         pass
-    reset_long_term_memory()
-    return {"memory_files_deleted": deleted}
+    reset_memory_store()
+    return deleted
 
 
 def _diagnostic_roots() -> list[Path]:
@@ -201,10 +196,6 @@ def enforce_runtime_retention() -> dict[str, int]:
         )
     )
     counts.update(_delete_stale_database_backups())
-    memory = get_long_term_memory()
-    memory_retention = getattr(memory, "enforce_retention", None)
-    if callable(memory_retention):
-        counts.update(memory_retention())
     counts.update(approval_broker.enforce_retention(max_age_days=RETENTION_DAYS))
     counts.update(access_grant_broker.enforce_retention(max_age_days=RETENTION_DAYS))
     counts.update(get_db().enforce_scheduled_task_run_retention(max_age_days=RETENTION_DAYS))

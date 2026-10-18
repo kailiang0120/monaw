@@ -83,6 +83,144 @@ Monaw currently targets Windows. macOS has not been tested yet.
   </tr>
 </table>
 
+## Architecture
+
+The system view shows where Monaw's components run. The agent view shows the repeating model-and-tools cycle. Both diagrams are native Mermaid, with editable source directly in this README.
+
+### System Architecture
+
+```mermaid
+%%{init: {"theme": "base", "fontFamily": "Arial", "themeVariables": {"fontSize": "16px", "primaryTextColor": "#172c40", "lineColor": "#64748b", "edgeLabelBackground": "#ffffff", "clusterBkg": "#f8fafc", "clusterBorder": "#cbd5e1"}, "flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 55, "padding": 18}}}%%
+flowchart TB
+  accTitle: Monaw system architecture
+  accDescr: Electron manages a local FastAPI backend. The shared agent runtime uses context management, permission-controlled skills, MCP tools and local persistence. Configured model providers, web services and Telegram are external connections.
+
+  subgraph PC["WINDOWS PC / LOCAL APPLICATION"]
+    direction TB
+    subgraph DESKTOP["DESKTOP EXPERIENCE"]
+      direction LR
+      UI("<b>React + TypeScript</b><br/>Chat / attachments / steering<br/>Settings / schedules / workspaces")
+      MAIN("<b>Electron main + preload</b><br/>Backend lifecycle / session tokens<br/>OS-encrypted credential vault")
+      UI <-->|IPC| MAIN
+    end
+
+    subgraph BACKEND["PYTHON BACKEND / SHARED CONTROL PLANE"]
+      direction TB
+      API("<b>FastAPI</b><br/>Authenticated localhost API<br/>HTTP requests + SSE events")
+      RUN("<b>Agent runtime</b><br/>Turn loop / model client / run state<br/>Conversation workspace + AGENTS.md")
+      CONTEXT("<b>Memory + context</b><br/>History / retrieval / compaction<br/>Live context-budget management")
+      GATE("<b>Execution controls</b><br/>Permissions / approvals<br/>Access grants / tool policies")
+      REGISTRY("<b>Skill + tool registry</b><br/>Built-in and user skills<br/>Tool discovery + reflected MCP schemas")
+      JOBS("<b>Task scheduler</b><br/>Recurring + one-time runs")
+      TG("<b>Telegram bridge</b><br/>Optional remote task entry")
+      STORE[("<b>Local Monaw data</b><br/>SQLite conversations / runs / traces<br/>Settings / Markdown memory / artifacts")]
+
+      API --> RUN
+      JOBS --> RUN
+      TG --> RUN
+      RUN <--> CONTEXT
+      RUN -->|Requested actions| GATE
+      GATE -->|Authorized calls| REGISTRY
+    end
+
+    subgraph TOOLS["EXECUTION / AUTOMATION"]
+      direction LR
+      FILES("<b>Files + shell</b><br/>Selected project workspace<br/>Shell sandbox / optional Docker")
+      APPS("<b>Windows computer use</b><br/>Screenshots / accessibility<br/>Mouse + keyboard control")
+      MCP("<b>MCP bridge</b><br/>Built-in Chrome DevTools<br/>Custom stdio + HTTP servers")
+      WEB("<b>Web tools</b><br/>Scrapling page fetch<br/>Tavily search")
+      CHROME[("<b>Your Chrome profile</b><br/>Existing logins + bookmarks")]
+      MCP --> CHROME
+    end
+
+    DESKTOP <-->|Authenticated HTTP / SSE| BACKEND
+    BACKEND -->|Authorized tool dispatch| TOOLS
+    FILES ~~~ APPS ~~~ MCP ~~~ WEB
+    CONTEXT <--> STORE
+    RUN -.->|History + checkpoints + tool ledger| STORE
+    JOBS <--> STORE
+  end
+
+  subgraph SERVICES["CONFIGURED EXTERNAL CONNECTIONS"]
+    direction LR
+    MODELS("<b>Model providers</b><br/>OpenAI API / ChatGPT via Codex<br/>Google Gemini API")
+    REMOTE("<b>Connected services</b><br/>Websites / search / remote MCP")
+    BOT("<b>Telegram Bot API</b><br/>Messages + run results")
+  end
+
+  PC <-->|Model and integration requests / responses| SERVICES
+  MODELS ~~~ REMOTE ~~~ BOT
+
+  classDef desktop fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a,stroke-width:2px
+  classDef agent fill:#172c40,stroke:#172c40,color:#ffffff,stroke-width:2px
+  classDef runtime fill:#ecfdf5,stroke:#10b981,color:#064e3b,stroke-width:2px
+  classDef tools fill:#f5f3ff,stroke:#8b5cf6,color:#4c1d95,stroke-width:2px
+  classDef local fill:#fff7ed,stroke:#f59e0b,color:#78350f,stroke-width:2px
+  classDef external fill:#f1f5f9,stroke:#94a3b8,color:#334155,stroke-width:1.5px
+  class UI,MAIN desktop
+  class RUN agent
+  class API,CONTEXT,GATE,REGISTRY,JOBS,TG runtime
+  class FILES,APPS,MCP,WEB tools
+  class STORE,CHROME local
+  class MODELS,REMOTE,BOT external
+  style PC fill:#f8fafc,stroke:#cbd5e1,stroke-width:2px
+  style DESKTOP fill:#f0f6ff,stroke:#bfdbfe
+  style BACKEND fill:#f0fdf8,stroke:#a7f3d0
+  style TOOLS fill:#faf7ff,stroke:#ddd6fe
+  style SERVICES fill:#f8fafc,stroke:#cbd5e1,stroke-dasharray:6 4
+```
+
+Electron handles startup, credentials, and the authentication bridge; the React renderer calls FastAPI directly. Desktop chat, scheduled runs, and Telegram all enter the same agent runtime. Solid arrows show calls or data exchange; dashed arrows show lifecycle and persistence.
+
+### Agent Design
+
+Follow the arrows clockwise: **context → budget → model → authorization → execution → observation → context**. Tool results close the loop and inform the next model call. A completed answer exits from the model stage.
+
+```mermaid
+%%{init: {"theme": "base", "fontFamily": "Arial", "block": {"padding": 22}, "themeVariables": {"fontSize": "18px", "primaryColor": "#eff6ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#172c40", "lineColor": "#0f766e"}}}%%
+block-beta
+  columns 3
+
+  Entry["<b>NEW REQUEST</b><br/>Chat / scheduler / Telegram"] space Done(["<b>COMPLETE</b><br/>Answer + attachments"])
+  space:3
+
+  Context["<b>01 / CONTEXT</b><br/>History + memory<br/>Workspace instructions"] Budget["<b>02 / BUDGET</b><br/>Trim observations<br/>Compact older rounds"] Model["<b>03 / MODEL</b><br/>Context + visible tools<br/>Selected provider"]
+  space:3
+
+  Observe["<b>06 / OBSERVE</b><br/>Results + errors<br/>Update history"] Cycle["<b>THE AGENT LOOP</b><br/>Repeat until complete"] Gate["<b>04 / AUTHORIZE</b><br/>Permission policies<br/>Approvals + access grants"]
+  space:3
+
+  space Execute["<b>05 / EXECUTE</b><br/>Skills + MCP tools<br/>Shell sandbox policy"] space
+
+  Entry --> Context
+  Context ==> Budget
+  Budget ==> Model
+  Model ==> Gate
+  Gate ==> Execute
+  Execute ==> Observe
+  Observe ==> Context
+  Model --> Done
+
+  classDef input fill:#172c40,color:#ffffff,stroke:#172c40,stroke-width:2px
+  classDef thinking fill:#eff6ff,color:#1e3a8a,stroke:#3b82f6,stroke-width:2px,rx:14,ry:14
+  classDef action fill:#ecfdf5,color:#064e3b,stroke:#10b981,stroke-width:2px,rx:14,ry:14
+  classDef center fill:transparent,color:#0f766e,stroke:none,font-size:23px,font-weight:bold
+  class Entry input
+  class Context,Budget,Model thinking
+  class Gate,Execute,Observe,Done action
+  class Cycle center
+```
+
+| Alongside the loop | What happens |
+| --- | --- |
+| **Context and tool discovery** | The runtime combines workspace `AGENTS.md`, skill instructions, history, attachments, and retrieved memory. Tool search can expose deferred schemas for later model calls. |
+| **Authorization** | Default, Full Access, Auto Review, and Custom modes determine action handling. Pending approvals or access grants wait for resolution; blocked actions return feedback, and repeated denials can pause the turn. |
+| **Execution** | Compatible tool calls can overlap. Workers enforce timeouts, cooperative cancellation, and resource conflict checks. Shell commands use the configured sandbox policy; Chrome automation uses Chrome DevTools MCP on the user's own profile. |
+| **User control and recovery** | Steering enters at model or tool boundaries. Stop, exhausted budgets, or failures can end or pause a turn; history, checkpoints, and the tool ledger support recovery. |
+| **Persistence and observability** | Conversation history, results, run status, usage, latency, and failure evidence are recorded locally. Progress and tool events stream back to the caller. |
+
+See [docs/development.md](docs/development.md) for the module map and implementation details.
+
 ## Requirements
 
 - Windows 10 or 11. macOS is not tested yet.
@@ -110,13 +248,12 @@ setup.bat
 
 The setup launcher will:
 
-- Close Monaw first if it is running. It only closes processes started from this folder or the Laya install. If another program holds one of Monaw's ports (Vite, the backend, or Laya on 8421), setup stops and names it.
+- Close Monaw first if it is running. It only closes processes started from this folder. If another program holds one of Monaw's ports (Vite or the backend), setup stops and names it.
 - Install `uv` with Windows Package Manager if it is missing.
 - Install Node.js LTS with Windows Package Manager if Node/npm is missing.
 - Install the Python version pinned in `backend\.python-version`.
 - Create `backend\.venv` and sync the dependencies locked in `backend\uv.lock`.
 - Run `npm ci` in `frontend`.
-- Install the Laya decision model into `%USERPROFILE%\.monaw\laya` and download its checkpoint (about 800 MB the first time). This step is optional: if it fails, setup still finishes.
 
 When setup finishes, double-click [start.bat](start.bat):
 
@@ -203,7 +340,7 @@ Main folders:
 %USERPROFILE%\.monaw\runtime\        settings, database, logs, Electron store
 %USERPROFILE%\.monaw\workspace\      default agent working directory
 %USERPROFILE%\.monaw\browser\        browser screenshots
-%USERPROFILE%\.monaw\memory\         long-term memory markdown files
+%USERPROFILE%\.monaw\memory\         global and workspace memory markdown files
 ```
 
 Settings, config, logs, browser screenshots, memory, and the default agent workspace all stay under this folder. Your Chrome profile stays in Chrome's own folder.
@@ -216,15 +353,13 @@ Chats open immediately in the default workspace. To work on a project, click **D
 
 While the agent is working, type a new instruction and press Enter or the send arrow to steer the same task. Stop remains available beside it. Steering takes effect after the current model or tool step, and the message shows whether it is waiting or applied. New text, pasted images, and attached files stay in the same chat history. If the turn finishes before delivery, the draft stays in the composer for sending as a new turn.
 
-Memory works in the background and is hidden from Settings. Memory files are local markdown files. See [docs/memory.md](docs/memory.md) for advanced configuration.
+Memory works in the background; turn it on or off with the Memory switch under Settings -> Identity. Memory files are local markdown files. See [docs/memory.md](docs/memory.md) for advanced configuration.
 
 Browser automation is configured in Settings -> Browser. See [docs/browser-automation.md](docs/browser-automation.md). Planned improvements, such as fuller control of your own Chrome profile, are listed in [docs/roadmap.md](docs/roadmap.md).
 
 Windows computer use combines screenshots and accessibility controls for desktop automation. See [docs/computer-use.md](docs/computer-use.md).
 
 MCP servers are configured in Settings -> Tools -> MCP. See [docs/mcp.md](docs/mcp.md).
-
-setup.bat also installs a small local decision model, Laya, which scores which skills each request needs and logs it next to the tools the model used (shadow mode). See [docs/decision-model.md](docs/decision-model.md).
 
 Scheduled tasks are configured in the app when scheduling is enabled. See [docs/scheduling.md](docs/scheduling.md).
 

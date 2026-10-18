@@ -3,7 +3,6 @@ import {
   Activity,
   AlertCircle,
   Bot,
-  Brain,
   CheckCircle2,
   ChevronDown,
   Container,
@@ -70,7 +69,6 @@ import {
   downloadSpeechToTextModel,
   fetchModelOptions,
   fetchOpenAIAccountStatus,
-  fetchDecisionModelStatus,
   fetchSettings,
   fetchSandboxStatus,
   fetchSpeechToTextStatus,
@@ -89,7 +87,6 @@ import { DEFAULT_AGENT_NAME } from '../../lib/identity'
 import type {
   AgentSettings,
   BrowserUseDiagnostics,
-  DecisionModelStatus,
   MCPServerDiagnostics,
   SandboxStatus,
   SpeechToTextStatus,
@@ -110,7 +107,6 @@ import {
 interface Props {
   onClose: () => void
   diagnosticsRefreshKey?: number
-  memoryRefreshKey?: number
   observabilityRefreshKey?: number
 }
 
@@ -127,7 +123,6 @@ const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
   identity: UserRound,
   apiKeys: KeyRound,
   model: Bot,
-  memory: Brain,
   tools: Wrench,
   browser: Globe2,
   permissions: Shield,
@@ -168,7 +163,6 @@ function draftSignature(
     permissions: draft.permissions,
     sandbox: draft.sandbox,
     identity: draft.identity,
-    decision_model: draft.decision_model,
     telegramUserIds: telegramUserIds.trim(),
     telegramChatIds: telegramChatIds.trim(),
   })
@@ -185,41 +179,6 @@ function accountUsageWindowLabel(minutes: number | null, window: 'primary' | 'se
 function accountResetTime(timestamp: number | null): string {
   if (!timestamp || !Number.isFinite(timestamp)) return 'Reset time unavailable'
   return `Resets ${new Date(timestamp * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
-}
-
-const DECISION_MODEL_BADGES: Record<DecisionModelStatus['state'], { tone: 'neutral' | 'ok' | 'warn' | 'danger' | 'accent'; label: string }> = {
-  off: { tone: 'neutral', label: 'Off' },
-  not_installed: { tone: 'warn', label: 'Not installed' },
-  starting: { tone: 'accent', label: 'Starting' },
-  ready: { tone: 'ok', label: 'Ready' },
-  unreachable: { tone: 'danger', label: 'Unreachable' },
-  error: { tone: 'danger', label: 'Error' },
-}
-
-function decisionModelBadge(status: DecisionModelStatus | null) {
-  return status ? DECISION_MODEL_BADGES[status.state] : { tone: 'neutral' as const, label: 'Unknown' }
-}
-
-function decisionModelSummary(status: DecisionModelStatus | null): string {
-  if (!status) return 'Status unavailable.'
-  if (!status.decisions_24h) return 'No decisions logged yet.'
-  const parts = [`${status.decisions_24h} decision${status.decisions_24h === 1 ? '' : 's'} logged.`]
-  if (status.scored_24h) {
-    parts.push(`The needed skill was kept in ${status.covered_24h} of ${status.scored_24h}.`)
-  }
-  if (status.last_decision_at) {
-    const when = new Date(status.last_decision_at).toLocaleTimeString(undefined, { timeStyle: 'short' })
-    parts.push(`Last at ${when}${status.last_top_domain ? `, picked ${status.last_top_domain}` : ''}.`)
-  }
-  return parts.join(' ')
-}
-
-function decisionModelProblem(status: DecisionModelStatus | null): string {
-  if (!status) return ''
-  if (status.state === 'not_installed') return 'Laya is not installed. Run setup.bat to install it.'
-  if (status.state === 'unreachable') return status.error || `Monaw can't reach Laya at ${status.endpoint}.`
-  if (status.state === 'error') return status.error || 'Laya failed to start.'
-  return ''
 }
 
 export function SettingsModal({
@@ -253,8 +212,6 @@ export function SettingsModal({
   const [resolvingDockerImage, setResolvingDockerImage] = useState(false)
   const [dockerResolveMessage, setDockerResolveMessage] = useState('')
   const [speechToTextStatus, setSpeechToTextStatus] = useState<SpeechToTextStatus | null>(null)
-  const [decisionModelStatus, setDecisionModelStatus] = useState<DecisionModelStatus | null>(null)
-  const [refreshingDecisionModel, setRefreshingDecisionModel] = useState(false)
   const [customInstructions, setCustomInstructions] = useState('')
   const [customInstructionsPath, setCustomInstructionsPath] = useState('')
   const [customInstructionsSavedContent, setCustomInstructionsSavedContent] = useState('')
@@ -377,24 +334,6 @@ export function SettingsModal({
     }
   }
 
-  const loadDecisionModelStatus = async (signal?: AbortSignal) => {
-    try {
-      setDecisionModelStatus(await fetchDecisionModelStatus(signal))
-    } catch {
-      if (signal?.aborted) return
-      setDecisionModelStatus(null)
-    }
-  }
-
-  const refreshDecisionModelStatus = async () => {
-    setRefreshingDecisionModel(true)
-    try {
-      await loadDecisionModelStatus()
-    } finally {
-      setRefreshingDecisionModel(false)
-    }
-  }
-
   const loadSpeechToTextStatus = async (signal?: AbortSignal) => {
     try {
       setSpeechToTextStatus(await fetchSpeechToTextStatus(signal))
@@ -463,7 +402,6 @@ export function SettingsModal({
         loadBrowserDiagnostics(signal),
         loadSandboxStatus(signal),
         loadSpeechToTextStatus(signal),
-        loadDecisionModelStatus(signal),
         loadWorkspaceInstructions(signal),
       ])
 
@@ -507,14 +445,6 @@ export function SettingsModal({
     return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [diagnosticsRefreshKey])
-
-  // Laya takes a few seconds to load its checkpoint; keep checking until it settles.
-  useEffect(() => {
-    if (decisionModelStatus?.state !== 'starting') return
-    const timer = window.setTimeout(() => { void loadDecisionModelStatus() }, 3000)
-    return () => window.clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [decisionModelStatus])
 
   // Switching pages should start you at the top, not halfway down the last one.
   useEffect(() => {
@@ -706,7 +636,6 @@ export function SettingsModal({
         permissions: draft.permissions,
         sandbox: draft.sandbox,
         identity: draft.identity,
-        decision_model: draft.decision_model,
         telegram_allowed_user_ids: telegramAllowedUserIds.trim(),
         telegram_allowed_chat_ids: telegramAllowedChatIds.trim(),
         ...browserSecretPayload,
@@ -731,7 +660,7 @@ export function SettingsModal({
         normalizedSavedSettings.telegram_allowed_chat_ids,
       ))
       setDirtySecrets(new Set())
-      await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus(), loadDecisionModelStatus()])
+      await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } finally {
@@ -1073,51 +1002,6 @@ export function SettingsModal({
                       )}
                     </SettingsCard>
 
-                    <SettingsCard
-                      title="Tool selection (Laya)"
-                      description={MODEL_COPY.decisionModel}
-                      action={
-                        <Badge tone={decisionModelBadge(decisionModelStatus).tone}>
-                          {decisionModelBadge(decisionModelStatus).label}
-                        </Badge>
-                      }
-                    >
-                      <SwitchRow
-                        label="Shadow mode"
-                        description={MODEL_COPY.decisionModelToggle}
-                        checked={draft.decision_model.enabled}
-                        onChange={(enabled) => updateDraft((current) => ({
-                          ...current,
-                          decision_model: { ...current.decision_model, enabled },
-                        }))}
-                      />
-                      <div className="st-row">
-                        <div className="min-w-0">
-                          <p className="st-label">Last 24 hours</p>
-                          <p className="st-desc mt-1">{decisionModelSummary(decisionModelStatus)}</p>
-                        </div>
-                        <div className="st-row-control-auto flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => void refreshDecisionModelStatus()}
-                            disabled={refreshingDecisionModel}
-                            aria-label="Refresh Laya status"
-                            title="Check Laya again"
-                            className="st-btn st-btn-secondary st-btn-icon"
-                          >
-                            <RotateCcw size={13} className={refreshingDecisionModel ? 'animate-spin' : ''} />
-                          </button>
-                        </div>
-                      </div>
-                      {decisionModelProblem(decisionModelStatus) && (
-                        <div className="px-4 pb-4">
-                          <Note tone={decisionModelStatus?.state === 'not_installed' ? 'warn' : 'danger'}>
-                            {decisionModelProblem(decisionModelStatus)}
-                          </Note>
-                        </div>
-                      )}
-                    </SettingsCard>
-
                   </div>
                 </>
               )}
@@ -1307,6 +1191,15 @@ export function SettingsModal({
                           className="st-input resize-none leading-relaxed"
                         />
                       </StackedRow>
+                      <SwitchRow
+                        label="Memory"
+                        description={IDENTITY_COPY.memory}
+                        checked={draft.memory.enabled}
+                        onChange={(enabled) => updateDraft((current) => ({
+                          ...current,
+                          memory: { ...current.memory, enabled },
+                        }))}
+                      />
                     </SettingsCard>
 
                     <SettingsCard

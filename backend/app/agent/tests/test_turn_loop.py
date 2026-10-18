@@ -3344,3 +3344,79 @@ def test_turn_loop_recovers_from_repeated_devtools_click_with_unchanged_page():
     assert tool_end_outputs[-1]["code"] == "stalled_repeat_detected"
     assert events[-1]["event"] == "done"
     assert "recovered after inspection" in events[-1]["data"]["summary"].lower()
+
+
+def test_turn_uses_workspace_memory_and_schedules_learning(tmp_path):
+    from app.agent.conversation_workspace import reset_workspace_dir, set_workspace_dir
+
+    workspace = str(tmp_path / "billing")
+    seen = {}
+
+    class MemoryAwareFake(PersistingFakeMemory):
+        def build_long_term_memory_context(self, query, *, conversation_id="", workspace=""):
+            seen["context"] = (query, conversation_id, workspace)
+            return "## Memory\n- Use pnpm, never npm, in this repo."
+
+        def schedule_memory_learning(self, *, user_message, workspace=""):
+            seen["learning"] = (user_message, workspace)
+
+    class PromptLLM:
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            seen["system_prompt"] = kwargs.get("system_prompt", "")
+            return final_answer_response("Done")
+
+    loop = TurnLoop(llm_client=PromptLLM(), registry=ToolRegistry([]), memory=MemoryAwareFake(), observability=FakeObservability())
+
+    async def collect():
+        token = set_workspace_dir(workspace)
+        try:
+            return [event async for event in loop.run("From now on use pnpm here", "memory-wiring", system_prompt="base")]
+        finally:
+            reset_workspace_dir(token)
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+
+    assert events[-1]["data"]["summary"] == "Done"
+    assert seen["context"] == ("From now on use pnpm here", "memory-wiring", workspace)
+    assert "Use pnpm, never npm, in this repo." in seen["system_prompt"]
+    assert seen["learning"] == ("From now on use pnpm here", workspace)
+
+
+def test_memory_learning_includes_steering_sent_mid_turn():
+    inbox = SteeringInbox("conv-steer-memory", "session-a")
+    learned = []
+
+    class LearningFake(FakeMemory):
+        def schedule_memory_learning(self, *, user_message, workspace=""):
+            learned.append(user_message)
+
+    class SteeredLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                inbox.enqueue(SteeringMessage("steer-1", "From now on use pnpm here"))
+                return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                    call_id="stale-call", tool_name="echo_tool", arguments={"text": "stale"},
+                )], finish_reason="tool_calls")
+            return final_answer_response("Done")
+
+    registry = ToolRegistry([{
+        "name": "echo_tool", "description": "Echo", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+        "callable": lambda text: text, "domain": "general", "execution_mode": "sync_stateless", "affinity_group": None,
+    }])
+    loop = TurnLoop(llm_client=SteeredLLM(), registry=registry, memory=LearningFake(), observability=FakeObservability())
+
+    async def collect():
+        return [event async for event in loop.run("Install the deps", inbox.conversation_id, system_prompt="", steering=inbox)]
+
+    try:
+        asyncio.run(collect())
+    finally:
+        loop.shutdown()
+
+    assert learned == ["Install the deps\n\nFrom now on use pnpm here"]

@@ -35,9 +35,7 @@ _OBSERVATION_TOOLS = {
     "datetime",
     "calculator",
     "file_reader",
-    "memory_get",
     "memory_search",
-    "recall_memory",
     "web_search",
 }
 

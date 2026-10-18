@@ -34,6 +34,7 @@ import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
 import { chatMarkdownUrlTransform, resolveChatLink } from '../lib/chatLinks'
 import { formatAgentResponse } from '../lib/formatAgentResponse'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
+import { isBrowserTool, toolDisplayName } from '../lib/toolNames'
 import type { UploadedAttachment } from '../lib/api/types'
 import type { ActivityItem, ApprovalNotice, Message, ToolCall } from '../hooks/useChat'
 
@@ -479,12 +480,7 @@ function ToolActivityGroup({
   const [expanded, setExpanded] = useState(false)
   const pendingTool = toolCalls.find((call) => call.pending)
   const allCommands = toolCalls.every((call) => /^exec(?:_|$)/.test(call.tool))
-  // browser_ covers browser_fetch and the removed browser_* tools in older saved
-  // conversations; mcp__Chrome-dev-tools__ is the name older saved MCP entries used.
-  const allBrowser = toolCalls.every((call) =>
-    call.tool.startsWith('browser_')
-    || call.tool.startsWith('mcp__chrome-devtools__')
-    || call.tool.startsWith('mcp__Chrome-dev-tools__'))
+  const allBrowser = toolCalls.every((call) => isBrowserTool(call.tool))
   const label = pendingTool
     ? toolCallActivityLabel(pendingTool)
     : allCommands ? `Ran ${toolCalls.length === 1 ? 'command' : 'commands'}`
@@ -569,7 +565,7 @@ function toolCallActivityLabel(toolCall: ToolCall): string {
     return `${verb} ${summary}`
   }
   const verb = status === 'running' ? 'Using' : status === 'error' ? 'Failed' : 'Used'
-  return `${verb} ${toolCall.tool}${summary && summary !== '{}' ? ` · ${summary}` : ''}`
+  return `${verb} ${toolDisplayName(toolCall.tool)}${summary && summary !== '{}' ? ` · ${summary}` : ''}`
 }
 
 function ToolCallScroller({

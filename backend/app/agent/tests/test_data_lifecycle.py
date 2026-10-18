@@ -71,8 +71,8 @@ def test_delete_runtime_data_clears_observability_support_and_retained_content(t
     monkeypatch.setattr(data_lifecycle, "MONAW_HOME_DIR", home_dir)
     monkeypatch.setattr(data_lifecycle, "get_db", lambda: db)
     monkeypatch.setattr(data_lifecycle, "get_observability_recorder", lambda: recorder)
-    monkeypatch.setattr(data_lifecycle, "get_long_term_memory", lambda: SimpleNamespace(root=memory_root))
-    monkeypatch.setattr(data_lifecycle, "reset_long_term_memory", lambda: None)
+    monkeypatch.setattr(data_lifecycle, "get_memory_store", lambda: SimpleNamespace(root=memory_root))
+    monkeypatch.setattr(data_lifecycle, "reset_memory_store", lambda: None)
 
     result = data_lifecycle.delete_runtime_data()
 

@@ -288,20 +288,6 @@
     @apply text-[10px] font-semibold uppercase tracking-[0.12em];
   }
 
-  .memory-pill-new {
-    border: 1px solid var(--st-warn-border);
-    background: var(--st-warn-soft);
-    color: var(--st-warn);
-    @apply inline-flex items-center rounded-lg px-2 py-0.5 text-[11px] font-medium;
-  }
-
-  .memory-pill-reviewed {
-    border: 1px solid var(--st-ok-border);
-    background: var(--st-ok-soft);
-    color: var(--st-ok);
-    @apply inline-flex items-center rounded-lg px-2 py-0.5 text-[11px] font-medium;
-  }
-
   /* --------------------------------------------------------------- scroll --- */
 
   .settings-scroll-area {

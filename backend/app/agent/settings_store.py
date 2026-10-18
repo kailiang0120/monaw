@@ -190,13 +190,9 @@ class BrowserUseSettings(BaseModel):
 class MemorySettings(BaseModel):
     enabled: bool = True
     auto_learn: bool = True
-    curate_on_session_close: bool = True
-    write_policy: Literal["off", "manual", "auto_with_review", "auto_reviewed"] = "auto_with_review"
     retrieval_limit: int = Field(6, ge=1, le=20)
     max_injected_chars: int = Field(2500, ge=500, le=10000)
-    min_confidence: float = Field(0.75, ge=0.0, le=1.0)
     min_relevance_score: float = Field(0.15, ge=0.0, le=1.0)
-    maintenance_cooldown_hours: int = Field(24, ge=0, le=168)
 
 
 class ToolSettings(BaseModel):
@@ -288,33 +284,6 @@ class IdentitySettings(BaseModel):
         return self
 
 
-class DecisionModelSettings(BaseModel):
-    """Optional System 1 decision model that scores which skills a turn needs.
-
-    Only ``shadow`` mode exists today: the model's choice is logged next to the
-    tools the LLM actually used, and the LLM still receives every visible tool.
-    With ``managed`` on, the backend runs the Laya server that setup.bat
-    installs, and the selector stays off when that install is missing.
-    """
-
-    enabled: bool = True
-    managed: bool = True
-    provider: Literal["laya"] = "laya"
-    mode: Literal["shadow"] = "shadow"
-    endpoint: str = "http://127.0.0.1:8421"
-    model: str = ""
-    timeout_ms: int = Field(3000, ge=100, le=30000)
-    coverage: float = Field(0.9, ge=0.5, le=1.0)
-    max_domains: int = Field(4, ge=1, le=32)
-    min_confidence: float = Field(0.4, ge=0.0, le=1.0)
-    pinned_domains: list[str] = Field(default_factory=lambda: ["core", "memory", "tool-search"])
-
-    @field_validator("endpoint", "model", mode="before")
-    @classmethod
-    def normalize_text(cls, value: Any) -> str:
-        return str(value or "").strip()
-
-
 class AgentSettings(BaseModel):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     speech_to_text: SpeechToTextSettings = Field(default_factory=SpeechToTextSettings)
@@ -325,7 +294,6 @@ class AgentSettings(BaseModel):
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     identity: IdentitySettings = Field(default_factory=IdentitySettings)
-    decision_model: DecisionModelSettings = Field(default_factory=DecisionModelSettings)
 
 
 def confirmation_settings_for_mode(
@@ -739,8 +707,6 @@ def build_runtime_namespace(base_settings, agent_settings: AgentSettings):
         ),
         browser=SimpleNamespace(**agent_settings.browser.model_dump()),
         sandbox=SimpleNamespace(**agent_settings.sandbox.model_dump()),
-        decision_model=SimpleNamespace(**agent_settings.decision_model.model_dump()),
-        laya_api_key=getattr(base_settings, "laya_api_key", ""),
         allow_arbitrary_app_paths=getattr(base_settings, "allow_arbitrary_app_paths", False),
     )
 

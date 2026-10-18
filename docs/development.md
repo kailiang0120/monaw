@@ -132,7 +132,7 @@ Runtime layout:
 %USERPROFILE%\.monaw\runtime\        settings.json, agent.db, backend.log, Electron store
 %USERPROFILE%\.monaw\workspace\      default workdir for agent shell commands
 %USERPROFILE%\.monaw\browser\        browser artifacts
-%USERPROFILE%\.monaw\memory\         long-term memory markdown files
+%USERPROFILE%\.monaw\memory\         global and workspace memory markdown files
 ```
 
 Override the main folder with `MONAW_HOME` or `AGENT_HOME`, runtime with `AGENT_RUNTIME_DIR`, workspace with `AGENT_WORKSPACE_DIR`, and memory with `AGENT_MEMORY_DIR`.
@@ -161,7 +161,7 @@ backend/app/agent/runtime.py           Runtime assembly for settings, LLM client
 backend/app/agent/turn_loop.py         Main agent turn loop and tool-call flow
 backend/app/agent/llm_client.py        OpenAI and Gemini client abstraction
 backend/app/agent/settings_store.py    Local runtime settings persistence
-backend/app/agent/long_term_memory.py  Sectioned markdown long-term memory storage
+backend/app/agent/memory_store.py      Global and workspace markdown memory, retrieval, and learning
 backend/app/agent/scheduler.py         Scheduled task service and run orchestration
 backend/app/agent/sandbox/             Exec sandbox policy, backend selection, sessions, and path controls
 backend/app/agent/harness/             Tool protocol, execution wrapper, and policy checks
@@ -174,7 +174,7 @@ frontend/src/                          React renderer, settings UI, chat UI, sch
 scripts/start-windows.ps1              Windows dev launcher used by start.bat
 docs/browser-automation.md             Browser automation behavior and troubleshooting
 docs/mcp.md                            MCP server setup, lifecycle, and reflected tools
-docs/memory.md                         Long-term memory storage and APIs
+docs/memory.md                         Global and workspace memory, storage, and APIs
 docs/permissions.md                    Permissions, approvals, and access grants
 docs/sandboxing.md                     Sandbox behavior and troubleshooting
 docs/scheduling.md                     Scheduled task lifecycle and APIs
@@ -190,7 +190,7 @@ core              Core utilities (internal)
 exec              Command execution (internal)
 filesystem        File management (internal)
 mcp_bridge        MCP integrations (internal)
-memory            Long-term memory tools (internal)
+memory            Global and workspace memory tools (internal)
 scheduling        Scheduled task tools
 skill_creator     Skill creation and reload tools
 web_search        Web search (when Tavily is configured)
@@ -259,18 +259,7 @@ from the interrupted task, including its tool inputs and result status.
 
 ## Memory Internals
 
-Durable memory is stored locally as sectioned markdown. Inside the memory root, long-term memory is stored by category:
-
-```text
-long-term\preference.md
-long-term\behavior.md
-long-term\fact.md
-long-term\workflow.md
-long-term\project.md
-long-term\reflection.md
-```
-
-Each section is editable through the Settings UI and memory API. The legacy `style` category is normalized into `preference`.
+`backend/app/agent/memory_store.py` keeps memory in two scopes, each one markdown file: `global.md` for the user, and `workspaces/<folder>-<hash>.md` per working folder. Entries are bullets under `## Rules`, `## Preferences`, and `## Facts`. Rules and preferences are pinned into every prompt of their scope; facts are ranked against the turn's message. Writes come only from the user's words, through the `memory_*` tools or the background learner. See [memory.md](memory.md).
 
 ## Browser Automation
 
