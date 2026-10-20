@@ -2,9 +2,11 @@ import { useState } from 'react'
 import { Clock3, MoreHorizontal, Play, Power, Trash2, type LucideIcon } from 'lucide-react'
 import type { ScheduledTask } from '../../lib/api/types'
 import { humanizeSchedule, relativeTime } from '../../lib/scheduling/humanize'
+import type { ItemActionFeedback } from '../../hooks/useItemActions'
 
 interface Props {
   task: ScheduledTask
+  feedback?: ItemActionFeedback
   onEdit: (id: string) => void
   onSelectRun: (conversationId: string) => void
   onToggleEnabled: (id: string, enabled: boolean) => void
@@ -15,6 +17,7 @@ interface Props {
 
 export function ScheduledTaskItem({
   task,
+  feedback,
   onEdit,
   onSelectRun,
   onToggleEnabled,
@@ -24,7 +27,7 @@ export function ScheduledTaskItem({
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false)
   const schedule = humanizeSchedule(task)
-  const next = task.enabled
+  const next = task.queued ? 'waiting to run' : task.enabled
     ? (task.nextRunAt ? `next ${relativeTime(task.nextRunAt)}` : 'no run scheduled')
     : 'paused'
 
@@ -71,17 +74,26 @@ export function ScheduledTaskItem({
 
       {menuOpen && (
         <div className="panel absolute right-1 top-8 z-20 w-36 overflow-hidden rounded-lg p-1 shadow-xl">
-          <MenuButton label="Edit" onClick={() => { setMenuOpen(false); onEdit(task.id) }} />
-          <MenuButton icon={Play} label="Run now" onClick={() => { setMenuOpen(false); onRunNow(task.id) }} />
+          <MenuButton disabled={Boolean(feedback?.pending)} label="Edit" onClick={() => { setMenuOpen(false); onEdit(task.id) }} />
+          <MenuButton disabled={Boolean(feedback?.pending)} icon={Play} label="Run now" onClick={() => { setMenuOpen(false); onRunNow(task.id) }} />
           <MenuButton
             icon={Power}
             label={task.enabled ? 'Disable' : 'Enable'}
+            disabled={Boolean(feedback?.pending)}
             onClick={() => { setMenuOpen(false); onToggleEnabled(task.id, !task.enabled) }}
           />
           <MenuButton label="View runs" onClick={() => { setMenuOpen(false); onViewRuns(task) }} />
-          <MenuButton icon={Trash2} label="Delete" tone="red" onClick={() => { setMenuOpen(false); onDelete(task.id) }} />
+          <MenuButton disabled={Boolean(feedback?.pending)} icon={Trash2} label="Delete" tone="red" onClick={() => { setMenuOpen(false); onDelete(task.id) }} />
         </div>
       )}
+      {feedback?.pending && <div role="status" className="px-2 text-[10px] text-neutral-400">{feedback.pending}…</div>}
+      {feedback?.error && (
+        <div role="alert" className="px-2 py-1 text-[10px] text-red-300">
+          {feedback.error}
+          {feedback.retry && <button type="button" className="ml-1 underline" onClick={feedback.retry}>{feedback.retryLabel || 'Retry'}</button>}
+        </div>
+      )}
+      {feedback?.success && <div role="status" className="px-2 text-[10px] text-neutral-500">{feedback.success}</div>}
     </div>
   )
 }
@@ -91,15 +103,18 @@ function MenuButton({
   label,
   tone = 'neutral',
   onClick,
+  disabled,
 }: {
   icon?: LucideIcon
   label: string
   tone?: 'neutral' | 'red'
   onClick: () => void
+  disabled?: boolean
 }) {
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={onClick}
       className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors ${
         tone === 'red'
@@ -114,20 +129,23 @@ function MenuButton({
 }
 
 function statusLabel(task: ScheduledTask): string {
-  if (!task.enabled) return 'Paused'
   if (task.running) return 'Running now'
+  if (task.queued) return 'Waiting to run'
+  if (task.lastRunStatus === 'dead_letter') return 'Paused after repeated failures'
+  if (!task.enabled) return 'Paused'
   if (task.lastRunStatus === 'ok') return 'Last run completed'
   if (task.lastRunStatus === 'error') return 'Last run failed'
   if (task.lastRunStatus === 'disabled_after_failures') return 'Paused after repeated failures'
-  if (task.lastRunStatus === 'skipped') return 'Last run was skipped'
+  if (['skipped', 'overlap', 'queue_limit', 'global_concurrency_limit'].includes(task.lastRunStatus)) return 'Last run was skipped'
   return 'Has not run yet'
 }
 
 function statusDot(task: ScheduledTask): string {
-  if (!task.enabled) return 'bg-neutral-600'
   if (task.running) return 'animate-pulse bg-amber-300'
+  if (task.queued) return 'bg-amber-300'
+  if (!task.enabled) return 'bg-neutral-600'
   if (task.lastRunStatus === 'ok') return 'bg-emerald-400'
   if (task.lastRunStatus === 'error' || task.lastRunStatus === 'disabled_after_failures') return 'bg-red-400'
-  if (task.lastRunStatus === 'skipped') return 'bg-amber-300'
+  if (['skipped', 'overlap', 'queue_limit', 'global_concurrency_limit'].includes(task.lastRunStatus)) return 'bg-amber-300'
   return 'bg-neutral-600'
 }

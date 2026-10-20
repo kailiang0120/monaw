@@ -193,7 +193,15 @@ def get_sandbox_status(
     def _status_backend(decision) -> str:
         return decision.backend if decision.allowed else "none"
 
+    from app.agent.sandbox.presentation import execution_environment, runtime_policy
+    from app.agent.permission_actions import ActionType, requires_confirmation
+
     status = SandboxStatus(
+        execution_environment=execution_environment({
+            **representative.model_dump(), "workdir": probe_workdir,
+            "runtime_policy": runtime_policy(settings, representative.backend),
+            "explicit_approval_required": requires_confirmation(ActionType.EXEC, policy.permissions),
+        }, blocked=not representative.allowed),
         enabled=settings.enabled,
         mode=settings.mode,
         default_profile=settings.default_profile,

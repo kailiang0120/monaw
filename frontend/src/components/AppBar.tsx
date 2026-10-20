@@ -1,8 +1,9 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { PanelLeftClose, PanelLeftOpen, ShieldAlert, ShieldCheck, ShieldHalf, SquarePen } from 'lucide-react'
 import type { AgentSettings } from '../lib/api/types'
 import { resolveAgentName } from '../lib/identity'
 import appLogo from '../assets/Logo.png'
+import type { ItemActionFeedback } from '../hooks/useItemActions'
 
 type ApprovalMode = AgentSettings['permissions']['mode']
 export type AgentStatus = 'starting' | 'ready' | 'working'
@@ -13,7 +14,9 @@ interface Props {
   onNewChat: () => void
   agentName?: string
   conversationTitle?: string
-  onRenameConversation?: (title: string) => void
+  conversationId?: string | null
+  onRenameConversation?: (title: string) => void | Promise<boolean>
+  renameFeedback?: ItemActionFeedback
   status: AgentStatus
   approvalMode: ApprovalMode
   onOpenPermissions?: () => void
@@ -47,7 +50,9 @@ export function AppBar({
   onNewChat,
   agentName,
   conversationTitle,
+  conversationId,
   onRenameConversation,
+  renameFeedback,
   status,
   approvalMode,
   onOpenPermissions,
@@ -55,6 +60,9 @@ export function AppBar({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const renaming = useRef(false)
+  const editGeneration = useRef(0)
+  useEffect(() => { editGeneration.current += 1; setEditing(false) }, [conversationId])
   const canRename = Boolean(conversationTitle && onRenameConversation)
   const mode = MODE_META[approvalMode] ?? MODE_META.default
   const ModeIcon = mode.Icon
@@ -63,15 +71,24 @@ export function AppBar({
 
   const startEdit = () => {
     if (!canRename) return
+    editGeneration.current += 1
     setDraft(conversationTitle || '')
     setEditing(true)
     setTimeout(() => inputRef.current?.select(), 0)
   }
 
-  const commitEdit = () => {
+  const commitEdit = async () => {
+    if (renaming.current) return
     const trimmed = draft.trim()
-    if (trimmed && trimmed !== conversationTitle) onRenameConversation?.(trimmed)
-    setEditing(false)
+    if (!trimmed || trimmed === conversationTitle) { setEditing(false); return }
+    renaming.current = true
+    const generation = editGeneration.current
+    try {
+      const saved = await onRenameConversation?.(trimmed)
+      if (saved !== false && generation === editGeneration.current) setEditing(false)
+    } finally {
+      renaming.current = false
+    }
   }
 
   return (
@@ -120,11 +137,12 @@ export function AppBar({
             <input
               ref={inputRef}
               value={draft}
+              disabled={Boolean(renameFeedback?.pending)}
               onChange={(event) => setDraft(event.target.value)}
               onBlur={commitEdit}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') { event.preventDefault(); commitEdit() }
-                if (event.key === 'Escape') { event.preventDefault(); setEditing(false) }
+                if (event.key === 'Escape') { event.preventDefault(); editGeneration.current += 1; setEditing(false) }
               }}
               className="app-bar-title-input"
               aria-label="Conversation title"
@@ -138,6 +156,7 @@ export function AppBar({
               {conversationTitle || 'New chat'}
             </h1>
           )}
+          {renameFeedback?.error && <span role="alert" className="max-w-56 truncate text-[10px] text-red-300" title={renameFeedback.error}>{renameFeedback.error}</span>}
           <span className="app-bar-divider" aria-hidden="true" />
           <button
             type="button"

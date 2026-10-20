@@ -47,6 +47,7 @@ TEST_GROUPS = {
         "test_core_tools.py",
     },
     "sandbox": {
+        "test_sandbox_disclosure.py",
         "test_sandbox.py",
         "test_sandbox_docker.py",
         "test_sandbox_environment.py",
@@ -78,6 +79,7 @@ TEST_GROUPS = {
         "test_observability_recorder.py",
     },
     "integrations": {
+        "test_scheduler_dispatch.py",
         "test_scheduler.py",
         "test_telegram_integration.py",
     },

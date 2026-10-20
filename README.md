@@ -12,7 +12,7 @@ The application runs on your PC. Chat history, settings, memory, and artifacts a
 
 ## Setup and Start
 
-You need **Git**, an internet connection for installation and model access, and Windows 10 or 11. The setup script can install missing **uv** and **Node.js LTS** through Windows Package Manager (`winget`). If you install Node yourself, use **22.12+**, or **20.19+ on the 20.x line**, with npm. Python **3.11** is pinned in `backend/.python-version` and installed by uv.
+You need **Git**, an internet connection for installation and model access, and Windows 10 or 11. The setup script can install missing **uv** and **Node.js LTS** through Windows Package Manager (`winget`). Supported Node release lines are **20.x starting at 20.19**, **22.x starting at 22.13**, and **24.x**, with npm. Setup and launch check the executable found on PATH against the policy in `frontend/package.json`; other major versions and prereleases are rejected. Python **3.11** is pinned in `backend/.python-version` and installed by uv. Required Windows backend checks use 3.11; a separate runtime compatibility job checks 3.12.
 
 Chrome **144+** is needed for browser automation. Docker Desktop is optional for isolated shell execution.
 

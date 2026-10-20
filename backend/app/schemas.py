@@ -529,6 +529,7 @@ class SandboxBackendCapabilityPayload(BaseModel):
 
 
 class SandboxStatusPayload(BaseModel):
+    execution_environment: dict = Field(default_factory=dict)
     enabled: bool
     mode: str
     default_profile: str

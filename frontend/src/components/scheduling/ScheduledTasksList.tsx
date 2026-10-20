@@ -3,11 +3,13 @@ import { ChevronDown, ChevronRight, Clock3, Plus } from 'lucide-react'
 import type { ScheduledTask } from '../../lib/api/types'
 import { ScheduledRunHistory } from './ScheduledRunHistory'
 import { ScheduledTaskItem } from './ScheduledTaskItem'
+import type { ItemActionFeedback } from '../../hooks/useItemActions'
 
 const STORAGE_KEY = 'scheduled_section_expanded'
 
 interface Props {
   tasks: ScheduledTask[]
+  actionFeedback?: Record<string, ItemActionFeedback>
   onCreate: () => void
   onEdit: (id: string) => void
   onSelectRun: (conversationId: string) => void
@@ -18,6 +20,7 @@ interface Props {
 
 export function ScheduledTasksList({
   tasks,
+  actionFeedback,
   onCreate,
   onEdit,
   onSelectRun,
@@ -80,6 +83,7 @@ export function ScheduledTasksList({
               <ScheduledTaskItem
                 key={task.id}
                 task={task}
+                feedback={actionFeedback?.[`task:${task.id}`]}
                 onEdit={onEdit}
                 onSelectRun={onSelectRun}
                 onToggleEnabled={onToggleEnabled}

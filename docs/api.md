@@ -60,7 +60,7 @@ unauthenticated runtime endpoint.
 | `POST` | `/api/openai-account/logout` | `settings:write` | `dict` |
 | `GET` | `/api/openai-account/status` | `settings:read` | `dict` |
 | `POST` | `/api/privacy/delete-data` | `agent:run` | `DataDeletionResult` |
-| `POST` | `/api/sandbox/docker/resolve-image` | `settings:read` | `SandboxResolveImageResponse` |
+| `POST` | `/api/sandbox/docker/resolve-image` | `settings:write` | `SandboxResolveImageResponse` |
 | `GET` | `/api/sandbox/status` | `settings:read` | `SandboxStatusPayload` |
 | `GET` | `/api/scheduled-tasks` | `agent:run` | `list` |
 | `POST` | `/api/scheduled-tasks` | `agent:run` | `ScheduledTaskOut` |
@@ -68,6 +68,7 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/scheduled-tasks/telegram-chats` | `agent:run` | `TelegramChatsResponse` |
 | `DELETE` | `/api/scheduled-tasks/{task_id}` | `agent:run` | `stream/file/none` |
 | `PATCH` | `/api/scheduled-tasks/{task_id}` | `agent:run` | `ScheduledTaskOut` |
+| `GET` | `/api/scheduled-tasks/{task_id}/operations/{operation_key}` | `agent:run` | `RunNowResponse` |
 | `POST` | `/api/scheduled-tasks/{task_id}/run` | `agent:run` | `RunNowResponse` |
 | `GET` | `/api/scheduled-tasks/{task_id}/runs` | `agent:run` | `list` |
 | `GET` | `/api/settings` | `settings:read` | `AgentSettingsPayload` |

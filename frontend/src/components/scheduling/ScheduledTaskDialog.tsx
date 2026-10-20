@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { actionErrorMessage } from '../../hooks/useItemActions'
 import { AlertCircle, Clock, Play, X } from 'lucide-react'
 import {
   createScheduledTask,
@@ -45,7 +46,7 @@ const OVERLAP_OPTIONS: Array<{
   {
     value: 'cancel_previous',
     label: 'Cancel and restart',
-    summary: 'Stop the run in progress and start the new one immediately.',
+    summary: 'Request cancellation, then start the new run when the previous work has stopped.',
   },
 ]
 
@@ -81,6 +82,9 @@ export function ScheduledTaskDialog({
   )
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [checkingRun, setCheckingRun] = useState(false)
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
   // Auto-fill the title from the first line of the prompt, until it is edited.
   useEffect(() => {
@@ -157,13 +161,17 @@ export function ScheduledTaskDialog({
     setError('')
     try {
       const result = await runScheduledTaskNow(task.id)
+      if (!mounted.current) return
       onSaved()
       onRunConversation(result.conversationId)
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to run scheduled task')
+      if (mounted.current) {
+        setCheckingRun(true)
+        setError(actionErrorMessage(err, 'Could not confirm the run. Check it before starting another.'))
+      }
     } finally {
-      setSaving(false)
+      if (mounted.current) setSaving(false)
     }
   }
 
@@ -330,7 +338,7 @@ export function ScheduledTaskDialog({
             {task && (
               <button type="button" onClick={runNow} disabled={saving} className="st-btn st-btn-secondary">
                 <Play size={13} />
-                Run now
+                {checkingRun ? 'Check run' : 'Run now'}
               </button>
             )}
           </div>

@@ -6,6 +6,7 @@ const http = require('http')
 const fs = require('fs')
 const { fileURLToPath } = require('url')
 const runtimeConfig = require('../config/runtime.json')
+const { backendPort, useDevelopmentRenderer } = require('./runtime-options.cjs')
 const {
   generateControlSecret,
   generateControlSessionId,
@@ -21,12 +22,13 @@ const BACKEND_HOST = normalizeBackendHost(
   runtimeConfig.backendHost,
   process.env.MONAW_ALLOW_UNSAFE_BACKEND_HOST === '1'
 )
-const BACKEND_PORT = runtimeConfig.backendPort || 8420
+const BACKEND_PORT = backendPort(runtimeConfig)
 const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`
 const CONTROL_SECRET = generateControlSecret()
 const CONTROL_SESSION_ID = generateControlSessionId()
 const BACKEND_RESTART_EXIT_CODE = 78
 const isDev = !app.isPackaged
+const useDevServer = useDevelopmentRenderer(app.isPackaged)
 const APP_USER_MODEL_ID = 'com.monaw.agent'
 const LEGACY_USER_DATA_DIR_NAMES = ['AI Agent', 'ai-agent']
 const APP_THEME_COLORS = {
@@ -136,7 +138,7 @@ function spawnBackend() {
         ...process.env,
         MONAW_CONTROL_SECRET: CONTROL_SECRET,
         MONAW_ALLOW_DEVELOPMENT_TOKEN: '0',
-        CORS_ALLOW_ORIGINS: isDev
+        CORS_ALLOW_ORIGINS: useDevServer
           ? 'http://localhost:5275,http://127.0.0.1:5275'
           : 'null',
         CORS_ALLOW_ORIGIN_REGEX: '',
@@ -246,7 +248,7 @@ function buildContentSecurityPolicy() {
   const viteWs = 'ws://localhost:5275'
   const viteLoopbackWs = 'ws://127.0.0.1:5275'
 
-  if (isDev) {
+  if (useDevServer) {
     return [
       "default-src 'self'",
       `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${viteHttp} ${viteLoopbackHttp}`,
@@ -291,7 +293,7 @@ function isTrustedRendererUrl(value) {
   if (!value) return false
   try {
     const url = new URL(value)
-    if (isDev) return ['localhost', '127.0.0.1'].includes(url.hostname) && url.port === '5275'
+    if (useDevServer) return url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.port === '5275'
     if (url.protocol !== 'file:') return false
     return path.resolve(fileURLToPath(url)) === path.resolve(__dirname, '../dist/index.html')
   } catch {
@@ -446,7 +448,7 @@ function createWindow() {
     },
   })
 
-  if (isDev) {
+  if (useDevServer) {
     mainWindow.loadURL('http://localhost:5275')
     if (process.env.MONAW_DEVTOOLS === '1') {
       mainWindow.webContents.openDevTools({ mode: 'detach' })

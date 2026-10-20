@@ -6,6 +6,7 @@ import { InputBar } from './components/InputBar'
 import { ApprovalToast } from './components/ApprovalToast'
 import { AccessGrantCard } from './components/AccessGrantCard'
 import { useChat } from './hooks/useChat'
+import { useItemActions } from './hooks/useItemActions'
 import { deleteConversation, fetchConversations, renameConversation, setConversationWorkspace, validateConversationWorkspace } from './lib/api/conversations'
 import {
   deleteScheduledTask,
@@ -66,6 +67,7 @@ function sameScheduledTasks(a: ScheduledTask[], b: ScheduledTask[]): boolean {
       && item.lastRunAt === other.lastRunAt
       && item.lastRunStatus === other.lastRunStatus
       && item.running === other.running
+      && item.queued === other.queued
   })
 }
 
@@ -99,6 +101,8 @@ export default function App() {
   const [observabilityRefreshKey, setObservabilityRefreshKey] = useState(0)
   const [diagnosticsRefreshKey, setDiagnosticsRefreshKey] = useState(0)
   const activeConvIdRef = useRef<string | null>(activeConvId)
+  const mutationGeneration = useRef(0)
+  const { feedback: actionFeedback, perform } = useItemActions(() => { mutationGeneration.current += 1 })
 
   const {
     messages,
@@ -122,8 +126,10 @@ export default function App() {
   }, [activeConvId])
 
   const loadConversations = useCallback(async () => {
+    const generation = mutationGeneration.current
     try {
       const convs = await fetchConversations()
+      if (generation !== mutationGeneration.current) return true
       const sorted = [...convs].sort((a, b) => b.created_at.localeCompare(a.created_at))
       setIsBackendReady(true)
       setConversations((current) => (sameConversations(current, sorted) ? current : sorted))
@@ -135,8 +141,10 @@ export default function App() {
   }, [])
 
   const loadScheduledTasks = useCallback(async () => {
+    const generation = mutationGeneration.current
     try {
       const tasks = await fetchScheduledTasks()
+      if (generation !== mutationGeneration.current) return true
       setIsBackendReady(true)
       setScheduledTasks((current) => (sameScheduledTasks(current, tasks) ? current : tasks))
       return true
@@ -358,7 +366,11 @@ export default function App() {
 
   const handleSend = (text: string, attachments: UploadedAttachment[] = []) => {
     if (savingWorkspace) return
+    const generation = workspaceGenerationRef.current
     sendMessage(text, attachments, (newConvId) => {
+      if (generation !== workspaceGenerationRef.current) return
+      workspaceGenerationRef.current += 1
+      activeConvIdRef.current = newConvId
       setActiveConvId(newConvId)
       loadConversations()
     }, activeConvId ? undefined : draftWorkspaceDir || undefined)
@@ -384,6 +396,8 @@ export default function App() {
   }
 
   const handleSelectConversation = (id: string) => {
+    workspaceGenerationRef.current += 1
+    activeConvIdRef.current = id
     if (id === activeConvId) return
     setActiveConvId(id)
   }
@@ -395,29 +409,31 @@ export default function App() {
 
   const handleNewChat = () => {
     workspaceGenerationRef.current += 1
+    activeConvIdRef.current = null
     setDraftWorkspaceDir('')
     setActiveConvId(null)
     clearMessages()
   }
 
   const handleDeleteConversation = async (id: string) => {
-    await deleteConversation(id)
-    if (id === activeConvId) {
-      setActiveConvId(null)
-      clearMessages()
-    }
-    loadConversations()
+    await perform(`conversation:${id}`, 'Deleting conversation', () => deleteConversation(id), () => {
+      setConversations((current) => current.filter((item) => item.id !== id))
+      if (id === activeConvIdRef.current) {
+        workspaceGenerationRef.current += 1
+        activeConvIdRef.current = null
+        setActiveConvId(null)
+        clearMessages()
+      }
+    }, () => { void handleDeleteConversation(id) })
   }
 
   const handleRenameConversation = async (id: string, title: string) => {
-    try {
-      const updated = await renameConversation(id, title)
+    const updated = await perform(`conversation:${id}`, 'Renaming conversation', () => renameConversation(id, title), (updated) => {
       setConversations((prev) =>
         prev.map((c) => (c.id === id ? { ...c, title: updated.title } : c)),
       )
-    } catch {
-      // Silent — the sidebar will revert to the original title on next refresh
-    }
+    })
+    return Boolean(updated)
   }
 
   const openScheduledTaskCreate = () => {
@@ -431,46 +447,43 @@ export default function App() {
   }
 
   const handleSelectScheduledRun = (conversationId: string) => {
+    workspaceGenerationRef.current += 1
+    activeConvIdRef.current = conversationId
     setActiveConvId(conversationId)
     loadConversations()
   }
 
   const handleToggleScheduledTaskEnabled = async (id: string, enabled: boolean) => {
-    const previous = scheduledTasks
-    setScheduledTasks((tasks) => tasks.map((task) => (task.id === id ? { ...task, enabled } : task)))
-    try {
-      const updated = await updateScheduledTask(id, { enabled })
+    await perform(`task:${id}`, 'Saving schedule', () => updateScheduledTask(id, { enabled }), (updated) => {
       setScheduledTasks((tasks) => tasks.map((task) => (task.id === id ? updated : task)))
-    } catch {
-      setScheduledTasks(previous)
-    }
+    }, () => { void handleToggleScheduledTaskEnabled(id, enabled) })
   }
 
   const handleDeleteScheduledTask = async (id: string) => {
-    const previous = scheduledTasks
-    setScheduledTasks((tasks) => tasks.filter((task) => task.id !== id))
-    try {
-      await deleteScheduledTask(id)
-    } catch {
-      setScheduledTasks(previous)
-    }
+    await perform(`task:${id}`, 'Deleting schedule', () => deleteScheduledTask(id), () => {
+      setScheduledTasks((tasks) => tasks.filter((task) => task.id !== id))
+    }, () => { void handleDeleteScheduledTask(id) })
   }
 
   const handleRunScheduledTask = async (id: string) => {
-    try {
-      const result = await runScheduledTaskNow(id)
-      setActiveConvId(result.conversationId)
-      loadScheduledTasks()
-      loadConversations()
-    } catch {
-      // The task row will refresh on the next polling cycle.
-    }
+    const conversation = activeConvIdRef.current
+    const navigation = workspaceGenerationRef.current
+    await perform(`task:${id}`, 'Starting or checking run', () => runScheduledTaskNow(id), (result) => {
+      if (activeConvIdRef.current === conversation && workspaceGenerationRef.current === navigation) {
+        workspaceGenerationRef.current += 1
+        activeConvIdRef.current = result.conversationId
+        setActiveConvId(result.conversationId)
+      }
+      void loadScheduledTasks()
+      void loadConversations()
+    }, () => { void handleRunScheduledTask(id) }, 'Run accepted', 'Check run')
   }
 
   const activeConversation = conversations.find((conversation) => conversation.id === activeConvId)
   const editingScheduledTask = editingScheduledTaskId
     ? scheduledTasks.find((task) => task.id === editingScheduledTaskId) || null
     : null
+  const navigationGeneration = workspaceGenerationRef.current
 
   return (
     <div className={`app-surface ${theme === 'light' ? 'theme-light' : 'theme-dark'} flex h-screen w-screen flex-col overflow-hidden`}>
@@ -480,7 +493,9 @@ export default function App() {
         onNewChat={handleNewChat}
         agentName={agentName}
         conversationTitle={activeConversation?.title}
+        conversationId={activeConvId}
         onRenameConversation={activeConvId ? (title) => handleRenameConversation(activeConvId, title) : undefined}
+        renameFeedback={activeConvId ? actionFeedback[`conversation:${activeConvId}`] : undefined}
         status={!isBackendReady ? 'starting' : isStreaming ? 'working' : 'ready'}
         approvalMode={approvalMode}
         onOpenPermissions={() => setShowSettings(true)}
@@ -499,6 +514,7 @@ export default function App() {
           }}
           onOpenSettings={() => setShowSettings(true)}
           scheduledTasks={scheduledTasks}
+          actionFeedback={actionFeedback}
           onOpenScheduledTaskCreate={openScheduledTaskCreate}
           onOpenScheduledTaskEdit={openScheduledTaskEdit}
           onSelectScheduledRun={handleSelectScheduledRun}
@@ -593,7 +609,8 @@ export default function App() {
               void loadConversations()
             }}
             onRunConversation={(conversationId) => {
-              setActiveConvId(conversationId)
+              if (navigationGeneration !== workspaceGenerationRef.current) return
+              handleSelectScheduledRun(conversationId)
               void loadConversations()
             }}
           />

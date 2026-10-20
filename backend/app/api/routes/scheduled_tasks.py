@@ -4,10 +4,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from app.agent.database import get_db
+from app.agent.database import ScheduledTaskCapacityError, ScheduledTaskConflictError, get_db
 from app.agent.scheduler import ScheduledTaskService, get_scheduled_task_service
 from app.agent.ui_events import publish_ui_event
 from app.integrations.telegram.session import TelegramSessionStore
@@ -81,6 +81,7 @@ class ScheduledTaskOut(ScheduledTaskBase):
     next_run_at: str = ""
     consecutive_failures: int = 0
     running: bool = False
+    queued: bool = False
     created_at: str
     updated_at: str
 
@@ -127,11 +128,12 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _normalize_task_row(row: dict[str, Any], *, running: bool = False) -> dict[str, Any]:
+def _normalize_task_row(row: dict[str, Any], *, running: bool = False, queued: bool = False) -> dict[str, Any]:
     normalized = dict(row)
     normalized["interval_seconds"] = int(normalized.get("interval_seconds") or 0)
     normalized["consecutive_failures"] = int(normalized.get("consecutive_failures") or 0)
     normalized["running"] = running
+    normalized["queued"] = queued
     return normalized
 
 
@@ -184,7 +186,8 @@ def _validate_merged_task(fields: dict[str, Any], current: dict[str, Any]) -> No
 async def list_scheduled_tasks():
     db = get_db()
     running_ids = db.list_running_scheduled_task_ids()
-    return [_normalize_task_row(row, running=str(row["id"]) in running_ids) for row in db.list_scheduled_tasks()]
+    queued_ids = db.list_queued_scheduled_task_ids()
+    return [_normalize_task_row(row, running=str(row["id"]) in running_ids, queued=str(row["id"]) in queued_ids) for row in db.list_scheduled_tasks()]
 
 
 @router.post("", response_model=ScheduledTaskOut)
@@ -219,7 +222,10 @@ async def update_scheduled_task(task_id: str, body: ScheduledTaskUpdate):
     }
     if fields.keys() & next_input_keys:
         fields["next_run_at"] = _compute_next_run_or_400(fields, current)
-    updated = db.update_scheduled_task(task_id, **fields)
+    try:
+        updated = db.update_scheduled_task(task_id, expected_config_revision=current["config_revision"], **fields)
+    except ScheduledTaskConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
     service = get_scheduled_task_service()
@@ -229,6 +235,7 @@ async def update_scheduled_task(task_id: str, body: ScheduledTaskUpdate):
     return _normalize_task_row(
         updated,
         running=task_id in db.list_running_scheduled_task_ids(),
+        queued=task_id in db.list_queued_scheduled_task_ids(),
     )
 
 
@@ -241,22 +248,40 @@ async def delete_scheduled_task(task_id: str):
 
 
 @router.post("/{task_id}/run", response_model=RunNowResponse)
-async def run_scheduled_task_now(task_id: str):
+async def run_scheduled_task_now(
+    task_id: str, request: Request,
+    idempotency_key: str | None = Header(None, min_length=1, max_length=128),
+):
     if get_db().get_scheduled_task(task_id) is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
     service = get_scheduled_task_service()
     if service is None:
         raise HTTPException(status_code=503, detail="Scheduled task service is not running")
     try:
-        result = await service.run_now(task_id)
+        session = getattr(request.state, "control_session", None)
+        result = await service.run_now(task_id, operation_key=idempotency_key or "", requester=session.session_id if session else "local")
     except KeyError:
         raise HTTPException(status_code=404, detail="Scheduled task not found") from None
+    except ScheduledTaskCapacityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     publish_ui_event("scheduled_tasks.changed", {"task_id": task_id, "action": "run_now"})
     publish_ui_event(
         "conversation.changed",
         {"conversation_id": result.get("conversation_id", ""), "action": "scheduled_run"},
     )
     return result
+
+
+@router.get("/{task_id}/operations/{operation_key}", response_model=RunNowResponse)
+async def find_scheduled_operation(task_id: str, operation_key: str, request: Request):
+    if not 1 <= len(operation_key) <= 128:
+        raise HTTPException(status_code=422, detail="Operation key must contain 1–128 characters")
+    session = getattr(request.state, "control_session", None)
+    key = ScheduledTaskService.operation_key(operation_key, session.session_id if session else "local")
+    row = get_db().get_scheduled_operation(task_id, key)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scheduled operation not found")
+    return {"run_id": row["id"], "conversation_id": row["conversation_id"]}
 
 
 @router.get("/{task_id}/runs", response_model=list[ScheduledTaskRunOut])

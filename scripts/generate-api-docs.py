@@ -16,6 +16,7 @@ sys.path.insert(0, str(BACKEND_ROOT))
 from fastapi.routing import APIRoute  # noqa: E402
 
 from app.main import app  # noqa: E402
+from app.security.control_plane import _required_scope  # noqa: E402
 
 
 def _iter_api_routes():
@@ -36,17 +37,7 @@ def _route_scope(path: str, methods: set[str]) -> str:
     method = sorted(methods)[0] if methods else "GET"
     if not path.startswith("/api"):
         return "unauthenticated"
-    if path.startswith("/api/settings") or path.startswith("/api/openai-account"):
-        return "settings:read" if method == "GET" else "settings:write"
-    if path.startswith("/api/sandbox"):
-        return "settings:read"
-    if path.startswith("/api/approvals") or path.startswith("/api/access-grants"):
-        return "approval:resolve"
-    if path.startswith("/api/diagnostics") or path.startswith("/api/observability"):
-        return "diagnostics:read" if method == "GET" else "diagnostics:control"
-    if path.startswith("/api/files"):
-        return "files:read"
-    return "agent:run"
+    return _required_scope(method, path)
 
 
 def generate() -> str:

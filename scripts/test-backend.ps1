@@ -1,7 +1,8 @@
 param(
     [ValidateSet("all", "api", "runtime", "policy", "sandbox", "skills", "memory", "integrations")]
     [string]$Group = "all",
-    [int]$TimeoutSeconds = 900
+    [int]$TimeoutSeconds = 900,
+    [string]$JUnitPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +10,9 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendRoot = Join-Path $repoRoot "backend"
 
 $pytestArgs = @("run", "--locked", "pytest")
+if ($JUnitPath) {
+    $pytestArgs += "--junitxml=$JUnitPath"
+}
 if ($Group -ne "all") {
     $pytestArgs += @("-m", $Group)
 }

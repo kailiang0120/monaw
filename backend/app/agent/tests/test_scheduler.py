@@ -1,17 +1,33 @@
 import asyncio
 import json
 import sqlite3
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Barrier
+
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.agent import run_context
-from app.agent.database import Database
+from app.agent.database import Database, ScheduledTaskConflictError
 from app.agent import scheduler as scheduler_module
 from app.agent.scheduler import ScheduledTaskService
 from app.api.routes import scheduled_tasks as scheduled_tasks_route
 from app.skills.scheduling import tools as scheduling_tools
+
+
+def _prepared_fixture(db, service, row):
+    conversation_id = f"fixture-{uuid.uuid4().hex}"
+    db.create_conversation(conversation_id, "Fixture")
+    run_id = db.create_scheduled_task_run(
+        task_id=row["id"], conversation_id=conversation_id,
+        started_at=scheduler_module._iso_utc(scheduler_module._utc_now()),
+        lease_owner=service._lease_owner, lease_expires_at=service._lease_expires_at(),
+    )
+    return {"run_id": run_id, "conversation_id": conversation_id}
 
 
 def test_compute_next_run_for_interval_skips_past_times():
@@ -168,6 +184,60 @@ def test_run_now_creates_conversation_and_records_success(tmp_path, monkeypatch)
     assert calls[0]["interactive"] is False
 
 
+@pytest.mark.parametrize(
+    "event,expected_body,expected_status,delivery_fails",
+    [
+        ({"event": "done", "data": {"summary": "Report ready"}}, "Report ready", "succeeded", False),
+        ({"event": "done", "data": {}}, "Scheduled task completed successfully (no output).", "succeeded", False),
+        ({"event": "error", "data": {"message": "Fixture failed"}}, "Scheduled task failed: Fixture failed", "failed", False),
+        ({"event": "done", "data": {"summary": "Report ready"}}, "Report ready", "succeeded", True),
+    ],
+)
+def test_completion_delivers_canonical_outcome_without_changing_execution_result(
+    tmp_path, monkeypatch, event, expected_body, expected_status, delivery_fails, caplog,
+):
+    from app.integrations.telegram import service as telegram_service
+
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    row = db.create_scheduled_task({
+        "id": "notify", "title": "Report", "prompt": "Prepare report",
+        "schedule_kind": "interval", "interval_seconds": 3600,
+        "notify_telegram": 1, "telegram_chat_id": "123",
+    })
+    monkeypatch.setattr(scheduler_module, "get_db", lambda: db)
+    monkeypatch.setattr(scheduler_module, "telegram_chat_allowed", lambda _: True)
+    messages = []
+
+    class Bot:
+        async def send_message(self, **payload):
+            messages.append(payload)
+            if delivery_fails:
+                raise RuntimeError("sentinel-transport-secret")
+
+    monkeypatch.setattr(telegram_service, "get_telegram_bot", lambda: Bot())
+
+    async def runner(**kwargs):
+        yield event
+
+    async def run():
+        service = ScheduledTaskService(settings_factory=lambda: object(), runner=runner)
+        await service.run_now(row["id"])
+        await asyncio.wait_for(service._inflight[row["id"]][0], timeout=2)
+
+    asyncio.run(run())
+    assert len(messages) == 1
+    assert messages[0]["chat_id"] == "123"
+    assert expected_body in messages[0]["text"]
+    assert db.list_scheduled_task_runs(row["id"])[0]["status"] == expected_status
+    assert db.get_scheduled_task(row["id"])["last_run_status"] == (
+        "ok" if expected_status == "succeeded" else "error"
+    )
+    assert "sentinel-transport-secret" not in caplog.text
+    if delivery_fails:
+        assert "notification delivery failed" in caplog.text
+
+
 def test_reuse_conversation_task_records_runs_in_same_conversation(tmp_path, monkeypatch):
     db = Database(tmp_path / "agent.db")
     db.init_db()
@@ -211,6 +281,244 @@ def test_reuse_conversation_task_records_runs_in_same_conversation(tmp_path, mon
     assert first["conversation_id"] == second["conversation_id"]
     assert first["conversation_id"] == "sched_task-1_shared"
     assert {run["conversation_id"] for run in runs} == {first["conversation_id"]}
+
+
+@pytest.mark.parametrize("initial_kind", ["interval", "once"])
+@pytest.mark.parametrize("patch", [
+    {"enabled": 0, "next_run_at": ""},
+    {"schedule_kind": "interval", "interval_seconds": 7200},
+    {"schedule_kind": "cron", "cron_expr": "0 9 * * *", "timezone": "Asia/Kuala_Lumpur"},
+    {"schedule_kind": "once", "run_at": "2099-01-01T00:00:00+00:00"},
+])
+def test_completion_preserves_configuration_saved_while_running(tmp_path, monkeypatch, patch, initial_kind):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    row = db.create_scheduled_task({
+        "id": "edited", "title": "Editable", "prompt": "Work",
+        "schedule_kind": initial_kind, "interval_seconds": 60, "run_at": "2099-01-01T00:00:00+00:00",
+    })
+    monkeypatch.setattr(scheduler_module, "get_db", lambda: db)
+
+    async def runner(**kwargs):
+        db.update_scheduled_task(row["id"], **patch)
+        yield {"event": "done", "data": {"summary": "Done"}}
+
+    async def run():
+        service = ScheduledTaskService(settings_factory=lambda: object(), runner=runner)
+        await service.run_now(row["id"])
+        await service._inflight[row["id"]][0]
+
+    asyncio.run(run())
+    current = db.get_scheduled_task(row["id"])
+    assert current["config_revision"] == 1
+    assert db.list_scheduled_task_runs(row["id"])[0]["config_revision"] == 0
+    for key, value in patch.items():
+        assert current[key] == value
+    if current["enabled"]:
+        after = datetime.fromisoformat(current["last_run_at"])
+        expected = ScheduledTaskService.compute_next_run(current, after=after)
+        assert current["next_run_at"] == scheduler_module._iso_utc(expected)
+    else:
+        assert current["next_run_at"] == ""
+
+
+def test_completion_is_idempotent_and_old_attempt_cannot_overwrite_newer_run(tmp_path, monkeypatch):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    row = db.create_scheduled_task({
+        "id": "fenced", "title": "Fenced", "prompt": "Work",
+        "schedule_kind": "interval", "interval_seconds": 60,
+    })
+    monkeypatch.setattr(scheduler_module, "get_db", lambda: db)
+    events = []
+    monkeypatch.setattr(scheduler_module, "publish_ui_event", lambda *args: events.append(args))
+
+    async def finish():
+        service = ScheduledTaskService(settings_factory=lambda: object())
+        old = _prepared_fixture(db, service, row)
+        new = _prepared_fixture(db, service, row)
+        await service._finish_run(row, run_id=new["run_id"], conversation_id=new["conversation_id"],
+                                  status="succeeded", final_text="New", error="")
+        snapshot = db.get_scheduled_task(row["id"])
+        await service._finish_run(row, run_id=old["run_id"], conversation_id=old["conversation_id"],
+                                  status="failed", final_text="", error="Old failure")
+        assert db.get_scheduled_task(row["id"]) == snapshot
+        event_count = len(events)
+        await service._finish_run(row, run_id=new["run_id"], conversation_id=new["conversation_id"],
+                                  status="failed", final_text="", error="Duplicate")
+        assert len(events) == event_count
+        assert db.get_scheduled_task(row["id"]) == snapshot
+        runs = db.list_scheduled_task_runs(row["id"])
+        assert [run["status"] for run in runs] == ["succeeded", "failed"]
+        assert runs[0]["final_text"] == "New"
+
+    asyncio.run(finish())
+
+
+def test_completion_after_deletion_does_not_recreate_task_or_emit_notifications(tmp_path, monkeypatch):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    row = db.create_scheduled_task({
+        "id": "deleted", "title": "Delete", "prompt": "Work",
+        "schedule_kind": "interval", "interval_seconds": 60,
+    })
+    monkeypatch.setattr(scheduler_module, "get_db", lambda: db)
+    events = []
+    monkeypatch.setattr(scheduler_module, "publish_ui_event", lambda *args: events.append(args))
+
+    async def finish():
+        service = ScheduledTaskService(settings_factory=lambda: object())
+        run = _prepared_fixture(db, service, row)
+        db.delete_scheduled_task(row["id"])
+        await service._finish_run(row, run_id=run["run_id"], conversation_id=run["conversation_id"],
+                                  status="succeeded", final_text="Done", error="")
+
+    asyncio.run(finish())
+    assert db.get_scheduled_task(row["id"]) is None
+    assert db.list_scheduled_task_runs(row["id"]) == []
+    assert events == []
+
+
+def test_finalization_is_atomic_across_connections_and_rolls_back_invalid_update(tmp_path):
+    first = Database(tmp_path / "agent.db")
+    first.init_db()
+    first.create_scheduled_task({
+        "id": "concurrent", "title": "Concurrent", "prompt": "Work",
+        "schedule_kind": "interval", "interval_seconds": 60,
+    })
+    run_id = first.create_scheduled_task_run(
+        task_id="concurrent", conversation_id="fixture", started_at="2026-01-01T00:00:00+00:00",
+        lease_owner="fixture", lease_expires_at="2099-01-01T00:00:00+00:00",
+    )
+    second = Database(tmp_path / "agent.db")
+    second.init_db()
+    args = dict(
+        task_id="concurrent", run_id=run_id, conversation_id="fixture", lease_owner="fixture",
+        finished_at="2026-01-01T00:01:00+00:00", status="failed", final_text="", error="Fixture failure",
+    )
+    with pytest.raises(ValueError, match="forbidden column"):
+        first.finalize_scheduled_task_run(**args, prepare_task_update=lambda row: {"prompt": "Incorrect"})
+    assert first.list_scheduled_task_runs("concurrent")[0]["status"] == "running"
+    assert first.get_scheduled_task("concurrent")["prompt"] == "Work"
+
+    barrier = Barrier(2)
+
+    def finalize(db):
+        barrier.wait(timeout=5)
+        return db.finalize_scheduled_task_run(**args, prepare_task_update=lambda row: {
+            "consecutive_failures": row["consecutive_failures"] + 1,
+            "last_run_status": "error",
+        })
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(finalize, [first, second]))
+    assert sum(result is not None for result in results) == 1
+    assert first.get_scheduled_task("concurrent")["consecutive_failures"] == 1
+    assert first.list_scheduled_task_runs("concurrent")[0]["status"] == "failed"
+    first.close()
+    second.close()
+
+
+def test_configuration_revisions_reject_stale_edits_and_survive_reinitialization(tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    row = db.create_scheduled_task({
+        "id": "revision", "title": "Original", "prompt": "Work",
+        "schedule_kind": "interval", "interval_seconds": 60,
+    })
+    updated = db.update_scheduled_task(row["id"], expected_config_revision=row["config_revision"], title="New")
+    assert updated["config_revision"] == row["config_revision"] + 1
+    with pytest.raises(ScheduledTaskConflictError):
+        db.update_scheduled_task(row["id"], expected_config_revision=row["config_revision"], enabled=0)
+    db.init_db()
+    assert db.get_scheduled_task(row["id"]) == updated
+
+
+def test_scheduler_renews_live_leases_while_waiting_for_runner_output(tmp_path, monkeypatch):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    row = db.create_scheduled_task({
+        "id": "lease", "title": "Lease", "prompt": "Wait",
+        "schedule_kind": "interval", "interval_seconds": 60,
+    })
+    monkeypatch.setattr(scheduler_module, "get_db", lambda: db)
+    monkeypatch.setattr(scheduler_module, "_SCHEDULER_LEASE_RENEW_SECONDS", 0)
+    renewed = asyncio.Event()
+    original = db.renew_scheduled_task_run_lease
+
+    def renew(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not kwargs.get("start"):
+            assert result is True
+            renewed.set()
+        return result
+
+    monkeypatch.setattr(db, "renew_scheduled_task_run_lease", renew)
+
+    async def runner(**kwargs):
+        await renewed.wait()
+        yield {"event": "done", "data": {"summary": "Done"}}
+
+    async def run():
+        service = ScheduledTaskService(settings_factory=lambda: object(), runner=runner)
+        await service.run_now(row["id"])
+        await asyncio.wait_for(service._inflight[row["id"]][0], timeout=2)
+        assert not any(task.get_name().startswith("scheduled-task-lease-") for task in asyncio.all_tasks())
+
+    asyncio.run(run())
+    assert renewed.is_set()
+    assert db.list_scheduled_task_runs(row["id"])[0]["status"] == "succeeded"
+
+
+def test_expired_or_recovered_lease_cannot_restart_or_finalize_an_attempt(tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    db.create_scheduled_task({
+        "id": "expired", "title": "Expired", "prompt": "Wait",
+        "schedule_kind": "interval", "interval_seconds": 60,
+    })
+    run_id = db.create_scheduled_task_run(
+        task_id="expired", conversation_id="fixture", started_at="2026-01-01T00:00:00+00:00",
+        lease_owner="fixture", lease_expires_at="2026-01-01T00:01:00+00:00",
+    )
+    assert not db.renew_scheduled_task_run_lease(
+        run_id, lease_owner="fixture", now_iso="2026-01-01T00:02:00+00:00",
+        lease_expires_at="2026-01-01T00:20:00+00:00", start=True,
+    )
+    assert db.finalize_scheduled_task_run(
+        task_id="expired", run_id=run_id, conversation_id="fixture", lease_owner="fixture",
+        finished_at="2026-01-01T00:02:00+00:00", status="succeeded", final_text="Done", error="",
+        prepare_task_update=lambda row: {"last_run_status": "ok"},
+    ) is None
+    db.recover_expired_scheduled_task_runs("2026-01-01T00:02:00+00:00")
+    assert db.list_scheduled_task_runs("expired")[0]["status"] == "abandoned"
+    assert not db.renew_scheduled_task_run_lease(
+        run_id, lease_owner="fixture", now_iso="2026-01-01T00:00:30+00:00",
+        lease_expires_at="2026-01-01T00:20:00+00:00", start=True,
+    )
+
+
+@pytest.mark.parametrize("change", ["lease_owner", "conversation_id", "task_id"])
+def test_finalization_rejects_mismatched_attempt_identity(tmp_path, change):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    db.create_scheduled_task({
+        "id": "identity", "title": "Identity", "prompt": "Work",
+        "schedule_kind": "interval", "interval_seconds": 60,
+    })
+    run_id = db.create_scheduled_task_run(
+        task_id="identity", conversation_id="fixture", started_at="2026-01-01T00:00:00+00:00",
+        lease_owner="fixture", lease_expires_at="2099-01-01T00:00:00+00:00",
+    )
+    args = dict(task_id="identity", run_id=run_id, conversation_id="fixture", lease_owner="fixture",
+                finished_at="2026-01-01T00:01:00+00:00", status="succeeded", final_text="Done", error="")
+    args[change] = "another"
+
+    def unexpected(row):
+        raise AssertionError("Invalid attempt reached task-state calculation")
+
+    assert db.finalize_scheduled_task_run(**args, prepare_task_update=unexpected) is None
+    assert db.list_scheduled_task_runs("identity")[0]["status"] == "running"
 
 
 def test_scheduled_task_output_is_truncated_before_storage(tmp_path, monkeypatch):
@@ -359,36 +667,6 @@ def test_recover_expired_scheduled_task_runs_marks_abandoned_runs(tmp_path):
     assert row["finished_at"] == "2026-05-08T10:16:00+00:00"
     assert row["error"] == "scheduler lease expired"
 
-def test_claim_due_scheduled_task_is_atomic(tmp_path):
-    db = Database(tmp_path / "agent.db")
-    db.init_db()
-    db.create_scheduled_task(
-        {
-            "id": "task-1",
-            "title": "Once",
-            "prompt": "Say done",
-            "schedule_kind": "once",
-            "run_at": "2026-05-08T00:00:00+00:00",
-            "next_run_at": "2026-05-08T00:00:00+00:00",
-        }
-    )
-
-    first = db.claim_due_scheduled_task(
-        "task-1",
-        expected_next_run_at="2026-05-08T00:00:00+00:00",
-        now_iso="2026-05-08T10:00:01+00:00",
-    )
-    second = db.claim_due_scheduled_task(
-        "task-1",
-        expected_next_run_at="2026-05-08T00:00:00+00:00",
-        now_iso="2026-05-08T10:00:01+00:00",
-    )
-
-    assert first is True
-    assert second is False
-    assert db.list_due_scheduled_tasks("2026-05-08T10:00:02+00:00") == []
-
-
 def test_due_once_task_only_creates_one_run_when_polled_twice(tmp_path, monkeypatch):
     db = Database(tmp_path / "agent.db")
     db.init_db()
@@ -425,56 +703,6 @@ def test_due_once_task_only_creates_one_run_when_polled_twice(tmp_path, monkeypa
 
     assert len(db.list_scheduled_task_runs("task-1")) == 1
     assert len([c for c in db.list_conversations() if c["id"].startswith("sched_")]) == 1
-
-
-def test_cancelled_queued_run_does_not_start_after_previous(tmp_path, monkeypatch):
-    db = Database(tmp_path / "agent.db")
-    db.init_db()
-    row = db.create_scheduled_task(
-        {
-            "id": "task-1",
-            "title": "Queued",
-            "prompt": "Say done",
-            "schedule_kind": "interval",
-            "interval_seconds": 60,
-            "overlap_policy": "queue",
-            "next_run_at": "2026-05-08T10:00:00+00:00",
-        }
-    )
-    monkeypatch.setattr(scheduler_module, "get_db", lambda: db)
-    calls = {"runner": 0}
-
-    async def fake_runner(**kwargs):
-        calls["runner"] += 1
-        yield {"event": "done", "data": {"summary": "Done", "status": "complete"}}
-
-    async def run():
-        service = ScheduledTaskService(
-            settings_factory=lambda: object(),
-            runner=fake_runner,
-            tick_interval=999,
-        )
-        previous = asyncio.create_task(asyncio.sleep(10))
-        prepared = service._prepare_run(row, manual=False, initial_status="queued")
-        queued = asyncio.create_task(
-            service._run_after_previous("task-1", previous, row, prepared)
-        )
-        await asyncio.sleep(0)
-        queued.cancel()
-        try:
-            await queued
-        except asyncio.CancelledError:
-            pass
-        assert not previous.cancelled()
-        previous.cancel()
-        await asyncio.gather(previous, return_exceptions=True)
-
-    asyncio.run(run())
-
-    assert calls["runner"] == 0
-    assert db.list_scheduled_task_runs("task-1")[0]["status"] == "cancelled"
-
-
 
 
 def test_scheduler_start_recovers_expired_run_leases(tmp_path, monkeypatch):

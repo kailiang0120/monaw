@@ -6,6 +6,7 @@ import {
   rejectTicket,
 } from '../lib/api/approvals'
 import type { ApprovalTicket } from '../lib/api/types'
+import { ExecutionEnvironment } from './ExecutionEnvironment'
 
 interface Props {
   conversationId: string | null
@@ -79,7 +80,7 @@ export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: P
   if (!toast) return null
 
   return (
-    <div className="fixed right-4 top-4 z-[60] w-80 animate-fade-in">
+    <div className="fixed right-4 top-4 z-[60] max-h-[calc(100dvh-2rem)] w-80 animate-fade-in overflow-y-auto">
       <div className="rounded-2xl border border-amber-400/25 bg-[#171615]/95 p-4 shadow-2xl shadow-black/30 backdrop-blur-md">
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -94,6 +95,7 @@ export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: P
           {toast.action_description}
         </p>
         <p className="mb-3 text-[10px] leading-relaxed text-neutral-500">{toast.reason}</p>
+        <ExecutionEnvironment environment={toast.payload.args?.sandbox?.execution_environment} />
         <div className="flex items-center gap-2">
           <button
             type="button"

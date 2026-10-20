@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.agent.sandbox.presentation import execution_environment
 
 SandboxBackend = Literal["none", "local_direct", "docker", "local_restricted"]
 SandboxMode = Literal["off", "disabled", "auto", "enforce", "host", "docker", "local_restricted"]
@@ -45,6 +47,10 @@ class SandboxRunMetadata(BaseModel):
     mode: str = "auto"
     network: str = "deny"
     workdir: str = ""
+    host_workdir: str = ""
+    effective_shell: str = ""
+    explicit_approval_required: bool = False
+    runtime_policy: dict = Field(default_factory=dict)
     inherited_env_keys: list[str] = Field(default_factory=list)
     explicit_env_keys: list[str] = Field(default_factory=list)
     blocked_env_keys: list[str] = Field(default_factory=list)
@@ -84,7 +90,22 @@ class SandboxExecutionRequest(BaseModel):
     cancel_event: Any | None = Field(default=None, exclude=True, repr=False)
 
 
-class SandboxExecutionResult(BaseModel):
+class _EnvironmentResult(BaseModel):
+    sandbox: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def disclose_environment(self):
+        if self.sandbox:
+            self.sandbox = dict(self.sandbox)
+            self.sandbox.setdefault("effective_shell", getattr(self, "shell", ""))
+            if getattr(self, "reason", ""):
+                self.sandbox["reason"] = self.reason
+            self.sandbox["execution_environment"] = execution_environment(
+                self.sandbox, blocked=getattr(self, "status", "") == "blocked")
+        return self
+
+
+class SandboxExecutionResult(_EnvironmentResult):
     status: Literal["ok", "error", "blocked"]
     exit_code: int | None = None
     duration_ms: int = 0
@@ -109,14 +130,14 @@ class SandboxSessionStartRequest(SandboxExecutionRequest):
     pass
 
 
-class SandboxSessionHandle(BaseModel):
+class SandboxSessionHandle(_EnvironmentResult):
     session_id: str
     backend: str
     pid: int | None = None
     sandbox: dict = Field(default_factory=dict)
 
 
-class SandboxSessionStatus(BaseModel):
+class SandboxSessionStatus(_EnvironmentResult):
     status: Literal["running", "ok", "error"]
     command_id: str
     pid: int | None = None
@@ -175,6 +196,7 @@ class SandboxDecision(BaseModel):
 
 
 class SandboxStatus(BaseModel):
+    execution_environment: dict = Field(default_factory=dict)
     enabled: bool
     mode: SandboxMode
     default_profile: SandboxProfile

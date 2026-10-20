@@ -23,6 +23,7 @@ from app.agent.sandbox.models import (
     SandboxSessionStartRequest,
 )
 from app.agent.sandbox.policy import SandboxPolicy, classify_command
+from app.agent.sandbox.presentation import consent_environment, execution_environment, runtime_policy
 from app.agent.sandbox.sessions import SandboxSessionRegistry
 from app.agent.tool_cancellation import (
     current_call_id,
@@ -91,6 +92,7 @@ def _sandbox_metadata(decision: SandboxDecision, workdir: str) -> dict[str, Any]
         "reason": decision.reason,
         "reason_code": decision.reason_code,
         "workdir": workdir,
+        "runtime_policy": runtime_policy(coerce_sandbox_settings(getattr(_ACTIVE_SETTINGS, "sandbox", None)), backend),
     }
 
 
@@ -111,6 +113,8 @@ def _build_sanitized_env(
 
 
 def _blocked_sandbox_result(decision: SandboxDecision, sandbox: dict[str, Any]) -> str:
+    sandbox["reason"] = decision.reason
+    sandbox["execution_environment"] = execution_environment(sandbox, blocked=True)
     return json.dumps(
         {
             "status": "blocked",
@@ -123,6 +127,8 @@ def _blocked_sandbox_result(decision: SandboxDecision, sandbox: dict[str, Any]) 
 
 
 def _blocked_env_result(sanitized_env: SanitizedEnvironment, sandbox: dict[str, Any]) -> str:
+    sandbox["reason"] = sanitized_env.reason
+    sandbox["execution_environment"] = execution_environment(sandbox, blocked=True)
     return json.dumps(
         {
             "status": "blocked",
@@ -151,6 +157,7 @@ def _pending_approval(decision, action_desc: str, payload: dict, sandbox: dict[s
     payload_args["env"] = _redacted_env(payload_args.get("env"))
     payload_args["env_keys"] = env_keys
     if sandbox is not None:
+        sandbox["execution_environment"] = execution_environment(sandbox)
         payload_args["sandbox"] = sandbox
     ticket = create_ticket(
         action_type="exec",
@@ -220,6 +227,7 @@ def _permission_check(
     elevated: bool = False,
     tool_name: str = "exec",
     bypass_confirmation: bool = False,
+    approved_sandbox: dict[str, Any] | None = None,
     extra_payload: dict[str, Any] | None = None,
 ) -> str | None:
     if host != "local":
@@ -227,6 +235,8 @@ def _permission_check(
 
     decision = resolve_permission(ActionType.EXEC, target_path=workdir)
     if decision.blocked:
+        sandbox["reason"] = decision.reason
+        sandbox["execution_environment"] = execution_environment(sandbox, blocked=True)
         return json.dumps(
             {
                 "status": "blocked",
@@ -241,6 +251,11 @@ def _permission_check(
     # Permission mode owns consent; choosing a host backend must not add a
     # second, unconditional prompt after Full Access already authorized exec.
     sandbox["explicit_approval_required"] = bool(decision.requires_confirmation)
+    sandbox["execution_environment"] = execution_environment(sandbox)
+    if bypass_confirmation and approved_sandbox is not None:
+        # A ticket consents to the disclosed environment, not a later fallback,
+        # workspace, shell, network policy, or write strategy.
+        bypass_confirmation = consent_environment(approved_sandbox) == consent_environment(sandbox)
     if decision.requires_confirmation and not bypass_confirmation:
         if host_approval_required:
             decision = SimpleNamespace(
@@ -277,6 +292,7 @@ def _permission_check(
 
 
 def _session_unsupported_result(decision: SandboxDecision, sandbox: dict[str, Any]) -> str:
+    sandbox["execution_environment"] = execution_environment(sandbox, blocked=True)
     return json.dumps(
         {
             "status": "blocked",
@@ -306,6 +322,7 @@ def exec_tool(
     save_output_to: str = "",
     return_mode: str = "full",
     _bypass_gate: bool = False,
+    _approved_sandbox: dict[str, Any] | None = None,
 ) -> str:
     effective_workdir = _effective_workdir(workdir)
     decision = build_sandbox_decision(
@@ -342,6 +359,7 @@ def exec_tool(
         elevated=elevated,
         tool_name="exec",
         bypass_confirmation=_bypass_gate,
+        approved_sandbox=_approved_sandbox,
     )
     if pending:
         return pending
@@ -412,6 +430,7 @@ def exec_start(
     host: str = "local",
     elevated: bool = False,
     _bypass_gate: bool = False,
+    _approved_sandbox: dict[str, Any] | None = None,
 ) -> str:
     effective_workdir = _effective_workdir(workdir)
     decision = build_sandbox_decision(
@@ -452,6 +471,7 @@ def exec_start(
         elevated=elevated,
         tool_name="exec_start",
         bypass_confirmation=_bypass_gate,
+        approved_sandbox=_approved_sandbox,
     )
     if pending:
         return pending
@@ -538,7 +558,8 @@ def exec_poll(command_id: str, max_output: int = _MAX_STDOUT, tail_lines: int = 
     return json.dumps(payload.model_dump(), ensure_ascii=False)
 
 
-def exec_write_stdin(command_id: str, text: str, _bypass_gate: bool = False) -> str:
+def exec_write_stdin(command_id: str, text: str, _bypass_gate: bool = False,
+                     _approved_sandbox: dict[str, Any] | None = None) -> str:
     session = _SESSION_REGISTRY.describe(command_id)
     if session is None:
         return json.dumps(
@@ -611,6 +632,7 @@ def exec_write_stdin(command_id: str, text: str, _bypass_gate: bool = False) -> 
         host="local",
         tool_name="exec_write_stdin",
         bypass_confirmation=_bypass_gate,
+        approved_sandbox=_approved_sandbox,
         extra_payload={"command_id": command_id, "text": text},
     )
     if pending:
@@ -642,6 +664,7 @@ def _resume_exec(input_str: str) -> str:
         host=str(args.get("host", "local")),
         elevated=bool(args.get("elevated", False)),
         _bypass_gate=True,
+        _approved_sandbox=args.get("sandbox") or {},
     )
 
 
@@ -658,6 +681,7 @@ def _resume_exec_start(input_str: str) -> str:
         host=str(args.get("host", "local")),
         elevated=bool(args.get("elevated", False)),
         _bypass_gate=True,
+        _approved_sandbox=args.get("sandbox") or {},
     )
 
 
@@ -670,6 +694,7 @@ def _resume_exec_write_stdin(input_str: str) -> str:
         command_id=str(args.get("command_id", "")),
         text=str(args.get("text", "")),
         _bypass_gate=True,
+        _approved_sandbox=args.get("sandbox") or {},
     )
 
 

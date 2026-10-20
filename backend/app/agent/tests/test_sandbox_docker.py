@@ -1,4 +1,5 @@
 import subprocess
+import os
 import json
 import shlex
 from types import SimpleNamespace
@@ -34,6 +35,17 @@ def _docker_image_available(image: str) -> bool:
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return False
     return version.returncode == 0 and image_check.returncode == 0
+
+
+@pytest.fixture(scope="module")
+def real_docker_image():
+    image = AgentSettings().sandbox.docker.image
+    if not _docker_image_available(image):
+        message = "Docker daemon or configured pinned sandbox image is unavailable"
+        if os.environ.get("MONAW_REQUIRE_DOCKER_TESTS") == "1":
+            pytest.fail(message, pytrace=False)
+        pytest.skip(message)
+    return image
 
 
 def test_docker_command_defaults_to_hardened_flags():
@@ -426,11 +438,7 @@ def test_docker_timeout_removes_named_container(monkeypatch, tmp_path):
     assert captured_name.startswith("monaw-sandbox-")
 
 
-@pytest.mark.skipif(
-    not _docker_image_available(AgentSettings().sandbox.docker.image),
-    reason="Docker daemon or configured sandbox image is unavailable",
-)
-def test_docker_integration_executes_simple_command_when_available(tmp_path):
+def test_docker_integration_executes_simple_command_when_available(tmp_path, real_docker_image):
     settings = AgentSettings()
     workdir = Path(tmp_path)
     settings.sandbox.allowed_bind_roots = [str(workdir)]
@@ -444,18 +452,19 @@ def test_docker_integration_executes_simple_command_when_available(tmp_path):
     request.copy_policy = {"write_strategy": "direct_rw"}
     result = runner.run(request)
 
-    assert result.status == "ok"
+    assert result.status == "ok", {
+        "image": real_docker_image, "backend": result.sandbox.get("backend"),
+        "status": result.status, "exit_code": result.exit_code,
+        "timed_out": result.timed_out, "reason_code": result.reason_code,
+        "error": result.error, "stderr": result.stderr,
+    }
     assert result.stdout.strip() == "mounted"
     assert (workdir / "output.txt").read_text(encoding="utf-8") == "ok"
     assert result.sandbox["backend"] == "docker"
     assert result.sandbox["security_label"] == "strong"
 
 
-@pytest.mark.skipif(
-    not _docker_image_available(AgentSettings().sandbox.docker.image),
-    reason="Docker daemon or configured sandbox image is unavailable",
-)
-def test_docker_integration_enforces_network_and_root_isolation(tmp_path):
+def test_docker_integration_enforces_network_and_root_isolation(tmp_path, real_docker_image):
     settings = AgentSettings()
     settings.sandbox.allowed_bind_roots = [str(tmp_path)]
     settings.sandbox.blocked_bind_roots = []

@@ -208,6 +208,8 @@ class ExecutionGateService:
                     "ticket_id": data.get("ticket_id", ""),
                     "action": data.get("action", ""),
                     "reason": data.get("reason", ""),
+                    **({"execution_environment": data["sandbox"]["execution_environment"]}
+                       if (data.get("sandbox") or {}).get("execution_environment") else {}),
                 },
             }
         if status == "pending_access_grant":
@@ -263,7 +265,12 @@ class ExecutionGateService:
         deadline = loop.time() + (self.default_timeout_seconds if timeout is None else timeout)
 
         try:
-            while True:
+            # A decision already delivered to this gate needs no wait budget.
+            # Check it before scheduling another waiter: on Windows a very
+            # short timeout can expire while an already-set event's wrapper is
+            # merely waiting to be scheduled. Replay still revalidates the
+            # stored ticket, expiry, identity and current policy.
+            while not event.is_set():
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     yield {
@@ -280,7 +287,7 @@ class ExecutionGateService:
                     return
 
                 try:
-                    await asyncio.wait_for(asyncio.shield(event.wait()), timeout=min(15.0, remaining))
+                    await asyncio.wait_for(event.wait(), timeout=min(15.0, remaining))
                     break
                 except asyncio.TimeoutError:
                     yield {"event": "ping", "data": {}}

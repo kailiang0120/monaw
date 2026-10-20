@@ -46,3 +46,8 @@ def unfinished_workers(conversation_id: str, resources: frozenset[str] = frozens
             not future.done() and ((conversation_id and owner == conversation_id) or bool(locked & resources))
             for future, (owner, locked) in _STOPPING.items()
         )
+
+
+def unfinished_conversation_ids() -> set[str]:
+    with _LOCK:
+        return {owner for future, (owner, _) in _STOPPING.items() if owner and not future.done()}

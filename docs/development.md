@@ -322,6 +322,14 @@ npm run verify
 
 This runs Vitest, TypeScript type checking, and the renderer production build.
 
+For the CI command including a JUnit renderer report, run `npm run verify:ci`.
+For Electron plus the real backend, run `npm run test:app` on Windows. See
+[disposable application verification](application-testing.md) for fixtures,
+workflow assertions, artifacts and the remaining installed-app checks.
+Backend reports can be requested with, for example,
+`./scripts/test-backend.ps1 -Group sandbox -JUnitPath test-results/sandbox.xml`.
+Report paths are relative to `backend`; generated `test-results/` directories are ignored by Git.
+
 Capture repeatable test and bundle baselines:
 
 ```powershell
@@ -372,14 +380,31 @@ printed rather than the dozens of submodules that inherit it.
 
 `.github/workflows/verify.yml` runs on every push and pull request:
 
-- **Backend** — each test group as a separate Windows job. Every group in
+- **Backend (Python 3.11)** — each test group as a separate Windows job, including
+  persisted scheduling/reconciliation, scoped API mutations, approval replay,
+  effective shell-environment disclosure and browser navigation-target checks.
+  The API job also checks generated API documentation for drift. Every group in
   `conftest.py` must also appear in the workflow matrix and in `pytest.ini`;
   `test_every_backend_test_group_runs_in_ci` fails if the three lists drift,
   because a group missing from the matrix would pass locally and never run.
+- **Python 3.12 compatibility** — Windows `runtime`, `integrations`, `sandbox`,
+  and `skills` groups, covering scheduling, tool completion/cancellation, approval
+  replay, browser/fetch policy and shell backends on the additional interpreter.
 - **Docker sandbox (Linux)** — the Windows jobs mock Docker, so this is the
   only job that proves the pinned digest resolves, that a container actually
   runs, and that the offline module table in `policy.py` is a subset of what
   the image can really import. Tests are selected by path because collecting
   the whole suite would import the Windows-only `computer_use` modules.
+  `MONAW_REQUIRE_DOCKER_TESTS=1` makes unavailable Docker prerequisites a failure.
 - **Per-commit integrity** — the checks above, capped at 20 commits.
-- **Frontend** — `npm run verify` (Vitest, Electron tests, type-check, build).
+- **Frontend** — `npm run verify:ci` (Vitest, Electron tests, type-check, build),
+  on Node 20.19.0, 22.13.0 and 24. The 22.x floor includes jsdom's requirement.
+- **Electron and backend workflows (Windows)** — `npm run test:app` on Python
+  3.11 / Node 22.13, covering authenticated startup, streaming/persistence,
+  approval and rejection, parallel stop, scheduling, uncertain run reconciliation
+  and backend interruption, with disposable application data and controlled providers.
+
+Backend, compatibility, real-Docker, and renderer jobs upload JUnit reports even
+after test failure when reports were produced. Artifacts have distinct names per
+matrix entry. New pushes cancel obsolete runs of the same workflow/ref. These
+jobs do not yet prove a packaged/installed Electron workflow, installer, or upgrade.

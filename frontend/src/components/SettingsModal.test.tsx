@@ -427,7 +427,8 @@ describe('SettingsModal', () => {
     expect(screen.getByText('Ready')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Chrome profile' })).toHaveTextContent('Last used (Default)')
     expect(screen.getByRole('checkbox', { name: "Auto-approve Chrome's connection prompt" })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: 'Allowed domains' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Navigation target domains' })).toBeInTheDocument()
+    expect(screen.getByText(/Does not restrict existing tabs, snapshots, screenshots, clicks, popups, or Chrome redirects/)).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Screenshots folder' })).toHaveValue('C:/runtime/browser/screenshots')
     expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument()
     for (const removed of [

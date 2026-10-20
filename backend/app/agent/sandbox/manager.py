@@ -9,6 +9,7 @@ from app.agent.sandbox.backends.local_restricted import LocalRestrictedRunner
 from app.agent.sandbox.models import SandboxCapabilities
 from app.agent.sandbox.models import SandboxDecision, SandboxExecutionRequest, SandboxExecutionResult, SandboxRunRequest
 from app.agent.sandbox.policy import SandboxPolicy
+from app.agent.sandbox.presentation import runtime_policy
 from app.agent.settings_store import SandboxSettings
 
 
@@ -50,6 +51,7 @@ class SandboxManager:
     ) -> SandboxExecutionResult:
         # Recheck the actual request under current settings. A supplied preview
         # is not authorization to bypass a changed mode or a different command.
+        preview = decision
         decision = SandboxPolicy(self.settings, capabilities=self.capabilities).decide(
             SandboxRunRequest(
                 command=request.command,
@@ -67,6 +69,22 @@ class SandboxManager:
         if not decision.allowed:
             return self._blocked_result(request, backend=selected_backend,
                 reason=decision.reason, reason_code=decision.reason_code)
+        material_fields = (
+            "backend", "effective_shell", "network", "network_enforcement",
+            "filesystem_policy", "write_strategy", "profile", "required_isolation",
+        )
+        runtime_changed = (
+            "runtime_policy" in request.env_metadata
+            and request.env_metadata["runtime_policy"] != runtime_policy(self.settings, selected_backend)
+        )
+        if runtime_changed or (preview is not None and any(
+            getattr(preview, key) != getattr(decision, key) for key in material_fields
+        )):
+            return self._blocked_result(
+                request, backend=selected_backend,
+                reason="Execution environment changed after authorization. Request the command again to review the current environment.",
+                reason_code="execution_environment_changed",
+            )
         if request.backend and request.backend != selected_backend:
             return self._blocked_result(
                 request,

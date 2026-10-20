@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { Clock3, MessageSquare, Moon, RefreshCw, Settings, Sun, Trash2 } from 'lucide-react'
 import type { Conversation, ScheduledTask } from '../lib/api/types'
 import { ScheduledTasksList } from './scheduling/ScheduledTasksList'
+import type { ItemActionFeedback } from '../hooks/useItemActions'
 
 type ThemeMode = 'dark' | 'light'
 
@@ -12,10 +13,11 @@ interface Props {
   onToggleCollapsed: () => void
   onSelect: (id: string) => void
   onDelete: (id: string) => void
-  onRename?: (id: string, title: string) => void
+  onRename?: (id: string, title: string) => void | Promise<boolean>
   onRefreshConversation?: (id: string) => void
   onOpenSettings: () => void
   scheduledTasks: ScheduledTask[]
+  actionFeedback?: Record<string, ItemActionFeedback>
   onOpenScheduledTaskCreate: () => void
   onOpenScheduledTaskEdit: (id: string) => void
   onSelectScheduledRun: (conversationId: string) => void
@@ -74,6 +76,7 @@ export function Sidebar({
   onRefreshConversation,
   onOpenSettings,
   scheduledTasks,
+  actionFeedback,
   onOpenScheduledTaskCreate,
   onOpenScheduledTaskEdit,
   onSelectScheduledRun,
@@ -86,20 +89,31 @@ export function Sidebar({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
+  const renaming = useRef(new Set<string>())
+  const editGeneration = useRef(0)
 
   const startEdit = (c: Conversation) => {
+    editGeneration.current += 1
     setEditingId(c.id)
     setEditValue(c.title)
     setTimeout(() => editInputRef.current?.select(), 0)
   }
 
-  const commitEdit = (id: string) => {
+  const commitEdit = async (id: string) => {
     const trimmed = editValue.trim()
-    if (trimmed && onRename) onRename(id, trimmed)
-    setEditingId(null)
+    if (renaming.current.has(id)) return
+    if (!trimmed || !onRename) { setEditingId(null); return }
+    renaming.current.add(id)
+    const generation = editGeneration.current
+    try {
+      const saved = await onRename(id, trimmed)
+      if (saved !== false && generation === editGeneration.current) setEditingId((current) => current === id ? null : current)
+    } finally {
+      renaming.current.delete(id)
+    }
   }
 
-  const cancelEdit = () => setEditingId(null)
+  const cancelEdit = () => { editGeneration.current += 1; setEditingId(null) }
 
   const groups = groupByDate(conversations)
   const ThemeIcon = theme === 'light' ? Moon : Sun
@@ -181,6 +195,7 @@ export function Sidebar({
         <div className="flex-1 overflow-y-auto px-2 py-2">
           <ScheduledTasksList
             tasks={scheduledTasks}
+            actionFeedback={actionFeedback}
             onCreate={onOpenScheduledTaskCreate}
             onEdit={onOpenScheduledTaskEdit}
             onSelectRun={onSelectScheduledRun}
@@ -204,6 +219,7 @@ export function Sidebar({
                     {convs.map((c) => {
                       const active = c.id === activeId
                       const isEditing = editingId === c.id
+                      const feedback = actionFeedback?.[`conversation:${c.id}`]
                       return (
                         <div
                           key={c.id}
@@ -224,6 +240,8 @@ export function Sidebar({
                               <input
                                 ref={editInputRef}
                                 value={editValue}
+                                disabled={Boolean(feedback?.pending)}
+                                aria-label={`Rename ${c.title}`}
                                 onChange={(e) => setEditValue(e.target.value)}
                                 onBlur={() => commitEdit(c.id)}
                                 onKeyDown={(e) => {
@@ -241,6 +259,14 @@ export function Sidebar({
                                 </span>
                               </>
                             )}
+                            {feedback?.pending && <span role="status" className="block text-[10px]">{feedback.pending}…</span>}
+                            {feedback?.error && (
+                              <div role="alert" className="mt-1 text-[10px] text-red-300">
+                                {feedback.error}
+                                {feedback.retry && <button type="button" onClick={(event) => { event.stopPropagation(); feedback.retry?.() }} className="ml-1 underline">Retry</button>}
+                              </div>
+                            )}
+                            {feedback?.success && <span role="status" className="block text-[10px] text-neutral-500">{feedback.success}</span>}
                           </div>
                           {!isEditing && (
                             <div className="flex shrink-0 items-center gap-0.5">
@@ -266,6 +292,7 @@ export function Sidebar({
                                 }}
                                 className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-700 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100 focus:opacity-100 focus:outline-none"
                                 aria-label={`Delete ${c.title}`}
+                                disabled={Boolean(feedback?.pending)}
                               >
                                 <Trash2 size={11} />
                               </button>

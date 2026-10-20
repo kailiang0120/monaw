@@ -71,6 +71,7 @@ export interface ScheduledTask {
   nextRunAt: string
   consecutiveFailures: number
   running: boolean
+  queued?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -678,6 +679,7 @@ export interface SettingsUpdatePayload {
 }
 
 export interface SandboxStatus {
+  execution_environment?: ExecutionEnvironment
   enabled: boolean
   mode: AgentSettings['sandbox']['mode']
   default_profile: AgentSettings['sandbox']['default_profile']
@@ -722,6 +724,21 @@ export interface ControllerPolicy {
   allowlisted_apps: AppEntry[]
 }
 
+export interface ExecutionEnvironment {
+  backend: string
+  summary: string
+  workspace: string
+  execution_workspace: string
+  shell: string
+  image?: string
+  filesystem: string
+  network: string
+  writes: string
+  approval_required: boolean
+  reason: string
+  scope: string
+}
+
 export interface ApprovalTicket {
   review_decision?: 'approve' | 'deny' | 'ask' | ''
   review_reason?: string
@@ -738,6 +755,7 @@ export interface ApprovalTicket {
     args?: {
       env_keys?: string[]
       sandbox?: {
+        execution_environment?: ExecutionEnvironment
         backend?: string
         selected_backend?: string
         security_label?: string
@@ -756,6 +774,7 @@ export interface ApprovalTicket {
 }
 
 export interface ApprovalEvent {
+  execution_environment?: ExecutionEnvironment
   ticket_id: string
   action: string
   reason: string

@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendDir = Join-Path $repoRoot 'backend'
 $frontendDir = Join-Path $repoRoot 'frontend'
+. (Join-Path $PSScriptRoot 'node-prerequisites.ps1')
 $monawHome = if ($env:MONAW_HOME) {
   $env:MONAW_HOME
 } elseif ($env:AGENT_HOME) {
@@ -197,37 +198,22 @@ function Ensure-Uv {
 
 function Ensure-Node {
   Write-Step "Checking Node.js and npm"
-  $node = Get-Command node -ErrorAction SilentlyContinue
+  Update-ProcessPath
+  $runtime = Get-MonawNodeRuntime
   $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
   if (-not $npm) {
     $npm = Get-Command npm -ErrorAction SilentlyContinue
   }
 
-  $nodeOk = $false
-  if ($node) {
-    try {
-      & $node.Source -e "const major = Number(process.versions.node.split('.')[0]); process.exit(major >= 18 ? 0 : 1)" *> $null
-      $nodeOk = $LASTEXITCODE -eq 0
-    } catch {
-      $nodeOk = $false
-    }
+  if ($runtime.supported -and $npm) {
+    return Assert-MonawNodeRuntime
   }
 
-  if ($nodeOk -and $npm) {
-    Write-Host "Using Node.js: $($node.Source)"
-    Write-Host "Using npm: $($npm.Source)"
-    return $npm.Source
-  }
-
+  Write-Host "Found Node.js $($runtime.version) at '$($runtime.path)'; required: $($runtime.required)."
   Install-WithWinget -PackageId 'OpenJS.NodeJS.LTS' -Name 'Node.js LTS'
-  $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
-  if (-not $npm) {
-    $npm = Get-Command npm -ErrorAction SilentlyContinue
-  }
-  if (-not $npm) {
-    throw "Node.js was installed, but setup cannot find npm yet. Close this window, open setup.bat again, and it should continue."
-  }
-  return $npm.Source
+  Update-ProcessPath
+  # Recheck the executable the launcher will actually resolve, including stale PATH entries.
+  return Assert-MonawNodeRuntime
 }
 
 try {

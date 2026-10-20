@@ -19,7 +19,8 @@ export async function createConversation(title?: string, workspaceDir = ''): Pro
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  await apiFetch(`${BASE}/api/conversations/${id}`, { method: 'DELETE' })
+  const res = await apiFetch(`${BASE}/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) return throwApiError(res, 'Failed to delete conversation')
 }
 
 export async function renameConversation(id: string, title: string): Promise<Conversation> {
@@ -28,7 +29,7 @@ export async function renameConversation(id: string, title: string): Promise<Con
     headers: JSON_HEADERS,
     body: JSON.stringify({ title }),
   })
-  if (!res.ok) throw new Error('Failed to rename conversation')
+  if (!res.ok) return throwApiError(res, 'Failed to rename conversation')
   return res.json()
 }
 

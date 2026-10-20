@@ -118,6 +118,51 @@ def test_openai_account_login_requires_settings_write_scope():
     assert response.json()["message"] == "Missing required scope: settings:write"
 
 
+def test_sandbox_read_scope_cannot_resolve_images_before_any_side_effect(monkeypatch):
+    from app.api.routes import sandbox
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Authorization must precede Docker and settings access")
+
+    for name in ("load_agent_settings", "save_agent_settings", "probe_python_module_inventory", "store_python_module_inventory"):
+        monkeypatch.setattr(sandbox, name, unexpected)
+    monkeypatch.setattr(sandbox.shutil, "which", unexpected)
+    monkeypatch.setattr(sandbox.subprocess, "run", unexpected)
+    token = mint_control_token(os.environ["MONAW_CONTROL_SECRET"], scopes={"settings:read"})
+    response = TestClient(app).post(
+        "/api/sandbox/docker/resolve-image",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"image": "python:3.12-slim"},
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "Missing required scope: settings:write"
+
+
+def test_sandbox_status_accepts_read_scope_and_mutation_accepts_write_scope(monkeypatch):
+    from app.api.routes import sandbox
+    from app.agent.settings_store import AgentSettings
+
+    monkeypatch.setattr(sandbox, "load_agent_settings", lambda _: AgentSettings())
+    monkeypatch.setattr(sandbox, "get_sandbox_status", lambda *args, **kwargs: {
+        "enabled": True, "mode": "auto", "default_profile": "standard",
+        "default_network": "deny", "default_write_strategy": "copy_out", "backends": {},
+    })
+    secret = os.environ["MONAW_CONTROL_SECRET"]
+    client = TestClient(app)
+    response = client.get("/api/sandbox/status", headers={
+        "Authorization": f"Bearer {mint_control_token(secret, scopes={'settings:read'})}",
+    })
+    assert response.status_code == 200
+    assert response.json()["mode"] == "auto"
+
+    # Valid authorization reaches normal input validation, without pulling an image.
+    response = client.post("/api/sandbox/docker/resolve-image", headers={
+        "Authorization": f"Bearer {mint_control_token(secret, scopes={'settings:write'})}",
+    }, json={"image": "invalid;image"})
+    assert response.status_code == 400
+    assert "invalid characters" in response.json()["message"]
+
+
 def test_request_size_limit_rejects_before_route_processing():
     client = TestClient(app)
 

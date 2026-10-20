@@ -1,3 +1,4 @@
+import { ExecutionEnvironment } from '../../components/ExecutionEnvironment'
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Activity,
@@ -1435,10 +1436,10 @@ export function SettingsModal({
                           browser: { ...current.browser, auto_approve_local_debugging },
                         }))}
                       />
-                      <SettingRow label="Allowed domains" description={BROWSER_COPY.allowedDomains} wide>
+                      <SettingRow label="Navigation target domains" description={BROWSER_COPY.allowedDomains} wide>
                         <input
                           value={allowedDomainsInput}
-                          aria-label="Allowed domains"
+                          aria-label="Navigation target domains"
                           onChange={(e) => updateDraft((current) => ({
                             ...current,
                             browser: {
@@ -1732,10 +1733,11 @@ export function SettingsModal({
                       <Note tone="warn" icon={AlertCircle}>{SANDBOX_COPY.enforceNeedsDocker}</Note>
                     )}
 
-                    <SettingsCard title="Current status">
+                    <SettingsCard title="Current status" description="Representative command under saved settings. Each actual command is classified again; unsaved changes are not applied.">
+                      <ExecutionEnvironment environment={sandboxStatus?.execution_environment} />
                       <div className="st-row">
                         <div className="min-w-0">
-                          <p className="st-label">Selected backend</p>
+                          <p className="st-label">Representative backend</p>
                           <p className="st-desc mt-1">
                             {sandboxStatus?.selected_backend || 'Checking…'} · {sandboxStatus?.isolation || 'unknown'} isolation
                             {sandboxStatus?.reason_code ? ` · ${sandboxStatus.reason_code}` : ''}

@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "main": "electron/main.js",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || ^24.0.0"
+  },
   "scripts": {
     "dev": "concurrently \"vite\" \"electron .\"",
     "dev:vite": "vite",
@@ -15,6 +18,10 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "verify": "npm run test && npm run typecheck && npm run build:renderer",
+    "test:ci": "vitest run --reporter=default --reporter=junit --outputFile=test-results/vitest.xml && npm run test:electron",
+    "verify:ci": "npm run test:ci && npm run typecheck && npm run build:renderer",
+    "typecheck:app": "tsc --noEmit -p tsconfig.e2e.json",
+    "test:app": "npm run build:renderer && npm run typecheck:app && playwright test",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -26,6 +33,7 @@
     "remark-gfm": "^4.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^18.3.5",

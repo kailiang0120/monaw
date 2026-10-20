@@ -2,8 +2,36 @@ import asyncio
 import json
 import threading
 
+import pytest
+
 from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.iteration_budget import IterationBudget
+
+
+def test_async_returned_result_survives_cancellation_before_wrapper_resumes():
+    executor = ToolExecutor()
+
+    async def run():
+        invocation = None
+
+        async def tool():
+            # Cancel the awaiting wrapper in the same loop turn as the actual
+            # return. No sleep or assumption about OS timer precision is needed.
+            invocation.cancel()
+            return '{"status":"ok","value":"captured"}'
+
+        invocation = asyncio.create_task(executor.execute(
+            tool_dict={"name": "fixture", "callable": tool, "execution_mode": "async"},
+            arguments={}, budget=IterationBudget(), call_id="returned-before-stop",
+        ))
+        with pytest.raises(asyncio.CancelledError) as interrupted:
+            await invocation
+        assert json.loads(interrupted.value.tool_output) == {"status": "ok", "value": "captured"}
+
+    try:
+        asyncio.run(run())
+    finally:
+        executor.shutdown()
 
 
 def test_partial_failure_cannot_be_marked_retryable():

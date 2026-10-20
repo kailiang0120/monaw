@@ -194,7 +194,7 @@ class ToolExecutor:
             if timeout_seconds is not None:
                 return await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
             return await asyncio.shield(task)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
+        except (asyncio.CancelledError, asyncio.TimeoutError) as interruption:
             # Signal native cancellation while the coroutine's hook is still
             # registered, then cancel and drain the coroutine itself.
             cancel_call(cancellation_id)
@@ -210,6 +210,15 @@ class ToolExecutor:
             task.add_done_callback(consume)
             if task.done():
                 finish_cancellation(cancellation_id)
+                if not task.cancelled():
+                    try:
+                        # The coroutine may have returned before its awaiting
+                        # wrapper observed Stop. Preserve captured evidence on
+                        # the interruption, as the synchronous path does, so
+                        # the turn ledger cannot relabel that result cancelled.
+                        interruption.tool_output = str(task.result())
+                    except Exception:
+                        pass
             raise
 
     async def _run_sync(self, fn, arguments: dict, tool_dict: dict, timeout_seconds: float | None):

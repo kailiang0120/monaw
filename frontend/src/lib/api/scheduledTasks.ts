@@ -1,4 +1,4 @@
-import { apiFetch, BASE, JSON_HEADERS } from './client'
+import { apiFetch, BASE, JSON_HEADERS, throwApiError } from './client'
 import type {
   SchedulePreviewRequest,
   ScheduledTask,
@@ -9,7 +9,7 @@ import type {
 
 export async function fetchScheduledTasks(): Promise<ScheduledTask[]> {
   const res = await apiFetch(`${BASE}/api/scheduled-tasks`)
-  if (!res.ok) throw new Error('Failed to fetch scheduled tasks')
+  if (!res.ok) return throwApiError(res, 'Failed to fetch scheduled tasks')
   return res.json()
 }
 
@@ -19,7 +19,7 @@ export async function createScheduledTask(input: ScheduledTaskInput): Promise<Sc
     headers: JSON_HEADERS,
     body: JSON.stringify(input),
   })
-  if (!res.ok) throw new Error(await errorText(res, 'Failed to create scheduled task'))
+  if (!res.ok) return throwApiError(res, 'Failed to create scheduled task')
   return res.json()
 }
 
@@ -32,7 +32,7 @@ export async function updateScheduledTask(
     headers: JSON_HEADERS,
     body: JSON.stringify(patch),
   })
-  if (!res.ok) throw new Error(await errorText(res, 'Failed to update scheduled task'))
+  if (!res.ok) return throwApiError(res, 'Failed to update scheduled task')
   return res.json()
 }
 
@@ -40,21 +40,56 @@ export async function deleteScheduledTask(id: string): Promise<void> {
   const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   })
-  if (!res.ok) throw new Error('Failed to delete scheduled task')
+  if (!res.ok && res.status !== 404) return throwApiError(res, 'Failed to delete scheduled task')
+  pendingRuns.delete(id)
 }
 
-export async function runScheduledTaskNow(id: string): Promise<{ runId: number; conversationId: string }> {
-  const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}/run`, {
-    method: 'POST',
-  })
-  if (!res.ok) throw new Error(await errorText(res, 'Failed to run scheduled task'))
-  return res.json()
+type RunResult = { runId: number; conversationId: string }
+type PendingRun = { key: string; reconcile: boolean; request?: Promise<RunResult> }
+// Share an uncertain intention between the sidebar and dialog, across backend
+// reconnects. A confirmed response retires it; the next user run gets a new key.
+const pendingRuns = new Map<string, PendingRun>()
+
+export function runScheduledTaskNow(id: string): Promise<RunResult> {
+  let intention = pendingRuns.get(id)
+  if (!intention) {
+    intention = { key: crypto.randomUUID(), reconcile: false }
+    pendingRuns.set(id, intention)
+  }
+  if (intention.request) return intention.request
+  const current = intention
+  current.request = (async () => {
+    try {
+      if (current.reconcile) {
+        const found = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}/operations/${encodeURIComponent(current.key)}`)
+        if (found.ok) {
+          const result = await found.json() as RunResult
+          pendingRuns.delete(id)
+          return result
+        }
+        if (found.status !== 404) return throwApiError(found, 'Could not check the previous run')
+      }
+      const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}/run`, {
+        method: 'POST', headers: { 'Idempotency-Key': current.key },
+      })
+      if (!res.ok) return await throwApiError(res, 'Failed to run scheduled task')
+      const result = await res.json() as RunResult
+      pendingRuns.delete(id)
+      return result
+    } catch (error) {
+      current.reconcile = true
+      throw error
+    } finally {
+      current.request = undefined
+    }
+  })()
+  return current.request
 }
 
 export async function fetchScheduledTaskRuns(id: string, limit = 20): Promise<ScheduledTaskRun[]> {
   const params = new URLSearchParams({ limit: String(limit) })
   const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(id)}/runs?${params}`)
-  if (!res.ok) throw new Error('Failed to fetch scheduled task runs')
+  if (!res.ok) return throwApiError(res, 'Failed to fetch scheduled task runs')
   return res.json()
 }
 
@@ -64,7 +99,7 @@ export async function previewSchedule(input: SchedulePreviewRequest): Promise<{ 
     headers: JSON_HEADERS,
     body: JSON.stringify(input),
   })
-  if (!res.ok) throw new Error(await errorText(res, 'Failed to preview schedule'))
+  if (!res.ok) return throwApiError(res, 'Failed to preview schedule')
   return res.json()
 }
 
@@ -85,13 +120,4 @@ export async function fetchTelegramChats(): Promise<TelegramChatTarget[]> {
       .map((id: string) => ({ id, label: `Telegram - ${id}` }))
   }
   return []
-}
-
-async function errorText(res: Response, fallback: string): Promise<string> {
-  try {
-    const payload = await res.json()
-    return String(payload.detail || fallback)
-  } catch {
-    return fallback
-  }
 }

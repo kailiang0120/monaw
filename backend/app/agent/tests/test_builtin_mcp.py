@@ -261,6 +261,37 @@ def test_devtools_navigation_passes_allowed_urls_and_history_moves(runtime_setti
     assert calls == [("navigate_page", {"url": "https://docs.example.com/start"}), ("navigate_page", {"type": "back"})]
 
 
+@pytest.mark.parametrize("tool,arguments", [
+    ("select_page", {"pageId": 1}),
+    ("take_snapshot", {}),
+    ("take_screenshot", {}),
+    ("click", {"uid": "link-to-another-origin"}),
+    ("navigate_page", {"type": "back"}),
+    ("navigate_page", {"type": "forward"}),
+    ("navigate_page", {"type": "reload"}),
+])
+def test_navigation_target_policy_does_not_inspect_tabs_or_implicit_destinations(runtime_settings, tool, arguments):
+    from app.skills.mcp_bridge.registry import _url_guard
+
+    runtime_settings.browser.allowed_domains = ["example.com"]
+    normalized, error = _url_guard(builtin.CHROME_DEVTOOLS_SERVER, tool, arguments)
+    assert error is None
+    assert normalized == arguments
+
+
+def test_chrome_response_destinations_are_not_a_navigation_target_boundary(runtime_settings):
+    runtime_settings.browser.allowed_domains = ["example.com"]
+    # Controlled adapter: Chrome reports a redirect or popup on another origin.
+    # The guard checks the submitted URL, not the browser's resulting targets.
+    response = {"status": "ok", "final_url": "https://outside.example.net/",
+                "popup_url": "https://another.example.net/"}
+    cfg = MCPServerConfig(name=builtin.CHROME_DEVTOOLS_SERVER, command="npx")
+    manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda *_: json.dumps(response))
+    [entry] = build_tool_entries(cfg, manager, [SimpleNamespace(
+        name="navigate_page", description="Navigate", inputSchema={"type": "object"})])
+    assert json.loads(entry["callable"](url="https://example.com/start")) == response
+
+
 def test_devtools_reads_stay_available_to_unattended_runs(runtime_settings):
     entries = _devtools_entries("list_pages", "take_snapshot")
     token = set_current_interactive(False)

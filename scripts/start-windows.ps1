@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $frontendDir = Join-Path $repoRoot 'frontend'
+. (Join-Path $PSScriptRoot 'node-prerequisites.ps1')
 $runtimeConfigPath = Join-Path $frontendDir 'config\runtime.json'
 $viteConfigPath = Join-Path $frontendDir 'vite.config.ts'
 $monawHome = if ($env:MONAW_HOME) {
@@ -23,6 +24,8 @@ New-Item -ItemType Directory -Force -Path $launcherLogDir | Out-Null
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $env:Path = @($machinePath, $userPath, $env:Path) -join ';'
+
+$null = Assert-MonawNodeRuntime
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   Write-Host "[ERROR] uv is required. Run setup.bat first."

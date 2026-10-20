@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     name: Backend (${{ matrix.group }})
@@ -30,7 +34,7 @@ jobs:
       - name: Install uv and Python
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.11"
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
 
@@ -40,7 +44,52 @@ jobs:
 
       - name: Run backend group
         shell: pwsh
-        run: ./scripts/test-backend.ps1 -Group ${{ matrix.group }} -TimeoutSeconds 1200
+        run: |
+          uv run --directory backend --locked python -c "import sys; print(sys.version); print(sys.executable); assert sys.version_info[:2] == (3, 11)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-backend.ps1 -Group ${{ matrix.group }} -TimeoutSeconds 1200 -JUnitPath "test-results/${{ matrix.group }}.xml"
+
+      - name: Check generated API contracts
+        if: matrix.group == 'api'
+        working-directory: backend
+        run: uv run --locked python ../scripts/generate-api-docs.py --check
+
+      - name: Upload backend test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.group }}-python-3.11
+          path: backend/test-results/*.xml
+          if-no-files-found: warn
+
+  runtime-compatibility:
+    name: Execution, scheduling, and boundary compatibility (Python 3.12)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Verify execution lifecycle on the compatibility interpreter
+        working-directory: backend
+        shell: pwsh
+        run: |
+          uv sync --locked --python 3.12
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --locked --python 3.12 python -c "import sys; print(sys.version); print(sys.executable); assert sys.version_info[:2] == (3, 12)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --locked --python 3.12 pytest -m "runtime or integrations or sandbox or skills" --junitxml=test-results/compatibility.xml
+
+      - name: Upload compatibility test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-compatibility-python-3.12
+          path: backend/test-results/*.xml
+          if-no-files-found: warn
 
   # The Windows jobs above mock Docker, so nothing there proves the pinned image
   # exists or that a container actually runs. Linux runners have a working Docker
@@ -80,8 +129,11 @@ jobs:
 
       - name: Run Docker sandbox tests against a real daemon
         working-directory: backend
+        env:
+          MONAW_REQUIRE_DOCKER_TESTS: "1"
         run: |
           uv run pytest -v \
+            --junitxml=test-results/docker.xml \
             app/agent/tests/test_sandbox_docker.py \
             app/agent/tests/test_sandbox_image_inventory.py
 
@@ -109,6 +161,49 @@ jobs:
           print(f'offline table is a safe subset ({len(actual - table)} extra modules available)')
           "
 
+      - name: Upload real Docker test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-sandbox-python-3.12
+          path: backend/test-results/*.xml
+          if-no-files-found: warn
+
+  application:
+    name: Electron and backend workflows (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Prepare locked backend dependencies
+        working-directory: backend
+        run: uv sync --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked frontend and Electron dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Run disposable application workflows
+        working-directory: frontend
+        run: npm run test:app
+      - name: Upload application report and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-windows-python-3.11-node-22.13
+          path: |
+            frontend/test-results/application.xml
+            frontend/test-results/application/
+          if-no-files-found: warn
+
   commits:
     name: Per-commit integrity
     runs-on: windows-latest
@@ -123,7 +218,7 @@ jobs:
       - name: Install uv and Python
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.11"
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
 
@@ -154,16 +249,20 @@ jobs:
         run: ./scripts/check-commits.ps1 -MaxCommits 20
 
   frontend:
-    name: Frontend
+    name: Frontend (Node ${{ matrix.node }})
     runs-on: windows-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20.19.0", "22.13.0", "24"]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -173,4 +272,12 @@ jobs:
 
       - name: Test, type-check, and build
         working-directory: frontend
-        run: npm run verify
+        run: npm run verify:ci
+
+      - name: Upload renderer test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-node-${{ matrix.node }}
+          path: frontend/test-results/*.xml
+          if-no-files-found: warn

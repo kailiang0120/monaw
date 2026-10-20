@@ -489,8 +489,9 @@ def test_timeout_text_uses_the_configured_duration():
     assert _format_timeout(60) == "1 minute"
 
 
-def test_await_ticket_resolution_replays_approved_ticket_payload():
-    service = ExecutionGateService()
+@pytest.mark.parametrize("timeout", [0, 0.01, 600])
+def test_await_ticket_resolution_replays_approved_ticket_payload(timeout):
+    service = ExecutionGateService(default_timeout_seconds=timeout)
     register_executor("danger_tool", lambda input_str: json.dumps({"status": "ok", "input": json.loads(input_str)}))
     ticket = create_ticket(
         tool_name="danger_tool",

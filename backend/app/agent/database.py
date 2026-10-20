@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,14 @@ logger = logging.getLogger(__name__)
 _RUNTIME_DIR = RUNTIME_DIR
 _DB_PATH = _RUNTIME_DIR / "agent.db"
 _JSON_CONVERSATIONS_DIR = _RUNTIME_DIR / "conversations"
+
+
+class ScheduledTaskConflictError(RuntimeError):
+    """A configuration edit was based on a superseded task revision."""
+
+
+class ScheduledTaskCapacityError(RuntimeError):
+    """No bounded queue capacity is available for a manual request."""
 
 
 class Database:
@@ -150,10 +159,20 @@ class Database:
         "consecutive_failures",
         "created_at",
         "updated_at",
+        "config_revision",
     )
     _SCHEDULED_TASK_MUTABLE_COLS: frozenset[str] = frozenset(
-        set(_SCHEDULED_TASK_COLUMNS) - {"id", "created_at"}
+        set(_SCHEDULED_TASK_COLUMNS) - {"id", "created_at", "config_revision"}
     )
+    _SCHEDULED_TASK_CONFIG_COLS = frozenset({
+        "title", "prompt", "schedule_kind", "cron_expr", "interval_seconds", "run_at",
+        "timezone", "enabled", "overlap_policy", "notify_telegram", "telegram_chat_id",
+        "reuse_conversation", "owner_principal_id", "permission_profile_id", "permission_profile_snapshot",
+    })
+    _SCHEDULED_TASK_COMPLETION_COLS = frozenset({
+        "last_run_at", "last_run_status", "last_run_conversation_id", "next_run_at",
+        "consecutive_failures", "enabled",
+    })
 
     def create_scheduled_task(self, fields: dict[str, Any]) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
@@ -177,6 +196,7 @@ class Database:
             "consecutive_failures": 0,
             "created_at": now,
             "updated_at": now,
+            "config_revision": 0,
             **fields,
         }
         unknown = set(values) - set(self._SCHEDULED_TASK_COLUMNS)
@@ -218,37 +238,155 @@ class Database:
         )
         return [dict(row) for row in rows]
 
-    def claim_due_scheduled_task(
-        self,
-        task_id: str,
-        *,
-        expected_next_run_at: str,
-        now_iso: str,
-    ) -> bool:
-        if not str(expected_next_run_at or "").strip():
-            return False
-        with self._lock:
-            cur = self.conn.execute(
-                """
-                UPDATE scheduled_tasks
-                SET next_run_at = '',
-                    updated_at = ?
-                WHERE id = ?
-                  AND enabled = 1
-                  AND next_run_at = ?
-                  AND next_run_at <> ''
-                  AND next_run_at <= ?
-                """,
-                (now_iso, task_id, expected_next_run_at, now_iso),
-            )
-            self.conn.commit()
-            return cur.rowcount > 0
-
     def get_scheduled_task(self, task_id: str) -> dict[str, Any] | None:
         row = self.fetchone("SELECT * FROM scheduled_tasks WHERE id = ?", (task_id,))
         return dict(row) if row else None
 
-    def update_scheduled_task(self, task_id: str, **fields: Any) -> dict[str, Any] | None:
+    def accept_scheduled_occurrence(
+        self, task_id: str, *, now_iso: str, lease_owner: str, lease_expires_at: str,
+        build: Callable[[dict[str, Any]], dict[str, Any]], manual_key: str = "",
+        expected_due: str = "", expected_revision: int = 0, max_running: int = 4,
+        max_queued: int = 16, blocked_tasks: set[str] = frozenset(), stopping_count: int = 0,
+    ) -> dict[str, Any] | None:
+        """Accept once, snapshot inputs, and advance cadence in one transaction.
+
+        Queued means execution has not started. Only start_scheduled_occurrence
+        may transition it to running; a crash between acceptance and dispatch
+        therefore cannot erase due intent or replay an uncertain running action.
+        """
+        with self._lock, self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            if manual_key:
+                existing = self.conn.execute(
+                    "SELECT run_id AS id, conversation_id FROM scheduled_run_requests WHERE task_id = ? AND operation_key = ?",
+                    (task_id, manual_key),
+                ).fetchone()
+                if existing is not None:
+                    return {**dict(existing), "created": False}
+            task = self.conn.execute("SELECT * FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            current = dict(task)
+            manual = bool(manual_key)
+            if not manual and (
+                not current["enabled"] or not expected_due or current["next_run_at"] != expected_due
+                or current["config_revision"] != expected_revision or expected_due > now_iso
+            ):
+                return None
+
+            running = self.conn.execute("SELECT COUNT(*) FROM scheduled_task_runs WHERE status = 'running'").fetchone()[0]
+            active = self.conn.execute(
+                "SELECT COUNT(*) FROM scheduled_task_runs WHERE task_id = ? AND status = 'running'", (task_id,),
+            ).fetchone()[0]
+            pending = self.conn.execute(
+                "SELECT COUNT(*) FROM scheduled_task_runs WHERE task_id = ? AND status = 'queued'", (task_id,),
+            ).fetchone()[0]
+            queued = self.conn.execute("SELECT COUNT(*) FROM scheduled_task_runs WHERE status = 'queued'").fetchone()[0]
+            replace = manual or current["overlap_policy"] == "cancel_previous"
+            busy = bool(active or pending or task_id in blocked_tasks)
+            reason = ""
+            if not replace and current["overlap_policy"] == "skip":
+                if busy:
+                    reason = "overlap"
+                elif running + stopping_count >= max_running:
+                    reason = "global_concurrency_limit"
+            if not reason and ((not replace and pending) or queued - (pending if replace else 0) >= max_queued):
+                reason = "queue_limit"
+            if manual and reason:
+                raise ScheduledTaskCapacityError("Scheduled task queue is full. Wait for pending work to finish.")
+
+            values = build(current)
+            key = manual_key or f"auto:{current['config_revision']}:{expected_due}"
+            conversation_id = "" if reason else values["conversation_id"]
+            if replace and not reason:
+                self.conn.execute(
+                    """UPDATE scheduled_task_runs SET status = 'cancelled', finished_at = ?,
+                       error = 'replaced before execution', lease_owner = '', lease_expires_at = '', task_snapshot = ''
+                       WHERE task_id = ? AND status = 'queued'""", (now_iso, task_id),
+                )
+                self.conn.execute(
+                    "UPDATE scheduled_task_runs SET cancel_requested = 1 WHERE task_id = ? AND status = 'running'",
+                    (task_id,),
+                )
+            if conversation_id:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (conversation_id, values["conversation_title"], now_iso, now_iso),
+                )
+            cur = self.conn.execute(
+                """INSERT INTO scheduled_task_runs
+                   (task_id, conversation_id, idempotency_key, lease_owner, lease_expires_at,
+                    started_at, finished_at, status, error, config_revision, task_snapshot, manual, scheduled_for, coalesced)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, conversation_id, key, "" if reason else lease_owner, "" if reason else lease_expires_at,
+                 now_iso, now_iso if reason else "", "skipped" if reason else "queued", reason,
+                 current["config_revision"], "" if reason else json.dumps(current), manual, values["scheduled_for"], values["coalesced"]),
+            )
+            if not manual:
+                self.conn.execute(
+                    "UPDATE scheduled_tasks SET next_run_at = ?, updated_at = ? WHERE id = ?",
+                    (values["next_run_at"], now_iso, task_id),
+                )
+                if reason:
+                    self.conn.execute(
+                        """UPDATE scheduled_tasks SET last_run_at = ?, last_run_status = ?,
+                           enabled = CASE WHEN schedule_kind = 'once' THEN 0 ELSE enabled END WHERE id = ?""",
+                        (now_iso, reason, task_id),
+                    )
+            result = dict(self.conn.execute("SELECT * FROM scheduled_task_runs WHERE id = ?", (cur.lastrowid,)).fetchone())
+            if manual:
+                self.conn.execute(
+                    "INSERT INTO scheduled_run_requests (task_id, operation_key, run_id, conversation_id) VALUES (?, ?, ?, ?)",
+                    (task_id, key, result["id"], conversation_id),
+                )
+        return {**result, "created": True}
+
+    def get_scheduled_operation(self, task_id: str, key: str) -> dict[str, Any] | None:
+        row = self.fetchone(
+            "SELECT run_id AS id, conversation_id FROM scheduled_run_requests WHERE task_id = ? AND operation_key = ?", (task_id, key),
+        )
+        return dict(row) if row else None
+
+    def cancel_disabled_scheduled_occurrences(self, now_iso: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute(
+                """UPDATE scheduled_task_runs SET status = 'cancelled', finished_at = ?,
+                   error = 'task disabled before execution', lease_owner = '', lease_expires_at = '', task_snapshot = ''
+                   WHERE status = 'queued' AND manual = 0 AND task_id IN
+                   (SELECT id FROM scheduled_tasks WHERE enabled = 0)""", (now_iso,),
+            )
+
+    def list_queued_scheduled_occurrences(self, owner: str, now_iso: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.fetchall(
+            """SELECT * FROM scheduled_task_runs WHERE status = 'queued' AND task_snapshot <> ''
+               AND (lease_owner = ? OR lease_expires_at <= ?) ORDER BY id""", (owner, now_iso),
+        )]
+
+    def start_scheduled_occurrence(self, run_id: int, owner: str, now_iso: str, expires: str, max_running: int) -> bool:
+        with self._lock, self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            cur = self.conn.execute(
+                """UPDATE scheduled_task_runs SET status = 'running', lease_owner = ?, lease_expires_at = ?, started_at = ?
+                   WHERE id = ? AND status = 'queued' AND cancel_requested = 0
+                   AND (lease_owner = ? OR lease_expires_at <= ?)
+                   AND EXISTS (SELECT 1 FROM scheduled_tasks t WHERE t.id = task_id AND (t.enabled = 1 OR manual = 1))
+                   AND (SELECT COUNT(*) FROM scheduled_task_runs WHERE status = 'running') < ?
+                   AND NOT EXISTS (SELECT 1 FROM scheduled_task_runs r
+                                   WHERE r.task_id = scheduled_task_runs.task_id AND r.status = 'running')""",
+                (owner, expires, now_iso, run_id, owner, now_iso, max_running),
+            )
+        return cur.rowcount == 1
+
+    def release_queued_scheduled_occurrences(self, owner: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE scheduled_task_runs SET lease_owner = '', lease_expires_at = '' WHERE status = 'queued' AND lease_owner = ?",
+                (owner,),
+            )
+
+    def update_scheduled_task(
+        self, task_id: str, *, expected_config_revision: int | None = None, **fields: Any,
+    ) -> dict[str, Any] | None:
         if not fields:
             return self.get_scheduled_task(task_id)
         fields["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -256,10 +394,19 @@ class Database:
         if unknown:
             raise ValueError(f"update_scheduled_task: unknown column(s): {unknown}")
         sets = ", ".join(f"{key} = ?" for key in fields)
+        if fields.keys() & self._SCHEDULED_TASK_CONFIG_COLS:
+            sets += ", config_revision = config_revision + 1"
         values = tuple(fields.values()) + (task_id,)
-        with self._lock:
-            self.conn.execute(f"UPDATE scheduled_tasks SET {sets} WHERE id = ?", values)
-            self.conn.commit()
+        where = "id = ?"
+        if expected_config_revision is not None:
+            where += " AND config_revision = ?"
+            values += (expected_config_revision,)
+        with self._lock, self.conn:
+            cur = self.conn.execute(f"UPDATE scheduled_tasks SET {sets} WHERE {where}", values)
+            if cur.rowcount == 0 and self.conn.execute(
+                "SELECT 1 FROM scheduled_tasks WHERE id = ?", (task_id,),
+            ).fetchone():
+                raise ScheduledTaskConflictError("Scheduled task changed; reload it before saving again.")
         return self.get_scheduled_task(task_id)
 
     def delete_scheduled_task(self, task_id: str) -> bool:
@@ -278,15 +425,16 @@ class Database:
         idempotency_key: str = "",
         lease_owner: str = "",
         lease_expires_at: str = "",
+        config_revision: int = 0,
     ) -> int:
         with self._lock:
             cur = self.conn.execute(
                 """
                 INSERT INTO scheduled_task_runs (
                     task_id, conversation_id, idempotency_key, lease_owner,
-                    lease_expires_at, started_at, status
+                    lease_expires_at, started_at, status, config_revision
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -296,10 +444,87 @@ class Database:
                     lease_expires_at,
                     started_at,
                     status,
+                    config_revision,
                 ),
             )
             self.conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
+
+    def finalize_scheduled_task_run(
+        self, *, task_id: str, run_id: int, conversation_id: str, lease_owner: str,
+        finished_at: str, status: str, final_text: str, error: str,
+        prepare_task_update: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Commit terminal evidence once, preserving current configuration.
+
+        The callback is synchronous and pure: schedule calculation only, no
+        nested database helpers (which commit) or external calls. BEGIN IMMEDIATE
+        protects the read/decision/write against other connections as well as
+        threads using this instance. A superseded run retains its own evidence
+        but cannot change the current task summary or failure counter.
+        """
+        with self._lock, self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            task = self.conn.execute("SELECT * FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
+            run = self.conn.execute("SELECT * FROM scheduled_task_runs WHERE id = ?", (run_id,)).fetchone()
+            if (
+                task is None or run is None or run["task_id"] != task_id
+                or run["conversation_id"] != conversation_id
+                or run["status"] not in {"queued", "running"} or run["finished_at"]
+                or run["lease_owner"] != lease_owner
+                or (run["lease_expires_at"] and run["lease_expires_at"] <= finished_at)
+            ):
+                return None
+
+            latest_id = self.conn.execute(
+                """SELECT MAX(id) FROM scheduled_task_runs WHERE task_id = ? AND status <> 'skipped'
+                   AND (status <> 'queued' OR id = ?)""", (task_id, run_id),
+            ).fetchone()[0]
+            fields = prepare_task_update(dict(task)) if latest_id == run_id else {}
+            unknown = fields.keys() - self._SCHEDULED_TASK_COMPLETION_COLS
+            if unknown:
+                raise ValueError(f"finalize_scheduled_task_run: forbidden column(s): {unknown}")
+            if fields and run["task_snapshot"] and (not run["manual"] or task["next_run_at"]):
+                # Acceptance already advanced cadence. Completion must not
+                # replace it with a delay based on completion time.
+                fields["next_run_at"] = task["next_run_at"] if fields.get("enabled", task["enabled"]) else ""
+                if task["config_revision"] != run["config_revision"] and task["next_run_at"] and status != "failed":
+                    fields["enabled"] = task["enabled"]
+                    fields["next_run_at"] = task["next_run_at"] if task["enabled"] else ""
+            # Keep the legacy dead-letter API value for compatibility. The
+            # notifier still receives the authoritative execution outcome.
+            stored_status = "dead_letter" if fields.get("last_run_status") == "dead_letter" else status
+            self.conn.execute(
+                """UPDATE scheduled_task_runs
+                   SET finished_at = ?, status = ?, final_text = ?, error = ?,
+                       lease_owner = '', lease_expires_at = '', task_snapshot = '' WHERE id = ?""",
+                (finished_at, stored_status, final_text, error, run_id),
+            )
+            if fields:
+                fields["updated_at"] = finished_at
+                sets = ", ".join(f"{key} = ?" for key in fields)
+                self.conn.execute(
+                    f"UPDATE scheduled_tasks SET {sets} WHERE id = ?", tuple(fields.values()) + (task_id,),
+                )
+            current = dict(self.conn.execute("SELECT * FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone())
+        return current
+
+    def renew_scheduled_task_run_lease(
+        self, run_id: int, *, lease_owner: str, now_iso: str, lease_expires_at: str,
+        start: bool = False, manual: bool = False,
+    ) -> bool:
+        """Renew only live owned work; never resurrect a recovered attempt."""
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE scheduled_task_runs SET lease_expires_at = ?,
+                       status = CASE WHEN ? THEN 'running' ELSE status END
+                   WHERE id = ? AND lease_owner = ? AND status IN ('queued', 'running')
+                     AND finished_at = '' AND lease_expires_at > ?
+                     AND EXISTS (SELECT 1 FROM scheduled_tasks t WHERE t.id = task_id
+                                 AND (NOT ? OR t.enabled = 1 OR ?))""",
+                (lease_expires_at, start, run_id, lease_owner, now_iso, start, manual),
+            )
+        return cur.rowcount == 1
 
     def update_scheduled_task_run(
         self,
@@ -355,10 +580,15 @@ class Database:
             """
             SELECT DISTINCT task_id
             FROM scheduled_task_runs
-            WHERE status IN ('queued', 'running')
+            WHERE status = 'running'
             """
         )
         return {str(row["task_id"]) for row in rows}
+
+    def list_queued_scheduled_task_ids(self) -> set[str]:
+        return {row["task_id"] for row in self.fetchall(
+            "SELECT DISTINCT task_id FROM scheduled_task_runs WHERE status = 'queued'",
+        )}
 
     def recover_expired_scheduled_task_runs(self, now_iso: str) -> int:
         with self._lock:
@@ -369,7 +599,8 @@ class Database:
                     finished_at = ?,
                     error = 'scheduler lease expired',
                     lease_owner = '',
-                    lease_expires_at = ''
+                    lease_expires_at = '',
+                    task_snapshot = ''
                 WHERE status = 'running'
                   AND lease_expires_at <> ''
                   AND lease_expires_at <= ?
@@ -379,13 +610,35 @@ class Database:
             self.conn.commit()
             return int(cur.rowcount)
 
+    def repair_scheduled_intent(self, now_iso: str, compute_next: Callable[[dict[str, Any]], str]) -> None:
+        """Repair legacy cleared claims, without replaying interrupted work."""
+        with self._lock, self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.execute(
+                """UPDATE scheduled_task_runs SET status = 'abandoned', finished_at = ?,
+                   error = 'legacy queued lease expired', lease_owner = '', lease_expires_at = '', task_snapshot = ''
+                   WHERE status = 'queued' AND task_snapshot = '' AND lease_expires_at <> '' AND lease_expires_at <= ?""",
+                (now_iso, now_iso),
+            )
+            rows = self.conn.execute(
+                """SELECT * FROM scheduled_tasks t WHERE enabled = 1 AND next_run_at = ''
+                   AND NOT EXISTS (SELECT 1 FROM scheduled_task_runs r WHERE r.task_id = t.id AND status IN ('queued', 'running'))
+                   """,
+            ).fetchall()
+            for row in rows:
+                due = compute_next(dict(row))
+                self.conn.execute(
+                    "UPDATE scheduled_tasks SET next_run_at = ?, enabled = ?, updated_at = ? WHERE id = ?",
+                    (due, int(bool(due)), now_iso, row["id"]),
+                )
+
     def enforce_scheduled_task_run_retention(
         self,
         *,
         max_age_days: int = 30,
         max_output_chars: int = 20_000,
     ) -> dict[str, int]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days))).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(max_age_days)))).isoformat()
         max_chars = max(0, int(max_output_chars))
         with self._lock:
             deleted = self.conn.execute(
@@ -421,7 +674,8 @@ class Database:
             ).fetchone()
             updated = int(row[0] if row else 0)
             self.conn.execute(
-                "UPDATE scheduled_task_runs SET final_text = '', error = ''"
+                """UPDATE scheduled_task_runs SET final_text = '', error = '',
+                   task_snapshot = CASE WHEN status IN ('queued', 'running') THEN task_snapshot ELSE '' END"""
             )
             self.conn.commit()
         return {"scheduled_task_outputs_cleared": updated}

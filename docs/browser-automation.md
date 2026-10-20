@@ -43,12 +43,16 @@ Each DevTools tool has an explicit entry in Monaw's permission table (`BUILTIN_T
 | `upload_file` | File change (high risk) | Always |
 | `lighthouse_audit`, screencast tools | File change | Follows your permission mode |
 
-Before `navigate_page` or `new_page` reaches Chrome, Monaw checks the URL:
+The **Navigation target domains** setting (`allowed_domains`) is a navigation-target policy. Before an explicit URL in `navigate_page` or `new_page` reaches Chrome, Monaw checks that submitted URL:
 
 - Only `http` and `https` are allowed. `file:`, `javascript:`, `data:`, `blob:`, `about:`, `chrome:`, `chrome-extension:`, `devtools:`, and `view-source:` URLs are blocked with a `reason_code`.
-- Hosts outside **Allowed domains** are blocked.
+- Submitted hosts outside **Navigation target domains** are blocked.
 - Scheduled and other non-interactive runs need an allowed-domains list and may only open public hosts.
 - `navigate_page` with `initScript` is refused; page JavaScript goes through `evaluate_script`, which asks first.
+
+This is not browser-origin containment. It does not inspect the current origin of existing tabs or restrict snapshots, screenshots, page selection, back/forward/reload without a URL, click-driven navigation, popups, or Chrome redirects. An allowed URL may lead Chrome to another origin. The separate interaction and unattended-run permission rules still apply, but do not turn the domain list into an all-origin boundary. Use a Chrome profile whose accessible tabs and accounts you intend the agent to use.
+
+The shell sandbox does not contain your personal Chrome, desktop automation, or external MCP servers. Each uses its own permissions and environment. Controlled adapter tests cover which submitted targets are intercepted and show that returned redirect/popup destinations are not checked; these are not live-Chrome containment tests.
 
 Mutating browser tools are guarded against loops: repeating the same action with unchanged page text inserts a recovery checkpoint (`stalled_repeat_detected`) that tells the model to take a snapshot or list pages before trying again.
 
@@ -78,7 +82,7 @@ When a page needs JavaScript, `browser_fetch` returns `status: "needs_browser_re
 
 URL safety:
 
-- Only `http` and `https` URLs, and only hosts in **Allowed domains** when that list is set.
+- Only `http` and `https` URLs, and only hosts in **Navigation target domains** when that list is set.
 - Hosts that resolve to private, loopback, link-local, reserved, or multicast addresses are refused (`blocked_host`).
 - Every redirect hop is checked against the same rules before it is followed (`redirect_domain_not_allowed`, `blocked_redirect_host`), and the final URL is checked again.
 - Non-interactive runs need an allowed-domains list.
@@ -94,7 +98,7 @@ Open Settings -> Browser.
 | Status | Whether Chrome was found and the state of the DevTools connection. **Reconnect** restarts the built-in DevTools server; Chrome stays open. |
 | Chrome profile (`system_profile_directory`) | The profile to open. Empty uses Chrome's last-used profile. |
 | Auto-approve Chrome's connection prompt (`auto_approve_local_debugging`) | Windows only. Default on. |
-| Allowed domains (`allowed_domains`) | Optional allow list for both DevTools navigation and `browser_fetch`. Empty allows all sites in interactive chats. |
+| Navigation target domains (`allowed_domains`) | Explicit DevTools navigation targets and `browser_fetch` URLs. Fetch also checks redirect hops; Chrome redirects and implicit navigation are outside this guard. Empty allows any target in interactive chats; unattended navigation/fetch requires a list. |
 | Screenshots folder (`screenshots_dir`) | Where browser screenshots are saved. |
 
 Settings files from earlier versions may still contain options of the removed Python browser engine (`headless`, `keep_alive`, `dom_inspection_engine`, iframe options, `system_connection_strategy`, `system_cdp_url`, `downloads_dir`, `traces_dir`). They are ignored when the file loads and dropped on the next save.
@@ -110,7 +114,7 @@ The same status is available from `GET /api/diagnostics/browser-use`: `chrome_fo
 | `chrome_setup_requires_restart` | First-time setup needs Chrome closed. | Close Chrome once, then retry. |
 | `chrome_profile_setup_failed` | `Local State` could not be updated. | Check access to Chrome's profile folder. |
 | `system_debugging_not_enabled` | Chrome opened but its approved endpoint did not appear. | Use Chrome 144+, close Chrome once, then retry. |
-| `domain_not_allowed`, `url_scheme_not_allowed`, `blocked_host` | The URL policy refused the page. | Adjust **Allowed domains** or use a public http(s) URL. |
+| `domain_not_allowed`, `url_scheme_not_allowed`, `blocked_host` | The target URL policy refused the URL. | Adjust **Navigation target domains** or use a public http(s) URL. |
 | `needs_browser_render` (status) | `browser_fetch` could not read a JavaScript page. | Open it with `new_page` and `take_snapshot`. |
 | `tool_timeout` | A browser call took too long. | Narrow the action instead of repeating it. |
 

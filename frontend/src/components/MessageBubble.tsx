@@ -37,6 +37,8 @@ import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
 import { isBrowserTool, toolDisplayName } from '../lib/toolNames'
 import type { UploadedAttachment } from '../lib/api/types'
 import type { ActivityItem, ApprovalNotice, Message, ToolCall } from '../hooks/useChat'
+import { ExecutionEnvironment } from './ExecutionEnvironment'
+import type { ExecutionEnvironment as Environment } from '../lib/api/types'
 
 const MIN_IMAGE_PREVIEW_DIMENSION_PX = 16
 const FORMATTED_RESPONSE_CACHE_LIMIT = 300
@@ -683,7 +685,10 @@ function ToolCallScroller({
                   )}
                   {toolCall.input && <ToolPayloadInline label="Input" value={toolCall.input} />}
                   {toolCall.output !== undefined ? (
-                    <ToolPayloadInline label="Result" value={toolCall.output} />
+                    <>
+                      <ExecutionEnvironment environment={toolEnvironment(toolCall.output)} />
+                      <ToolPayloadInline label="Result" value={toolCall.output} />
+                    </>
                   ) : toolCall.pending ? (
                     <p className="text-[11px] italic text-neutral-500">Running...</p>
                   ) : null}
@@ -732,6 +737,21 @@ function formatToolPayload(value: string): string {
   }
 }
 
+function toolEnvironment(value: string): Environment | undefined {
+  try {
+    const environment = JSON.parse(value)?.sandbox?.execution_environment
+    if (!environment || typeof environment !== 'object') return undefined
+    const textFields = ['backend', 'summary', 'workspace', 'execution_workspace', 'shell',
+      'filesystem', 'network', 'writes', 'reason', 'scope']
+    if (!textFields.every((key) => typeof environment[key] === 'string')
+      || typeof environment.approval_required !== 'boolean'
+      || (environment.image !== undefined && typeof environment.image !== 'string')) return undefined
+    return environment as Environment
+  } catch {
+    return undefined
+  }
+}
+
 function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
   const [localStatus, setLocalStatus] = useState<'idle' | 'approving' | 'rejecting' | 'approved' | 'rejected'>('idle')
 
@@ -773,6 +793,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
         <div className="min-w-0">
           <span className="font-medium">{label}</span>
           <p className="mt-1 text-neutral-400">{notice.action}</p>
+          <ExecutionEnvironment environment={notice.execution_environment} />
           {(denied || automatic) && notice.reason && <p className="mt-1 text-neutral-300">{notice.reason}</p>}
         </div>
       </div>
@@ -786,6 +807,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold text-amber-200">Approval required</p>
           <p className="mt-1 text-[11px] leading-relaxed text-neutral-200">{notice.action}</p>
+          <ExecutionEnvironment environment={notice.execution_environment} />
           {notice.reason && (
             <p className="mt-1 text-[10px] text-neutral-500">{notice.reason}</p>
           )}

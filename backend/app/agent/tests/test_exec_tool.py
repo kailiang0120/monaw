@@ -149,6 +149,7 @@ def test_exec_tool_runs_command(monkeypatch, tmp_path):
             network="deny",
             network_enforcement="none",
             write_strategy="direct_rw",
+            filesystem_policy="host",
             reason_code="allowed",
         ),
     )
