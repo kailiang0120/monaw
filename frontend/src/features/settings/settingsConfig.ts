@@ -268,7 +268,7 @@ const emptySandbox = (): AgentSettings['sandbox'] => ({
   },
 })
 
-// Chrome DevTools is built into browser use (backend/app/skills/mcp_bridge/builtin.py).
+// Browser control is built in through the Monaw extension (backend/app/skills/browser_use/extension).
 export const MCP_SERVER_TEMPLATES = {
   custom: {
     label: 'Custom stdio',

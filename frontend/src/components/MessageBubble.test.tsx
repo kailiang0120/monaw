@@ -461,7 +461,7 @@ const answer = 42
     expect(screen.queryByRole('button', { name: 'Ran npm test' })).not.toBeInTheDocument()
   })
 
-  it('labels Chrome DevTools MCP calls as browser activity', () => {
+  it('labels browser tool calls as browser activity', () => {
     render(<MessageBubble message={{
       id: 'msg-mcp-browser',
       role: 'assistant',

@@ -32,6 +32,7 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/conversations/{conv_id}/context-usage` | `agent:run` | `ContextUsagePayload` |
 | `GET` | `/api/conversations/{conv_id}/messages` | `agent:run` | `MessagesResponse` |
 | `GET` | `/api/diagnostics/browser-use` | `diagnostics:read` | `BrowserUseDiagnosticsOut` |
+| `POST` | `/api/diagnostics/browser-use/extension/install` | `diagnostics:control` | `BrowserExtensionInstallOut` |
 | `POST` | `/api/diagnostics/browser-use/reset` | `diagnostics:control` | `BrowserUseDiagnosticsOut` |
 | `GET` | `/api/diagnostics/mcp` | `diagnostics:read` | `list` |
 | `POST` | `/api/diagnostics/mcp/{name}/reconnect` | `diagnostics:control` | `MCPServerDiagnosticsOut` |
@@ -79,6 +80,11 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/settings/controller-policy` | `settings:read` | `ControllerPolicyOut` |
 | `PUT` | `/api/settings/controller-policy` | `settings:write` | `OkResponse` |
 | `GET` | `/api/settings/controller-policy-markdown` | `settings:read` | `ControllerPolicyMarkdownPayload` |
+| `POST` | `/api/settings/mcp-credentials/commit` | `mcp:credentials` | `stream/file/none` |
+| `POST` | `/api/settings/mcp-credentials/hydrate` | `mcp:credentials` | `stream/file/none` |
+| `GET` | `/api/settings/mcp-credentials/inventory` | `mcp:credentials` | `stream/file/none` |
+| `POST` | `/api/settings/mcp-credentials/prepare` | `mcp:credentials` | `stream/file/none` |
+| `POST` | `/api/settings/mcp-credentials/revoke` | `mcp:credentials` | `stream/file/none` |
 | `GET` | `/api/settings/model-options` | `settings:read` | `ModelOptionsPayload` |
 | `GET` | `/api/settings/speech-to-text` | `settings:read` | `SpeechToTextStatusPayload` |
 | `POST` | `/api/settings/speech-to-text/download` | `settings:write` | `SpeechToTextStatusPayload` |

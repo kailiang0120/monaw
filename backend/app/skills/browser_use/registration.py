@@ -16,8 +16,9 @@ def _configured_allowed_domains(settings: Any) -> list[str]:
 
 
 def register_browser_tools(registry, settings) -> None:
-    # Interactive browsing is provided by the built-in Chrome DevTools MCP server
-    # (mcp_bridge/builtin.py); this skill's only native tool is the HTTP fetcher.
+    # Interactive browsing is provided by the built-in browser server that the
+    # Monaw extension connects to (mcp_bridge/builtin.py, browser_use/extension);
+    # this skill's only native tool is the HTTP fetcher.
     policy = SimpleNamespace(config={"allowed_domains": _configured_allowed_domains(settings)})
 
     registry.extend(

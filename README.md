@@ -14,7 +14,7 @@ The application runs on your PC. Chat history, settings, memory, and artifacts a
 
 You need **Git**, an internet connection for installation and model access, and Windows 10 or 11. The setup script can install missing **uv** and **Node.js LTS** through Windows Package Manager (`winget`). Supported Node release lines are **20.x starting at 20.19**, **22.x starting at 22.13**, and **24.x**, with npm. Setup and launch check the executable found on PATH against the policy in `frontend/package.json`; other major versions and prereleases are rejected. Python **3.11** is pinned in `backend/.python-version` and installed by uv. Required Windows backend checks use 3.11; a separate runtime compatibility job checks 3.12.
 
-Chrome **144+** is needed for browser automation. Docker Desktop is optional for isolated shell execution.
+Google Chrome **125+** is needed for browser automation, through the Monaw extension you set up from Settings > Browser. Docker Desktop is optional for isolated shell execution.
 
 ### 1. Clone the repository
 
@@ -80,7 +80,7 @@ Choose a permission mode in Settings or the composer: **Default**, **Full Access
 | Backend | **Python 3.11**, **FastAPI**, **Uvicorn**, and **Pydantic** implement the local HTTP API, validation, and streamed events. |
 | Agent orchestration | A **custom Python runtime and turn loop** assemble prompts, call models, authorize actions, execute tools, and process observations. Skills and the tool registry expose capabilities to the model. |
 | Model clients | **OpenAI Python SDK**, **Codex SDK**, and **Google GenAI SDK** provide the three model connection routes. |
-| Browser and desktop automation | **Chrome DevTools MCP** controls the user's Chrome profile; **Scrapling** fetches pages. **pywinauto**, **pywin32**, and **mss** support Windows controls and screenshots. |
+| Browser and desktop automation | The **Monaw Chrome extension** controls the user's Chrome profile; **Scrapling** fetches pages. **pywinauto**, **pywin32**, and **mss** support Windows controls and screenshots. |
 | Tool integrations | The **MCP Python SDK** connects built-in and user-configured MCP servers. |
 | Storage and credentials | **SQLite** stores conversations, runs, and app state. **Markdown** stores global and workspace memory. Electron **safeStorage** encrypts saved provider keys and the Telegram token using the OS. |
 | Dependencies and tests | **uv** manages Python and its lockfile; **npm** manages the frontend. Checks use **pytest**, **Vitest**, Node's test runner, and TypeScript. |
@@ -129,10 +129,10 @@ flowchart TB
       direction LR
       FILES("<b>Files + shell</b><br/>Selected project workspace<br/>Shell sandbox / optional Docker")
       APPS("<b>Windows computer use</b><br/>Screenshots / accessibility<br/>Mouse + keyboard control")
-      MCP("<b>MCP bridge</b><br/>Built-in Chrome DevTools<br/>Custom stdio + HTTP servers")
+      MCP("<b>MCP bridge</b><br/>Built-in browser server<br/>Custom stdio + HTTP servers")
       WEB("<b>Web tools</b><br/>Scrapling page fetch<br/>Tavily search")
       CHROME[("<b>Your Chrome profile</b><br/>Existing logins + bookmarks")]
-      MCP --> CHROME
+      MCP -->|Monaw extension| CHROME
     end
 
     DESKTOP <-->|Authenticated HTTP / SSE| BACKEND
@@ -184,7 +184,7 @@ The agent repeats **update context → fit context → call model → authorize 
 | --- | --- |
 | **Context and tool discovery** | The runtime combines workspace `AGENTS.md`, skill instructions, history, attachments, and retrieved memory. Tool search can expose deferred schemas for later model calls. |
 | **Authorization** | Default, Full Access, Auto Review, and Custom modes determine action handling. Pending approvals or access grants wait for resolution; blocked actions return feedback, and repeated denials can pause the turn. |
-| **Execution** | Compatible tool calls can overlap. Workers enforce timeouts, cooperative cancellation, and resource conflict checks. Shell commands use the configured sandbox policy; Chrome automation uses Chrome DevTools MCP on the user's own profile. |
+| **Execution** | Compatible tool calls can overlap. Workers enforce timeouts, cooperative cancellation, and resource conflict checks. Shell commands use the configured sandbox policy; Chrome automation goes through the Monaw extension on the user's own profile. |
 | **User control and recovery** | Steering enters at model or tool boundaries. Stop, exhausted budgets, or failures can end or pause a turn; history, checkpoints, and the tool ledger support recovery. |
 | **Persistence and observability** | Conversation history, results, run status, usage, latency, and failure evidence are recorded locally. Progress and tool events stream back to the caller. |
 
@@ -242,7 +242,7 @@ Use `npm run dev` inside `frontend` to run Vite and Electron directly. Electron 
 | Backend cannot start | Check `runtime\backend.log`; run `uv sync --locked` inside `backend`. |
 | Node engine or frontend dependency errors | Upgrade to a supported Node.js version, then run `npm ci` inside `frontend`. |
 | A port is occupied | Check Vite port `5275` and backend port `8435`; the launcher reports conflicts. |
-| Browser automation cannot connect | Check Chrome 144+, your selected profile, and the [browser automation guide](docs/browser-automation.md). |
+| Browser automation cannot connect | Check the Monaw extension status in Settings > Browser and that the extension is on at `chrome://extensions`, then see the [browser automation guide](docs/browser-automation.md). |
 
 For a custom uv installation, set `AGENT_UV_PATH` to the full path of `uv.exe` before starting Monaw.
 

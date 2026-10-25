@@ -81,7 +81,7 @@ RECOVERY_RESULT_LIMIT = 1400
 FINAL_RESPONSE_TYPEWRITER_CHARS = 8
 FINAL_RESPONSE_TYPEWRITER_MAX_CHUNKS = 240
 
-# Reflected names of the built-in Chrome DevTools MCP server (mcp_bridge/builtin.py).
+# Reflected names of the built-in browser server (mcp_bridge/builtin.py), served by the Monaw extension.
 _DEVTOOLS_PREFIX = "mcp__chrome-devtools__"
 _DEVTOOLS_SNAPSHOT_TOOL = f"{_DEVTOOLS_PREFIX}take_snapshot"
 _DEVTOOLS_LIST_PAGES_TOOL = f"{_DEVTOOLS_PREFIX}list_pages"
@@ -92,7 +92,7 @@ _DEVTOOLS_MUTATING_TOOLS = {
         "navigate_page", "new_page", "handle_dialog", "upload_file",
         # Also exempt from the blanket identical-call cap (registry repeat_safe),
         # so this page-state-aware guard must cover them.
-        "click_at", "close_page", "resize_page", "emulate",
+        "close_page",
     )
 }
 _DEVTOOLS_OBSERVATION_TOOLS = {

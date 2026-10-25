@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { isBrowserTool, toolDisplayName } from './toolNames'
 
 describe('toolDisplayName', () => {
-  it('names Chrome DevTools tools by what they do', () => {
+  it('names browser tools by what they do', () => {
     expect(toolDisplayName('mcp__chrome-devtools__navigate_page')).toBe('browser · open page')
     expect(toolDisplayName('mcp__Chrome-dev-tools__take_snapshot')).toBe('browser · read page')
     expect(toolDisplayName('mcp__chrome-devtools__some_new_tool')).toBe('browser · some new tool')

@@ -4,7 +4,7 @@ Monaw includes an MCP bridge that connects configured MCP servers and exposes th
 
 ## What MCP Adds
 
-MCP lets Monaw use external tools from local or remote servers. Typical examples are database tools or custom internal tools. Chrome DevTools is already built into the browser automation skill (see [browser-automation.md](browser-automation.md)), so you do not add it here.
+MCP lets Monaw use external tools from local or remote servers. Typical examples are database tools or custom internal tools. Browser control is already built into the browser automation skill through the Monaw Chrome extension (see [browser-automation.md](browser-automation.md)), so you do not add it here.
 
 The bridge has two parts:
 
@@ -20,6 +20,8 @@ Open Settings -> Tools -> MCP.
 The template menu offers custom stdio and Streamable HTTP connections. File tools are built in, so Filesystem is not offered as a template. Existing filesystem MCP connections remain editable.
 
 MCP server configuration is saved in runtime settings under `%USERPROFILE%\.monaw\runtime\settings.json`.
+
+Save the configuration, then use **Advanced → Encrypted credentials** for secrets. Explicitly migrate legacy fields with **Encrypt FIELD**. See [credential storage, migration and recovery](mcp-credentials.md) for the scoped vault, runtime hydration, headless handoff and compatibility rules.
 
 ## Supported Transports
 
@@ -40,15 +42,17 @@ Server names must be unique.
 
 | Field | Meaning |
 | --- | --- |
-| `name` | Stable local server id. Used in reflected tool names. |
+| `name` | Editable local server name. Used in reflected tool names. |
+| `server_id` | Stable credential identity, preserved when renaming a saved server. |
+| `credential_refs` | Scoped encrypted credential references; managed through credential controls. |
 | `enabled` | Whether Monaw should start/connect this server. |
 | `transport` | `stdio` or `streamable_http`. |
 | `command` | Local executable for `stdio`. |
 | `args` | Command arguments for `stdio`. |
-| `env` | Extra environment variables for `stdio`. |
+| `env` | Explicit nonsecret environment configuration for `stdio`; runtime essentials are inherited, other parent environment variables are filtered. |
 | `cwd` | Working directory for `stdio`. |
 | `url` | MCP HTTP URL for `streamable_http`. |
-| `headers` | Static headers for `streamable_http`. |
+| `headers` | Nonsecret headers for `streamable_http`; authorization values belong in encrypted credentials. |
 | `startup_timeout_ms` | Startup/connect timeout. Default is `8000`. |
 | `call_timeout_ms` | Per-tool call timeout. Default is `30000`. |
 | `reconnect_on_unhealthy` | Restart unhealthy servers before tool calls. |
@@ -88,9 +92,7 @@ Example `streamable_http` server:
   "enabled": true,
   "transport": "streamable_http",
   "url": "http://127.0.0.1:9000/mcp",
-  "headers": {
-    "Authorization": "Bearer local-token"
-  },
+  "headers": {},
   "startup_timeout_ms": 8000,
   "call_timeout_ms": 30000,
   "reconnect_on_unhealthy": true,
@@ -100,6 +102,8 @@ Example `streamable_http` server:
 ```
 
 Prefer the Settings UI over manual JSON edits.
+
+For the HTTP example, save the server and add `Authorization` with its complete value through **Encrypted credentials**. It is resolved only into that connection's HTTP state.
 
 ## Runtime Lifecycle
 
@@ -114,6 +118,7 @@ Runtime states:
 | `connected` | Server is initialized and tools were listed. |
 | `unhealthy` | Server was connected but a call, refresh, or stop failed. |
 | `failed` | Startup or initialization failed. |
+| `credentials_unavailable` | Required credential references have not been hydrated; the connection is not launched. |
 
 Diagnostics in the authenticated local UI include the configured command/arguments or URL, working directory, resolved executable, PID when available, startup phase, stderr tail, tool counts, reflected names, last error, unhealthy reason, and recent call duration. Environment-variable and HTTP-header values remain redacted and are never returned as diagnostic secrets.
 
@@ -165,7 +170,7 @@ Names, descriptions and annotations produce risk labels. The shared action polic
 
 MCP servers can expose powerful tools. Keep the allow list narrow when using servers you do not fully trust.
 
-Do not put permanent secrets in plain `env` fields unless you accept that they are stored in local runtime settings. Prefer short-lived local credentials where possible.
+Keep secrets out of ordinary `env`, `headers`, arguments and URLs. Use encrypted credential fields. Existing likely secret fields are hidden from settings readback and preserved during unrelated edits; migration remains explicit so arbitrary nonsecret environment values are not misclassified. Deleting a stored credential closes the connection and retains its required reference until a value is restored or the server is removed.
 
 Remote MCP tools can request external network or file actions. Their own filesystem and network capabilities are not contained by Monaw's shell sandbox. Approval behavior follows the selected mode.
 

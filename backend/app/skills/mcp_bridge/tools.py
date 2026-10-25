@@ -50,7 +50,7 @@ def _iter_user_servers(settings) -> list[MCPServerConfig]:
 
 
 def _iter_servers(settings) -> list[MCPServerConfig]:
-    return [*_iter_user_servers(settings), *builtin_mcp_servers()]
+    return [*_iter_user_servers(settings), *builtin_mcp_servers(settings)]
 
 
 def _iter_enabled_servers(settings) -> list[MCPServerConfig]:
@@ -58,7 +58,7 @@ def _iter_enabled_servers(settings) -> list[MCPServerConfig]:
     user_servers: list[MCPServerConfig] = []
     if bool(getattr(getattr(settings, "mcp", object()), "enabled", True)):
         user_servers = [cfg for cfg in _iter_user_servers(settings) if cfg.enabled]
-    return [*user_servers, *builtin_mcp_servers()]
+    return [*user_servers, *builtin_mcp_servers(settings)]
 
 
 def _server_entry_predicate(server_name: str):

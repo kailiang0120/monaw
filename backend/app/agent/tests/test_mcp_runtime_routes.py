@@ -10,18 +10,11 @@ from app.main import app
 def _patch_browser_discovery(monkeypatch, *, chrome="C:/Program Files/Google/Chrome/Application/chrome.exe", mcp=None):
     module = "app.api.routes.diagnostics"
     monkeypatch.setattr(f"{module}.find_chrome_executable", lambda: chrome)
-    monkeypatch.setattr(f"{module}.list_local_chrome_profiles", lambda: [
-        {"name": "Personal", "directory": "Default"},
-        {"name": "Work", "directory": "Profile 1"},
-        {"name": "Invalid", "directory": "C:/private/profile"},
-    ])
-    monkeypatch.setattr(f"{module}.last_used_chrome_profile", lambda: "Profile 1")
     monkeypatch.setattr(f"{module}.get_mcp_runtime_diagnostics", lambda: list(mcp or []))
 
 
-def test_browser_status_reports_chrome_profiles_and_devtools_connection(monkeypatch):
+def test_browser_status_reports_chrome_extension_and_server_state(monkeypatch):
     settings_data = AgentSettings()
-    settings_data.browser.system_profile_directory = "Profile 1"
     monkeypatch.setattr("app.api.routes.diagnostics.load_agent_settings", lambda _settings: settings_data)
     _patch_browser_discovery(monkeypatch, mcp=[
         {"name": "filesystem", "connected": False, "state": "failed"},
@@ -43,12 +36,8 @@ def test_browser_status_reports_chrome_profiles_and_devtools_connection(monkeypa
     payload = response.json()
     assert payload["chrome_found"] is True
     assert payload["chrome_executable"] == ""
-    assert payload["available_system_profiles"] == [
-        {"name": "Personal", "directory": "Default"},
-        {"name": "Work", "directory": "Profile 1"},
-    ]
-    assert payload["system_profile_directory"] == "Profile 1"
-    assert payload["default_profile_directory"] == "Profile 1"
+    assert payload["extension"]["installed"] is False
+    assert payload["extension"]["connected"] is False
     assert payload["devtools"] == {
         "server": "chrome-devtools",
         "running": True,
@@ -61,14 +50,19 @@ def test_browser_status_reports_chrome_profiles_and_devtools_connection(monkeypa
         "connected_at": "2026-10-18T00:00:00Z",
     }
     assert payload["last_error"] == ""
-    for removed in ("session_active", "headless", "dom_inspection_engine", "downloads_dir", "traces_dir"):
+    for removed in (
+        "session_active", "headless", "dom_inspection_engine", "downloads_dir", "traces_dir",
+        # Chrome remote debugging.
+        "available_system_profiles", "system_profile_directory", "default_profile_directory",
+        "connection", "connection_setting",
+    ):
         assert removed not in payload
 
 
 def test_browser_status_redacts_paths_in_devtools_errors_and_handles_missing_chrome(monkeypatch):
     _patch_browser_discovery(monkeypatch, chrome="", mcp=[
         {"name": "chrome-devtools", "connected": False, "state": "failed",
-         "last_error": r"spawn failed at C:\Users\someone\AppData\npx.cmd", "unhealthy_reason": None},
+         "last_error": r"spawn failed at C:\Users\someone\AppData\python.exe", "unhealthy_reason": None},
     ])
 
     payload = TestClient(app).get("/api/diagnostics/browser-use").json()
@@ -445,3 +439,37 @@ def test_update_settings_clean_preset_patch_uses_preset_payload(monkeypatch):
     payload = response.json()
     assert payload["permissions"]["mode"] == "full_access"
     assert payload["permissions"]["allow_screen_fallback"] is True
+
+
+def test_browser_extension_install_copies_pairs_and_restarts_the_browser_server(monkeypatch, tmp_path):
+    import json
+
+    import app.skills.browser_use.extension.common as extension_common
+
+    source = tmp_path / "bundled"
+    source.mkdir()
+    (source / "manifest.json").write_text(json.dumps({"version": "1.0.0"}), encoding="utf-8")
+    monkeypatch.setenv(extension_common.SOURCE_ENV, str(source))
+    settings_data = AgentSettings()
+    monkeypatch.setattr("app.api.routes.diagnostics.load_agent_settings", lambda _settings: settings_data)
+    _patch_browser_discovery(monkeypatch)
+    opened: list[str] = []
+    monkeypatch.setattr("app.api.routes.diagnostics._open_folder", lambda folder: opened.append(folder) or True)
+    monkeypatch.setattr("app.api.routes.diagnostics._open_extensions_page", lambda: True)
+    restarts: list[bool] = []
+    monkeypatch.setattr("app.api.routes.diagnostics._restart_browser_server", lambda: restarts.append(True))
+
+    before = TestClient(app).get("/api/diagnostics/browser-use").json()
+    assert before["extension"]["installed"] is False
+
+    response = TestClient(app).post("/api/diagnostics/browser-use/extension/install")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["folder"] == str(extension_common.installed_extension_dir())
+    assert opened == [payload["folder"]]
+    assert payload["extensions_page_opened"] is True
+    assert restarts == [True]
+    assert payload["status"]["extension"]["installed"] is True
+    assert payload["status"]["extension"]["paired"] is True
+    assert payload["status"]["extension"]["connected"] is False

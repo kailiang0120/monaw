@@ -11,8 +11,14 @@ declare global {
       setCredential: (id: CredentialId, value: string) => Promise<CredentialStatus>
       deleteCredential: (id: CredentialId) => Promise<CredentialStatus>
       applyStoredCredentials: () => Promise<CredentialStatus>
+      changeMcpCredential: (input: {
+        action: 'migrate' | 'replace' | 'delete'
+        binding: { server_id: string; transport: 'stdio' | 'streamable_http'; target: 'env' | 'headers'; key: string }
+        value?: string
+      }) => Promise<{ ok: boolean }>
       selectDirectory?: (defaultPath?: string) => Promise<string>
       setTheme?: (theme: 'dark' | 'light') => Promise<void>
+      writeClipboardText?: (text: string) => Promise<void>
       backendBaseUrl: string
       platform?: string
       isElectron: boolean

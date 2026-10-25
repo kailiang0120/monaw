@@ -191,7 +191,7 @@ jobs:
       - name: Install locked frontend and Electron dependencies
         working-directory: frontend
         run: npm ci
-      - name: Run disposable application workflows
+      - name: Verify application workflows and OS-encrypted MCP lifecycle
         working-directory: frontend
         run: npm run test:app
       - name: Upload application report and failure evidence

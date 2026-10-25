@@ -1,5 +1,6 @@
 import { apiFetch, BASE, JSON_HEADERS, throwApiError } from './client'
 import type {
+  BrowserExtensionInstallResult,
   BrowserUseDiagnostics,
   DataDeletionResult,
   DiagnosticsSummary,
@@ -26,19 +27,28 @@ export async function fetchMCPDiagnostics(signal?: AbortSignal): Promise<MCPServ
   return res.json()
 }
 
-/** Chrome discovery, profiles, and the built-in Chrome DevTools connection. */
+/** Chrome discovery, the Monaw extension, and the built-in browser server. */
 export async function fetchBrowserDiagnostics(signal?: AbortSignal): Promise<BrowserUseDiagnostics> {
   const res = await apiFetch(`${BASE}/api/diagnostics/browser-use`, { signal })
   if (!res.ok) throw new Error('Failed to fetch browser status')
   return res.json()
 }
 
-/** Restart the built-in Chrome DevTools server. The user's Chrome stays open. */
+/** Restart the built-in browser server; the extension reconnects. The user's Chrome stays open. */
 export async function reconnectBrowser(): Promise<BrowserUseDiagnostics> {
   const res = await apiFetch(`${BASE}/api/diagnostics/browser-use/reset`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error('Failed to reconnect the browser')
+  return res.json()
+}
+
+/** Copy and pair the Monaw Chrome extension, then open its folder and chrome://extensions. */
+export async function installBrowserExtension(): Promise<BrowserExtensionInstallResult> {
+  const res = await apiFetch(`${BASE}/api/diagnostics/browser-use/extension/install`, {
+    method: 'POST',
+  })
+  if (!res.ok) await throwApiError(res, 'Could not set up the Monaw extension')
   return res.json()
 }
 

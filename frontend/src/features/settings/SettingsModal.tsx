@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Container,
+  Copy,
   Download,
   Folder,
   Globe2,
@@ -26,6 +27,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel'
+import { McpCredentials } from './McpCredentials'
 import {
   DEFAULT_CONNECTION_PORTAL,
   type ConnectionPortalId,
@@ -62,6 +64,7 @@ import {
 import {
   fetchBrowserDiagnostics,
   fetchMCPDiagnostics,
+  installBrowserExtension,
   reconnectBrowser,
   reconnectMCPServer,
 } from '../../lib/api/diagnostics'
@@ -87,6 +90,7 @@ import { syncStoredApiKeysToBackend } from '../../lib/apiKeySync'
 import { DEFAULT_AGENT_NAME } from '../../lib/identity'
 import type {
   AgentSettings,
+  BrowserExtensionInstallResult,
   BrowserUseDiagnostics,
   MCPServerDiagnostics,
   SandboxStatus,
@@ -222,6 +226,11 @@ export function SettingsModal({
   const [openMcpAdvanced, setOpenMcpAdvanced] = useState<Record<number, boolean>>({})
   const [reconnectingServer, setReconnectingServer] = useState('')
   const [reconnectingBrowser, setReconnectingBrowser] = useState(false)
+  const [installingExtension, setInstallingExtension] = useState(false)
+  const [extensionInstall, setExtensionInstall] = useState<BrowserExtensionInstallResult | null>(null)
+  const [extensionError, setExtensionError] = useState('')
+  const [extensionFolderCopied, setExtensionFolderCopied] = useState(false)
+  const [extensionCopyError, setExtensionCopyError] = useState('')
   const [downloadingSpeechToText, setDownloadingSpeechToText] = useState(false)
   const [offloadingSpeechToText, setOffloadingSpeechToText] = useState(false)
   const [deletingSpeechToText, setDeletingSpeechToText] = useState(false)
@@ -489,6 +498,39 @@ export function SettingsModal({
     }
   }
 
+  const handleInstallExtension = async () => {
+    setInstallingExtension(true)
+    setExtensionError('')
+    setExtensionFolderCopied(false)
+    setExtensionCopyError('')
+    try {
+      const result = await installBrowserExtension()
+      setExtensionInstall(result)
+      setBrowserDiagnostics(result.status)
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : 'Could not set up the Monaw extension')
+    } finally {
+      setInstallingExtension(false)
+    }
+  }
+
+  const copyExtensionFolder = async () => {
+    if (!extensionInstall) return
+    setExtensionCopyError('')
+    setExtensionFolderCopied(false)
+    try {
+      if (window.electronAPI?.writeClipboardText) {
+        await window.electronAPI.writeClipboardText(extensionInstall.folder)
+      } else {
+        await navigator.clipboard.writeText(extensionInstall.folder)
+      }
+      setExtensionFolderCopied(true)
+    } catch {
+      setExtensionFolderCopied(false)
+      setExtensionCopyError('Could not copy automatically. Select the folder and press Ctrl+C (⌘C on Mac).')
+    }
+  }
+
   const handleDownloadSpeechToText = async () => {
     setDownloadingSpeechToText(true)
     setSpeechToTextError('')
@@ -707,6 +749,25 @@ export function SettingsModal({
     return draftSignature(draft, telegramAllowedUserIds, telegramAllowedChatIds) !== baselineSignature
   }, [draft, dirtySecrets, baselineSignature, telegramAllowedUserIds, telegramAllowedChatIds])
 
+  const refreshMcpCredentials = async () => {
+    const fresh = await fetchSettings()
+    // A credential operation is immediate. Reconcile only its metadata so an
+    // unrelated edit made while the IPC request was pending stays in the draft.
+    setDraft(current => current ? {
+      ...current, settings_version: fresh.settings_version,
+      mcp: { ...current.mcp, servers: current.mcp.servers.map(server => {
+        const savedServer = fresh.mcp.servers.find(item => item.server_id === server.server_id)
+        if (!savedServer) return server
+        const ordinary = (target: 'env' | 'headers') => Object.fromEntries(Object.entries(server[target])
+          .filter(([key]) => !savedServer.credential_refs?.[target]?.[key]))
+        return { ...server, credential_refs: savedServer.credential_refs,
+          legacy_secret_fields: savedServer.legacy_secret_fields, env: ordinary('env'), headers: ordinary('headers') }
+      }) },
+    } : current)
+    setBaselineSignature(current => current ? JSON.stringify({ ...JSON.parse(current), mcp: fresh.mcp }) : current)
+    await loadMcpDiagnostics()
+  }
+
   const requestClose = () => {
     if (isDirty) {
       setConfirmDiscard(true)
@@ -726,6 +787,17 @@ export function SettingsModal({
     return () => window.removeEventListener('keydown', onKeyDown)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDirty])
+
+  // After setup, watch for the extension to connect once the user loads it in Chrome.
+  const pollExtension = activeTab === 'browser'
+    && Boolean(browserDiagnostics?.extension?.installed)
+    && !browserDiagnostics?.extension?.connected
+  useEffect(() => {
+    if (!pollExtension) return
+    const timer = window.setInterval(() => { void loadBrowserDiagnostics() }, 2000)
+    return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pollExtension])
 
   const visibleTabs = useMemo(() => {
     const query = navQuery.trim().toLowerCase()
@@ -762,6 +834,8 @@ export function SettingsModal({
   const mcpFeatureAvailable = mcpFeatureDiagnostics[0]?.feature_available ?? true
   const mcpFeatureUnavailableReason = mcpFeatureDiagnostics[0]?.feature_unavailable_reason ?? ''
   const allowedDomainsInput = draft.browser.allowed_domains.join(', ')
+  const extensionStatus = browserDiagnostics?.extension
+  const waitingForExtension = Boolean(extensionStatus?.installed) && !extensionStatus?.connected
   const duplicateMcpNames = duplicateMcpServerNames(draft.mcp.servers)
   const connectionSecretValues: ConnectionSecretValues = {
     openai: openaiKey,
@@ -1388,8 +1462,8 @@ export function SettingsModal({
                           value={!browserDiagnostics ? 'Checking' : browserDiagnostics.chrome_found ? 'Found' : 'Not found'}
                         />
                         <StatusCell
-                          label="DevTools connection"
-                          value={browserConnectionStatus(browserDiagnostics, browserSkillEnabled)}
+                          label="Monaw extension"
+                          value={extensionConnectionStatus(browserDiagnostics, browserSkillEnabled)}
                         />
                       </div>
                       {browserDiagnostics && !browserDiagnostics.chrome_found && (
@@ -1404,38 +1478,82 @@ export function SettingsModal({
                       )}
                     </SettingsCard>
 
+                    <SettingsCard
+                        title="Monaw extension"
+                        description={BROWSER_COPY.extension}
+                        action={
+                          <button
+                            type="button"
+                            onClick={handleInstallExtension}
+                            disabled={installingExtension}
+                            className={`st-btn ${extensionStatus?.installed ? 'st-btn-secondary' : 'st-btn-primary'}`}
+                          >
+                            {installingExtension ? <Loader2 size={13} className="animate-spin" /> : <Puzzle size={13} />}
+                            {installingExtension
+                              ? 'Setting up'
+                              : extensionStatus?.update_available
+                                ? 'Update extension'
+                                : extensionStatus?.installed
+                                  ? 'Set up again'
+                                  : 'Set up extension'}
+                          </button>
+                        }
+                      >
+                        {extensionStatus?.update_available && (
+                          <div className="st-row-stacked">
+                            <Note tone="info">{BROWSER_COPY.extensionUpdate}</Note>
+                          </div>
+                        )}
+                        {extensionError && (
+                          <div className="st-row-stacked">
+                            <Note tone="danger" icon={AlertCircle}>{extensionError}</Note>
+                          </div>
+                        )}
+                        {extensionStatus?.last_error && !extensionStatus.connected && (
+                          <div className="st-row-stacked">
+                            <Note tone="warn">{extensionStatus.last_error}</Note>
+                          </div>
+                        )}
+                        {extensionInstall && !extensionStatus?.connected && (
+                          <div className="st-row-stacked space-y-3">
+                            <ol className="list-decimal space-y-1 pl-5 text-sm text-[var(--text-primary)]">
+                              {BROWSER_COPY.extensionSteps.map((step) => <li key={step}>{step}</li>)}
+                            </ol>
+                            <div className="flex items-center gap-2">
+                              <input
+                                readOnly
+                                value={extensionInstall.folder}
+                                aria-label="Extension folder"
+                                className="st-input flex-1"
+                                onFocus={(event) => event.currentTarget.select()}
+                              />
+                              <button type="button" onClick={copyExtensionFolder} className="st-btn st-btn-secondary">
+                                <Copy size={13} />
+                                {extensionFolderCopied ? 'Copied' : 'Copy'}
+                              </button>
+                            </div>
+                            {extensionCopyError && <p role="alert" className="st-desc">{extensionCopyError}</p>}
+                            {!extensionInstall.extensions_page_opened && (
+                              <Note tone="info">Open chrome://extensions in Chrome yourself; Monaw could not open it.</Note>
+                            )}
+                            {waitingForExtension && (
+                              <p className="st-desc flex items-center gap-2">
+                                <Loader2 size={13} className="animate-spin" />
+                                Waiting for the extension to connect…
+                              </p>
+                            )}
+                          </div>
+                        )}
+                        {extensionStatus?.connected && (
+                          <div className="st-row-stacked">
+                            <Note tone="info" icon={CheckCircle2}>
+                              Connected{extensionStatus.connected_version ? ` (version ${extensionStatus.connected_version})` : ''}. Monaw uses the Chrome profile the extension is loaded in.
+                            </Note>
+                          </div>
+                        )}
+                    </SettingsCard>
+
                     <SettingsCard title="My Chrome" description={BROWSER_COPY.usesYourProfile}>
-                      <SettingRow label="Chrome profile" description={BROWSER_COPY.chromeProfile}>
-                        <Dropdown
-                          ariaLabel="Chrome profile"
-                          value={draft.browser.system_profile_directory || ''}
-                          options={[
-                            {
-                              value: '',
-                              label: browserDiagnostics?.default_profile_directory
-                                ? `Last used (${browserDiagnostics.default_profile_directory})`
-                                : 'Detect automatically',
-                            },
-                            ...(browserDiagnostics?.available_system_profiles ?? []).map((p) => ({
-                              value: p.directory,
-                              label: `${p.name} (${p.directory})`,
-                            })),
-                          ]}
-                          onChange={(system_profile_directory) => updateDraft((current) => ({
-                            ...current,
-                            browser: { ...current.browser, system_profile_directory },
-                          }))}
-                        />
-                      </SettingRow>
-                      <SwitchRow
-                        label="Auto-approve Chrome's connection prompt"
-                        description={BROWSER_COPY.autoApprove}
-                        checked={draft.browser.auto_approve_local_debugging ?? true}
-                        onChange={(auto_approve_local_debugging) => updateDraft((current) => ({
-                          ...current,
-                          browser: { ...current.browser, auto_approve_local_debugging },
-                        }))}
-                      />
                       <SettingRow label="Navigation target domains" description={BROWSER_COPY.allowedDomains} wide>
                         <input
                           value={allowedDomainsInput}
@@ -1569,6 +1687,8 @@ export function SettingsModal({
                               },
                             }))}
                             onUpdate={(updater) => updateMcpServer(index, updater)}
+                            credentialsDisabled={isDirty || saving}
+                            onCredentialsChanged={refreshMcpCredentials}
                           />
                         )
                       })
@@ -1993,15 +2113,15 @@ function OutputFolderInput({
     </div>
   )
 }
-function browserConnectionStatus(diagnostics: BrowserUseDiagnostics | null, skillEnabled: boolean): string {
+function extensionConnectionStatus(diagnostics: BrowserUseDiagnostics | null, skillEnabled: boolean): string {
   if (!skillEnabled) return 'Off'
   if (!diagnostics) return 'Checking'
-  const { devtools } = diagnostics
-  if (devtools.connected) return 'Ready'
-  if (!devtools.running) return 'Not started'
-  if (devtools.state === 'starting') return 'Starting'
-  if (devtools.state === 'stopped') return 'Stopped'
-  return 'Needs attention'
+  const extension = diagnostics.extension
+  if (!extension?.installed) return 'Not set up'
+  if (extension.connected) return 'Connected'
+  // The built-in browser server the extension connects to.
+  if (diagnostics.devtools.state === 'failed' || diagnostics.devtools.state === 'unhealthy') return 'Needs attention'
+  return 'Waiting for Chrome'
 }
 
 function McpServerCard({
@@ -2016,6 +2136,8 @@ function McpServerCard({
   onReconnect,
   onRemove,
   onUpdate,
+  credentialsDisabled,
+  onCredentialsChanged,
 }: {
   server: AgentSettings['mcp']['servers'][number]
   index: number
@@ -2028,6 +2150,8 @@ function McpServerCard({
   onReconnect: () => void
   onRemove: () => void
   onUpdate: (updater: (server: AgentSettings['mcp']['servers'][number]) => AgentSettings['mcp']['servers'][number]) => void
+  credentialsDisabled: boolean
+  onCredentialsChanged: () => Promise<void>
 }) {
   const dotClass = diagnostic?.connected
     ? 'st-dot st-dot-ok'
@@ -2164,6 +2288,8 @@ function McpServerCard({
 
       {advancedOpen && (
         <div className="st-divider-t">
+          <McpCredentials key={`${server.server_id}-${server.transport}`} server={server}
+            disabled={credentialsDisabled} onChanged={onCredentialsChanged} />
           <NumberRow
             label="Startup timeout"
             ariaLabel={`Startup timeout for server ${index + 1}`}

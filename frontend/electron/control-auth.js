@@ -20,7 +20,7 @@ function generateControlSessionId() {
   return crypto.randomBytes(18).toString('base64url')
 }
 
-function mintControlSession(secret, sessionId, nowSeconds = Math.floor(Date.now() / 1000)) {
+function mintControlSession(secret, sessionId, nowSeconds = Math.floor(Date.now() / 1000), scopes = CONTROL_SCOPES) {
   if (typeof secret !== 'string' || secret.length < 32) {
     throw new Error('Control-plane secret is not configured')
   }
@@ -34,7 +34,7 @@ function mintControlSession(secret, sessionId, nowSeconds = Math.floor(Date.now(
     // The backend binds approval tickets and "this session" grants to this id,
     // so it stays fixed across token refreshes for the app's lifetime.
     jti: sessionId,
-    scopes: [...CONTROL_SCOPES].sort(),
+    scopes: [...scopes].sort(),
   }
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url')
   const signature = crypto

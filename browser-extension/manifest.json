@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Monaw",
+  "description": "Lets the Monaw desktop agent use this Chrome profile. It connects only to Monaw on this computer.",
+  "version": "1.0.0",
+  "minimum_chrome_version": "125",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAn/freLKNbDM3usr0u2ulAQa36+Rvrfsb3ceroREg53ehoUI5bgiLWvZ3Y5W5QZYjGDJOWBVJC0CBV4+RYbp2WqAC1gXUsCFyy5ubkwmVMzTQz+reKAtSzy5OAcp0PsWglYTuffZhc/AXm5OguROYiDn6yBe+pozj3LJzER0W72KsdIzB9x/V15jQg7UirPfz9kTrIqVcBN3CBjOLa/VShgPEZR8za6ASuC9SXGp99hQAiP3C19nezCUN46D4cVRIIwk5PUVR1Dd6WWIlAX6XHIU3OUqj5Oucyvtv39kuhq6lyPIoayM+U8kPQsqvhjv/GgG06EthDbpEnlW7RTU1NQIDAQAB",
+  "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Monaw",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -1,6 +1,9 @@
 import asyncio
 import importlib.util
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -13,11 +16,17 @@ from app.agent.settings_store import build_runtime_namespace, load_agent_setting
 from app.agent.skill_loader import available_skill_payload
 from app.config import settings
 from app.agent.observability.recorder import redact
-from app.schemas import BrowserUseDiagnosticsOut, DiagnosticsSummaryPayload, MCPServerDiagnosticsOut
-from app.skills.browser_use.chrome_launch import (
-    find_chrome_executable,
-    last_used_chrome_profile,
-    list_local_chrome_profiles,
+from app.schemas import (
+    BrowserExtensionInstallOut,
+    BrowserUseDiagnosticsOut,
+    DiagnosticsSummaryPayload,
+    MCPServerDiagnosticsOut,
+)
+from app.skills.browser_use.chrome_launch import find_chrome_executable, launch_chrome_detached
+from app.skills.browser_use.extension.install import (
+    ExtensionInstallError,
+    extension_status,
+    install_extension,
 )
 from app.skills.mcp_bridge.builtin import CHROME_DEVTOOLS_SERVER, is_builtin_server
 from app.skills.mcp_bridge.connection import get_mcp_runtime_diagnostics, reconnect_mcp_server
@@ -98,16 +107,6 @@ def _redact_mcp_args(values: object) -> list[str]:
     return output
 
 
-def _safe_profile_directory(value: object) -> str:
-    """Keep Chrome profile identifiers (Default / Profile N), never anything path-like."""
-    directory = str(value or "").strip()
-    if directory in {"Default", "Guest Profile"}:
-        return directory
-    if directory.startswith("Profile ") and directory.removeprefix("Profile ").isdigit():
-        return directory
-    return ""
-
-
 def _devtools_status() -> dict:
     entry = next(
         (item for item in get_mcp_runtime_diagnostics() if item.get("name") == CHROME_DEVTOOLS_SERVER),
@@ -131,10 +130,6 @@ def _devtools_status() -> dict:
 def _browser_status(runtime_settings, runtime_namespace) -> dict:
     available_skills = {item["name"]: item for item in available_skill_payload(runtime_namespace)}
     browser_skill = available_skills.get("browser-use", {})
-    profiles = [
-        {"name": str(profile.get("name") or ""), "directory": _safe_profile_directory(profile.get("directory"))}
-        for profile in list_local_chrome_profiles()
-    ]
     devtools = _devtools_status()
     return {
         "skill_enabled": bool(runtime_settings.tools.skills.get("browser-use", False)),
@@ -142,10 +137,8 @@ def _browser_status(runtime_settings, runtime_namespace) -> dict:
         "skill_unavailable_reason": str(browser_skill.get("unavailable_reason", "") or ""),
         "chrome_found": bool(find_chrome_executable()),
         "chrome_executable": "",
-        "available_system_profiles": [profile for profile in profiles if profile["directory"]],
-        "system_profile_directory": _safe_profile_directory(runtime_settings.browser.system_profile_directory),
-        "default_profile_directory": _safe_profile_directory(last_used_chrome_profile()),
         "devtools": devtools,
+        "extension": extension_status(),
         "last_error": devtools.get("last_error", "") or devtools.get("unhealthy_reason", ""),
     }
 
@@ -306,7 +299,7 @@ async def reconnect_mcp(name: str):
 
 @router.get("/diagnostics/browser-use", response_model=BrowserUseDiagnosticsOut)
 async def get_browser_status():
-    """Chrome discovery, profiles, and the built-in Chrome DevTools connection."""
+    """Chrome discovery, the Monaw extension, and the built-in browser server."""
     runtime_settings = load_agent_settings(settings)
     runtime_namespace = build_runtime_namespace(settings, runtime_settings)
     return await asyncio.to_thread(_browser_status, runtime_settings, runtime_namespace)
@@ -314,6 +307,55 @@ async def get_browser_status():
 
 @router.post("/diagnostics/browser-use/reset", response_model=BrowserUseDiagnosticsOut)
 async def reconnect_browser_devtools():
-    """Reconnect the built-in chrome-devtools server. The user's Chrome stays open."""
+    """Restart the built-in browser server; the extension reconnects. The user's Chrome stays open."""
     await asyncio.to_thread(reconnect_mcp_server, CHROME_DEVTOOLS_SERVER)
     return await get_browser_status()
+
+
+def _open_folder(folder: str) -> bool:
+    try:
+        if sys.platform == "win32":
+            os.startfile(folder)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", folder],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return False
+    return True
+
+
+def _open_extensions_page() -> bool:
+    executable = find_chrome_executable()
+    if not executable:
+        return False
+    try:
+        # Opens a tab in the running Chrome, or starts it with its last profile.
+        launch_chrome_detached([executable, "chrome://extensions/"])
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def _restart_browser_server() -> None:
+    # Dropping the socket makes a connected extension reload its new files.
+    reconnect_mcp_server(CHROME_DEVTOOLS_SERVER)
+
+
+@router.post("/diagnostics/browser-use/extension/install", response_model=BrowserExtensionInstallOut)
+async def install_browser_extension():
+    """Copy and pair the Monaw extension, then open its folder and Chrome's extensions page."""
+    runtime_settings = load_agent_settings(settings)
+    try:
+        installed = await asyncio.to_thread(install_extension, int(runtime_settings.browser.extension_port))
+    except ExtensionInstallError as exc:
+        raise HTTPException(status_code=500, detail={"reason_code": exc.reason_code, "message": str(exc)}) from exc
+    folder_opened = await asyncio.to_thread(_open_folder, installed["folder"])
+    page_opened = await asyncio.to_thread(_open_extensions_page)
+    await asyncio.to_thread(_restart_browser_server)
+    return {
+        "folder": installed["folder"],
+        "version": installed["version"],
+        "folder_opened": folder_opened,
+        "extensions_page_opened": page_opened,
+        "status": await get_browser_status(),
+    }

@@ -249,6 +249,9 @@ export interface SkillDescriptor {
 }
 
 export interface MCPServerConfig {
+  server_id?: string
+  credential_refs?: Partial<Record<'env' | 'headers', Record<string, string>>>
+  legacy_secret_fields?: Partial<Record<'env' | 'headers', string[]>>
   name: string
   enabled: boolean
   transport: 'stdio' | 'streamable_http'
@@ -298,11 +301,6 @@ export interface MCPServerDiagnostics {
   feature_unavailable_reason: string
 }
 
-export interface BrowserUseProfile {
-  name: string
-  directory: string
-}
-
 export interface BrowserDevToolsStatus {
   server: string
   running: boolean
@@ -315,17 +313,37 @@ export interface BrowserDevToolsStatus {
   connected_at: string | null
 }
 
+export interface BrowserExtensionStatus {
+  installed: boolean
+  paired: boolean
+  installed_version: string
+  bundled_version: string
+  update_available: boolean
+  server_running: boolean
+  connected: boolean
+  connected_version: string
+  last_error: string
+}
+
 export interface BrowserUseDiagnostics {
   skill_enabled: boolean
   skill_available: boolean
   skill_unavailable_reason: string
   chrome_found: boolean
   chrome_executable: string
-  available_system_profiles: BrowserUseProfile[]
-  system_profile_directory: string
-  default_profile_directory: string
+  /** The built-in browser server that the extension connects to. */
   devtools: BrowserDevToolsStatus
+  extension?: BrowserExtensionStatus
   last_error: string
+}
+
+export interface BrowserExtensionInstallResult {
+  /** The folder to pick in Chrome's "Load unpacked" dialog. */
+  folder: string
+  version: string
+  folder_opened: boolean
+  extensions_page_opened: boolean
+  status: BrowserUseDiagnostics
 }
 
 export interface DiagnosticsSummary {
@@ -547,8 +565,7 @@ export interface AgentSettings {
   }
   browser: {
     screenshots_dir: string
-    system_profile_directory: string
-    auto_approve_local_debugging?: boolean
+    extension_port?: number
     allowed_domains: string[]
   }
   memory: {

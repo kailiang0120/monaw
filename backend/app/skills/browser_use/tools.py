@@ -1,7 +1,8 @@
 """``browser_fetch``: read-only page retrieval over HTTP, parsed with Scrapling.
 
 This never opens a browser. Interactive browsing and JavaScript-rendered pages
-go through the built-in Chrome DevTools MCP tools (``mcp__chrome-devtools__*``).
+go through the built-in browser tools (``mcp__chrome-devtools__*``), served by the
+Monaw extension.
 """
 
 from __future__ import annotations

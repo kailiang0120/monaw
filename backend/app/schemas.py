@@ -221,6 +221,7 @@ class SpeechToTextSettingsPayload(BaseModel):
 
 
 class MCPServerConfigPayload(BaseModel):
+    server_id: str = Field("", pattern=r"^(?:[a-f0-9]{32})?$")
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]{1,32}$")
     enabled: bool = True
     transport: str = Field("stdio", pattern="^(stdio|streamable_http)$")
@@ -230,6 +231,8 @@ class MCPServerConfigPayload(BaseModel):
     cwd: str = ""
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    credential_refs: dict[Literal["env", "headers"], dict[str, str]] = Field(default_factory=dict)
+    legacy_secret_fields: dict[str, list[str]] = Field(default_factory=dict)
     startup_timeout_ms: int = 8000
     call_timeout_ms: int = 30000
     reconnect_on_unhealthy: bool = True
@@ -253,8 +256,7 @@ class MCPSettingsPayload(BaseModel):
 
 class BrowserUseSettingsPayload(BaseModel):
     screenshots_dir: str = ""
-    system_profile_directory: str = ""
-    auto_approve_local_debugging: bool = True
+    extension_port: int = Field(8436, ge=1024, le=65535)
     allowed_domains: list[str] = Field(default_factory=list)
 
 
@@ -751,13 +753,8 @@ class RetryEvent(BaseModel):
     attempt: int
 
 
-class BrowserUseProfileOut(BaseModel):
-    name: str
-    directory: str
-
-
 class BrowserDevToolsStatusOut(BaseModel):
-    """State of the built-in chrome-devtools MCP server that drives the browser."""
+    """State of the built-in browser server (the chrome-devtools MCP server the extension serves)."""
 
     server: str
     # False until the server has been started (it starts with the backend).
@@ -771,6 +768,21 @@ class BrowserDevToolsStatusOut(BaseModel):
     connected_at: str | None = None
 
 
+class BrowserExtensionStatusOut(BaseModel):
+    """The Monaw Chrome extension: installed copy, pairing, and live connection."""
+
+    installed: bool = False
+    paired: bool = False
+    installed_version: str = ""
+    bundled_version: str = ""
+    update_available: bool = False
+    # The built-in browser server is running.
+    server_running: bool = False
+    connected: bool = False
+    connected_version: str = ""
+    last_error: str = ""
+
+
 class BrowserUseDiagnosticsOut(BaseModel):
     skill_enabled: bool
     skill_available: bool
@@ -778,12 +790,19 @@ class BrowserUseDiagnosticsOut(BaseModel):
     chrome_found: bool
     # Always "": local paths are not returned by diagnostics.
     chrome_executable: str = ""
-    available_system_profiles: list[BrowserUseProfileOut] = Field(default_factory=list)
-    # Configured profile ("" = Chrome's last-used profile, shown as default_profile_directory).
-    system_profile_directory: str = ""
-    default_profile_directory: str = ""
     devtools: BrowserDevToolsStatusOut
+    extension: BrowserExtensionStatusOut = Field(default_factory=BrowserExtensionStatusOut)
     last_error: str = ""
+
+
+class BrowserExtensionInstallOut(BaseModel):
+    # The folder to pick in Chrome's "Load unpacked" dialog. This is the one
+    # diagnostics response that returns a local path, because the user needs it.
+    folder: str
+    version: str
+    folder_opened: bool = False
+    extensions_page_opened: bool = False
+    status: BrowserUseDiagnosticsOut
 
 
 class ObservabilityUsageOut(BaseModel):

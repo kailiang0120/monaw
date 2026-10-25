@@ -1,7 +1,7 @@
 // mcp__Chrome-dev-tools__ is the name older saved MCP entries used.
 const CHROME_DEVTOOLS_PREFIXES = ['mcp__chrome-devtools__', 'mcp__Chrome-dev-tools__']
 
-// Chrome DevTools MCP tool names, in the words a user would use.
+// Browser tool names (served by the Monaw extension), in the words a user would use.
 const BROWSER_ACTIONS: Record<string, string> = {
   navigate_page: 'open page',
   new_page: 'open new tab',
@@ -22,10 +22,6 @@ const BROWSER_ACTIONS: Record<string, string> = {
   evaluate_script: 'run page script',
   list_console_messages: 'read console',
   get_console_message: 'read console',
-  list_network_requests: 'read network requests',
-  get_network_request: 'read network request',
-  emulate: 'emulate device',
-  resize_page: 'resize window',
 }
 
 function humanize(name: string): string {

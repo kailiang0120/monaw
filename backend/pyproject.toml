@@ -36,6 +36,8 @@ dependencies = [
     "tiktoken>=0.8.0",
     "tzdata>=2025.2; sys_platform == 'win32'",
     "uvicorn[standard]>=0.30.6",
+    # The Monaw Chrome extension connects over a local WebSocket.
+    "websockets>=13.0",
 ]
 
 [dependency-groups]

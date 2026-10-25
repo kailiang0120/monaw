@@ -11,7 +11,7 @@ import {
   updateWorkspaceInstructions,
   startOpenAIAccountLogin,
 } from '../lib/api/settings'
-import { fetchBrowserDiagnostics, reconnectBrowser } from '../lib/api/diagnostics'
+import { fetchBrowserDiagnostics, installBrowserExtension, reconnectBrowser } from '../lib/api/diagnostics'
 import { SettingsModal } from '../features/settings/SettingsModal'
 
 const mocks = vi.hoisted(() => ({
@@ -38,12 +38,6 @@ vi.mock('../lib/api/diagnostics', () => {
     skill_unavailable_reason: '',
     chrome_found: true,
     chrome_executable: '',
-    available_system_profiles: [
-      { name: 'Personal', directory: 'Default' },
-      { name: 'Work', directory: 'Profile 1' },
-    ],
-    system_profile_directory: '',
-    default_profile_directory: 'Default',
     devtools: {
       server: 'chrome-devtools',
       running: true,
@@ -55,12 +49,17 @@ vi.mock('../lib/api/diagnostics', () => {
       unhealthy_reason: '',
       connected_at: null,
     },
+    extension: {
+      installed: true, paired: true, installed_version: '1.0.0', bundled_version: '1.0.0', update_available: false,
+      server_running: true, connected: true, connected_version: '1.0.0', last_error: '',
+    },
     last_error: '',
   }
   return {
     fetchBrowserDiagnostics: vi.fn().mockResolvedValue(browserStatus),
     fetchMCPDiagnostics: vi.fn().mockResolvedValue([]),
     reconnectBrowser: vi.fn().mockResolvedValue(browserStatus),
+    installBrowserExtension: vi.fn(),
     reconnectMCPServer: vi.fn(),
   }
 })
@@ -104,7 +103,6 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
     },
     browser: {
       screenshots_dir: 'C:/runtime/browser/screenshots',
-      system_profile_directory: '',
       allowed_domains: [],
     },
     memory: {
@@ -407,6 +405,7 @@ describe('SettingsModal', () => {
 
   afterEach(() => {
     cleanup()
+    vi.unstubAllGlobals()
   })
 
   it('keeps model selection and image help out of Settings', async () => {
@@ -418,15 +417,19 @@ describe('SettingsModal', () => {
     expect(screen.queryByText('Reading images and screenshots')).not.toBeInTheDocument()
   })
 
-  it('shows Chrome status and only the DevTools-era browser settings', async () => {
+  it('shows Chrome status and only the extension-era browser settings', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
     expect(await screen.findByText('Found')).toBeInTheDocument()
-    expect(screen.getByText('DevTools connection')).toBeInTheDocument()
-    expect(screen.getByText('Ready')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Chrome profile' })).toHaveTextContent('Last used (Default)')
-    expect(screen.getByRole('checkbox', { name: "Auto-approve Chrome's connection prompt" })).toBeInTheDocument()
+    expect(screen.getAllByText('Monaw extension').length).toBeGreaterThan(0)
+    expect(screen.getByText('Connected')).toBeInTheDocument()
+    // Chrome remote debugging was removed: no connection choice, profile picker or Allow-prompt switch.
+    expect(screen.queryByText('DevTools connection')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Chrome remote debugging' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Chrome profile' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: "Auto-approve Chrome's connection prompt" })).not.toBeInTheDocument()
+    expect(screen.queryByText(/remote debugging/i)).not.toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Navigation target domains' })).toBeInTheDocument()
     expect(screen.getByText(/Does not restrict existing tabs, snapshots, screenshots, clicks, popups, or Chrome redirects/)).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Screenshots folder' })).toHaveValue('C:/runtime/browser/screenshots')
@@ -446,29 +449,33 @@ describe('SettingsModal', () => {
     expect(screen.queryByLabelText('CDP endpoint')).not.toBeInTheDocument()
   })
 
-  it('saves the selected Chrome profile without removed browser keys', async () => {
+  it('saves browser settings without removed browser keys', async () => {
     mocks.updateSettings.mockClear()
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
     await screen.findByText('Found')
-    fireEvent.click(screen.getByRole('button', { name: 'Chrome profile' }))
-    fireEvent.click(screen.getByRole('option', { name: 'Work (Profile 1)' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Navigation target domains' }), {
+      target: { value: 'example.com, docs.example.com' },
+    })
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-        browser: expect.objectContaining({ system_profile_directory: 'Profile 1' }),
+        browser: expect.objectContaining({ allowed_domains: ['example.com', 'docs.example.com'] }),
       }))
     })
     const calls = vi.mocked(updateSettings).mock.calls
     const savedBrowser = calls[calls.length - 1]?.[0]?.browser ?? {}
-    for (const removed of ['headless', 'keep_alive', 'dom_inspection_engine', 'downloads_dir', 'traces_dir', 'mode']) {
+    for (const removed of [
+      'headless', 'keep_alive', 'dom_inspection_engine', 'downloads_dir', 'traces_dir', 'mode',
+      'connection', 'system_profile_directory', 'auto_approve_local_debugging',
+    ]) {
       expect(savedBrowser).not.toHaveProperty(removed)
     }
   })
 
-  it('reconnects the Chrome DevTools connection from the Browser page', async () => {
+  it('reconnects the browser server from the Browser page', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
@@ -477,29 +484,90 @@ describe('SettingsModal', () => {
     await waitFor(() => expect(reconnectBrowser).toHaveBeenCalledTimes(1))
   })
 
+  it('sets up the Monaw extension and shows the Load unpacked steps', async () => {
+    const base = await fetchBrowserDiagnostics()
+    const extension = {
+      installed: false, paired: false, installed_version: '', bundled_version: '1.0.0', update_available: false,
+      server_running: false, connected: false, connected_version: '', last_error: '',
+    }
+    vi.mocked(fetchBrowserDiagnostics).mockResolvedValue({ ...base, extension })
+    const installedStatus = {
+      ...base,
+      extension: { ...extension, installed: true, paired: true, installed_version: '1.0.0', server_running: true },
+    }
+    vi.mocked(installBrowserExtension).mockResolvedValue({
+      folder: 'C:/Users/me/.monaw/browser/extension',
+      version: '1.0.0',
+      folder_opened: true,
+      extensions_page_opened: false,
+      status: installedStatus,
+    })
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    await screen.findByText('Found')
+    expect(screen.getByText('Not set up')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set up extension' }))
+    expect(await screen.findByRole('textbox', { name: 'Extension folder' })).toHaveValue('C:/Users/me/.monaw/browser/extension')
+    expect(screen.getByText('Click Load unpacked.')).toBeInTheDocument()
+    expect(screen.getByText(/Monaw could not open it/)).toBeInTheDocument()
+    expect(screen.getByText('Waiting for Chrome')).toBeInTheDocument()
+    vi.mocked(fetchBrowserDiagnostics).mockResolvedValue(base)
+  })
+
+  it.each(['desktop', 'browser', 'failure'] as const)('copies the extension folder with %s clipboard behavior', async (mode) => {
+    const base = await fetchBrowserDiagnostics()
+    const status = { ...base,
+      extension: { installed: true, paired: true, installed_version: '1.0.0', bundled_version: '1.0.0',
+        update_available: false, server_running: true, connected: false, connected_version: '', last_error: '' } }
+    vi.mocked(fetchBrowserDiagnostics).mockResolvedValueOnce(status)
+    vi.mocked(installBrowserExtension).mockResolvedValue({ folder: 'C:/Monaw Test/浏览器/extension', version: '1.0.0',
+      folder_opened: true, extensions_page_opened: true, status })
+    const browserWrite = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: browserWrite } })
+    const desktopWrite = vi.fn().mockResolvedValue(undefined)
+    if (mode !== 'browser') {
+      // Electron denies navigator.clipboard. Copy must use the preload bridge.
+      browserWrite.mockRejectedValue(new Error('Clipboard permission denied'))
+      Object.defineProperty(window, 'electronAPI', { configurable: true, value: { writeClipboardText: desktopWrite } })
+    }
+    if (mode === 'failure') desktopWrite.mockRejectedValue(new Error('Fixture OS clipboard failure'))
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up again' }))
+    await screen.findByRole('textbox', { name: 'Extension folder' })
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+    if (mode === 'failure') {
+      expect(await screen.findByRole('alert')).toHaveTextContent('Select the folder and press Ctrl+C')
+      expect(screen.queryByRole('button', { name: 'Copied' })).not.toBeInTheDocument()
+      expect(screen.getByRole('textbox', { name: 'Extension folder' })).toHaveValue('C:/Monaw Test/浏览器/extension')
+    } else {
+      expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+      expect(mode === 'desktop' ? desktopWrite : browserWrite).toHaveBeenCalledWith('C:/Monaw Test/浏览器/extension')
+    }
+    if (mode !== 'browser') expect(browserWrite).not.toHaveBeenCalled()
+  })
+
+  it('shows the extension as connected', async () => {
+    const base = await fetchBrowserDiagnostics()
+    vi.mocked(fetchBrowserDiagnostics).mockResolvedValueOnce(base)
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+    expect(await screen.findByText('Connected')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set up again' })).toBeInTheDocument()
+    expect(screen.getByText(/Connected \(version 1\.0\.0\)/)).toBeInTheDocument()
+  })
+
   it('warns when Chrome is not installed', async () => {
     vi.mocked(fetchBrowserDiagnostics).mockResolvedValueOnce({
       ...(await fetchBrowserDiagnostics()),
       chrome_found: false,
-      available_system_profiles: [],
     })
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
     expect(await screen.findByText('Not found')).toBeInTheDocument()
     expect(screen.getByText(/Google Chrome was not found/)).toBeInTheDocument()
-  })
-
-  it('defaults Chrome approval on and saves the manual approval choice', async () => {
-    render(<SettingsModal onClose={() => {}} />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
-    const approval = screen.getByRole('checkbox', { name: "Auto-approve Chrome's connection prompt" })
-    expect(approval).toBeChecked()
-    fireEvent.click(approval)
-    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
-    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-      browser: expect.objectContaining({ auto_approve_local_debugging: false }),
-    })))
   })
 
   it('lists only user-added skills and MCP servers in Tools and preserves edits when switching', async () => {

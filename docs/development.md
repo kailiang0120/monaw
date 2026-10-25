@@ -9,7 +9,7 @@ This document is for contributors and maintainers. The root README is for end us
 - Python environment and dependencies: `uv`, `pyproject.toml`, and `uv.lock`.
 - LLM providers: OpenAI SDK with API key, Codex SDK with ChatGPT account sign-in, and Google GenAI SDK.
 - Storage: SQLite plus local markdown memory files.
-- Automation: Chrome DevTools MCP (`chrome-devtools-mcp`, run through `npx`), Scrapling for `browser_fetch`, MCP, and Windows desktop automation packages.
+- Automation: the Monaw Chrome extension (`browser-extension/`, a Manifest V3 extension using `chrome.debugger`) with its local server in `backend/app/skills/browser_use/extension/`, Scrapling for `browser_fetch`, MCP, and Windows desktop automation packages.
 
 ## Development Commands
 
@@ -184,7 +184,7 @@ docs/telegram.md                       Telegram bridge setup and operations
 Current built-in skills:
 
 ```text
-browser_use       Browser automation (Chrome DevTools MCP + browser_fetch)
+browser_use       Browser automation (Monaw extension server + browser_fetch)
 computer_use      Windows desktop observation and control helpers
 core              Core utilities (internal)
 exec              Command execution (internal)
@@ -263,13 +263,15 @@ from the interrupted task, including its tool inputs and result status.
 
 ## Browser Automation
 
-Browser settings and status live in Settings -> Browser. Monaw drives the user's own Chrome through the built-in Chrome DevTools MCP server (`backend/app/skills/mcp_bridge/builtin.py`). `backend/app/skills/browser_use/chrome_launch.py` finds Chrome, prepares the profile, and launches it on the first DevTools call; `chrome_approval.py` clicks Chrome's native Allow prompt on Windows; `url_policy.py` holds the URL allow-list and SSRF checks shared by DevTools navigation and `browser_fetch` (`tools.py`). Chrome 144 or later is required. See [browser-automation.md](browser-automation.md).
+Browser settings and status live in Settings -> Browser. Monaw drives the user's own Chrome through the Monaw Chrome extension (`browser-extension/`). The built-in browser server (`backend/app/skills/mcp_bridge/builtin.py`) runs `backend/app/skills/browser_use/extension/` as a stdio MCP server that the extension connects to over a loopback WebSocket; `install.py` copies and pairs the extension, and `toolset.py`, `snapshot.py`, and `session.py` implement the tools over DevTools commands the extension relays. `chrome_launch.py` finds Chrome and opens it normally when the extension is not connected; `url_policy.py` holds the URL allow-list and SSRF checks shared by browser navigation and `browser_fetch` (`tools.py`). Chrome 125 or later is required. See [browser-automation.md](browser-automation.md).
 
 ## MCP
 
-MCP servers are configured in Settings -> Tools -> MCP. The app supports custom stdio and streamable HTTP server entries. Chrome DevTools ships built into the browser automation skill (`backend/app/skills/mcp_bridge/builtin.py`) and is not configured here.
+MCP servers are configured in Settings -> Tools -> MCP. The app supports custom stdio and streamable HTTP server entries. The browser server ships built into the browser automation skill (`backend/app/skills/mcp_bridge/builtin.py`) and is not configured here.
 
 Diagnostics in the same panel show server connection state, reflected tools, process state, and startup errors.
+
+Custom credentials use a server/transport/field-scoped encrypted vault with an authenticated main-process handoff. See [MCP credential migration and headless development](mcp-credentials.md). Tests cover interrupted migration and use a real local MCP fixture plus Windows OS encryption in the application suite.
 
 ## Sandbox And Permissions
 
@@ -402,7 +404,7 @@ printed rather than the dozens of submodules that inherit it.
 - **Electron and backend workflows (Windows)** — `npm run test:app` on Python
   3.11 / Node 22.13, covering authenticated startup, streaming/persistence,
   approval and rejection, parallel stop, scheduling, uncertain run reconciliation
-  and backend interruption, with disposable application data and controlled providers.
+  backend interruption, and MCP migration/rotation/restart/schema/revocation, with disposable application data and controlled providers. The credential workflow requires real OS encryption and a real local MCP transport; it does not silently skip those checks.
 
 Backend, compatibility, real-Docker, and renderer jobs upload JUnit reports even
 after test failure when reports were produced. Artifacts have distinct names per

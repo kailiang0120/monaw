@@ -1,8 +1,8 @@
 # Reliability implementation progress
 
-Updated: 20 October 2026. Baseline: `ec2bd7df7006ee11469d9ea80f6d1f25aa8fc2eb`.
+Updated: 25 October 2026. Original baseline: `ec2bd7df7006ee11469d9ea80f6d1f25aa8fc2eb`; first four batches checkpointed in `98ec1fc`.
 
-This records the first four implementation batches against the [implementation plan](reliability-implementation-plan.md). The full release plan remains in progress. Changes have not been pushed; no pull request, release, or GitHub-hosted CI run has been published.
+This records five implementation batches against the [implementation plan](reliability-implementation-plan.md). The full release plan remains in progress. The fifth batch is local and uncommitted; this session has not pushed changes, opened a pull request, published a release, or run GitHub-hosted CI.
 
 ## Delivered in the first batch
 
@@ -120,8 +120,40 @@ Stop the application and create a consistent SQLite backup, accounting for WAL, 
 
 ## Next implementation boundaries
 
-1. SEC-03 MCP credential references/migration, followed by focused runtime/settings extractions and keyboard/focus/first-run improvements.
+1. Focused runtime/settings extractions and keyboard/focus/first-run improvements. SEC-03 credential storage and the controlled MCP lifecycle workflow are delivered below; third-party interoperability and cross-user credential restore remain separate checks.
 2. Windows backend packaging/installer, packaged/installed application and upgrade checks, diagnostic export and measured baselines.
-3. Expand the application harness for MCP lifecycle and packaged candidates; run real Docker and GitHub-hosted CI and collect release evidence.
+3. Expand the application harness for packaged candidates; run real Docker and GitHub-hosted CI and collect release evidence.
 
 Stage A and the overall reliability release are not complete. No score reassessment is claimed yet.
+
+## Delivered in the fifth batch
+
+The checkout already contained uncommitted browser-extension work at the start of this session. It was preserved. The results below validate the combined checkout; this batch's implementation concerns custom MCP credentials and the application workflow.
+
+| Work item | Behavior implemented | Evidence |
+| --- | --- | --- |
+| SEC-03 identity and storage | Stable server identities; references bound to server/transport/field/key; MCP-only OS-encrypted vault namespace; no generic renderer key selection or stored-secret read API. Ordinary settings preserve omitted references and hidden legacy credentials, reject masked inputs/new obvious secret fields, and reject reference rebinding and case-insensitive field collisions. | Model/API tests; two-server vault isolation and rotation tests; actual Windows encryption and decrypted restart in the application workflow. |
+| SEC-03 migration | Explicit per-field selection, including arbitrary environment names. Encrypt and verify the stored record before atomic plaintext removal. Encrypted prepared records retain progress; version/digest checks reject changed legacy input; an interrupted or lost commit response reconciles safely. Unselected legacy fields remain marked plaintext. | Encryption/storage/verification failures, interruption before commit, response loss after commit, changed binding/version/digest, atomic replace failure, and unrelated whole-settings save tests. No live developer settings were migrated. |
+| SEC-03 hydration and revocation | Dedicated main-process-only scope, absent from renderer/development tokens. Connection-local values, filtered child environment, unavailable state before hydration, affected-manager retirement/reconnect on rotation, explicit revocation, server-removal pruning, and stale callback fencing. Headless launchers use an explicit authenticated runtime snapshot with no persistence fallback. | Scope-denial/no-read tests, missing-hydration/no-launch, two-server separation, HTTP local-header injection, rotation/teardown, removed-server callbacks, real local subprocess transport, and restart workflow. |
+| SEC-03 disclosure and redaction | Separate immediate credential controls and saved configuration drafts; per-field migration choices and generic retry-safe feedback. Known current/previous credentials redact diagnostics and observability. Credential-bearing stderr uses bounded memory instead of a raw temporary file. | Component lifecycle/pending/error tests, real subprocess stderr sentinel test, application settings/store/diagnostic/backend-log checks. Ordinary nonsecret configuration remains plaintext by design. |
+| QA-01 MCP lifecycle and CI | Eighth workflow uses real Windows OS encryption and real local MCP SDK transport. Approval invokes discovered tools, rotation takes effect, actual restart rehydrates, reconnect discovers/invokes a changed schema, deletion prevents a new subprocess. Reconnect invalidates old mappings and cached tool registration. Existing Windows application job runs the expanded suite; new backend tests belong to the required API group and Electron tests use the existing glob. | Focused application workflow passed. Final combined verification is recorded below. Third-party MCP services, cross-user restore and packaged installation remain outside this evidence. |
+
+See [MCP credential storage and recovery](mcp-credentials.md) and [application testing](application-testing.md) for the exact behavior and limitations. Older binaries cannot hydrate the new references; copying the encrypted vault across Windows users/machines is not a verified recovery path.
+
+### Fifth-batch verification
+
+| Invocation | Result |
+| --- | --- |
+| Full locked Python 3.11 backend suite with JUnit | **1,187 passed, 8 skipped**, 95.96 seconds. |
+| Isolated locked Python 3.12, `api or runtime or integrations or sandbox or skills`, with JUnit | **1,019 passed, 7 skipped, 169 deselected**, 104.76 seconds. This local selection includes the new API credential tests beyond the existing compatibility-job selection. |
+| Frontend `npm run verify:ci` | **130 UI/App tests and 32 Electron tests passed**; TypeScript, renderer build and JUnit passed. |
+| Windows `npm run test:app` | **8 passed, 0 failures**, approximately 2.3 minutes; renderer build, harness type-check and JUnit passed. Includes the actual OS-encrypted local MCP lifecycle. |
+| Generated API documentation, workflow parse/application job command, whitespace | Passed. New backend tests are classified in the required API group. |
+
+The final application run cleaned its own fixtures and left no harness Electron process running. The previously recorded cleanup exception is historical; it was not retried by this session. Real Docker, GitHub-hosted CI, installer/upgrade, live-provider/third-party MCP interoperability and cross-user credential restore remain unverified. No additional release score is claimed.
+
+### Clipboard follow-up, 25 October
+
+The extension-folder Copy handler used the browser clipboard API, which the desktop permission policy denies, and silently swallowed the error. Copy now uses a bounded, sender-validated, write-only Electron IPC bridge in the desktop app; browser development retains the browser API. Failures show an accessible message with manual keyboard-copy instructions. Clipboard reads are not exposed to the renderer. A desktop restart is needed to load the new main/preload bridge.
+
+Three regression cases cover desktop, browser, and failed copying, including spaces and non-ASCII paths. The desktop and failure-feedback cases failed before the fix; all **29 settings component tests** now pass. **32 Electron tests**, renderer/harness TypeScript, and the renderer build pass. A focused real Electron application workflow passes (**1 passed**, 14.0 seconds), asserting the actual OS clipboard after clicking Copy through real authenticated setup. Only setup's external Explorer/Chrome launches are suppressed in the disposable fixture; Chrome extension installation is not tested or claimed. The existing application CI command now discovers nine workflows. The earlier eight-workflow/backend results above remain historical and were not rerun for this clipboard-only change.

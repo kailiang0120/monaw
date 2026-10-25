@@ -13,6 +13,7 @@ from app.api.routes.openai_account import router as openai_account_router
 from app.api.routes.privacy import router as privacy_router
 from app.api.routes.sandbox import router as sandbox_router
 from app.api.routes.settings import router as settings_router
+from app.api.routes.mcp_credentials import router as mcp_credentials_router
 from app.api.routes.scheduled_tasks import router as scheduled_tasks_router
 from app.api.routes.speech_to_text import router as speech_to_text_router
 from app.api.routes.uploads import router as uploads_router
@@ -24,6 +25,7 @@ router.include_router(events_router)
 router.include_router(conversations_router)
 router.include_router(access_grants_router)
 router.include_router(settings_router)
+router.include_router(mcp_credentials_router)
 router.include_router(memories_router)
 router.include_router(approvals_router)
 router.include_router(diagnostics_router)

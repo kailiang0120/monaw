@@ -60,6 +60,11 @@ def reset_runtime_cache(*, reset_mcp: bool = True) -> None:
     runtime_reset(reset_mcp=reset_mcp)
 
 
+def _browser_connection_changed(current, updated) -> bool:
+    """The built-in browser server is started with the extension port."""
+    return current.browser.extension_port != updated.browser.extension_port
+
+
 def _normalize_permission_mode(value: str) -> str:
     return "custom" if value == "user_config" else value
 
@@ -130,7 +135,10 @@ async def update_settings(body: SettingsUpdate):
         )
     updated = current
     if patch:
-        updated = merge_agent_settings(current, patch)
+        try:
+            updated = merge_agent_settings(current, patch)
+        except ValueError:
+            raise HTTPException(400, "Invalid settings change; use MCP credential controls for secret fields and preserve server identity") from None
         if updated != current:
             save_agent_settings(updated)
             changed = True
@@ -140,7 +148,7 @@ async def update_settings(body: SettingsUpdate):
                 for section in patch
                 if getattr(updated, section) != getattr(current, section)
             }
-            mcp_changed = "mcp" in changed_sections
+            mcp_changed = "mcp" in changed_sections or _browser_connection_changed(current, updated)
 
     def assign_if_changed(name: str, value: str | None, *, default: str | None = None) -> bool:
         if value is None:
@@ -187,6 +195,9 @@ async def update_settings(body: SettingsUpdate):
         )
         set_permission_mode(mapped)
     if changed:
+        if mcp_changed:
+            from app.security.mcp_credentials import prune_references
+            prune_references(updated.mcp.servers)
         logger.info(
             "Settings updated provider=%s model=%s reasoning=%s runtime_changed=%s mcp_changed=%s",
             updated.llm.provider,

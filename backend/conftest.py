@@ -14,6 +14,7 @@ TEST_GROUPS = {
         "test_main_config.py",
         "test_mcp_runtime_routes.py",
         "test_mcp_settings_integration.py",
+        "test_mcp_credentials.py",
         "test_response_attachments.py",
     },
     "runtime": {
@@ -60,7 +61,9 @@ TEST_GROUPS = {
         "test_computer_state.py",
         "test_computer_input.py",
         "test_browser_fetch.py",
-        "test_chrome_approval.py",
+        "test_browser_extension_bridge.py",
+        "test_browser_extension_install.py",
+        "test_browser_extension_tools.py",
         "test_local_chrome_launch.py",
         "test_exec_tool.py",
         "test_filesystem_tools.py",
@@ -104,6 +107,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture(autouse=True)
+def isolate_mcp_credentials(monkeypatch: pytest.MonkeyPatch):
+    import app.security.mcp_credentials as credentials
+    monkeypatch.setattr(credentials, "_VALUES", {})
+    monkeypatch.setattr(credentials, "_REDACTIONS", [])
+
+
+@pytest.fixture(autouse=True)
 def isolate_approval_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Keep approval tickets out of the developer's real ~/.monaw runtime dir.
 
@@ -118,6 +128,16 @@ def isolate_approval_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     broker._pending_index.clear()
     broker._resume_events.clear()
     broker._resume_decisions.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_browser_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Keep the developer's installed Monaw extension from changing the browser connection."""
+    import app.skills.browser_use.extension.common as extension_common
+
+    monkeypatch.setattr(extension_common, "installed_extension_dir", lambda: tmp_path / "browser-extension")
+    monkeypatch.setattr(extension_common, "status_file", lambda: tmp_path / "browser-extension-status.json")
     yield
 
 

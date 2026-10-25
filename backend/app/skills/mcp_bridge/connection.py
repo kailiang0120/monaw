@@ -16,13 +16,14 @@ from typing import Any, Literal
 
 from app.agent.settings_store import MCPServerConfig
 from app.agent.ui_events import publish_ui_event
+from app.security.mcp_credentials import child_environment, resolved_fields, redact_mcp_secrets, remember_secrets, SECRET_NAME
 
 from .builtin import builtin_mcp_servers, is_builtin_server
 from .images import externalize_image_blocks
 
 logger = logging.getLogger(__name__)
 
-MCP_SERVER_STATES = {"stopped", "starting", "connected", "unhealthy", "failed"}
+MCP_SERVER_STATES = {"stopped", "starting", "connected", "unhealthy", "failed", "credentials_unavailable"}
 
 _ACTIVE_MANAGERS: dict[str, "ServerManager"] = {}
 _ACTIVE_LOCK = threading.RLock()
@@ -159,11 +160,54 @@ class _TailBuffer:
                 self._finalizer = None
 
 
+class _CredentialStderr:
+    """Pipe child stderr into bounded memory; never spool credential-bearing stderr to disk."""
+    def __init__(self, limit: int = 8192):
+        self.limit = limit
+        self._text = b""
+        self._lock = threading.Lock()
+        self._writer = None
+
+    def fileno(self):
+        if self._writer is None:
+            reader, writer = os.pipe()
+            self._writer = os.fdopen(writer, "wb", buffering=0)
+            def drain():
+                try:
+                    while chunk := os.read(reader, 4096):
+                        with self._lock:
+                            self._text = (self._text + chunk)[-self.limit:]
+                finally:
+                    os.close(reader)
+            self._reader = threading.Thread(target=drain, daemon=True, name="mcp-stderr")
+            self._reader.start()
+        return self._writer.fileno()
+
+    def write(self, value):
+        chunk = value if isinstance(value, bytes) else str(value).encode()
+        with self._lock:
+            self._text = (self._text + chunk)[-self.limit:]
+        return len(chunk)
+
+    def flush(self):
+        pass
+
+    def getvalue(self):
+        with self._lock:
+            return redact_mcp_secrets(self._text.decode("utf-8", errors="replace"))
+
+    def close(self):
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+            self._reader.join(timeout=1)
+
+
 class ServerManager:
     def __init__(self, cfg: MCPServerConfig) -> None:
         self.cfg = cfg
         self.connected = False
-        self.state: Literal["stopped", "starting", "connected", "unhealthy", "failed"] = "stopped"
+        self.state: str = "stopped"
         self.last_error = ""
         self.unhealthy_reason = ""
         self.tool_count = 0
@@ -193,14 +237,26 @@ class ServerManager:
         self.liveness_failure_threshold = 3
         self._liveness_failures = 0
         self._child_pids_before_start: set[int] = set()
-        self._local_chrome_launched = False
+        remember_secrets(v for fields in (cfg.env, cfg.headers) for k, v in fields.items() if SECRET_NAME.search(k))
 
     def start(self) -> bool:
+        if getattr(self, "_credential_retired", False):
+            self.last_error = "MCP connection configuration changed; reload tools"
+            return False
         self._register_active()
         with self._lifecycle_lock:
             if self._thread is not None and self._thread.is_alive() and self.connected:
                 return True
             if not self._stop_current_runtime_locked(join_timeout=5):
+                return False
+            try:
+                resolved_fields(self.cfg)
+            except ValueError:
+                self.state = "credentials_unavailable"
+                self.startup_phase = "awaiting_credentials"
+                self.last_error = "MCP credentials are unavailable; unlock or restore the credential vault"
+                self.connected = False
+                self._publish_changed()
                 return False
             self._prepare_start_locked()
 
@@ -235,6 +291,8 @@ class ServerManager:
             self._unregister_active()
 
     def call_tool_sync(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        if getattr(self, "_credential_retired", False):
+            return _err("mcp_credentials_changed", "MCP connection changed; reload tools before calling it")
         if (self._loop is None or self._session is None or not self.connected) and not self._recover_before_call():
             return _err(
                 "mcp_disconnected",
@@ -278,7 +336,7 @@ class ServerManager:
                 "The MCP tool call failed.",
                 server=self.cfg.name,
                 tool=tool_name,
-                raw_error=str(exc),
+                raw_error=redact_mcp_secrets(str(exc)),
             )
         finally:
             elapsed = datetime.now(timezone.utc) - started
@@ -316,6 +374,8 @@ class ServerManager:
         )
 
     def refresh_tools(self) -> bool:
+        if getattr(self, "_credential_retired", False):
+            return False
         if (self._loop is None or self._session is None or not self.connected) and not self.restart():
             return False
 
@@ -353,8 +413,8 @@ class ServerManager:
             "connected": self.connected,
             "state": self.state,
             "tool_count": self.tool_count,
-            "last_error": self.last_error or None,
-            "unhealthy_reason": self.unhealthy_reason or None,
+            "last_error": redact_mcp_secrets(self.last_error) or None,
+            "unhealthy_reason": redact_mcp_secrets(self.unhealthy_reason) or None,
             "description": self.cfg.description,
             "command": self.cfg.command,
             "args": list(self.cfg.args),
@@ -366,7 +426,7 @@ class ServerManager:
             "started_at": self.started_at,
             "connected_at": self.connected_at,
             "disconnected_at": self.disconnected_at,
-            "stderr_tail": self.stderr_tail.getvalue(),
+            "stderr_tail": redact_mcp_secrets(self.stderr_tail.getvalue()),
             "last_call_started_at": self.last_call_started_at,
             "last_call_duration_ms": self.last_call_duration_ms,
             "failed_call_count": self.failed_call_count,
@@ -380,27 +440,11 @@ class ServerManager:
         return self.restart()
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]):
-        if "--autoConnect" in self.cfg.args and any(
-            "chrome-devtools-mcp" in arg for arg in self.cfg.args
-        ):
-            from app.agent.settings_store import load_agent_settings
-            from app.skills.browser_use.chrome_launch import launch_local_chrome
-            from app.skills.browser_use.chrome_approval import approve_chrome_connection
-
-            browser_settings = load_agent_settings().browser
-            if not self._local_chrome_launched:
-                self._local_chrome_endpoint, _ = await launch_local_chrome(browser_settings.system_profile_directory)
-                self._local_chrome_launched = True
-            async with approve_chrome_connection(
-                self._local_chrome_endpoint, enabled=browser_settings.auto_approve_local_debugging,
-            ):
-                return await self._session.call_tool(tool_name, arguments=arguments)
         return await self._session.call_tool(tool_name, arguments=arguments)
 
     def _prepare_start_locked(self) -> None:
-        self._local_chrome_launched = False
         self.stderr_tail.close()
-        self.stderr_tail = _TailBuffer()
+        self.stderr_tail = _CredentialStderr() if self.cfg.credential_refs or self.cfg.env or self.cfg.headers else _TailBuffer()
         self.connected = False
         self.last_error = ""
         self.unhealthy_reason = ""
@@ -458,8 +502,8 @@ class ServerManager:
         return True
 
     def _mark_unhealthy(self, reason: str, *, failed_call: bool = False) -> None:
-        self.last_error = reason
-        self.unhealthy_reason = reason
+        self.last_error = redact_mcp_secrets(reason)
+        self.unhealthy_reason = self.last_error
         self.connected = False
         self.state = "unhealthy"
         self.disconnected_at = _utcnow()
@@ -488,10 +532,11 @@ class ServerManager:
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            self.last_error = str(exc)
-            self.unhealthy_reason = str(exc)
+            self.last_error = redact_mcp_secrets(str(exc))
+            self.unhealthy_reason = self.last_error
             self.state = "failed"
-            logger.exception("Failed to start MCP server '%s'", self.cfg.name)
+            # SDK exceptions may echo headers, environment values, or launch data.
+            logger.error("Failed to start MCP server '%s': %s", self.cfg.name, self.last_error)
             self._ready.set()
             self._publish_changed()
         finally:
@@ -516,6 +561,7 @@ class ServerManager:
     async def _serve(self) -> None:
         from mcp import ClientSession
 
+        env, headers = resolved_fields(self.cfg)
         self.startup_phase = "opening_transport"
         if self.cfg.transport == "streamable_http":
             from mcp.client.streamable_http import streamablehttp_client
@@ -525,7 +571,7 @@ class ServerManager:
 
             async with streamablehttp_client(
                 self.cfg.url,
-                headers=dict(self.cfg.headers) or None,
+                headers=headers or None,
                 timeout=max(1, self.cfg.startup_timeout_ms / 1000),
                 sse_read_timeout=max(1, self.cfg.call_timeout_ms / 1000),
             ) as (read_stream, write_stream, _get_session_id):
@@ -537,7 +583,7 @@ class ServerManager:
             params = StdioServerParameters(
                 command=_resolve_command(self.cfg.command),
                 args=list(self.cfg.args),
-                env={**os.environ, **self.cfg.env},
+                env=child_environment(env),
                 cwd=self.cfg.cwd or None,
             )
 
@@ -727,7 +773,7 @@ def _iter_enabled_configs(agent_settings) -> list[MCPServerConfig]:
             cfg = raw if isinstance(raw, MCPServerConfig) else MCPServerConfig.model_validate(raw)
             if cfg.enabled and not is_builtin_server(cfg.name):
                 configs.append(cfg)
-    return [*configs, *builtin_mcp_servers()]
+    return [*configs, *builtin_mcp_servers(agent_settings)]
 
 
 def ensure_mcp_manager(cfg: MCPServerConfig) -> ServerManager:
@@ -737,6 +783,7 @@ def ensure_mcp_manager(cfg: MCPServerConfig) -> ServerManager:
             return manager
         if manager is not None:
             try:
+                manager._credential_retired = True
                 manager.close()
             except Exception:
                 logger.exception("Failed to close stale MCP server '%s'", cfg.name)
@@ -753,12 +800,17 @@ def reconnect_mcp_server(name: str) -> dict[str, Any] | None:
         from app.config import settings as app_settings
 
         agent_settings = load_agent_settings(app_settings)
-        candidates = [*agent_settings.mcp.servers, *builtin_mcp_servers()]
+        candidates = [*agent_settings.mcp.servers, *builtin_mcp_servers(agent_settings)]
         cfg = next((s for s in candidates if s.name == name), None)
         if cfg is None:
             return None
         manager = ensure_mcp_manager(cfg)
     manager.restart()
+    # Old tool closures must not execute a newly discovered incompatible schema.
+    from .registry import clear_reflected_tools_for_server
+    from app.agent.runtime import reset_runtime_cache
+    clear_reflected_tools_for_server(name)
+    reset_runtime_cache(reset_mcp=False)
     return manager.status()
 
 
@@ -782,6 +834,7 @@ def reset_mcp_runtime() -> None:
         managers = list(_ACTIVE_MANAGERS.values())
     for manager in managers:
         try:
+            manager._credential_retired = True
             manager.close()
         except Exception:
             logger.exception("Failed to close MCP server '%s'", manager.cfg.name)

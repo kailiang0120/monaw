@@ -79,6 +79,11 @@ class FixtureProvider:
                 if stream_callback:
                     await stream_callback(f"Fixture {scenario} started. ")
                 await barrier(scenario)
+            elif scenario in {"mcp", "mcp-schema"}:
+                if scenario == "mcp-schema":
+                    record("mcp_schema", schema_has_extra=any('get_credential_status' in str(tool) and 'extra' in str(tool) for tool in tools))
+                return LLMResponse(content="", tool_calls=[call("mcp__fixture__get_credential_status",
+                    {"label": "fixture", **({"extra": "new schema"} if scenario == "mcp-schema" else {})})], finish_reason="tool_calls")
             elif scenario != "recover":
                 raise RuntimeError(f"Unknown application fixture: {scenario}")
         if scenario == "interrupt" and index == 1:
@@ -137,6 +142,11 @@ def install() -> None:
                 module.create_llm_provider_adapter = lambda provider, _client: FixtureProvider(provider)
             elif module.__name__ == "app.agent.runtime":
                 configure_runtime(module)
+            elif module.__name__ == "app.api.routes.diagnostics":
+                # Setup may prepare files in the disposable home, but must not
+                # open Explorer or Chrome while exercising the Copy button.
+                module._open_folder = lambda _folder: False
+                module._open_extensions_page = lambda: False
             else:
                 original_now = module._utc_now
                 module._utc_now = lambda: original_now() + timedelta(seconds=float(
@@ -156,7 +166,7 @@ def install() -> None:
 
     class FixtureImports(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname, path, target=None):
-            if fullname not in {"app.agent.llm_provider_adapters", "app.agent.runtime", "app.agent.scheduler"}:
+            if fullname not in {"app.agent.llm_provider_adapters", "app.agent.runtime", "app.agent.scheduler", "app.api.routes.diagnostics"}:
                 return None
             spec = importlib.machinery.PathFinder.find_spec(fullname, path)
             if spec is not None and spec.loader is not None:

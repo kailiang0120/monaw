@@ -35,7 +35,9 @@ VALUE_REDACTIONS = (
 
 
 def redact_text(value: str) -> str:
-    text = WINDOWS_ABSOLUTE_PATH_RE.sub("[REDACTED PATH]", str(value or ""))
+    from app.security.mcp_credentials import redact_mcp_secrets
+    text = redact_mcp_secrets(str(value or ""))
+    text = WINDOWS_ABSOLUTE_PATH_RE.sub("[REDACTED PATH]", text)
     text = USER_POSIX_PATH_RE.sub("[REDACTED PATH]", text)
     text = BEARER_RE.sub("Bearer [REDACTED]", text)
     text = OPENAI_KEY_RE.sub("sk-[REDACTED]", text)

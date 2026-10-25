@@ -38,8 +38,8 @@ export const PAGE_COPY = {
   },
   browser: {
     label: 'Browser',
-    blurb: 'Choose the Chrome profile the agent drives, which sites it may open, and where it saves screenshots.',
-    keywords: 'chrome devtools profile connection allow prompt screenshots automation domains reconnect',
+    blurb: 'Set up the Monaw Chrome extension, choose which sites the agent may open, and where it saves screenshots.',
+    keywords: 'chrome extension profile connection screenshots automation domains reconnect',
   },
   observability: {
     label: 'Activity log',
@@ -100,13 +100,19 @@ export const SKILLS_COPY = {
 
 export const BROWSER_COPY = {
   usesYourProfile:
-    'Monaw drives your own Chrome profile, with your saved logins and tabs, through Chrome DevTools. It opens Chrome when a browser tool first needs it.',
-  chromeProfile: 'The profile Monaw opens when it launches your Chrome.',
-  autoApprove: 'On Windows, clicks Allow on Chrome’s “Allow remote debugging?” prompt while Monaw connects.',
+    'Monaw drives your own Chrome profile, with your saved logins and tabs. It opens Chrome when a browser tool first needs it.',
+  extension:
+    'The Monaw extension lets Monaw use the Chrome profile it is loaded in. While Monaw works, Chrome shows “Monaw started debugging this browser”.',
+  extensionSteps: [
+    'In Chrome, open chrome://extensions and turn on Developer mode (top right).',
+    'Click Load unpacked.',
+    'Select the folder below.',
+  ],
+  extensionUpdate: 'A newer Monaw extension is available. Update it and Chrome reloads it automatically.',
   allowedDomains: 'Navigation-target policy for explicit new-page and navigate URLs; browser_fetch also checks redirects. Does not restrict existing tabs, snapshots, screenshots, clicks, popups, or Chrome redirects. Empty allows any target in interactive chats; unattended navigation requires a list.',
   screenshots: 'Where browser screenshots are saved. Your Chrome profile stays in Chrome’s own folder.',
-  chromeMissing: 'Google Chrome was not found. Install Chrome (version 144 or later) to use browser automation.',
-  reconnect: 'Restart Monaw’s connection to Chrome. Your Chrome and its tabs stay open.',
+  chromeMissing: 'Google Chrome was not found. Install Chrome (version 125 or later) to use browser automation.',
+  reconnect: 'Restart Monaw’s browser server; the extension reconnects. Your Chrome and its tabs stay open.',
 } as const
 
 /* -------------------------------------------------------------------- mcp --- */
@@ -125,7 +131,7 @@ export const MCP_COPY = {
   allowList: 'Leave empty to expose all server tools.',
   trustedTools: 'These tools run without an approval prompt.',
   riskOverrides: 'Changes risk labels; approval rules still apply.',
-  plaintextWarning: 'Headers and environment variables are saved as plain text.',
+  plaintextWarning: 'Ordinary headers and environment variables remain plaintext configuration. Use Advanced → Encrypted credentials for secrets. Existing plaintext fields require explicit migration.',
 } as const
 
 /* ------------------------------------------------------------ permissions --- */

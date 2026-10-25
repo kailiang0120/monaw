@@ -13,7 +13,7 @@ npm --prefix frontend ci
 npm --prefix frontend run test:app
 ```
 
-`test:app` builds the renderer, type-checks the harness, then runs seven workflows
+`test:app` builds the renderer, type-checks the harness, then runs nine workflows
 serially with no automatic retries. A separate required Windows GitHub Actions
 job runs the same command. Playwright uses the repository's Electron binary;
 downloading a separate browser is unnecessary. Its Electron support is documented
@@ -30,6 +30,8 @@ in the [Playwright Electron API](https://playwright.dev/docs/api/class-electron)
 | Schedule lifecycle | Create and run from the UI; disable while active; completion succeeds; quit/reopen; advance a controlled scheduler clock past several periods and observe normal dispatch ticks; saved task stays disabled with one run. |
 | Lost run response | The real backend accepts Run now, then the response is dropped at the transport boundary. Check run reconciles the accepted occurrence, renders its result, and produces no second POST, conversation or execution. |
 | Backend interruption | A real file action completes before the controlled provider waits. The backend exits through its existing restart code; the UI shows interruption, Electron restarts the backend, a fresh message completes, and the original file change has not repeated. |
+| MCP credentials and schema | Real Windows OS encryption; explicitly selected legacy migration; real local MCP SDK transport and discovered tool invocation through approval; independent scoped environment; rotation; full Electron/backend restart and rehydration; reconnect discovers and invokes a changed schema; settings, encrypted store, diagnostics and backend logs exclude sentinel plaintext; deletion blocks future launch. |
+| Extension folder clipboard | Real authenticated setup in the disposable home; clicking Copy in the sandboxed renderer writes the exact returned folder path to the OS clipboard and shows Copied; oversized clipboard input is rejected. The fixture suppresses Explorer/Chrome launch and restores the previous clipboard when it still contains fixture text. |
 
 Provider text is buffered while tools are available in the current turn loop.
 The streaming assertion checks the application's actual emitted token events; it
@@ -51,7 +53,7 @@ provider adapter and add a barrier tool. The real file tools, authorization,
 approval replay, scheduler acceptance/dispatch, routes and database are retained.
 The scheduler clock and polling interval are controlled only inside this fixture.
 Renderer requests outside its files and owned backend are blocked by the harness.
-No personal Chrome, Telegram or external MCP server is started.
+No personal Chrome, Telegram or third-party MCP service is started. The credential workflow starts only the repository's disposable local MCP fixture. Its tool returns digests; it deliberately echoes a synthetic credential to stderr to check redaction.
 
 Shutdown is requested after the inspector evaluation returns, then checked with
 a bounded process-close event and backend port-closure assertion. A shutdown
@@ -74,6 +76,6 @@ uploaded by the application CI job.
 
 This is source-application evidence, not an installed build or upgrade test. It
 does not verify live providers, real Docker, personal Chrome containment, native
-desktop actions, MCP credential rotation/schema changes, installer registration,
+desktop actions, third-party MCP interoperability, installer registration,
 or upgrade data preservation. Those remain separate release checks. Tests have
 been run locally on Windows; a GitHub-hosted run must still validate the workflow.

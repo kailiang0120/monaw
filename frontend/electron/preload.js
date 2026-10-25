@@ -36,14 +36,30 @@ function theme(value) {
   return value
 }
 
+function mcpCredential(input) {
+  if (!input || typeof input !== 'object' || !['migrate', 'replace', 'delete'].includes(input.action)) {
+    throw new TypeError('Invalid MCP credential operation')
+  }
+  const b = input.binding
+  if (!b || !/^[a-f0-9]{32}$/.test(b.server_id) || !['stdio', 'streamable_http'].includes(b.transport)
+    || b.target !== (b.transport === 'stdio' ? 'env' : 'headers')
+    || typeof b.key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/.test(b.key)) {
+    throw new TypeError('Invalid MCP credential binding')
+  }
+  return { action: input.action, binding: { server_id: b.server_id, transport: b.transport, target: b.target, key: b.key },
+    ...(input.action === 'replace' ? { value: safeString(input.value, 'MCP credential value') } : {}) }
+}
+
 const electronAPI = Object.freeze({
   getControlSession: () => ipcRenderer.invoke('control:get-session'),
   credentialStatus: () => ipcRenderer.invoke('credentials:status'),
   setCredential: (id, value) => ipcRenderer.invoke('credentials:set', credentialId(id), safeString(value, 'credential value')),
   deleteCredential: (id) => ipcRenderer.invoke('credentials:delete', credentialId(id)),
   applyStoredCredentials: () => ipcRenderer.invoke('credentials:apply'),
+  changeMcpCredential: (input) => ipcRenderer.invoke('mcp:credential', mcpCredential(input)),
   selectDirectory: (defaultPath) => ipcRenderer.invoke('dialog:select-directory', optionalString(defaultPath, 'default path')),
   setTheme: (value) => ipcRenderer.invoke('theme:set', theme(value)),
+  writeClipboardText: (text) => ipcRenderer.invoke('clipboard:write-text', safeString(text, 'clipboard text')),
   backendBaseUrl,
   platform: process.platform,
   isElectron: true,

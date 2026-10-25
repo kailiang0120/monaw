@@ -365,8 +365,7 @@ def test_default_browser_artifacts_live_under_monaw_home():
     assert Path(browser.screenshots_dir).is_relative_to(MONAW_HOME_DIR / "browser")
     assert set(browser.model_dump()) == {
         "screenshots_dir",
-        "system_profile_directory",
-        "auto_approve_local_debugging",
+        "extension_port",
         "allowed_domains",
     }
 
@@ -378,7 +377,7 @@ def test_load_settings_ignores_legacy_managed_browser_keys(tmp_path):
             "mode": "managed",
             "managed_profile_dir": "x",
             "enable_system_fallback": True,
-            "system_profile_directory": "Profile 1",
+            "allowed_domains": ["example.com"],
         },
     }), encoding="utf-8")
 
@@ -387,10 +386,10 @@ def test_load_settings_ignores_legacy_managed_browser_keys(tmp_path):
     dumped = loaded.browser.model_dump()
     for key in ("mode", "managed_profile_dir", "enable_system_fallback"):
         assert key not in dumped
-    assert loaded.browser.system_profile_directory == "Profile 1"
+    assert loaded.browser.allowed_domains == ["example.com"]
 
 
-def test_load_settings_drops_removed_browser_use_engine_keys(tmp_path):
+def test_load_settings_drops_removed_browser_keys(tmp_path):
     settings_path = tmp_path / "settings.json"
     removed = {
         "headless": True,
@@ -404,13 +403,16 @@ def test_load_settings_drops_removed_browser_use_engine_keys(tmp_path):
         "system_cdp_url": "http://127.0.0.1:9222",
         "downloads_dir": str(tmp_path / "downloads"),
         "traces_dir": str(tmp_path / "traces"),
+        # Chrome remote debugging, replaced by the Monaw extension.
+        "connection": "remote_debugging",
+        "system_profile_directory": "Profile 2",
+        "auto_approve_local_debugging": False,
     }
     settings_path.write_text(json.dumps({
         "browser": {
             **removed,
             "screenshots_dir": str(tmp_path / "shots"),
-            "system_profile_directory": "Profile 2",
-            "auto_approve_local_debugging": False,
+            "extension_port": 8500,
             "allowed_domains": ["example.com"],
         },
     }), encoding="utf-8")
@@ -420,8 +422,7 @@ def test_load_settings_drops_removed_browser_use_engine_keys(tmp_path):
     dumped = loaded.browser.model_dump()
     assert not set(removed) & set(dumped)
     assert loaded.browser.screenshots_dir == str(tmp_path / "shots")
-    assert loaded.browser.system_profile_directory == "Profile 2"
-    assert loaded.browser.auto_approve_local_debugging is False
+    assert loaded.browser.extension_port == 8500
     assert loaded.browser.allowed_domains == ["example.com"]
     assert not (tmp_path / "downloads").exists()
     assert not (tmp_path / "traces").exists()

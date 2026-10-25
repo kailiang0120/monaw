@@ -25,15 +25,22 @@ def _runtime(settings_data: AgentSettings):
     return build_runtime_namespace(base, settings_data)
 
 
-def test_chrome_devtools_ships_as_a_builtin_on_the_users_chrome(monkeypatch):
-    monkeypatch.delenv(builtin.DISABLE_ENV, raising=False)
+def test_browser_server_ships_as_a_builtin_served_by_the_extension(monkeypatch):
+    import sys
 
-    [server] = builtin.builtin_mcp_servers()
+    monkeypatch.delenv(builtin.DISABLE_ENV, raising=False)
+    settings_data = AgentSettings()
+    settings_data.browser.extension_port = 8500
+
+    [server] = builtin.builtin_mcp_servers(settings_data)
 
     assert server.name == builtin.CHROME_DEVTOOLS_SERVER
-    assert server.command == "npx"
-    assert "--autoConnect" in server.args
+    assert server.command == sys.executable
+    assert server.args == ["-m", "app.skills.browser_use.extension"]
+    assert server.env == {"MONAW_BROWSER_EXTENSION_PORT": "8500"}
     assert builtin.BUILTIN_SERVER_SKILLS[server.name] == "browser-use"
+    # Chrome remote debugging (chrome-devtools-mcp --autoConnect, npx) is gone.
+    assert "npx" not in server.command and not any("chrome-devtools-mcp" in arg for arg in server.args)
 
     monkeypatch.setenv(builtin.DISABLE_ENV, "1")
     assert builtin.builtin_mcp_servers() == []
@@ -60,21 +67,23 @@ def test_a_user_server_cannot_shadow_the_builtin_name(monkeypatch):
 
     servers = bridge_tools._iter_enabled_servers(_runtime(settings_data))
 
-    assert [cfg.command for cfg in servers] == ["npx"]
+    assert [cfg.args for cfg in servers] == [["-m", "app.skills.browser_use.extension"]]
 
 
-def test_saved_chrome_devtools_entries_are_dropped_on_load():
+def test_saved_remote_debugging_entries_are_dropped_on_load():
     payload = _normalize_loaded_payload({
         "mcp": {
             "enabled": True,
             "servers": [
                 {"name": "Chrome-dev-tools", "command": "npx", "args": ["-y", "chrome-devtools-mcp@latest", "--autoConnect"]},
                 {"name": "my-files", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]},
+                {"name": "devtools-headless", "command": "npx", "args": ["-y", "chrome-devtools-mcp@latest", "--headless"]},
             ],
         },
     })
 
-    assert [server["name"] for server in payload["mcp"]["servers"]] == ["my-files"]
+    # Only old --autoConnect copies are dropped; other servers the user added stay.
+    assert [server["name"] for server in payload["mcp"]["servers"]] == ["my-files", "devtools-headless"]
     assert AgentSettings.model_validate(payload).mcp.servers[0].name == "my-files"
 
 
@@ -118,26 +127,16 @@ def _devtools_entries(*tool_names, calls=None):
     return {entry["mcp_bridge"]["original_tool_name"]: entry for entry in build_tool_entries(cfg, manager, tools)}
 
 
-def test_chrome_devtools_server_is_pinned_and_hardened(monkeypatch):
-    monkeypatch.delenv(builtin.DISABLE_ENV, raising=False)
+def test_policy_table_covers_exactly_the_extension_tools():
+    from app.skills.browser_use.extension.tools_schema import TOOL_NAMES
 
-    [server] = builtin.builtin_mcp_servers()
-
-    assert server.args == [
-        "-y", "chrome-devtools-mcp@1.11.0", "--autoConnect", "--no-usage-statistics", "--no-performance-crux",
-        "--no-category-memory", "--no-category-performance", "--no-category-extensions",
-        "--no-file-navigations", "--redact-network-headers",
-    ]
-    assert server.env == {
-        "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1",
-        "CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS": "1",
-    }
+    assert set(builtin.BUILTIN_TOOL_POLICIES[builtin.CHROME_DEVTOOLS_SERVER]) == set(TOOL_NAMES)
 
 
 def test_devtools_reads_never_prompt_and_are_observations(runtime_settings):
     calls = []
     reads = ["list_pages", "select_page", "take_snapshot", "take_screenshot", "wait_for", "list_console_messages",
-             "get_console_message", "list_network_requests", "get_network_request", "get_css_styles"]
+             "get_console_message"]
     entries = _devtools_entries(*reads, calls=calls)
 
     for name in reads:
@@ -171,25 +170,21 @@ def test_devtools_interactions_run_without_prompt_but_not_unattended(runtime_set
 
 def test_devtools_script_and_file_tools_prompt_with_table_risk(runtime_settings):
     calls = []
-    entries = _devtools_entries("evaluate_script", "upload_file", "lighthouse_audit", calls=calls)
+    entries = _devtools_entries("evaluate_script", "upload_file", calls=calls)
 
     pending = json.loads(entries["evaluate_script"]["callable"](function="() => 1"))
     assert pending["status"] == "pending_approval"
     assert get_ticket(pending["ticket_id"]).risk_level == "high"
 
-    upload = json.loads(entries["upload_file"]["callable"](uid="1_2", filePath="C:/x.txt"))
+    upload = json.loads(entries["upload_file"]["callable"](uid="1_2", filePaths=["C:/x.txt"]))
     assert upload["status"] == "pending_approval"
     assert get_ticket(upload["ticket_id"]).risk_level == "high"
-
-    audit = json.loads(entries["lighthouse_audit"]["callable"]())
-    assert audit["status"] == "pending_approval"
-    assert get_ticket(audit["ticket_id"]).risk_level == "medium"
 
     # Full access skips the trust prompts, except upload_file which always asks.
     runtime_settings.permissions = merge_agent_settings(
         runtime_settings, {"permissions": {"mode": "full_access"}}).permissions
     assert json.loads(entries["evaluate_script"]["callable"](function="() => 1"))["ok"] is True
-    assert json.loads(entries["upload_file"]["callable"](uid="1_2", filePath="C:/x.txt"))["status"] == "pending_approval"
+    assert json.loads(entries["upload_file"]["callable"](uid="1_2", filePaths=["C:/x.txt"]))["status"] == "pending_approval"
     assert [tool for tool, _ in calls] == ["evaluate_script"]
 
 
@@ -300,3 +295,11 @@ def test_devtools_reads_stay_available_to_unattended_runs(runtime_settings):
         assert json.loads(entries["take_snapshot"]["callable"]())["ok"] is True
     finally:
         reset_current_interactive(token)
+
+
+def test_changing_the_extension_port_restarts_mcp():
+    from app.api.routes.settings import _browser_connection_changed
+
+    current = AgentSettings()
+    assert _browser_connection_changed(current, merge_agent_settings(current, {"browser": {"extension_port": 8500}}))
+    assert not _browser_connection_changed(current, merge_agent_settings(current, {"browser": {"allowed_domains": ["a.com"]}}))

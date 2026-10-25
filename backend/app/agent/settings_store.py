@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import uuid
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -146,6 +148,7 @@ class SpeechToTextSettings(BaseModel):
 
 
 class MCPServerConfig(BaseModel):
+    server_id: str = Field("", pattern=r"^(?:[a-f0-9]{32})?$")
     name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]{1,32}$")
     enabled: bool = True
     transport: Literal["stdio", "streamable_http"] = "stdio"
@@ -155,6 +158,7 @@ class MCPServerConfig(BaseModel):
     cwd: str = ""
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    credential_refs: dict[Literal["env", "headers"], dict[str, str]] = Field(default_factory=dict)
     startup_timeout_ms: int = 8000
     call_timeout_ms: int = 30000
     reconnect_on_unhealthy: bool = True
@@ -162,6 +166,23 @@ class MCPServerConfig(BaseModel):
     trusted_tools: list[str] = Field(default_factory=list)
     tool_risk_overrides: dict[str, Literal["low", "medium", "high"]] = Field(default_factory=dict)
     description: str = ""
+
+    @model_validator(mode="after")
+    def validate_credentials(self):
+        from app.security.mcp_credentials import CredentialBinding
+        if not self.server_id:
+            # Stable on every read of an older settings file, before its next atomic save.
+            self.server_id = uuid.uuid5(uuid.NAMESPACE_URL, "monaw:mcp:" + self.name).hex
+        for target in ("env", "headers"):
+            keys = [*getattr(self, target), *self.credential_refs.get(target, {})]
+            if len(keys) != len({key.casefold() for key in keys}):
+                raise ValueError("MCP field names must be unique ignoring case")
+        for target, fields in self.credential_refs.items():
+            for key, ref in fields.items():
+                binding = CredentialBinding(server_id=self.server_id, transport=self.transport, target=target, key=key)
+                if ref != binding.reference or key in getattr(self, target):
+                    raise ValueError("Invalid MCP credential binding or plaintext collision")
+        return self
 
 
 class MCPSettings(BaseModel):
@@ -173,17 +194,20 @@ class MCPSettings(BaseModel):
         names = [server.name for server in self.servers]
         if len(names) != len(set(names)):
             raise ValueError("MCP server names must be unique")
+        ids = [server.server_id for server in self.servers]
+        if len(ids) != len(set(ids)):
+            raise ValueError("MCP server identities must be unique")
         return self
 
 
 class BrowserUseSettings(BaseModel):
-    """Browser control drives the user's own Chrome through Chrome DevTools MCP."""
+    """Browser control drives the user's own Chrome through the Monaw extension."""
 
     screenshots_dir: str = Field(
         default_factory=lambda: _default_browser_path(_BROWSER_SCREENSHOTS_DIR)
     )
-    system_profile_directory: str = ""
-    auto_approve_local_debugging: bool = True
+    # Local port the extension connects to.
+    extension_port: int = Field(8436, ge=1024, le=65535)
     allowed_domains: list[str] = Field(default_factory=list)
 
 
@@ -383,9 +407,9 @@ def _normalize_browser_payload(browser: Any) -> dict[str, Any]:
     if not isinstance(browser, dict):
         return defaults
 
-    # Keys of the removed browser-use engine (headless, keep_alive, DOM/iframe
-    # options, CDP strategy, downloads/traces folders) are dropped here so old
-    # settings files still load.
+    # Keys of removed browser options (the browser-use engine, and Chrome remote
+    # debugging: connection, system_profile_directory,
+    # auto_approve_local_debugging) are dropped here so old settings files load.
     merged = dict(defaults)
     merged.update(
         {
@@ -509,8 +533,9 @@ def _normalize_loaded_payload(data: dict[str, Any]) -> dict[str, Any]:
             "enabled",
             True if raw_mcp_bridge_enabled is None else raw_mcp_bridge_enabled,
         )
-        # Chrome DevTools now ships as the built-in browser server (mcp_bridge/builtin.py),
-        # so a saved copy would start a second server.
+        # Older versions saved Chrome DevTools MCP with --autoConnect, which drove
+        # Chrome through remote debugging. Browser control now goes through the
+        # Monaw extension, so drop those copies instead of reviving that path.
         servers = payload["mcp"].get("servers")
         if isinstance(servers, list):
             payload["mcp"]["servers"] = [
@@ -518,6 +543,7 @@ def _normalize_loaded_payload(data: dict[str, Any]) -> dict[str, Any]:
                 if not (
                     isinstance(server, dict)
                     and any("chrome-devtools-mcp" in str(arg) for arg in server.get("args") or [])
+                    and "--autoConnect" in [str(arg) for arg in server.get("args") or []]
                 )
             ]
     payload["browser"] = _normalize_browser_payload(payload.get("browser"))
@@ -609,7 +635,18 @@ def save_agent_settings(settings_data: AgentSettings, *, settings_path: Path | N
         settings_data.permissions.dangerous_actions_require_confirm = True
         settings_data.permissions.allow_screen_fallback = True
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(settings_data.model_dump_json(indent=2), encoding="utf-8")
+    # Replace atomically so migration cannot leave a truncated settings file.
+    # This is the new canonical file, never a plaintext backup/export.
+    fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(settings_data.model_dump_json(indent=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     try:
         from app.agent.sandbox.capabilities import invalidate_capability_cache
 
@@ -628,6 +665,39 @@ def settings_version(settings_data: AgentSettings) -> str:
 
 def merge_agent_settings(current: AgentSettings, patch: dict[str, Any]) -> AgentSettings:
     merged = current.model_dump()
+    patch = {**patch}
+    if "servers" in (patch.get("mcp") or {}):
+        from app.security.mcp_credentials import SECRET_NAME, validate_secret
+        existing = {s.server_id: s for s in current.mcp.servers}
+        by_name = {s.name: s for s in current.mcp.servers}
+        servers = []
+        for raw in patch["mcp"]["servers"]:
+            raw = dict(raw)
+            old = existing.get(raw.get("server_id")) or by_name.get(raw.get("name"))
+            if old:
+                if raw.get("server_id") and raw["server_id"] != old.server_id:
+                    raise ValueError("MCP server identity cannot be rebound")
+                raw["server_id"] = old.server_id
+                if raw.get("credential_refs", old.credential_refs) != old.credential_refs:
+                    raise ValueError("Use credential controls to change stored credentials")
+                raw["credential_refs"] = old.credential_refs
+                for target in ("env", "headers"):
+                    # Hidden legacy credentials survive ordinary whole-settings saves.
+                    hidden = {k: v for k, v in getattr(old, target).items() if SECRET_NAME.search(k)}
+                    if target in raw:
+                        raw[target] = {**hidden, **raw[target]}
+                    else:
+                        raw[target] = dict(getattr(old, target))
+            elif raw.get("credential_refs"):
+                raise ValueError("Credential references cannot be attached to another server")
+            for target in ("env", "headers"):
+                for key, value in raw.get(target, {}).items():
+                    if SECRET_NAME.search(key) and value != (getattr(old, target).get(key) if old else None):
+                        raise ValueError("Use encrypted MCP credential controls for new or changed secret fields")
+                    if value:
+                        validate_secret(value)
+            servers.append(raw)
+        patch["mcp"] = {**patch["mcp"], "servers": servers}
 
     def apply(dst: dict[str, Any], src: dict[str, Any]) -> None:
         for key, value in src.items():
@@ -715,8 +785,15 @@ def api_settings_payload(base_settings, agent_settings: AgentSettings) -> dict[s
     from app.agent.skill_loader import available_skill_payload
 
     runtime_settings = build_runtime_namespace(base_settings, agent_settings)
+    payload = agent_settings.model_dump()
+    from app.security.mcp_credentials import SECRET_NAME
+    for server in payload["mcp"]["servers"]:
+        server["legacy_secret_fields"] = {target: [k for k in server[target] if SECRET_NAME.search(k)]
+                                          for target in ("env", "headers")}
+        for target in ("env", "headers"):
+            server[target] = {k: v for k, v in server[target].items() if not SECRET_NAME.search(k)}
     return {
-        **agent_settings.model_dump(),
+        **payload,
         "permissions_config_path": str(_SETTINGS_FILE),
         "settings_version": settings_version(agent_settings),
         "available_skills": available_skill_payload(runtime_settings),

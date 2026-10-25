@@ -7,35 +7,21 @@ and run whether or not the user turned on their own MCP connections.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from app.agent.permission_actions import ActionType
 from app.agent.settings_store import MCPServerConfig
 
+# The built-in browser server. It keeps the chrome-devtools name (and the tool
+# names below) so permissions, the stall guard and the UI stay unchanged; it is
+# served by the Monaw Chrome extension (app/skills/browser_use/extension).
 CHROME_DEVTOOLS_SERVER = "chrome-devtools"
-# Pinned to the version whose option names and tool table below were checked.
-CHROME_DEVTOOLS_PACKAGE = "chrome-devtools-mcp@1.11.0"
-CHROME_DEVTOOLS_ARGS = [
-    "-y",
-    CHROME_DEVTOOLS_PACKAGE,
-    # Drive the user's own running Chrome profile.
-    "--autoConnect",
-    "--no-usage-statistics",
-    "--no-performance-crux",
-    # Removes take_heapsnapshot; the other memory tools also need --memoryDebugging.
-    "--no-category-memory",
-    "--no-category-performance",
-    "--no-category-extensions",
-    "--no-file-navigations",
-    "--redact-network-headers",
-]
-CHROME_DEVTOOLS_ENV = {
-    "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1",
-    "CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS": "1",
-}
 # Built-in server name -> the skill its tools belong to.
 BUILTIN_SERVER_SKILLS = {CHROME_DEVTOOLS_SERVER: "browser-use"}
-# Tests set this so loading tools never launches npx.
+# Tests set this so loading tools never starts the browser server.
 DISABLE_ENV = "MONAW_DISABLE_BUILTIN_MCP"
 
 
@@ -62,8 +48,6 @@ def _act(action: ActionType, reason: str = "builtin_browser_interaction") -> Bui
     return BuiltinToolPolicy(action, "medium", reason)
 
 
-_FILE_WRITING = BuiltinToolPolicy(ActionType.MUTATE, "medium", "builtin_browser_writes_files")
-
 # Keyed by the server's original tool name. Tools missing here fall back to the
 # generic keyword classification in registry._approval_decision.
 BUILTIN_TOOL_POLICIES: dict[str, dict[str, BuiltinToolPolicy]] = {
@@ -75,11 +59,7 @@ BUILTIN_TOOL_POLICIES: dict[str, dict[str, BuiltinToolPolicy]] = {
         "wait_for": _read(),
         "list_console_messages": _read(),
         "get_console_message": _read(),
-        "list_network_requests": _read(),
-        "get_network_request": _read(),
-        "get_css_styles": _read(),
         "click": _act(ActionType.CLICK),
-        "click_at": _act(ActionType.CLICK),
         "hover": _act(ActionType.CLICK),
         "drag": _act(ActionType.CLICK),
         "handle_dialog": _act(ActionType.CLICK),
@@ -90,18 +70,10 @@ BUILTIN_TOOL_POLICIES: dict[str, dict[str, BuiltinToolPolicy]] = {
         "navigate_page": _act(ActionType.LAUNCH_APP, "builtin_browser_navigation"),
         "new_page": _act(ActionType.LAUNCH_APP, "builtin_browser_navigation"),
         "close_page": _act(ActionType.LAUNCH_APP, "builtin_browser_navigation"),
-        "resize_page": _act(ActionType.LAUNCH_APP, "builtin_browser_navigation"),
-        "emulate": _act(ActionType.LAUNCH_APP, "builtin_browser_navigation"),
         "evaluate_script": BuiltinToolPolicy(ActionType.EXEC, "high", "builtin_browser_script_execution"),
         "upload_file": BuiltinToolPolicy(
             ActionType.MUTATE, "high", "builtin_browser_file_upload", always_confirm=True,
         ),
-        "lighthouse_audit": _FILE_WRITING,
-        "screencast_start": _FILE_WRITING,
-        "screencast_stop": _FILE_WRITING,
-        "take_heapsnapshot": _FILE_WRITING,
-        "performance_start_trace": _FILE_WRITING,
-        "performance_stop_trace": _FILE_WRITING,
     },
 }
 
@@ -112,18 +84,32 @@ BUILTIN_URL_TOOLS: dict[str, frozenset[str]] = {
 }
 
 
-def builtin_mcp_servers() -> list[MCPServerConfig]:
+# The extension server lives in the backend package, so it runs with the
+# backend's own Python from the backend folder.
+EXTENSION_SERVER_MODULE = "app.skills.browser_use.extension"
+_BACKEND_DIR = Path(__file__).resolve().parents[3]
+
+
+def builtin_mcp_servers(settings: Any = None) -> list[MCPServerConfig]:
     if os.environ.get(DISABLE_ENV) == "1":
         return []
+    from app.skills.browser_use.extension.common import DEFAULT_PORT, PORT_ENV
+
+    browser = getattr(settings, "browser", None)
+    if browser is None:
+        from app.agent.settings_store import load_agent_settings
+
+        browser = load_agent_settings().browser
     return [
         MCPServerConfig(
             name=CHROME_DEVTOOLS_SERVER,
-            command="npx",
-            args=list(CHROME_DEVTOOLS_ARGS),
-            env=dict(CHROME_DEVTOOLS_ENV),
-            startup_timeout_ms=60000,
+            command=sys.executable,
+            args=["-m", EXTENSION_SERVER_MODULE],
+            cwd=str(_BACKEND_DIR),
+            env={PORT_ENV: str(int(getattr(browser, "extension_port", DEFAULT_PORT) or DEFAULT_PORT))},
+            startup_timeout_ms=30000,
             call_timeout_ms=90000,
-            description="Your Chrome: page snapshots, hover, drag, dialogs, uploads and other browser actions.",
+            description="Your Chrome, through the Monaw extension: page snapshots, clicks, typing, dialogs, uploads and screenshots.",
         )
     ]
 

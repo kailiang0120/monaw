@@ -75,6 +75,9 @@ def _control_secret() -> str:
 
 def _required_scope(method: str, path: str) -> str:
     method = method.upper()
+    # Deliberately absent from ALL_SCOPES and ordinary renderer/development tokens.
+    if path.startswith("/api/settings/mcp-credentials"):
+        return "mcp:credentials"
     if path.startswith("/api/settings") or path.startswith("/api/openai-account"):
         return "settings:read" if method == "GET" else "settings:write"
     if path.startswith("/api/sandbox"):

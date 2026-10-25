@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme, safeStorage } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme, safeStorage, clipboard } = require('electron')
 const path = require('path')
 const os = require('os')
 const { spawn, spawnSync } = require('child_process')
@@ -14,6 +14,7 @@ const {
   normalizeBackendHost,
 } = require('./control-auth')
 const { SECRET_FIELDS, createCredentialVault } = require('./credential-vault')
+const { createMcpCredentialVault, createMcpCredentialService } = require('./mcp-credential-vault.cjs')
 const { isExternalOpenableUrl, windowOpenTarget } = require('./navigation-policy')
 const CREDENTIAL_IDS = new Set(Object.keys(SECRET_FIELDS))
 const MAX_IPC_STRING_LENGTH = 20_000
@@ -550,6 +551,50 @@ async function getStore() {
 }
 
 let credentialVault = null
+let mcpCredentialService = null
+async function getMcpCredentialService() {
+  if (!mcpCredentialService) {
+    mcpCredentialService = getStore().then(currentStore => createMcpCredentialService({
+      vault: createMcpCredentialVault({ safeStorage, store: currentStore }),
+      request: requestMcpBackend,
+    }))
+  }
+  return mcpCredentialService
+}
+
+function requestMcpBackend(method, suffix, payload) {
+  return new Promise((resolve, reject) => {
+    const body = payload === undefined ? null : Buffer.from(JSON.stringify(payload), 'utf8')
+    // This scope never appears in control:get-session or in renderer state.
+    const session = mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID, undefined, ['mcp:credentials'])
+    const request = http.request(`${BACKEND_BASE_URL}/api/settings/mcp-credentials${suffix}`, {
+      method, headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json',
+        ...(body ? { 'Content-Length': String(body.length) } : {}) },
+    }, (response) => {
+      const chunks = []
+      let size = 0
+      response.on('data', chunk => {
+        size += chunk.length
+        if (size > 512 * 1024) request.destroy(new Error('MCP credential response exceeds its limit'))
+        else chunks.push(chunk)
+      })
+      response.on('end', () => {
+        try {
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            throw new Error(`MCP credential operation failed (${response.statusCode}); reload saved settings and retry`)
+          }
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+        } catch { reject(new Error('MCP credential response was unsuccessful or invalid; reload saved settings and retry')) }
+        finally { for (const chunk of chunks) chunk.fill(0) }
+      })
+    })
+    request.setTimeout(20_000, () => request.destroy(new Error('MCP credential handoff timed out; retry to reconcile')))
+    request.on('error', reject)
+    request.on('close', () => body?.fill(0))
+    request.end(body)
+  })
+}
+
 async function getCredentialVault() {
   if (!credentialVault) {
     const currentStore = await getStore()
@@ -572,6 +617,7 @@ async function applyStoredCredentialsToBackend() {
     if (Object.keys(payload).length > 0) {
       await updateBackendSettings(payload)
     }
+    await (await getMcpCredentialService()).apply()
     return vault.status()
   } finally {
     for (const key of Object.keys(payload)) {
@@ -614,9 +660,24 @@ ipcMain.handle('credentials:apply', async (event) => {
   return applyStoredCredentialsToBackend()
 })
 
+ipcMain.handle('mcp:credential', async (event, input) => {
+  assertTrustedIpcSender(event)
+  try {
+    return await (await getMcpCredentialService()).operate(input)
+  } catch {
+    // Neither OS/SDK exceptions nor transport responses may echo plaintext.
+    throw new Error('MCP credential change could not complete. Check saved server configuration and OS encryption, then retry; a prepared migration will resume safely.')
+  }
+})
+
 ipcMain.handle('theme:set', async (event, theme) => {
   assertTrustedIpcSender(event)
   applyNativeTheme(assertTheme(theme))
+})
+
+ipcMain.handle('clipboard:write-text', async (event, text) => {
+  assertTrustedIpcSender(event)
+  clipboard.writeText(assertIpcString(text, 'clipboard text'))
 })
 
 ipcMain.handle('dialog:select-directory', async (event, defaultPath) => {

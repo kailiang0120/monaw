@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Monaw</title>
+    <style>
+      body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 14px; width: 260px; color: #111827; }
+      h1 { font-size: 14px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+      h1 img { width: 20px; height: 20px; }
+      .state { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
+      .dot.connected { background: #16a34a; }
+      .dot.unpaired { background: #dc2626; }
+      .detail { color: #4b5563; margin: 6px 0 10px; }
+      button { font: inherit; padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; cursor: pointer; }
+      button:hover { background: #f3f4f6; }
+      .version { color: #9ca3af; font-size: 11px; margin-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <h1><img src="icons/icon32.png" alt="" />Monaw</h1>
+    <div class="state"><span id="dot" class="dot"></span><span id="state">Checking…</span></div>
+    <div id="detail" class="detail"></div>
+    <button id="reconnect" type="button">Reconnect</button>
+    <div id="version" class="version"></div>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
