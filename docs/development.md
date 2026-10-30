@@ -196,6 +196,10 @@ skill_creator     Skill creation and reload tools
 web_search        Web search (when Tavily is configured)
 ```
 
+Skills the user creates with the skill creator are stored in `~/.monaw/skills` (the `skills` folder of the Monaw
+home), loaded after the built-in skills, and cannot take a built-in skill's name. Agent tools cannot modify either
+folder; only the skill creator writes there, behind its approval.
+
 Each `SKILL.md` must begin with a closed YAML frontmatter block. It is the source of truth for a skill's trigger description, `display_name`,
 one-line `summary`, tier, default, and prompt guidance. Internal skills use
 `tier: internal` and `always: true`; they stay registered for the runtime but are omitted

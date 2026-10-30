@@ -492,6 +492,7 @@ class TestProtectedControlState:
             cp.RUNTIME_DIR / "approvals" / "tickets.jsonl",
             cp.RUNTIME_DIR / "agent.db",
             cp._APP_SKILLS_DIR / "evil" / "tools.py",
+            cp.USER_SKILLS_DIR / "evil" / "tools.py",
         ):
             dec = resolve_permission(action, target_path=str(target))
             assert dec.blocked, target

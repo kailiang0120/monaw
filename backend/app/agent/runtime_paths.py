@@ -44,6 +44,9 @@ def _default_workspace_dir() -> Path:
 MONAW_HOME_DIR = _default_monaw_home_dir()
 RUNTIME_DIR = _default_runtime_dir()
 WORKSPACE_DIR = _default_workspace_dir()
+# Skills the user creates. They live with the user's data, not the installed
+# application, so they survive upgrades and never need a writable install folder.
+USER_SKILLS_DIR = MONAW_HOME_DIR / "skills"
 MONAW_HOME_DIR.mkdir(parents=True, exist_ok=True)
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)

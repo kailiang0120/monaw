@@ -24,7 +24,7 @@ from app.agent.settings_store import (
     load_agent_settings,
     save_agent_settings,
 )
-from app.agent.runtime_paths import RUNTIME_DIR, WORKSPACE_DIR
+from app.agent.runtime_paths import RUNTIME_DIR, USER_SKILLS_DIR, WORKSPACE_DIR
 from app.agent.run_context import current_interactive
 from app.agent.permission_actions import ActionType, requires_confirmation
 
@@ -667,6 +667,7 @@ def _protected_control_roots() -> list[str]:
         str(_settings_json_path()),
         str(_POLICY_DIR),
         str(_APP_SKILLS_DIR),
+        str(USER_SKILLS_DIR),
     ]
 
 

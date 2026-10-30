@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.schemas import SkillDescriptorPayload
@@ -296,3 +297,37 @@ Core
     mcp_skill = next(skill for skill in skills if skill.name == "mcp-bridge")
     assert mcp_skill.unavailable_reason == "load_error"
     assert mcp_skill.load_error == "mcp broken"
+
+
+def _write_skill(base, folder, name, description="A skill."):
+    skill_dir = base / folder
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\nBody", encoding="utf-8"
+    )
+
+
+def test_user_skills_load_after_built_ins_and_cannot_replace_them(tmp_path, monkeypatch):
+    built_in, user = tmp_path / "built-in", tmp_path / "user"
+    _write_skill(built_in, "core", "core", "Built-in core.")
+    _write_skill(user, "core", "core", "Impostor.")
+    _write_skill(user, "notes_sync", "notes-sync", "User skill.")
+    monkeypatch.setattr("app.agent.skill_loader.SKILLS_DIR", built_in)
+    monkeypatch.setattr("app.agent.skill_loader.USER_SKILLS_DIR", user)
+
+    runtime_settings = build_runtime_namespace(_base_settings(), AgentSettings())
+    skills = {skill.name: skill for skill in discover_skills(runtime_settings)}
+
+    assert set(skills) == {"core", "notes-sync"}
+    assert skills["core"].path == built_in / "core"
+    assert skills["notes-sync"].path == user / "notes_sync"
+
+
+def test_created_skills_live_in_the_monaw_home_not_the_application():
+    import app.agent.runtime_paths as runtime_paths
+    import app.skills.skill_creator.tools as skill_creator_tools
+
+    app_dir = Path(skill_creator_tools.__file__).resolve().parents[2]
+    assert skill_creator_tools.USER_SKILLS_DIR == runtime_paths.USER_SKILLS_DIR
+    assert runtime_paths.USER_SKILLS_DIR == runtime_paths.MONAW_HOME_DIR / "skills"
+    assert app_dir not in runtime_paths.USER_SKILLS_DIR.resolve().parents

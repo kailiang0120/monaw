@@ -144,6 +144,17 @@ def isolate_browser_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_user_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Keep skills the developer created in ~/.monaw/skills out of the catalog under test."""
+    import app.agent.skill_loader as skill_loader
+    import app.skills.skill_creator.tools as skill_creator_tools
+
+    user_skills = tmp_path / "user-skills"
+    monkeypatch.setattr(skill_loader, "USER_SKILLS_DIR", user_skills)
+    monkeypatch.setattr(skill_creator_tools, "SKILLS_DIR", user_skills)
+
+
+@pytest.fixture(autouse=True)
 def isolate_memory_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Keep memory files out of the developer's real ~/.monaw/memory folder."""
     from app.agent.memory_store import reset_memory_store

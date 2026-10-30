@@ -11,7 +11,8 @@ tier: internal
 
 # Skill Creator
 
-Use this skill to add or refresh Monaw runtime skills under `backend/app/skills`.
+Use this skill to add or refresh the user's own Monaw skills. They are saved in the `skills` folder of the Monaw home
+(`~/.monaw/skills` by default), not in the application, so they survive upgrades. Built-in skill names cannot be reused.
 It is disabled by default and its mutating tools require explicit administrator approval.
 
 Default created skills to optional:

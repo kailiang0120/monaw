@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from app.agent.runtime_paths import USER_SKILLS_DIR
 from app.agent.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,21 @@ def _normalize_skill_name(folder_name: str, frontmatter: dict[str, Any]) -> str:
 
 
 def _skill_catalog(*, skills_dir: Path | None = None) -> list[SkillCatalogEntry]:
-    base_dir = skills_dir or SKILLS_DIR
+    """Built-in skills, then the user's own; a user skill cannot replace a built-in one."""
+    if skills_dir is not None:
+        return _catalog_in(skills_dir)
+    catalog = _catalog_in(SKILLS_DIR)
+    taken = {entry.slug for entry in catalog} | {entry.name for entry in catalog}
+    for entry in _catalog_in(USER_SKILLS_DIR):
+        if entry.slug in taken or entry.name in taken:
+            logger.warning("user skill=%s ignored: a built-in skill has the same name", entry.slug)
+            continue
+        taken.update({entry.slug, entry.name})
+        catalog.append(entry)
+    return catalog
+
+
+def _catalog_in(base_dir: Path) -> list[SkillCatalogEntry]:
     if not base_dir.exists():
         return []
 

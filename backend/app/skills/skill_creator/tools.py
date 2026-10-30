@@ -15,9 +15,10 @@ from app.agent.approval_broker import create_ticket
 from app.agent.execution_resume import register_executor
 from app.agent.run_context import current_control_session_id, current_conversation_id, current_execution_source
 from app.agent.run_context import current_interactive
-from app.agent.runtime_paths import RUNTIME_DIR
+from app.agent.runtime_paths import RUNTIME_DIR, USER_SKILLS_DIR
 
-SKILLS_DIR = Path(__file__).resolve().parents[1]
+# New skills go to the user's skill folder, never into the installed application.
+SKILLS_DIR = USER_SKILLS_DIR
 SKILL_STAGING_DIR = RUNTIME_DIR / "skill_staging"
 SKILL_ROLLBACK_DIR = RUNTIME_DIR / "skill_rollbacks"
 RESTART_EXIT_CODE = 78
