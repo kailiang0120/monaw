@@ -201,3 +201,15 @@ Updated: 30 October 2026.
 | `tsc --noUnusedLocals` on the changed settings files | No unused locals. |
 | Windows `npm run test:app` | **8 passed, 1 failed**, 3.2 minutes. The failure is the clipboard workflow: it clicks a "Monaw extension" button that `cc9e109` replaced with a status cell, so it fails before reaching settings code changed here. Fixed separately. A first attempt from the sandboxed Git Bash shell could not start any backend because `uv` was denied its cache directory; the run above used PowerShell. |
 | `git diff --check` | Passed. |
+
+## ARC-01, third extraction: run finalization
+
+Updated: 31 October 2026.
+
+The turn loop ends a turn in four places: a pause because an earlier tool is still stopping, normal completion, user cancellation and an internal error. Each persisted the turn, closed the observed run and (except cancellation) emitted `done`, and three of them repeated the tool-error count. `harness/run_outcome.py` now provides the turn status, the `done` payload and observed-run closing used by all four. The payloads and observability arguments are unchanged field for field: the early pause still reports no tool counts, and only normal completion includes attachments, duration and incomplete markers. Persistence and run-state transitions stay in the turn loop because they depend on its state. This completes the ARC-01 runtime extractions the plan called for; provider adaptation and context budgets were deliberately left alone.
+
+| Invocation | Result |
+| --- | --- |
+| Run-outcome contract tests | **5 passed**: error counting, pause conditions, payload contents per exit, incomplete reasons, tool counts reported only when known. |
+| Full locked Python 3.11 backend suite | **1,171 passed, 8 skipped**, 65.04 seconds. |
+| `scripts/check-imports.py` | 236 modules compile and import; `/health` served. |

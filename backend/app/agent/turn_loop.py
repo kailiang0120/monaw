@@ -46,6 +46,7 @@ from app.agent.state import ExecutionPlan, PlanStep
 from app.agent.steering import SteeringInbox
 from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.harness.tool_batch import ActiveToolCall, ToolBatchLedger
+from app.agent.harness.run_outcome import done_payload, finish_observed_run, turn_status
 from app.agent.harness.context_budget import ContextBudgetExceeded, fit_live_context
 from app.agent.harness.tool_policy import ToolPolicy, tool_call_signature
 from app.agent.approval_review import AutoReviewState
@@ -975,8 +976,14 @@ class TurnLoop:
                 final_text = "Paused: a previous tool is still stopping. Wait for it to finish, then continue and verify its last action."
                 await _persist_turn_once(final_text, status="paused")
                 _put({"event": "error", "data": {"code": "tool_still_running", "message": final_text}})
-                _put({"event": "done", "data": {"conversation_id": conversation_id, "summary": final_text, "status": "paused"}})
-                self.observability.finish_run(run_id=obs_run_id, status="paused", final_output=final_text, failure_reason="tool_still_running")
+                _put({"event": "done", "data": done_payload(conversation_id, final_text, "paused")})
+                finish_observed_run(
+                    self.observability,
+                    run_id=obs_run_id,
+                    status="paused",
+                    final_output=final_text,
+                    failure_reason="tool_still_running",
+                )
                 return
             build_long_term_context = getattr(self.memory, "build_long_term_memory_context", None)
             long_term_context = (
@@ -2269,10 +2276,11 @@ class TurnLoop:
 
             if steering is not None:
                 steering.closed = True
-            run_status = (
-                "paused"
-                if iteration_limit_hit or budget_exhausted or terminal_error or stop_requested
-                else "complete"
+            run_status = turn_status(
+                stop_requested=stop_requested,
+                iteration_limit_hit=iteration_limit_hit,
+                budget_exhausted=budget_exhausted,
+                terminal_error=terminal_error,
             )
             if (
                 final_text
@@ -2297,19 +2305,15 @@ class TurnLoop:
             )
             if completed_normally and not iteration_limit_hit and not budget_exhausted:
                 self.memory.clear_task_progress(conversation_id)
-            self.observability.finish_run(
+            finish_observed_run(
+                self.observability,
                 run_id=obs_run_id,
                 status=run_status,
                 final_output=final_text or "Done.",
                 failure_reason=incomplete_reason_code if run_status != "complete" else "",
                 duration_ms=response_duration_ms,
                 usage=obs_usage_total,
-                tool_count=len(persisted_tool_calls),
-                tool_error_count=sum(
-                    1
-                    for tool_call in persisted_tool_calls
-                    if str(tool_call.get("status") or "").lower() not in {"ok", "complete", "success"}
-                ),
+                tool_calls=persisted_tool_calls,
                 metadata={
                     "completed_normally": completed_normally,
                     "budget_consumed": budget.consumed,
@@ -2317,18 +2321,17 @@ class TurnLoop:
                 },
             )
 
-            done_data = {
-                "conversation_id": conversation_id,
-                "summary": final_text or "Done.",
-                "status": run_status,
-                "attachments": response_attachments,
-            }
-            if response_duration_ms is not None:
-                done_data["response_duration_ms"] = response_duration_ms
-            if iteration_limit_hit or budget_exhausted or terminal_error or stop_requested:
-                done_data["incomplete"] = True
-                if incomplete_reason_code:
-                    done_data["reason_code"] = incomplete_reason_code
+            incomplete = run_status != "complete"
+            done_data = done_payload(
+                conversation_id,
+                final_text or "Done.",
+                run_status,
+                attachments=response_attachments,
+                duration_ms=response_duration_ms,
+                incomplete=incomplete,
+                reason_code=incomplete_reason_code,
+            )
+            if incomplete:
                 if stop_requested:
                     _transition(run_state.cancel, incomplete_reason_code or "cancelled")
                 else:
@@ -2358,19 +2361,15 @@ class TurnLoop:
                 partial_text += "\n\nA tool is still stopping. Further actions are blocked until it finishes; verify its last action before retrying."
             try:
                 await _persist_turn_once(partial_text, status="paused")
-                self.observability.finish_run(
+                finish_observed_run(
+                    self.observability,
                     run_id=obs_run_id,
                     status="paused",
                     final_output=partial_text,
                     failure_reason="cancelled",
                     duration_ms=_response_duration_ms(),
                     usage=obs_usage_total,
-                    tool_count=len(_tool_calls_for_persist()),
-                    tool_error_count=sum(
-                        1
-                        for tool_call in _tool_calls_for_persist()
-                        if str(tool_call.get("status") or "").lower() not in {"ok", "complete", "success"}
-                    ),
+                    tool_calls=_tool_calls_for_persist(),
                 )
                 logger.info(
                     "turn_loop persisted cancelled turn conversation_id=%s tool_calls=%s last_tool=%s",
@@ -2402,19 +2401,15 @@ class TurnLoop:
                 await _persist_turn_once(failure_text, status="error")
             except Exception:
                 logger.exception("Unable to checkpoint failed turn conversation_id=%s", conversation_id)
-            self.observability.finish_run(
+            finish_observed_run(
+                self.observability,
                 run_id=obs_run_id,
                 status="error",
                 final_output=final_text or "Error.",
                 failure_reason="internal_error",
                 duration_ms=_response_duration_ms(),
                 usage=obs_usage_total,
-                tool_count=len(_tool_calls_for_persist()),
-                tool_error_count=sum(
-                    1
-                    for tool_call in _tool_calls_for_persist()
-                    if str(tool_call.get("status") or "").lower() not in {"ok", "complete", "success"}
-                ),
+                tool_calls=_tool_calls_for_persist(),
             )
             try:
                 _put({
@@ -2423,7 +2418,7 @@ class TurnLoop:
                 })
                 _put({
                     "event": "done",
-                    "data": {"conversation_id": conversation_id, "summary": failure_text, "status": "error"},
+                    "data": done_payload(conversation_id, failure_text, "error"),
                 })
             except Exception:
                 pass
