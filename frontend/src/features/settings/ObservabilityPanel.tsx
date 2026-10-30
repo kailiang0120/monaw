@@ -29,6 +29,7 @@ import {
 } from '../../lib/api/diagnostics'
 import { ApiError } from '../../lib/api/client'
 import { Dropdown } from '../../components/Dropdown'
+import { SupportReport } from './SupportReport'
 import type {
   ObservabilityBackendLog,
   ObservabilityError,
@@ -37,7 +38,7 @@ import type {
   ObservabilitySummary,
 } from '../../lib/api/types'
 
-type ViewMode = 'runs' | 'errors' | 'backend'
+type ViewMode = 'runs' | 'errors' | 'backend' | 'report'
 const VIRTUALIZE_OBSERVABILITY_THRESHOLD = 60
 const RUN_ROW_HEIGHT_PX = 58
 const ERROR_ROW_HEIGHT_PX = 72
@@ -428,7 +429,7 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        {(['runs', 'errors', 'backend'] as ViewMode[]).map((item) => (
+        {(['runs', 'errors', 'backend', 'report'] as ViewMode[]).map((item) => (
           <button
             key={item}
             type="button"
@@ -439,7 +440,7 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
                 : 'border-white/[0.08] bg-white/[0.03] text-neutral-400 hover:text-neutral-100'
             }`}
           >
-            {item === 'runs' ? 'Runs' : item === 'errors' ? 'Errors' : 'Backend log'}
+            {item === 'runs' ? 'Runs' : item === 'errors' ? 'Errors' : item === 'backend' ? 'Backend log' : 'Support report'}
           </button>
         ))}
         <div className="ml-auto flex min-w-[220px] items-center gap-2 rounded-lg border border-white/[0.08] bg-black/10 px-2 py-1.5">
@@ -505,6 +506,7 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
       )}
 
       {view === 'errors' && <ErrorsList errors={errors} loading={loading} />}
+      {view === 'report' && <SupportReport />}
       {view === 'backend' && (
         <BackendLogView
           log={backendLog}

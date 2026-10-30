@@ -7,6 +7,7 @@ const fs = require('fs')
 const { fileURLToPath } = require('url')
 const runtimeConfig = require('../config/runtime.json')
 const { backendLaunch } = require('./backend-launch.cjs')
+const { portInUse, startupFailureMessage } = require('./backend-startup.cjs')
 const { backendPort, useDevelopmentRenderer } = require('./runtime-options.cjs')
 const {
   generateControlSecret,
@@ -49,6 +50,7 @@ let mainWindow = null
 let backendProcess = null
 let backendUvCommand = null
 let appQuitting = false
+let backendReady = false
 
 function currentBackendLaunch() {
   return backendLaunch({
@@ -112,6 +114,10 @@ function attachBackendLogging(runtimeDir, proc) {
     logStream.end()
     console.log('[backend] exited with code', code)
     if (backendProcess === proc) backendProcess = null
+    if (!appQuitting && !backendReady && code !== BACKEND_RESTART_EXIT_CODE) {
+      reportStartupFailure({ kind: 'exited', code }, logPath)
+      return
+    }
     if (!appQuitting && code === BACKEND_RESTART_EXIT_CODE) {
       console.log('[main] Backend requested restart; respawning')
       setTimeout(() => {
@@ -160,6 +166,35 @@ function spawnBackend() {
 }
 
 installUserDataDir()
+// One Monaw per data folder: a second launch would start a second backend on the same port.
+const hasInstanceLock = app.requestSingleInstanceLock()
+if (!hasInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+}
+
+let startupFailureShown = false
+function reportStartupFailure(reason, logPath = path.join(getBackendRuntimeDir(), 'backend.log')) {
+  console.error('[main] Backend startup failed:', JSON.stringify(reason))
+  // Keep the reason with the backend log, where support looks first.
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true })
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] [startup] failed ${JSON.stringify(reason)}\n`)
+  } catch (err) {
+    console.warn('[main] Failed to record startup failure', err.message)
+  }
+  if (startupFailureShown) return
+  startupFailureShown = true
+  const { title, message, detail } = startupFailureMessage(reason, { port: BACKEND_PORT, logPath })
+  dialog.showMessageBox(mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined, { type: 'error', title, message, detail, buttons: ['Quit'] })
+    .finally(() => app.quit())
+}
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID)
 }
@@ -227,6 +262,7 @@ function waitForBackend(retries = 30, delay = 1000) {
       http
         .get(`${BACKEND_BASE_URL}/health`, (res) => {
           if (res.statusCode === 200) {
+            backendReady = true
             console.log('[main] Backend ready')
             resolve()
           } else {
@@ -478,8 +514,13 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (!hasInstanceLock) return
   installContentSecurityPolicy()
   installMediaPermissionHandler()
+  if (await portInUse(BACKEND_HOST, BACKEND_PORT)) {
+    reportStartupFailure({ kind: 'port_in_use' })
+    return
+  }
   if (!currentBackendLaunch().frozen) backendUvCommand = await pickBackendUv()
   spawnBackend()
   createWindow()

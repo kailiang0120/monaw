@@ -12,6 +12,7 @@ TEST_GROUPS = {
         "test_conversation_workspace.py",
         "test_control_plane_auth.py",
         "test_main_config.py",
+        "test_support_report.py",
         "test_mcp_runtime_routes.py",
         "test_mcp_settings_integration.py",
         "test_mcp_credentials.py",

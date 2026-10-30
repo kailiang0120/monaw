@@ -37,6 +37,7 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/diagnostics/mcp` | `diagnostics:read` | `list` |
 | `POST` | `/api/diagnostics/mcp/{name}/reconnect` | `diagnostics:control` | `MCPServerDiagnosticsOut` |
 | `GET` | `/api/diagnostics/summary` | `diagnostics:read` | `DiagnosticsSummaryPayload` |
+| `GET` | `/api/diagnostics/support-report` | `diagnostics:read` | `stream/file/none` |
 | `GET` | `/api/events` | `agent:run` | `stream/file/none` |
 | `GET` | `/api/files/{attachment_id}` | `files:read` | `stream/file/none` |
 | `GET` | `/api/files/{attachment_id}/preview` | `files:read` | `stream/file/none` |

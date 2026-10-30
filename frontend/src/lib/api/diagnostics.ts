@@ -21,6 +21,13 @@ export async function fetchDiagnosticsSummary(signal?: AbortSignal): Promise<Dia
   return res.json()
 }
 
+/** A redacted, bounded report for the user to review before sharing; the backend log needs support mode. */
+export async function fetchSupportReport(signal?: AbortSignal): Promise<Record<string, unknown>> {
+  const res = await apiFetch(`${BASE}/api/diagnostics/support-report`, { signal })
+  if (!res.ok) throw new Error('Failed to prepare the support report')
+  return res.json()
+}
+
 export async function fetchMCPDiagnostics(signal?: AbortSignal): Promise<MCPServerDiagnostics[]> {
   const res = await apiFetch(`${BASE}/api/diagnostics/mcp`, { signal })
   if (!res.ok) throw new Error('Failed to fetch MCP diagnostics')

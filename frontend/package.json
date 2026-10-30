@@ -24,7 +24,8 @@
     "test:app": "npm run build:renderer && npm run typecheck:app && playwright test",
     "preview": "vite preview",
     "package:win": "npm run build:renderer && electron-builder --win --x64",
-    "package:win:dir": "npm run build:renderer && electron-builder --win --x64 --dir"
+    "package:win:dir": "npm run build:renderer && electron-builder --win --x64 --dir",
+    "test:packaged": "npm run typecheck:app && playwright test -c playwright.packaged.config.ts"
   },
   "dependencies": {
     "electron-store": "^8.2.0",

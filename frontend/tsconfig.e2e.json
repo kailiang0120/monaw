@@ -5,6 +5,6 @@
     "lib": ["ES2022", "DOM"],
     "types": ["node"]
   },
-  "include": ["e2e/**/*.ts", "playwright.config.ts", "src/types/electron.d.ts"],
+  "include": ["e2e/**/*.ts", "e2e-packaged/**/*.ts", "playwright.config.ts", "playwright.packaged.config.ts", "src/types/electron.d.ts"],
   "references": []
 }

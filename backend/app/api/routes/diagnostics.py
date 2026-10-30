@@ -15,7 +15,9 @@ from app.agent.scheduler import get_scheduled_task_service
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
 from app.agent.skill_loader import available_skill_payload
 from app.config import settings
-from app.agent.observability.recorder import redact
+from app.security.support_mode import support_mode_status
+from app.agent.observability.recorder import get_observability_recorder, now_iso, redact
+from app.agent.observability.support_report import build_support_report, settings_shape
 from app.schemas import (
     BrowserExtensionInstallOut,
     BrowserUseDiagnosticsOut,
@@ -197,6 +199,26 @@ async def get_diagnostics_summary(request: Request):
         },
         "sandbox": sandbox_status,
     }
+
+
+@router.get("/diagnostics/support-report")
+async def get_support_report(request: Request):
+    """A redacted, bounded report for the user to read before sharing it.
+
+    The backend log is included only while support mode is on, as for the
+    detailed log view.
+    """
+    recorder = get_observability_recorder()
+    include_log = support_mode_status(request.state.control_session.session_id).enabled
+    summary = await get_diagnostics_summary(request)
+    return build_support_report(
+        created_at=now_iso(),
+        app_version=summary["backend"]["version"],
+        summary=summary,
+        configuration=settings_shape(load_agent_settings(settings)),
+        errors=recorder.list_errors(limit=50),
+        log_lines=recorder.read_backend_log_tail(300).get("lines", []) if include_log else None,
+    )
 
 
 @router.get("/diagnostics/mcp", response_model=list[MCPServerDiagnosticsOut])
