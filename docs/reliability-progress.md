@@ -234,3 +234,24 @@ The Electron workflows that open the task actions menu now select its items as m
 | Windows `npm run test:app` (PowerShell) | **9 passed**, 2.4 minutes, including the corrected clipboard workflow. |
 
 Not covered: a manual screen-reader pass and a keyboard-only walkthrough in the installed app. ObservabilityPanel's run-detail test failed once under full-suite load and passed in four isolated runs and the final full run; it is timing-sensitive.
+
+## UX-02, second part: first-run guidance
+
+Updated: 31 October 2026.
+
+An empty new chat now shows a "Get started" guide instead of only "Ready." when the app is not ready for a first task, or before the first conversation exists.
+
+| Work item | Behavior implemented | Evidence |
+| --- | --- | --- |
+| Required steps | Connect a model (checks the credential the selected provider needs: the OpenAI key, the Google key, or the signed-in OpenAI account, which is reported as checking until the account check returns), the working folder (default workspace or the chosen folder), and the current permission mode with a link to review it. | Readiness tests per provider, including that a Google key does not make the OpenAI provider ready. |
+| First task | "Run example" sends a read-only prompt ("look at the files in my workspace folder ... do not change anything") and is disabled until a model is connected and while the backend is starting or a turn is running. | Guide component tests. |
+| Optional capabilities | Listed under "Turned on" only once selected, with state from live checks: browser control from the extension connection; Docker only when the isolation mode requires a container (Automatic mode's opportunistic Docker is not listed), from the sandbox backend check; Telegram from the running bot and its startup error; MCP from connected and unhealthy server counts. Each links to the settings page that resolves it. | Readiness tests for every capability state. |
+| Visibility | Always shown in an empty new chat while no model is connected; otherwise only until the first conversation exists, and it can be hidden once a model is connected (remembered per browser profile). Failed checks stay "checking" and never block the chat. | `shouldShowGuide` tests. |
+| Settings deep links | Settings can open on a given page. The app bar's permission shortcut now opens Permissions instead of the Model page. | Exercised through the guide's settings links. |
+
+| Invocation | Result |
+| --- | --- |
+| Frontend `npm run verify` | **179 UI/App tests and 32 Electron tests passed**; TypeScript and renderer build passed. |
+| Windows `npm run test:app` (PowerShell) | **9 passed**, 2.5 minutes. |
+
+Not checked: the guide's appearance in the running app and with a screen reader. UX-02 is complete apart from those manual passes.

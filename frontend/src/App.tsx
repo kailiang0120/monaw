@@ -16,6 +16,10 @@ import {
 } from './lib/api/scheduledTasks'
 import { fetchModelOptions, fetchSettings, updateSettings } from './lib/api/settings'
 import { FALLBACK_MODEL_OPTIONS, reasoningEffortsForProvider } from './features/settings/settingsConfig'
+import type { SettingsPageId } from './features/settings/settingsCopy'
+import { FirstRunGuide } from './features/onboarding/FirstRunGuide'
+import { useSetupReadiness } from './features/onboarding/useSetupReadiness'
+import { shouldShowGuide } from './features/onboarding/readiness'
 import { syncStoredApiKeysToBackendWithRetry } from './lib/apiKeySync'
 import { fetchPendingAccessGrants } from './lib/api/accessGrants'
 import { subscribeServerEvents, type ServerEvent } from './lib/api/serverEvents'
@@ -30,6 +34,16 @@ const THEME_STORAGE_KEY = 'agent_theme'
 const STARTUP_REFRESH_RETRIES = 20
 const STARTUP_REFRESH_DELAY_MS = 1000
 const RECOVERY_POLL_MS = 60_000
+
+const GUIDE_DISMISSED_KEY = 'monaw.firstRunGuideDismissed'
+
+function readGuideDismissed(): boolean {
+  try {
+    return window.localStorage.getItem(GUIDE_DISMISSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 const SettingsModal = lazy(() =>
   import('./features/settings/SettingsModal').then((module) => ({ default: module.SettingsModal })),
@@ -78,6 +92,10 @@ export default function App() {
   const [savingWorkspace, setSavingWorkspace] = useState(false)
   const workspaceGenerationRef = useRef(0)
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsPage, setSettingsPage] = useState<SettingsPageId | undefined>(undefined)
+  const [conversationsLoaded, setConversationsLoaded] = useState(false)
+  const [guideDismissed, setGuideDismissed] = useState(readGuideDismissed)
+  const [guideRefreshKey, setGuideRefreshKey] = useState(0)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [isBackendReady, setIsBackendReady] = useState(() => typeof window === 'undefined' || !window.electronAPI?.isElectron)
   const [theme, setTheme] = useState<ThemeMode>(() => initialTheme())
@@ -132,6 +150,7 @@ export default function App() {
       if (generation !== mutationGeneration.current) return true
       const sorted = [...convs].sort((a, b) => b.created_at.localeCompare(a.created_at))
       setIsBackendReady(true)
+      setConversationsLoaded(true)
       setConversations((current) => (sameConversations(current, sorted) ? current : sorted))
       return true
     } catch {
@@ -364,6 +383,34 @@ export default function App() {
     }
   }
 
+  const openSettings = (page?: SettingsPageId) => {
+    setSettingsPage(page)
+    setShowSettings(true)
+  }
+
+  const inEmptyNewChat = !activeConvId && messages.length === 0
+  const readiness = useSetupReadiness({
+    enabled: isBackendReady && inEmptyNewChat,
+    workspaceDir: draftWorkspaceDir,
+    refreshKey: guideRefreshKey,
+  })
+  const showGuide = shouldShowGuide({
+    inEmptyNewChat,
+    loaded: readiness.loaded,
+    modelReady: readiness.modelReady,
+    dismissed: guideDismissed,
+    conversationsLoaded,
+    conversationCount: conversations.length,
+  })
+  const dismissGuide = () => {
+    setGuideDismissed(true)
+    try {
+      window.localStorage.setItem(GUIDE_DISMISSED_KEY, '1')
+    } catch {
+      // Hiding the guide is a convenience; it simply returns next time.
+    }
+  }
+
   const handleSend = (text: string, attachments: UploadedAttachment[] = []) => {
     if (savingWorkspace) return
     const generation = workspaceGenerationRef.current
@@ -498,7 +545,7 @@ export default function App() {
         renameFeedback={activeConvId ? actionFeedback[`conversation:${activeConvId}`] : undefined}
         status={!isBackendReady ? 'starting' : isStreaming ? 'working' : 'ready'}
         approvalMode={approvalMode}
-        onOpenPermissions={() => setShowSettings(true)}
+        onOpenPermissions={() => openSettings('permissions')}
       />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <Sidebar
@@ -512,7 +559,7 @@ export default function App() {
           onRefreshConversation={(id) => {
             if (id === activeConvId) handleRefreshChat()
           }}
-          onOpenSettings={() => setShowSettings(true)}
+          onOpenSettings={() => openSettings()}
           scheduledTasks={scheduledTasks}
           actionFeedback={actionFeedback}
           onOpenScheduledTaskCreate={openScheduledTaskCreate}
@@ -537,6 +584,17 @@ export default function App() {
               agentName={agentName}
               onLoadOlderMessages={loadOlderMessages}
               onPromptSelect={handleSend}
+              emptyState={showGuide ? (
+                <FirstRunGuide
+                  required={readiness.required}
+                  optional={readiness.optional}
+                  modelReady={readiness.modelReady}
+                  exampleDisabled={!isBackendReady || isStreaming || savingWorkspace}
+                  onOpenSettings={openSettings}
+                  onRunExample={(prompt) => handleSend(prompt)}
+                  onDismiss={readiness.modelReady ? dismissGuide : undefined}
+                />
+              ) : undefined}
             />
             {pendingAccessGrant && (
               <AccessGrantCard
@@ -585,10 +643,12 @@ export default function App() {
       {showSettings && (
         <Suspense fallback={null}>
           <SettingsModal
+            initialTab={settingsPage}
             diagnosticsRefreshKey={diagnosticsRefreshKey}
             observabilityRefreshKey={observabilityRefreshKey}
             onClose={() => {
               setShowSettings(false)
+              setGuideRefreshKey((value) => value + 1)
               setComposerFocusRequestKey((value) => value + 1)
               void refreshVisibleSettings()
             }}

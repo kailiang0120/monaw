@@ -103,6 +103,8 @@ import {
 
 interface Props {
   onClose: () => void
+  /** Page to open on, e.g. from the first-run guide. */
+  initialTab?: SettingsPageId
   diagnosticsRefreshKey?: number
   observabilityRefreshKey?: number
 }
@@ -159,6 +161,7 @@ function accountResetTime(timestamp: number | null): string {
 
 export function SettingsModal({
   onClose,
+  initialTab = 'model',
   diagnosticsRefreshKey = 0,
   observabilityRefreshKey = 0,
 }: Props) {
@@ -176,7 +179,7 @@ export function SettingsModal({
     save: saveDraft,
   } = useSettingsDraft()
   const [modelOptions, setModelOptions] = useState<ModelOptionsCatalog>(FALLBACK_MODEL_OPTIONS)
-  const [activeTab, setActiveTab] = useState<SettingsTab>('model')
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
   const [toolsTab, setToolsTab] = useState<ToolsTab>('skills')
   const [navQuery, setNavQuery] = useState('')
   const [openaiAccount, setOpenaiAccount] = useState<OpenAIAccountStatus | null>(null)

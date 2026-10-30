@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { Loader2 } from 'lucide-react'
 import { MessageBubble } from './MessageBubble'
 import type { Message } from '../hooks/useChat'
@@ -43,6 +43,8 @@ interface Props {
   agentName?: string
   onLoadOlderMessages?: () => void
   onPromptSelect?: (prompt: string) => void // kept for API compat
+  /** Shown in an empty chat in place of the idle line, e.g. the first-run guide. */
+  emptyState?: ReactNode
 }
 
 export function ChatWindow({
@@ -53,6 +55,7 @@ export function ChatWindow({
   conversationId,
   agentName = DEFAULT_AGENT_NAME,
   onLoadOlderMessages,
+  emptyState,
 }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -147,7 +150,7 @@ export function ChatWindow({
           <p className="text-sm font-medium">Loading conversation</p>
         </div>
       ) : messages.length === 0 ? (
-        <div className="flex flex-1 select-none flex-col items-center justify-center gap-5 px-4">
+        <div className="flex min-h-0 flex-1 select-none flex-col items-center justify-[safe_center] gap-5 overflow-y-auto px-4 py-6">
           <picture>
             <source media="(prefers-reduced-motion: reduce)" srcSet={stillMascotImg} />
             <img
@@ -159,8 +162,9 @@ export function ChatWindow({
           </picture>
           <div className="text-center">
             <p className="text-base font-medium tracking-tight text-neutral-400">{assistantLabel}</p>
-            <p className="mt-0.5 text-[13px] text-neutral-600">Ready.</p>
+            {!emptyState && <p className="mt-0.5 text-[13px] text-neutral-600">Ready.</p>}
           </div>
+          {emptyState}
         </div>
       ) : (
         <div
