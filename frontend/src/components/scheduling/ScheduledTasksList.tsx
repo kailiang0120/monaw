@@ -48,6 +48,7 @@ export function ScheduledTasksList({
         <button
           type="button"
           onClick={toggleExpanded}
+          aria-expanded={expanded}
           className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
         >
           {expanded ? <ChevronDown size={12} className="text-neutral-600" /> : <ChevronRight size={12} className="text-neutral-600" />}

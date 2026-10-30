@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { actionErrorMessage } from '../../hooks/useItemActions'
+import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
+import { useModalFocus } from '../../hooks/useModalFocus'
 import { AlertCircle, Clock, Play, X } from 'lucide-react'
 import {
   createScheduledTask,
@@ -83,6 +85,8 @@ export function ScheduledTaskDialog({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [checkingRun, setCheckingRun] = useState(false)
+  const { confirming: confirmDiscard, ask: askDiscard, keepEditing, keepEditingRef } = useDiscardPrompt()
+  const dialogRef = useRef<HTMLDivElement>(null)
   const mounted = useRef(true)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
@@ -93,14 +97,6 @@ export function ScheduledTaskDialog({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prompt])
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
 
   useEffect(() => {
     if (!notifyTelegram) return
@@ -137,6 +133,24 @@ export function ScheduledTaskDialog({
     notifyTelegram,
     telegramChatId: notifyTelegram ? telegramChatId.trim() : '',
     reuseConversation,
+  })
+
+  // Closing never silently throws away edits; at the discard prompt Escape keeps editing.
+  const initialInput = useRef<string | null>(null)
+  const currentInput = JSON.stringify(buildInput())
+  if (initialInput.current === null) initialInput.current = currentInput
+  const isDirty = currentInput !== initialInput.current
+
+  const requestClose = () => {
+    if (isDirty && !saving) {
+      askDiscard()
+      return
+    }
+    onClose()
+  }
+
+  useModalFocus(dialogRef, {
+    onEscape: () => (confirmDiscard ? keepEditing() : requestClose()),
   })
 
   const save = async () => {
@@ -188,9 +202,11 @@ export function ScheduledTaskDialog({
   return (
     <div className="st-overlay fixed inset-0 below-app-bar z-50 flex items-center justify-center p-4">
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={task ? 'Edit scheduled task' : 'New scheduled task'}
+        tabIndex={-1}
         className="settings-shell flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl"
       >
         <header className="st-divider-b flex items-center justify-between gap-3 px-5 py-4">
@@ -210,7 +226,7 @@ export function ScheduledTaskDialog({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             className="st-btn st-btn-ghost st-btn-icon shrink-0"
             aria-label="Close"
           >
@@ -334,22 +350,38 @@ export function ScheduledTaskDialog({
         </div>
 
         <footer className="st-divider-t flex items-center justify-between gap-2 px-5 py-3.5">
-          <div>
-            {task && (
-              <button type="button" onClick={runNow} disabled={saving} className="st-btn st-btn-secondary">
-                <Play size={13} />
-                {checkingRun ? 'Check run' : 'Run now'}
-              </button>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <button type="button" onClick={onClose} className="st-btn st-btn-ghost">
-              Cancel
-            </button>
-            <button type="button" onClick={save} disabled={!canSave} className="st-btn st-btn-primary">
-              {saving ? 'Saving…' : task ? 'Update task' : 'Create task'}
-            </button>
-          </div>
+          {confirmDiscard ? (
+            <>
+              <p className="st-desc">Close and lose your changes to this task?</p>
+              <div className="flex items-center gap-2">
+                <button ref={keepEditingRef} type="button" onClick={keepEditing} className="st-btn st-btn-ghost">
+                  Keep editing
+                </button>
+                <button type="button" onClick={onClose} className="st-btn st-btn-danger">
+                  Discard changes
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                {task && (
+                  <button type="button" onClick={runNow} disabled={saving} className="st-btn st-btn-secondary">
+                    <Play size={13} />
+                    {checkingRun ? 'Check run' : 'Run now'}
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={requestClose} className="st-btn st-btn-ghost">
+                  Cancel
+                </button>
+                <button type="button" onClick={save} disabled={!canSave} className="st-btn st-btn-primary">
+                  {saving ? 'Saving…' : task ? 'Update task' : 'Create task'}
+                </button>
+              </div>
+            </>
+          )}
         </footer>
       </div>
     </div>

@@ -92,7 +92,7 @@ export function ContextUsageBar({ usage }: Props) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.03] transition-colors hover:border-white/[0.12] focus:outline-none ${pulseClass}`}
+        className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.03] transition-colors hover:border-white/[0.12] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 ${pulseClass}`}
         aria-label={`Context usage ${Math.round(percentage)}% — click to ${open ? 'hide' : 'show'} breakdown`}
         aria-expanded={open}
       >

@@ -32,8 +32,8 @@ it('shows pending operations, blocks mutation controls and offers a check for un
   const props = { task, onEdit: vi.fn(), onSelectRun: vi.fn(), onToggleEnabled: vi.fn(), onDelete: vi.fn(), onRunNow: vi.fn(), onViewRuns: vi.fn() }
   const { rerender } = render(<ScheduledTaskItem {...props} feedback={{ pending: 'Starting or checking run' }} />)
   fireEvent.click(screen.getByRole('button', { name: 'Scheduled task actions for Report' }))
-  expect(screen.getByRole('button', { name: 'Run now' })).toBeDisabled()
-  expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled()
+  expect(screen.getByRole('menuitem', { name: 'Run now' })).toBeDisabled()
+  expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeDisabled()
   expect(screen.getByRole('status')).toHaveTextContent('Starting or checking run')
   expect(screen.getByText('Waiting to run')).toBeInTheDocument()
   rerender(<ScheduledTaskItem {...props} feedback={{ error: 'Response interrupted', retry, retryLabel: 'Check run' }} />)

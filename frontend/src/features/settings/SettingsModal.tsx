@@ -28,6 +28,8 @@ import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel
 import { McpSettings } from './McpSettings'
 import { SandboxSettings } from './SandboxSettings'
 import { useSettingsDraft } from './useSettingsDraft'
+import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
+import { useModalFocus } from '../../hooks/useModalFocus'
 import {
   DEFAULT_CONNECTION_PORTAL,
   type ConnectionPortalId,
@@ -207,9 +209,10 @@ export function SettingsModal({
   const [saved, setSaved] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null)
-  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const { confirming: confirmDiscard, ask: askDiscard, keepEditing, keepEditingRef } = useDiscardPrompt()
 
   const scrollRef = useRef<HTMLDivElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -537,7 +540,7 @@ export function SettingsModal({
   const handleSave = async () => {
     if (!draft) return
     if (duplicateMcpServerNames(draft.mcp.servers).length > 0) return
-    setConfirmDiscard(false)
+    keepEditing()
     const outcome = await saveDraft(modelOptions)
     if (outcome === 'failed') return
     await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
@@ -584,23 +587,17 @@ export function SettingsModal({
 
   const requestClose = () => {
     if (isDirty) {
-      setConfirmDiscard(true)
+      askDiscard()
       return
     }
     onClose()
   }
 
-  // Escape closes, but never silently throws away edits.
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      event.stopPropagation()
-      requestClose()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDirty])
+  // Escape closes, but never silently throws away edits; at the discard prompt it keeps editing.
+  useModalFocus(dialogRef, {
+    onEscape: () => (confirmDiscard ? keepEditing() : requestClose()),
+    remountKey: Boolean(draft),
+  })
 
   // After setup, watch for the extension to connect once the user loads it in Chrome.
   const pollExtension = activeTab === 'browser'
@@ -625,7 +622,7 @@ export function SettingsModal({
   if (!draft) {
     return (
       <div className="st-overlay fixed inset-0 below-app-bar z-50 flex items-center justify-center p-4">
-        <div className="settings-shell max-w-md rounded-2xl px-5 py-4">
+        <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Settings" tabIndex={-1} className="settings-shell max-w-md rounded-2xl px-5 py-4">
           {loadError ? (
             <div>
               <p className="st-label" style={{ color: 'var(--st-danger)' }}>Settings failed to load.</p>
@@ -708,9 +705,11 @@ export function SettingsModal({
       onClick={(e) => e.target === e.currentTarget && requestClose()}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
+        tabIndex={-1}
         className="settings-shell flex h-[min(92vh,940px)] w-full max-w-6xl overflow-hidden rounded-2xl"
       >
         {/* ------------------------------------------------------ navigation */}
@@ -1499,7 +1498,7 @@ export function SettingsModal({
               <>
                 <p className="st-desc">Close settings and lose your unsaved changes?</p>
                 <div className="flex items-center gap-2">
-                  <button type="button" onClick={() => setConfirmDiscard(false)} className="st-btn st-btn-ghost">
+                  <button ref={keepEditingRef} type="button" onClick={keepEditing} className="st-btn st-btn-ghost">
                     Keep editing
                   </button>
                   <button type="button" onClick={onClose} className="st-btn st-btn-danger">

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ExternalLink, X } from 'lucide-react'
+import { useModalFocus } from '../../hooks/useModalFocus'
 import { fetchScheduledTaskRuns } from '../../lib/api/scheduledTasks'
 import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types'
 import { relativeTime } from '../../lib/scheduling/humanize'
@@ -12,6 +13,8 @@ interface Props {
 
 export function ScheduledRunHistory({ task, onClose, onSelectRun }: Props) {
   const [runs, setRuns] = useState<ScheduledTaskRun[]>([])
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useModalFocus(dialogRef, { onEscape: onClose })
 
   useEffect(() => {
     let cancelled = false
@@ -28,9 +31,11 @@ export function ScheduledRunHistory({ task, onClose, onSelectRun }: Props) {
   return (
     <div className="st-overlay fixed inset-0 below-app-bar z-50 flex items-center justify-center p-4">
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={`Run history for ${task.title}`}
+        tabIndex={-1}
         className="settings-shell w-full max-w-lg overflow-hidden rounded-2xl"
       >
         <header className="st-divider-b flex items-center justify-between gap-3 px-5 py-4">

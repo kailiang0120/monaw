@@ -213,3 +213,24 @@ The turn loop ends a turn in four places: a pause because an earlier tool is sti
 | Run-outcome contract tests | **5 passed**: error counting, pause conditions, payload contents per exit, incomplete reasons, tool counts reported only when known. |
 | Full locked Python 3.11 backend suite | **1,171 passed, 8 skipped**, 65.04 seconds. |
 | `scripts/check-imports.py` | 236 modules compile and import; `/health` served. |
+
+## UX-02, first part: keyboard use, dialogs and confirmations
+
+Updated: 31 October 2026.
+
+| Work item | Behavior implemented | Evidence |
+| --- | --- | --- |
+| Shared dialog behavior | `useModalFocus` gives every modal (settings, scheduled task, run history, image preview) initial focus, Tab and Shift+Tab kept inside the dialog, Escape routed to the dialog's own close logic, and focus returned to the opener. Only the topmost dialog handles keys, decided by containment so nested dialogs that mount together behave. Portal menus keep their own Tab and Escape. Controls inside a dialog that use Escape themselves (the timezone search) mark it handled, so the dialog no longer also closes. Run history now closes on Escape. | Five hook tests: initial focus and return, Tab wrapping past disabled controls, stray focus brought back, handled Escape ignored, innermost dialog only. |
+| Unsaved-change prompts | Settings and the scheduled-task dialog share `useDiscardPrompt`: asking moves focus to Keep editing, Escape at the prompt keeps editing, and focus returns to where the user was. The scheduled-task dialog previously closed on Escape or Cancel and discarded edits; it now asks first. | Settings and scheduled-task dialog tests drive both prompts from the keyboard. |
+| Dropdown | Arrow keys open the menu on the selected option; Up/Down wrap, Home/End jump; choosing, Escape or Tab close it and return focus to the trigger. Escape closes only the menu, not an enclosing dialog. | Five Dropdown tests. |
+| History and irreversible deletes | A conversation row is a real button (`aria-current` for the open one) and F2 renames it; Enter or Escape in the rename box returns focus to the row. Deleting a conversation or a scheduled task asks first with an inline confirmation that starts on Cancel; Escape cancels and returns focus to the delete control. Previously both deleted on one click. The scheduled-task actions menu now uses menu semantics, arrow/Home/End movement, Escape/Tab/outside-click closing and focus return. | Five keyboard tests for the sidebar and task menu; the existing action-feedback test now queries menu items by their role. |
+| Visible focus and labels | Dropdown options, settings navigation, the context-usage button and the sidebar delete control show a focus indicator. The scheduled section toggle reports `aria-expanded`. A scan of icon-containing buttons found none without an accessible name. | CSS and class changes; covered visually only by the component tests' focus assertions. |
+
+The Electron workflows that open the task actions menu now select its items as menu items.
+
+| Invocation | Result |
+| --- | --- |
+| Frontend `npm run verify` | **166 UI/App tests and 32 Electron tests passed**; TypeScript and renderer build passed. |
+| Windows `npm run test:app` (PowerShell) | **9 passed**, 2.4 minutes, including the corrected clipboard workflow. |
+
+Not covered: a manual screen-reader pass and a keyboard-only walkthrough in the installed app. ObservabilityPanel's run-detail test failed once under full-suite load and passed in four isolated runs and the final full run; it is timing-sensitive.

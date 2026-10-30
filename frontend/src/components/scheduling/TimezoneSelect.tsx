@@ -116,7 +116,12 @@ export function TimezoneSelect({ value, onChange }: Props) {
               aria-label="Search timezone"
               className="w-full border-0 bg-transparent text-sm outline-none"
               style={{ color: 'var(--st-text)' }}
-              onKeyDown={(e) => e.key === 'Escape' && closeDropdown()}
+              onKeyDown={(e) => {
+                if (e.key !== 'Escape') return
+                // Close only the timezone list, not the dialog around it.
+                e.preventDefault()
+                closeDropdown()
+              }}
             />
           </div>
 

@@ -1023,4 +1023,22 @@ describe('SettingsModal', () => {
       sandbox: expect.objectContaining({ resources: expect.objectContaining({ timeout_seconds: 45 }) }),
     })))
   })
+
+  it('asks before Escape discards edits and lets Escape keep editing', async () => {
+    const onClose = vi.fn()
+    render(<SettingsModal onClose={onClose} />)
+    fireEvent.click((await screen.findAllByRole('button', { name: /Identity/i }))[0])
+    const name = await screen.findByLabelText('Your name')
+    fireEvent.change(name, { target: { value: 'Kai' } })
+    name.focus()
+
+    fireEvent.keyDown(name, { key: 'Escape' })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Keep editing' })).toHaveFocus()
+
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(screen.queryByText('Close settings and lose your unsaved changes?')).not.toBeInTheDocument()
+    expect(name).toHaveFocus()
+    expect(name).toHaveValue('Kai')
+  })
 })

@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Clock3, MessageSquare, Moon, RefreshCw, Settings, Sun, Trash2 } from 'lucide-react'
 import type { Conversation, ScheduledTask } from '../lib/api/types'
 import { ScheduledTasksList } from './scheduling/ScheduledTasksList'
+import { InlineConfirm } from './ui/InlineConfirm'
 import type { ItemActionFeedback } from '../hooks/useItemActions'
 
 type ThemeMode = 'dark' | 'light'
@@ -115,6 +116,29 @@ export function Sidebar({
 
   const cancelEdit = () => { editGeneration.current += 1; setEditingId(null) }
 
+  // Delete asks first; keyboard focus follows the row through rename and the delete prompt.
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
+  const rowButtons = useRef(new Map<string, HTMLButtonElement>())
+  const deleteButtons = useRef(new Map<string, HTMLButtonElement>())
+  const pendingFocus = useRef<{ id: string; target: 'row' | 'delete' } | null>(null)
+  const setRowButton = (id: string, element: HTMLButtonElement | null) => {
+    if (element) rowButtons.current.set(id, element)
+    else rowButtons.current.delete(id)
+  }
+  const setDeleteButton = (id: string, element: HTMLButtonElement | null) => {
+    if (element) deleteButtons.current.set(id, element)
+    else deleteButtons.current.delete(id)
+  }
+  const focusAfterRender = (id: string, target: 'row' | 'delete') => { pendingFocus.current = { id, target } }
+  useEffect(() => {
+    const pending = pendingFocus.current
+    if (!pending) return
+    const element = (pending.target === 'row' ? rowButtons : deleteButtons).current.get(pending.id)
+    if (!element) return
+    pendingFocus.current = null
+    element.focus()
+  })
+
   const groups = groupByDate(conversations)
   const ThemeIcon = theme === 'light' ? Moon : Sun
   const nextThemeLabel = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'
@@ -223,81 +247,93 @@ export function Sidebar({
                       return (
                         <div
                           key={c.id}
-                          className={`group relative flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 transition-colors ${
+                          className={`group relative rounded-lg px-2 py-1.5 transition-colors ${
                             active
                               ? 'border border-accent/20 bg-accent/10 text-neutral-100'
                               : 'border border-transparent text-neutral-500 hover:border-white/[0.06] hover:bg-white/[0.03] hover:text-neutral-200'
                           }`}
-                          onClick={() => { if (!isEditing) onSelect(c.id) }}
-                          onDoubleClick={() => startEdit(c)}
                         >
-                          <MessageSquare
-                            size={12}
-                            className={`shrink-0 ${active ? 'text-accent-light' : 'text-neutral-700'}`}
-                          />
-                          <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
                             {isEditing ? (
-                              <input
-                                ref={editInputRef}
-                                value={editValue}
-                                disabled={Boolean(feedback?.pending)}
-                                aria-label={`Rename ${c.title}`}
-                                onChange={(e) => setEditValue(e.target.value)}
-                                onBlur={() => commitEdit(c.id)}
+                              <>
+                                <MessageSquare size={12} className={`shrink-0 ${active ? 'text-accent-light' : 'text-neutral-700'}`} />
+                                <input
+                                  ref={editInputRef}
+                                  value={editValue}
+                                  disabled={Boolean(feedback?.pending)}
+                                  aria-label={`Rename ${c.title}`}
+                                  onChange={(e) => setEditValue(e.target.value)}
+                                  onBlur={() => commitEdit(c.id)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') { e.preventDefault(); focusAfterRender(c.id, 'row'); void commitEdit(c.id) }
+                                    if (e.key === 'Escape') { e.preventDefault(); focusAfterRender(c.id, 'row'); cancelEdit() }
+                                  }}
+                                  className="min-w-0 flex-1 rounded bg-white/[0.08] px-1 py-0 text-[11px] leading-snug text-neutral-100 outline-none ring-1 ring-accent/50"
+                                />
+                              </>
+                            ) : (
+                              <button
+                                ref={(element) => setRowButton(c.id, element)}
+                                type="button"
+                                aria-current={active ? 'page' : undefined}
+                                aria-keyshortcuts={onRename ? 'F2' : undefined}
+                                title={onRename ? 'Double-click or press F2 to rename' : undefined}
+                                onClick={() => onSelect(c.id)}
+                                onDoubleClick={() => startEdit(c)}
                                 onKeyDown={(e) => {
-                                  if (e.key === 'Enter') { e.preventDefault(); commitEdit(c.id) }
-                                  if (e.key === 'Escape') { e.preventDefault(); cancelEdit() }
+                                  if (e.key === 'F2' && onRename) { e.preventDefault(); startEdit(c) }
                                 }}
-                                onClick={(e) => e.stopPropagation()}
-                                className="w-full rounded bg-white/[0.08] px-1 py-0 text-[11px] leading-snug text-neutral-100 outline-none ring-1 ring-accent/50"
+                                className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                              >
+                                <MessageSquare size={12} className={`shrink-0 ${active ? 'text-accent-light' : 'text-neutral-700'}`} />
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate text-[11px] leading-snug">{c.title}</span>
+                                  <span className="block max-h-0 overflow-hidden text-[10px] leading-none text-neutral-700 transition-[max-height] duration-150 group-hover:max-h-4 group-focus-within:max-h-4">
+                                    {formatTimestamp(c.created_at)}
+                                  </span>
+                                </span>
+                              </button>
+                            )}
+                            {!isEditing && (confirmingDeleteId === c.id ? (
+                              <InlineConfirm
+                                label={`Delete "${c.title}"?`}
+                                onConfirm={() => { setConfirmingDeleteId(null); onDelete(c.id) }}
+                                onCancel={() => { focusAfterRender(c.id, 'delete'); setConfirmingDeleteId(null) }}
                               />
                             ) : (
-                              <>
-                                <span className="block truncate text-[11px] leading-snug">{c.title}</span>
-                                <span className="block max-h-0 overflow-hidden text-[10px] leading-none text-neutral-700 transition-[max-height] duration-150 group-hover:max-h-4">
-                                  {formatTimestamp(c.created_at)}
-                                </span>
-                              </>
-                            )}
-                            {feedback?.pending && <span role="status" className="block text-[10px]">{feedback.pending}…</span>}
-                            {feedback?.error && (
-                              <div role="alert" className="mt-1 text-[10px] text-red-300">
-                                {feedback.error}
-                                {feedback.retry && <button type="button" onClick={(event) => { event.stopPropagation(); feedback.retry?.() }} className="ml-1 underline">Retry</button>}
-                              </div>
-                            )}
-                            {feedback?.success && <span role="status" className="block text-[10px] text-neutral-500">{feedback.success}</span>}
-                          </div>
-                          {!isEditing && (
-                            <div className="flex shrink-0 items-center gap-0.5">
-                              {active && onRefreshConversation && (
+                              <div className="flex shrink-0 items-center gap-0.5">
+                                {active && onRefreshConversation && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onRefreshConversation(c.id)}
+                                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-600 transition-all hover:bg-accent/10 hover:text-accent-light focus:outline-none focus:ring-2 focus:ring-accent/20"
+                                    aria-label={`Refresh ${c.title}`}
+                                    title="Refresh chat"
+                                  >
+                                    <RefreshCw size={11} />
+                                  </button>
+                                )}
                                 <button
+                                  ref={(element) => setDeleteButton(c.id, element)}
                                   type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    onRefreshConversation(c.id)
-                                  }}
-                                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-600 transition-all hover:bg-accent/10 hover:text-accent-light focus:outline-none focus:ring-2 focus:ring-accent/20"
-                                  aria-label={`Refresh ${c.title}`}
-                                  title="Refresh chat"
+                                  onClick={() => setConfirmingDeleteId(c.id)}
+                                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-700 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/30"
+                                  aria-label={`Delete ${c.title}`}
+                                  disabled={Boolean(feedback?.pending)}
                                 >
-                                  <RefreshCw size={11} />
+                                  <Trash2 size={11} />
                                 </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  onDelete(c.id)
-                                }}
-                                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-700 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100 focus:opacity-100 focus:outline-none"
-                                aria-label={`Delete ${c.title}`}
-                                disabled={Boolean(feedback?.pending)}
-                              >
-                                <Trash2 size={11} />
-                              </button>
+                              </div>
+                            ))}
+                          </div>
+                          {feedback?.pending && <span role="status" className="block pl-5 text-[10px]">{feedback.pending}…</span>}
+                          {feedback?.error && (
+                            <div role="alert" className="mt-1 pl-5 text-[10px] text-red-300">
+                              {feedback.error}
+                              {feedback.retry && <button type="button" onClick={() => feedback.retry?.()} className="ml-1 underline">Retry</button>}
                             </div>
                           )}
+                          {feedback?.success && <span role="status" className="block pl-5 text-[10px] text-neutral-500">{feedback.success}</span>}
                         </div>
                       )
                     })}

@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown } from 'lucide-react'
 
@@ -84,6 +84,11 @@ export function Dropdown<T extends string>({
     }
   }, [open, align, options.length])
 
+  const close = ({ restoreFocus }: { restoreFocus: boolean }) => {
+    setOpen(false)
+    if (restoreFocus) triggerRef.current?.focus()
+  }
+
   useEffect(() => {
     if (!open) return
     const handlePointerDown = (event: MouseEvent) => {
@@ -94,8 +99,9 @@ export function Dropdown<T extends string>({
     }
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        // Close only the menu, not a dialog that contains the trigger.
         event.stopPropagation()
-        setOpen(false)
+        close({ restoreFocus: true })
       }
     }
     window.addEventListener('mousedown', handlePointerDown)
@@ -106,12 +112,61 @@ export function Dropdown<T extends string>({
     }
   }, [open])
 
+  const optionButtons = () => Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])
+
+  // Once placed (a hidden menu cannot take focus), focus the selected option, or the requested end.
+  const pendingFocus = useRef<'selected' | 'first' | 'last'>('selected')
+  const placed = menuStyle !== null
+  useEffect(() => {
+    if (!open || !placed) return
+    const buttons = optionButtons()
+    const selectedIndex = options.findIndex((option) => option.value === value)
+    const index = pendingFocus.current === 'last'
+      ? buttons.length - 1
+      : pendingFocus.current === 'first' || selectedIndex < 0 ? 0 : selectedIndex
+    buttons[index]?.focus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, placed])
+
+  useEffect(() => {
+    if (!open) setMenuStyle(null)
+  }, [open])
+
+  const openWith = (focus: 'selected' | 'first' | 'last') => {
+    pendingFocus.current = focus
+    setOpen(true)
+  }
+
+  const handleTriggerKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (open) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      openWith(event.key === 'ArrowUp' && !active ? 'last' : 'selected')
+    }
+  }
+
+  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const buttons = optionButtons()
+    if (buttons.length === 0) return
+    const current = buttons.indexOf(document.activeElement as HTMLButtonElement)
+    const move = (index: number) => {
+      event.preventDefault()
+      buttons[(index + buttons.length) % buttons.length].focus()
+    }
+    if (event.key === 'ArrowDown') move(current + 1)
+    else if (event.key === 'ArrowUp') move(current < 0 ? buttons.length - 1 : current - 1)
+    else if (event.key === 'Home') move(0)
+    else if (event.key === 'End') move(buttons.length - 1)
+    else if (event.key === 'Tab') close({ restoreFocus: true })
+  }
+
   const menu = open && (
     <div
       ref={menuRef}
       role="listbox"
       aria-label={ariaLabel}
       className="st-menu"
+      onKeyDown={handleMenuKeyDown}
       style={{
         position: 'fixed',
         top: menuStyle?.top ?? -9999,
@@ -128,9 +183,10 @@ export function Dropdown<T extends string>({
             type="button"
             role="option"
             aria-selected={selected}
+            tabIndex={-1}
             onClick={() => {
               onChange(option.value)
-              setOpen(false)
+              close({ restoreFocus: true })
             }}
             className="st-menu-item"
           >
@@ -148,7 +204,11 @@ export function Dropdown<T extends string>({
         ref={triggerRef}
         type="button"
         disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => {
+          pendingFocus.current = 'selected'
+          setOpen((current) => !current)
+        }}
+        onKeyDown={handleTriggerKeyDown}
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}

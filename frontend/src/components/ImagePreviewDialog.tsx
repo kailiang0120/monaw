@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, Image, Loader2, X } from 'lucide-react'
+import { useModalFocus } from '../hooks/useModalFocus'
 import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
 import type { UploadedAttachment } from '../lib/api/types'
 
@@ -15,6 +16,7 @@ export function ImagePreviewDialog({
   const [src, setSrc] = useState('')
   const [failed, setFailed] = useState(false)
   const closeRef = useRef<HTMLButtonElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let active = true
@@ -36,17 +38,7 @@ export function ImagePreviewDialog({
     }
   }, [attachment])
 
-  useEffect(() => {
-    closeRef.current?.focus()
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      event.stopPropagation()
-      onClose()
-    }
-    window.addEventListener('keydown', onKeyDown, true)
-    return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [onClose])
+  useModalFocus(dialogRef, { onEscape: onClose, initialFocusRef: closeRef })
 
   // Portal out of the message list: animated (transformed) ancestors would
   // otherwise trap the fixed overlay inside the bubble.
@@ -57,9 +49,11 @@ export function ImagePreviewDialog({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={`Image preview: ${attachment.name}`}
+        tabIndex={-1}
         className="settings-shell flex max-h-full max-w-full flex-col overflow-hidden rounded-2xl"
         onClick={(event) => event.stopPropagation()}
       >
