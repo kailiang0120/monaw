@@ -55,13 +55,31 @@ Windows 11 x64 development machine; Python 3.11 backend, Electron 41.3.0, PyInst
 
 With `PATH` limited to the Windows folders (no Python, uv, Node, npm or Git), the frozen backend served `/health` and authenticated API calls. It loaded every built-in skill from disk, with web search unavailable only because no Tavily key was set. It started the built-in browser server through `-m` (connected, 20 tools) and ran `-c`. The packaged app started the frozen backend, the renderer made authenticated calls, and killing the app left no Monaw processes.
 
+### Candidate `fdf05ae`
+
+Built from commit `fdf05ae`: `Monaw-Setup-1.0.0-x64.exe`, 220.4 MB, SHA-256 `F7FB6CC5922A479DF52D25E0D4E7675E646915F8B8B3A6B01622D12656D81C7B`. With `measure-baseline.ps1`: cold start to a healthy backend 1.75 s, warm 1.61 s, no API requests while idle for 60 s, fresh database 4,096 bytes. The packaged-app checks passed (5 of 5).
+
 ## Licensing to resolve before publishing
 
 The ffmpeg executable bundled by `imageio-ffmpeg` is a GPLv3 build (`--enable-gpl --enable-version3`, with x264 and x265). Monaw is Apache-2.0. Distributing that binary in the installer carries GPLv3 obligations for it. The options are to ship an LGPL ffmpeg build, decode audio through the `av` libraries already bundled, or download ffmpeg on demand. Speech-to-text is its only user (`backend/app/agent/speech_to_text.py`). Other bundled native packages checked (`av`, `ctranslate2`, `onnxruntime`, `faster-whisper`, `pywin32`) use permissive licenses. A complete third-party notice file has not been produced.
 
 ## Not yet verified
 
-- Installing on a clean Windows machine, shutdown and restart, repeated launch, an occupied port and missing optional dependencies in the installed app.
+- Installing on a clean Windows machine. The packaged-app checks below run the unpacked build, not an installed one.
 - Upgrading from one installed version to the next while keeping conversations, memory, settings and stored credentials. There is no automatic update.
 - Code signing. The installer and executables are unsigned, so Windows SmartScreen will warn.
-- The application workflows (`npm run test:app`) against the packaged app instead of the source app.
+- Model-driven workflows in the packaged app. The source workflows (`npm run test:app`) substitute the model provider through the Python path, which a frozen backend does not load, and the packaged build has no test hooks.
+
+## Packaged-app checks
+
+`npm run test:packaged` (from `frontend`) drives `release/win-unpacked/Monaw.exe`, or the app named by `MONAW_PACKAGED_APP`, with only the Windows folders on `PATH` and a Monaw home whose path contains spaces and non-ASCII characters. It checks:
+
+- the first start and the first-run guide;
+- settings kept across a restart;
+- a second launch, which leaves the running app and its single backend alone;
+- an occupied port, which is reported and the other program left running;
+- a backend that stops while starting, which is reported.
+
+Startup failures are also written to `runtime/backend.log`.
+
+`scripts/measure-baseline.ps1` measures the packaged app's cold and warm start, idle API requests and fresh database size, and records the commit it measured.

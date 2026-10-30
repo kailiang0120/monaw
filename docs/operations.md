@@ -94,7 +94,9 @@ If a secret or grant may be compromised:
    attachment registry entries, browser/MCP diagnostics, and scheduled-task
    output.
 7. Review `%USERPROFILE%\.monaw\runtime\backend.log` for local errors without
-   sharing raw logs publicly.
+   sharing raw logs publicly. To share diagnostics, prepare a report in
+   Settings -> Observability -> Support report. It is redacted and bounded, and
+   it is shown in full before it can be saved.
 
 ## Backup And Restore
 
@@ -111,6 +113,7 @@ runtime\agent.db          conversations, scheduled tasks, and app state
 runtime\settings.json     local settings
 memory\                   long-term memory markdown files
 workspace\                default agent workspace
+skills\                   skills you created with the skill creator
 browser\                  browser screenshots
 ```
 

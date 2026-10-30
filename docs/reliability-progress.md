@@ -270,3 +270,41 @@ Updated: 31 October 2026.
 The installer was built but not installed: installing writes Start-menu entries and an uninstall key to the current user profile, and the plan places install and upgrade checks on a clean Windows machine. Release blockers recorded in [packaging.md](packaging.md): the GPLv3 ffmpeg build bundled by `imageio-ffmpeg`, unsigned executables, and the missing third-party notice file. Clean install, upgrade, repeated launch, port conflict and missing-dependency checks remain for QA-01 expansion against an installed candidate.
 
 The source-app workflows still pass with the new launch module (**9 passed**, 2.5 minutes), and Electron unit tests pass (**35**).
+
+## QA-01 expansion, OBS-01 and DOC-01
+
+Updated: 31 October 2026.
+
+| Work item | Behavior implemented | Evidence |
+| --- | --- | --- |
+| Packaged-app checks | `npm run test:packaged` drives the packaged app with only the Windows folders on `PATH`, from a Monaw home whose path has spaces and non-ASCII characters: first run and guide, settings across restart, second launch, occupied port, backend that stops while starting. The source workflows cannot run frozen: they substitute the model provider through the Python path, and the packaged build has no test hooks. | Five packaged checks; results for the candidate below. |
+| Startup robustness found by those checks | A second launch used to start a second backend on the same port with a different control secret; Monaw now holds a single-instance lock and focuses the running window. An occupied port or a backend exiting before it was ready left the window waiting; both now show an error naming the port or the log, are recorded in `backend.log`, and never stop the other program. | Electron unit tests for port detection and messages; the packaged checks. Source workflows still pass (**9 passed**, 2.6 minutes). |
+| Settings save with stored keys | While testing, saving settings in an isolated profile surfaced a credential re-apply failure; the new save handling reported it instead of failing silently. Its cause was the test profile lacking Windows known folders, fixed in the harness. | Packaged settings check. |
+| Support report (OBS-01) | Settings > Observability > Support report prepares versions, packaging, service status, a configuration shape without values, and up to 50 recent errors. It is redacted with the existing observability redaction, bounded to 512 KB (oldest log lines, then oldest errors dropped first), shown in full before it can be saved, and includes the backend log only in support mode. | Five backend tests (no setting values, redaction of keys and paths, log only in support mode, size bound keeping newest entries) and two UI tests. |
+| Measured baselines (OBS-01) | `scripts/measure-baseline.ps1` measures the packaged app's cold and warm start to a healthy backend, idle API requests per minute from the access log, and fresh database size, and records the commit and Electron version. Long-conversation rendering, representative database growth and stop-to-quiescence are recorded as not measured rather than estimated. | Candidate figures below. |
+| Release documentation (DOC-01) | [Installation](installation.md) covers requirements, checksum verification, install, data location, manual upgrade with backup, uninstall and startup failures; [packaging](packaging.md) covers building, layout, measurements, licensing and what is unverified; operations and the README link both and list the user skills folder. | Link check over the changed documents. |
+
+### Candidate `fdf05ae`
+
+The candidate was built from commit `fdf05aea5f7d592b150f7e5901e02e390a811561` with `scripts/package-windows.ps1` (154 seconds for backend, app and installer). Documentation edits made while it built do not change the app.
+
+| Invocation | Result |
+| --- | --- |
+| Installer | `Monaw-Setup-1.0.0-x64.exe`, 220.4 MB, SHA-256 `F7FB6CC5922A479DF52D25E0D4E7675E646915F8B8B3A6B01622D12656D81C7B`. Unsigned; not installed on this machine. |
+| `npm run test:packaged` | **5 passed**, 24.8 seconds. |
+| `scripts/measure-baseline.ps1 -SkipTests` | Cold start to healthy backend **1.75 s**, warm **1.61 s**; **0** idle API requests per minute over 60 seconds; fresh database **4,096 bytes**. Windows 11 (10.0.26300), 16 logical processors, Python 3.11.15, Node 22.23.4, Electron 41.3.0. Test timings were skipped because the suites had just run. |
+| Full backend suite | **1,178 passed, 8 skipped**, 65.76 seconds. |
+| Frontend `npm run verify` | **181 UI/App tests and 37 Electron tests passed**; TypeScript and renderer build passed. |
+| Source `npm run test:app` | **9 passed**, 2.6 minutes. |
+
+During startup the renderer's stored-key sync can reach the backend before it listens and logs `ECONNREFUSED`; it retries and succeeds, as before this work.
+
+## Status of the plan
+
+All fifteen packages have an implementation. What is still open needs resources or decisions outside this machine:
+
+- **Stage A:** the real Linux Docker job and GitHub-hosted CI have not run on these commits (nothing has been pushed), and Docker is unavailable locally.
+- **Stage B:** a manual keyboard-only and screen-reader walkthrough of the installed app.
+- **Stage C:** a clean Windows install and an upgrade between two installed versions; code signing; third-party notices; and a decision on the GPLv3 ffmpeg build bundled by `imageio-ffmpeg`. Long-conversation rendering, representative database growth and stop-to-quiescence baselines need a packaged fixture and are not measured.
+
+No rating reassessment is claimed.

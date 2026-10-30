@@ -12,6 +12,8 @@ The application runs on your PC. Chat history, settings, memory, and artifacts a
 
 ## Setup and Start
 
+To use Monaw without Python, Node.js or Git, build or download the Windows installer instead; see [Installing the Windows build](docs/installation.md). The steps below run Monaw from source.
+
 You need **Git**, an internet connection for installation and model access, and Windows 10 or 11. The setup script can install missing **uv** and **Node.js LTS** through Windows Package Manager (`winget`). Supported Node release lines are **20.x starting at 20.19**, **22.x starting at 22.13**, and **24.x**, with npm. Setup and launch check the executable found on PATH against the policy in `frontend/package.json`; other major versions and prereleases are rejected. Python **3.11** is pinned in `backend/.python-version` and installed by uv. Required Windows backend checks use 3.11; a separate runtime compatibility job checks 3.12.
 
 Google Chrome **125+** is needed for browser automation, through the Monaw extension you set up from Settings > Browser. Docker Desktop is optional for isolated shell execution.
@@ -256,6 +258,7 @@ For a custom uv installation, set `AGENT_UV_PATH` to the full path of `uv.exe` b
 | Tool integrations and remote tasks | [MCP](docs/mcp.md) / [Telegram](docs/telegram.md) / [Scheduling](docs/scheduling.md) |
 | Action approval and execution isolation | [Permissions](docs/permissions.md) / [Sandboxing](docs/sandboxing.md) |
 | Runtime operations and HTTP endpoints | [Operations](docs/operations.md) / [API reference](docs/api.md) |
+| Windows installer: install, upgrade, build | [Installation](docs/installation.md) / [Packaging](docs/packaging.md) |
 | Planned work | [Roadmap](docs/roadmap.md) |
 
 This repository is intended for cloning, local use, and code review. External contributions are not being accepted yet.

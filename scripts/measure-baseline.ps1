@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $frontendRoot = Join-Path $repoRoot "frontend"
 if (-not $PackagedApp) {
-    $PackagedApp = Join-Path $frontendRoot "releasewin-unpackedMonaw.exe"
+    $PackagedApp = Join-Path $frontendRoot "release\win-unpacked\Monaw.exe"
 }
 
 function Measure-PackagedApp {
@@ -113,7 +113,7 @@ $result = [ordered]@{
     application = [ordered]@{
         commit = (& git -C $repoRoot rev-parse HEAD 2>&1 | Out-String).Trim()
         working_tree_clean = -not [bool](& git -C $repoRoot status --porcelain 2>&1 | Out-String).Trim()
-        electron = (Get-Content (Join-Path $frontendRoot "node_moduleselectronpackage.json") -Raw | ConvertFrom-Json).version
+        electron = (Get-Content (Join-Path $frontendRoot "node_modules\electron\package.json") -Raw | ConvertFrom-Json).version
     }
     backend_test_seconds = $null
     frontend_test_seconds = $null
