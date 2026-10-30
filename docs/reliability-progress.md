@@ -157,3 +157,24 @@ The final application run cleaned its own fixtures and left no harness Electron 
 The extension-folder Copy handler used the browser clipboard API, which the desktop permission policy denies, and silently swallowed the error. Copy now uses a bounded, sender-validated, write-only Electron IPC bridge in the desktop app; browser development retains the browser API. Failures show an accessible message with manual keyboard-copy instructions. Clipboard reads are not exposed to the renderer. A desktop restart is needed to load the new main/preload bridge.
 
 Three regression cases cover desktop, browser, and failed copying, including spaces and non-ASCII paths. The desktop and failure-feedback cases failed before the fix; all **29 settings component tests** now pass. **32 Electron tests**, renderer/harness TypeScript, and the renderer build pass. A focused real Electron application workflow passes (**1 passed**, 14.0 seconds), asserting the actual OS clipboard after clicking Copy through real authenticated setup. Only setup's external Explorer/Chrome launches are suppressed in the disposable fixture; Chrome extension installation is not tested or claimed. The existing application CI command now discovers nine workflows. The earlier eight-workflow/backend results above remain historical and were not rerun for this clipboard-only change.
+
+## ARC-01, first extraction: tool-batch ownership
+
+Updated: 30 October 2026. Local and uncommitted.
+
+| Work item | Behavior implemented | Evidence |
+| --- | --- | --- |
+| ARC-01 tool-batch ownership | `harness/tool_batch.py` owns the turn's started calls and their invocation tasks: registration with a stopped placeholder, result mirroring, ordered parallel/serial batch execution, escaped-error isolation, cancel/drain, cancellation marking and the persistable snapshot. The turn loop keeps event emission, observability, gates, review and result processing, and passes them in as callbacks. Exception handlers call the ledger directly instead of looking up nested helpers through `locals()`. Ledger keys use a per-turn sequence; the previous `call_id:len(active)` key could repeat for a reused call ID after an earlier call finished. | Seven contract tests cover placeholder persistence, distinct keys, pending gates not counting as completion, model-order results, escaped-error isolation, a completed sibling retained across cancellation with one observability report per call, and serial-barrier draining. The existing turn-loop sibling, gate and cancellation tests pass unchanged. |
+
+Public event fields, tool identities, permissions, attachment scope and persisted tool-call shape are unchanged. Run finalization was not extracted in this change; settings sections remain the next ARC-01 step.
+
+### Verification
+
+| Invocation | Result |
+| --- | --- |
+| Full locked Python 3.11 backend suite before the change | **1,159 passed, 8 skipped**, 70.88 seconds. |
+| Full locked Python 3.11 backend suite after the change | **1,166 passed, 8 skipped**, 69.32 seconds. |
+| `scripts/check-imports.py` | 234 modules compile and import; `/health` served. |
+| `git diff --check` | Passed. |
+
+Frontend, application workflows, Python 3.12, real Docker and GitHub-hosted CI were not run for this backend-only change.

@@ -45,6 +45,7 @@ from app.agent.run_state_machine import AgentRunStateMachine
 from app.agent.state import ExecutionPlan, PlanStep
 from app.agent.steering import SteeringInbox
 from app.agent.harness.tool_executor import ToolExecutor
+from app.agent.harness.tool_batch import ActiveToolCall, ToolBatchLedger
 from app.agent.harness.context_budget import ContextBudgetExceeded, fit_live_context
 from app.agent.harness.tool_policy import ToolPolicy, tool_call_signature
 from app.agent.approval_review import AutoReviewState
@@ -779,12 +780,7 @@ class TurnLoop:
         last_tool_name = ""
         latest_progress_text = ""
         turn_thinking_parts: list[str] = []
-        # Calls are prepared in model order, but a safe contiguous batch may
-        # have several invocations in flight at once.  Keep every started call
-        # until its ordered result has been persisted so cancellation can
-        # account for the whole batch rather than only the last call.
-        active_tool_calls: dict[str, dict] = {}
-        active_tool_tasks: dict[str, asyncio.Task] = {}
+        tool_batch = ToolBatchLedger()
         turn_persisted = False
         obs_usage_total = UsageStats()
 
@@ -852,6 +848,29 @@ class TurnLoop:
                 metadata=metadata or {},
             )
 
+        def _observe_cancelled_call(
+            call: ActiveToolCall,
+            status: str,
+            output: str,
+            error_code: str,
+            duration_ms: int | None,
+        ) -> None:
+            _obs_tool_end(
+                call.tool_name or "tool",
+                output,
+                status,
+                call.call_id,
+                call.obs_started_at or time.perf_counter(),
+                error_code=error_code,
+                duration_ms=duration_ms,
+            )
+
+        def _mark_active_tool_calls_cancelled() -> None:
+            tool_batch.mark_cancelled(
+                worker_state="stopping" if unfinished_workers(conversation_id) else "stopped",
+                observe=_observe_cancelled_call,
+            )
+
         def _emit_agent_progress(text: str) -> None:
             nonlocal latest_progress_text
             content = str(text or "").strip()
@@ -875,14 +894,7 @@ class TurnLoop:
 
         def _tool_calls_for_persist() -> list[dict]:
             tool_calls = [dict(tool_call) for tool_call in persisted_tool_calls]
-            tool_calls.extend(
-                {
-                    key: tool_call[key]
-                    for key in ("tool_name", "input", "output", "status")
-                    if key in tool_call
-                }
-                for tool_call in active_tool_calls.values()
-            )
+            tool_calls.extend(tool_batch.persistable_calls())
             return tool_calls
 
         def _emit_response_token(content: str) -> None:
@@ -1046,67 +1058,8 @@ class TurnLoop:
             # take turns waiting on their gates.
             gate_lock = asyncio.Lock()
 
-            async def _cancel_active_tool_tasks() -> None:
-                """Cancel and drain invocation tasks created for this turn."""
-                tasks = list(active_tool_tasks.values())
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                active_tool_tasks.clear()
-
-            def _mark_active_tool_calls_cancelled() -> None:
-                cancelled_output = json.dumps(
-                    {
-                        "status": "cancelled",
-                        "reason_code": "user_stopped",
-                        "error": "Cancellation requested while the tool was running. Verify its last action before retrying.",
-                        "worker_state": "stopping" if unfinished_workers(conversation_id) else "stopped",
-                    },
-                    ensure_ascii=False,
-                )
-                for active_call in active_tool_calls.values():
-                    completed = bool(active_call.get("completed"))
-                    if not completed:
-                        active_call.update({"output": cancelled_output, "status": "cancelled"})
-                    if active_call.get("observability_finished"):
-                        continue
-                    if completed:
-                        observed_status = "ok" if active_call.get("status") == "complete" else "error"
-                    else:
-                        observed_status = "cancelled"
-                    observed_output = str(active_call.get("output") or cancelled_output)
-                    _obs_tool_end(
-                        str(active_call.get("tool_name") or "tool"),
-                        observed_output,
-                        observed_status,
-                        str(active_call.get("call_id") or ""),
-                        float(active_call.get("obs_tool_started_at") or time.perf_counter()),
-                        error_code="" if observed_status in {"ok", "complete"} else "cancelled",
-                        duration_ms=(
-                            int(active_call["duration_ms"])
-                            if completed and active_call.get("duration_ms") is not None
-                            else None
-                        ),
-                    )
-                    active_call["observability_finished"] = True
-
             def _record_call_result(prepared: dict, result: ToolCallResult, *, timed: bool = True) -> None:
-                """Mirror a call's latest result into the active-call ledger used on cancellation."""
-                active_call = active_tool_calls.get(prepared["active_key"])
-                if active_call is None:
-                    return
-                update: dict[str, Any] = {
-                    "output": result.output,
-                    "status": "complete" if result.status == "ok" else result.status,
-                    "completed": result.status not in {"pending_approval", "pending_access_grant"},
-                }
-                if timed:
-                    completed_at = time.perf_counter()
-                    started_at = float(active_call.get("obs_tool_started_at") or completed_at)
-                    update["duration_ms"] = round((completed_at - started_at) * 1000)
-                active_call.update(update)
+                tool_batch.record_result(prepared["active_key"], result, timed=timed)
 
             def _emit_gate_event(event: dict) -> None:
                 if event.get("event") in {"approval_required", "access_grant_required"}:
@@ -1184,54 +1137,16 @@ class TurnLoop:
                     _record_call_result(prepared, result)
                     return result
 
-            async def _run_prepared_batch(prepared_calls: list[dict], *, parallel: bool) -> list[ToolCallResult]:
-                """Run a prepared batch while retaining task ownership for cancellation."""
-                tasks: list[asyncio.Task] = []
-                for prepared in prepared_calls:
-                    task = asyncio.create_task(
-                        _invoke_prepared_tool(prepared),
-                        name=f"turn-tool-{prepared['call_id']}",
-                    )
-                    active_tool_tasks[prepared["active_key"]] = task
-                    tasks.append(task)
-
-                if not parallel:
-                    # A serial barrier still uses a tracked task so a turn
-                    # cancellation can drain it through the same path.
-                    result = await tasks[0]
-                    active_tool_tasks.pop(prepared_calls[0]["active_key"], None)
-                    return [result]
-
-                values = await asyncio.gather(*tasks, return_exceptions=True)
-                results: list[ToolCallResult] = []
-                for prepared, value in zip(prepared_calls, values):
-                    active_tool_tasks.pop(prepared["active_key"], None)
-                    if isinstance(value, asyncio.CancelledError):
-                        raise value
-                    if isinstance(value, BaseException):
-                        # The invocation wrapper normally converts exceptions,
-                        # but isolate a failure from its sibling if a future
-                        # error escapes that boundary.
-                        tool_name = str(prepared["tool_name"])
-                        output = json.dumps({"status": "error", "error": str(value)})
-                        _obs_error(
-                            str(value),
-                            error_type=type(value).__name__,
-                            metadata={
-                                "phase": "tool_call",
-                                "tool": tool_name,
-                                "call_id": str(prepared["call_id"]),
-                            },
-                        )
-                        value = ToolCallResult.from_output(
-                            call_id=str(prepared["call_id"]),
-                            name=tool_name,
-                            output=output,
-                            fallback_status="error",
-                        )
-                        _record_call_result(prepared, value)
-                    results.append(value)
-                return results
+            def _report_escaped_tool_error(prepared: dict, exc: BaseException) -> None:
+                _obs_error(
+                    str(exc),
+                    error_type=type(exc).__name__,
+                    metadata={
+                        "phase": "tool_call",
+                        "tool": str(prepared["tool_name"]),
+                        "call_id": str(prepared["call_id"]),
+                    },
+                )
 
             async def _process_tool_result(prepared: dict, tool_result: ToolCallResult) -> None:
                 """Apply the ordered result guards and publish the call's final result."""
@@ -1442,14 +1357,8 @@ class TurnLoop:
                     stop_requested = True
                     incomplete_reason_code = "tool_still_running"
                     final_text = "Paused: a tool is still stopping after cancellation or timeout. Wait for it to finish, then continue and verify its last action."
-                active_call = active_tool_calls.get(prepared["active_key"])
-                if active_call is not None:
-                    active_call.update(
-                        {
-                            "output": raw_tool_output,
-                            "status": "complete" if status == "ok" else status,
-                        }
-                    )
+                tool_batch.record_output(prepared["active_key"], raw_tool_output, status)
+                active_call = tool_batch.get(prepared["active_key"])
                 image_attachments = _extract_image_attachments(tool_name, raw_tool_output)
                 tool_result = ToolCallResult.from_output(
                     call_id=call_id,
@@ -1482,14 +1391,10 @@ class TurnLoop:
                     prepared["obs_tool_started_at"],
                     risk=policy_decision.risk,
                     error_code=_tool_error_code(raw_tool_output) if status != "ok" else "",
-                    duration_ms=(
-                        int(active_call["duration_ms"])
-                        if active_call is not None and active_call.get("duration_ms") is not None
-                        else None
-                    ),
+                    duration_ms=active_call.duration_ms if active_call is not None else None,
                 )
                 if active_call is not None:
-                    active_call["observability_finished"] = True
+                    active_call.observability_finished = True
                 if plan_step is not None:
                     verified = status == "ok"
                     plan_step.status = "done" if verified else "failed"
@@ -1520,7 +1425,7 @@ class TurnLoop:
                         "status": "complete" if status == "ok" else status,
                     }
                 )
-                active_tool_calls.pop(prepared["active_key"], None)
+                tool_batch.finish(prepared["active_key"])
                 message_entry = build_tool_result_message(
                     tool_result,
                     provider=str(getattr(self.llm_client, "provider", "") or ""),
@@ -1538,9 +1443,11 @@ class TurnLoop:
                     return
                 calls = list(prepared_calls)
                 prepared_calls.clear()
-                results = await _run_prepared_batch(
+                results = await tool_batch.run(
                     calls,
+                    _invoke_prepared_tool,
                     parallel=len(calls) > 1,
+                    report_escaped_error=_report_escaped_tool_error,
                 )
                 for prepared, result in zip(calls, results):
                     await _process_tool_result(prepared, result)
@@ -2277,23 +2184,12 @@ class TurnLoop:
                                 "risk": policy_decision.risk,
                             },
                         })
-                        active_key = f"{call_id}:{len(active_tool_calls)}"
-                        active_tool_calls[active_key] = {
-                            "call_id": call_id,
-                            "tool_name": tool_name,
-                            "input": json.dumps(arguments, ensure_ascii=False),
-                            "output": json.dumps(
-                                {
-                                    "status": "cancelled",
-                                    "reason_code": "user_stopped",
-                                    "error": "Stopped by user before the tool finished.",
-                                },
-                                ensure_ascii=False,
-                            ),
-                            "status": "cancelled",
-                            "obs_tool_started_at": obs_tool_started_at,
-                            "observability_finished": False,
-                        }
+                        active_key = tool_batch.register(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            obs_started_at=obs_tool_started_at,
+                        )
                         prepared_tool_calls.append(
                             {
                                 "active_key": active_key,
@@ -2454,12 +2350,8 @@ class TurnLoop:
                 except Exception:
                     logger.exception("schedule_memory_learning failed")
         except asyncio.CancelledError:
-            cleanup_active_tasks = locals().get("_cancel_active_tool_tasks")
-            if callable(cleanup_active_tasks):
-                await cleanup_active_tasks()
-            mark_active_calls = locals().get("_mark_active_tool_calls_cancelled")
-            if callable(mark_active_calls):
-                mark_active_calls()
+            await tool_batch.cancel_tasks()
+            _mark_active_tool_calls_cancelled()
             _transition(run_state.cancel, "cancelled")
             partial_text = _assistant_message_on_cancel()
             if unfinished_workers(conversation_id):
@@ -2493,12 +2385,8 @@ class TurnLoop:
                 )
             raise
         except Exception as exc:
-            cleanup_active_tasks = locals().get("_cancel_active_tool_tasks")
-            if callable(cleanup_active_tasks):
-                await cleanup_active_tasks()
-            mark_active_calls = locals().get("_mark_active_tool_calls_cancelled")
-            if callable(mark_active_calls):
-                mark_active_calls()
+            await tool_batch.cancel_tasks()
+            _mark_active_tool_calls_cancelled()
             _transition(run_state.fail, "internal_error")
             logger.exception("react_worker error: %s", exc)
             _obs_error(
