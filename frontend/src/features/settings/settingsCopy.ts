@@ -272,5 +272,7 @@ export const FOOTER_COPY = {
   dirty: 'You have unsaved changes.',
   saved: 'Settings saved.',
   duplicateMcp: 'Two MCP servers share a name. Rename one before saving.',
+  saveFailed: 'Settings were not saved.',
+  keysFailed: 'Settings were saved, but the edited keys were not stored.',
   discardConfirm: 'Discard your unsaved changes?',
 } as const

@@ -1,5 +1,4 @@
-import { ExecutionEnvironment } from '../../components/ExecutionEnvironment'
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -14,7 +13,6 @@ import {
   KeyRound,
   Loader2,
   Mic,
-  Plus,
   Puzzle,
   RotateCcw,
   Save,
@@ -27,20 +25,19 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel'
-import { McpCredentials } from './McpCredentials'
+import { McpSettings } from './McpSettings'
+import { SandboxSettings } from './SandboxSettings'
+import { useSettingsDraft } from './useSettingsDraft'
 import {
   DEFAULT_CONNECTION_PORTAL,
   type ConnectionPortalId,
-  type ConnectionSecretId,
   type ConnectionSecretStatuses,
-  type ConnectionSecretValues,
 } from './connectionPortals/connectionPortalConfig'
 import { Dropdown } from '../../components/Dropdown'
 import {
   Badge,
   ChoiceCard,
   Note,
-  NumberRow,
   PageHeader,
   ReadOnlyValue,
   SettingRow,
@@ -53,11 +50,9 @@ import {
   BROWSER_COPY,
   FOOTER_COPY,
   IDENTITY_COPY,
-  MCP_COPY,
   MODEL_COPY,
   PAGE_COPY,
   PERMISSION_MODE_COPY,
-  SANDBOX_COPY,
   SKILLS_COPY,
   type SettingsPageId,
 } from './settingsCopy'
@@ -66,7 +61,6 @@ import {
   fetchMCPDiagnostics,
   installBrowserExtension,
   reconnectBrowser,
-  reconnectMCPServer,
 } from '../../lib/api/diagnostics'
 import {
   deleteSpeechToTextModel,
@@ -80,10 +74,8 @@ import {
   offloadSpeechToTextModel,
   logoutOpenAIAccount,
   resetWorkspaceInstructions,
-  resolveSandboxDockerImage,
   startOpenAIAccountLogin,
   type OpenAIAccountStatus,
-  updateSettings,
   updateWorkspaceInstructions,
 } from '../../lib/api/settings'
 import { syncStoredApiKeysToBackend } from '../../lib/apiKeySync'
@@ -97,7 +89,6 @@ import type {
   SpeechToTextStatus,
 } from '../../lib/api/types'
 import {
-  MCP_SERVER_TEMPLATES,
   PERMISSION_PROFILES,
   applyPermissionProfile,
   duplicateMcpServerNames,
@@ -106,7 +97,6 @@ import {
   normalizeDraft,
   permissionProfileFromPermissions,
   type ModelOptionsCatalog,
-  type MCPServerTemplateKey,
 } from './settingsConfig'
 
 interface Props {
@@ -152,27 +142,6 @@ const ObservabilityPanel = lazy(() =>
   import('./ObservabilityPanel').then((module) => ({ default: module.ObservabilityPanel })),
 )
 
-/** The slice of settings that Save actually sends, used to detect edits. */
-function draftSignature(
-  draft: AgentSettings,
-  telegramUserIds: string,
-  telegramChatIds: string,
-): string {
-  return JSON.stringify({
-    llm: draft.llm,
-    speech_to_text: draft.speech_to_text,
-    mcp: draft.mcp,
-    browser: draft.browser,
-    memory: draft.memory,
-    tools: draft.tools,
-    permissions: draft.permissions,
-    sandbox: draft.sandbox,
-    identity: draft.identity,
-    telegramUserIds: telegramUserIds.trim(),
-    telegramChatIds: telegramChatIds.trim(),
-  })
-}
-
 function accountUsageWindowLabel(minutes: number | null, window: 'primary' | 'secondary'): string {
   if (!minutes || minutes <= 0) return window === 'primary' ? 'Primary limit' : 'Secondary limit'
   if (minutes === 7 * 24 * 60) return 'Weekly limit'
@@ -191,31 +160,33 @@ export function SettingsModal({
   diagnosticsRefreshKey = 0,
   observabilityRefreshKey = 0,
 }: Props) {
-  const [draft, setDraft] = useState<AgentSettings | null>(null)
+  const {
+    draft,
+    isDirty,
+    secrets: connectionSecretValues,
+    saving,
+    saveError,
+    load: loadDraft,
+    updateDraft,
+    setSecret: updateConnectionSecret,
+    applyStoredCredentialStatus,
+    reconcileMcpCredentials,
+    save: saveDraft,
+  } = useSettingsDraft()
   const [modelOptions, setModelOptions] = useState<ModelOptionsCatalog>(FALLBACK_MODEL_OPTIONS)
   const [activeTab, setActiveTab] = useState<SettingsTab>('model')
   const [toolsTab, setToolsTab] = useState<ToolsTab>('skills')
   const [navQuery, setNavQuery] = useState('')
-  const [openaiKey, setOpenaiKey] = useState('')
   const [openaiAccount, setOpenaiAccount] = useState<OpenAIAccountStatus | null>(null)
   const [openaiAccountBusy, setOpenaiAccountBusy] = useState(false)
   const [refreshingOpenAIUsage, setRefreshingOpenAIUsage] = useState(false)
   const [openaiAccountError, setOpenaiAccountError] = useState('')
   const [openaiAccountAuthUrl, setOpenaiAccountAuthUrl] = useState('')
-  const [tavilyKey, setTavilyKey] = useState('')
-  const [googleKey, setGoogleKey] = useState('')
-  const [telegramBotToken, setTelegramBotToken] = useState('')
-  const [telegramAllowedUserIds, setTelegramAllowedUserIds] = useState('')
-  const [telegramAllowedChatIds, setTelegramAllowedChatIds] = useState('')
-  const [dirtySecrets, setDirtySecrets] = useState<Set<ConnectionSecretId>>(() => new Set())
   const [showKey, setShowKey] = useState(false)
   const [activeConnectionPortal, setActiveConnectionPortal] = useState<ConnectionPortalId>(DEFAULT_CONNECTION_PORTAL)
-  const [mcpTemplate, setMcpTemplate] = useState<MCPServerTemplateKey>('custom')
   const [browserDiagnostics, setBrowserDiagnostics] = useState<BrowserUseDiagnostics | null>(null)
   const [mcpDiagnostics, setMcpDiagnostics] = useState<Record<string, MCPServerDiagnostics>>({})
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
-  const [resolvingDockerImage, setResolvingDockerImage] = useState(false)
-  const [dockerResolveMessage, setDockerResolveMessage] = useState('')
   const [speechToTextStatus, setSpeechToTextStatus] = useState<SpeechToTextStatus | null>(null)
   const [customInstructions, setCustomInstructions] = useState('')
   const [customInstructionsPath, setCustomInstructionsPath] = useState('')
@@ -223,8 +194,6 @@ export function SettingsModal({
   const [savingCustomInstructions, setSavingCustomInstructions] = useState(false)
   const [resettingCustomInstructions, setResettingCustomInstructions] = useState(false)
   const [customInstructionsError, setCustomInstructionsError] = useState('')
-  const [openMcpAdvanced, setOpenMcpAdvanced] = useState<Record<number, boolean>>({})
-  const [reconnectingServer, setReconnectingServer] = useState('')
   const [reconnectingBrowser, setReconnectingBrowser] = useState(false)
   const [installingExtension, setInstallingExtension] = useState(false)
   const [extensionInstall, setExtensionInstall] = useState<BrowserExtensionInstallResult | null>(null)
@@ -235,12 +204,10 @@ export function SettingsModal({
   const [offloadingSpeechToText, setOffloadingSpeechToText] = useState(false)
   const [deletingSpeechToText, setDeletingSpeechToText] = useState(false)
   const [speechToTextError, setSpeechToTextError] = useState('')
-  const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
-  const [baselineSignature, setBaselineSignature] = useState('')
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -381,22 +348,14 @@ export function SettingsModal({
       modelOptionsPromise.then((loadedModelOptions) => {
         if (cancelled) return
         setModelOptions(loadedModelOptions)
-        setDraft((current) => (current ? normalizeDraft(current, loadedModelOptions) : current))
+        updateDraft((current) => normalizeDraft(current, loadedModelOptions))
       })
 
-      let settings: AgentSettings | null = null
       try {
-        settings = normalizeDraft(await fetchSettings(signal))
+        const settings = normalizeDraft(await fetchSettings(signal))
         if (!cancelled) {
           setLoadError('')
-          setDraft(settings)
-          setTelegramAllowedUserIds(settings.telegram_allowed_user_ids)
-          setTelegramAllowedChatIds(settings.telegram_allowed_chat_ids)
-          setBaselineSignature(draftSignature(
-            settings,
-            settings.telegram_allowed_user_ids,
-            settings.telegram_allowed_chat_ids,
-          ))
+          loadDraft(settings)
         }
       } catch (error) {
         if (signal.aborted) return
@@ -419,18 +378,7 @@ export function SettingsModal({
         try {
           const credentialStatus = await syncStoredApiKeysToBackend()
           if (cancelled) return
-          setDirtySecrets(new Set())
-          setDraft((current) => current ? {
-            ...current,
-            api_keys: {
-              ...current.api_keys,
-              has_openai_key: current.api_keys.has_openai_key || credentialStatus.openai,
-              has_google_key: current.api_keys.has_google_key || credentialStatus.google,
-              has_tavily_key: current.api_keys.has_tavily_key || credentialStatus.tavily,
-              has_telegram_bot_token:
-                current.api_keys.has_telegram_bot_token || credentialStatus.telegramBot,
-            },
-          } : current)
+          applyStoredCredentialStatus(credentialStatus)
         } catch {
           // Stored key sync should not prevent the settings UI from opening.
         }
@@ -460,32 +408,6 @@ export function SettingsModal({
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0
   }, [activeTab])
-
-  const updateDraft = (updater: (current: AgentSettings) => AgentSettings) => {
-    setDraft((current) => (current ? updater(current) : current))
-  }
-
-  const updateMcpServer = (
-    index: number,
-    updater: (server: AgentSettings['mcp']['servers'][number]) => AgentSettings['mcp']['servers'][number],
-  ) => {
-    updateDraft((current) => {
-      const servers = [...current.mcp.servers]
-      servers[index] = updater(servers[index])
-      return { ...current, mcp: { ...current.mcp, servers } }
-    })
-  }
-
-  const handleReconnectServer = async (name: string) => {
-    if (!name) return
-    setReconnectingServer(name)
-    try {
-      const status = await reconnectMCPServer(name)
-      setMcpDiagnostics((current) => ({ ...current, [name]: status }))
-    } finally {
-      setReconnectingServer('')
-    }
-  }
 
   const handleReconnectBrowser = async () => {
     setReconnectingBrowser(true)
@@ -612,103 +534,16 @@ export function SettingsModal({
     }))
   }
 
-  const saveKeys = async () => {
-    if (!window.electronAPI) return null
-    const writes: Array<[ConnectionSecretId, string]> = [
-      ['openai', openaiKey],
-      ['google', googleKey],
-      ['tavily', tavilyKey],
-      ['telegramBot', telegramBotToken],
-    ]
-    for (const [secret, value] of writes) {
-      if (!dirtySecrets.has(secret)) continue
-      if (value) await window.electronAPI.setCredential(secret, value)
-      else await window.electronAPI.deleteCredential(secret)
-    }
-    return window.electronAPI.applyStoredCredentials()
-  }
-
-  const updateConnectionSecret = (secret: ConnectionSecretId, value: string) => {
-    setDirtySecrets((current) => {
-      const next = new Set(current)
-      next.add(secret)
-      return next
-    })
-    switch (secret) {
-      case 'openai':
-        setOpenaiKey(value)
-        return
-      case 'google':
-        setGoogleKey(value)
-        return
-      case 'tavily':
-        setTavilyKey(value)
-        return
-      case 'telegramBot':
-        setTelegramBotToken(value)
-    }
-  }
-
   const handleSave = async () => {
     if (!draft) return
     if (duplicateMcpServerNames(draft.mcp.servers).length > 0) return
-    setSaving(true)
     setConfirmDiscard(false)
-    try {
-      const browserSecretPayload: {
-        openai_api_key?: string
-        google_api_key?: string
-        tavily_api_key?: string
-        telegram_bot_token?: string
-      } = {}
-      if (!window.electronAPI) {
-        if (dirtySecrets.has('openai')) browserSecretPayload.openai_api_key = openaiKey
-        if (dirtySecrets.has('google')) browserSecretPayload.google_api_key = googleKey
-        if (dirtySecrets.has('tavily')) browserSecretPayload.tavily_api_key = tavilyKey
-        if (dirtySecrets.has('telegramBot')) browserSecretPayload.telegram_bot_token = telegramBotToken
-      }
-
-      const savedSettings = await updateSettings({
-        ...(draft.settings_version ? { expected_settings_version: draft.settings_version } : {}),
-        llm: draft.llm,
-        speech_to_text: draft.speech_to_text,
-        mcp: draft.mcp,
-        browser: draft.browser,
-        memory: draft.memory,
-        tools: draft.tools,
-        permissions: draft.permissions,
-        sandbox: draft.sandbox,
-        identity: draft.identity,
-        telegram_allowed_user_ids: telegramAllowedUserIds.trim(),
-        telegram_allowed_chat_ids: telegramAllowedChatIds.trim(),
-        ...browserSecretPayload,
-      })
-      const normalizedSavedSettings = normalizeDraft(savedSettings, modelOptions)
-      const credentialStatus = await saveKeys()
-      setDraft(credentialStatus ? {
-        ...normalizedSavedSettings,
-        api_keys: {
-          ...normalizedSavedSettings.api_keys,
-          has_openai_key: credentialStatus.openai,
-          has_google_key: credentialStatus.google,
-          has_tavily_key: credentialStatus.tavily,
-          has_telegram_bot_token: credentialStatus.telegramBot,
-        },
-      } : normalizedSavedSettings)
-      setTelegramAllowedUserIds(normalizedSavedSettings.telegram_allowed_user_ids)
-      setTelegramAllowedChatIds(normalizedSavedSettings.telegram_allowed_chat_ids)
-      setBaselineSignature(draftSignature(
-        normalizedSavedSettings,
-        normalizedSavedSettings.telegram_allowed_user_ids,
-        normalizedSavedSettings.telegram_allowed_chat_ids,
-      ))
-      setDirtySecrets(new Set())
-      await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
-      setSaved(true)
-      setTimeout(() => setSaved(false), 2000)
-    } finally {
-      setSaving(false)
-    }
+    const outcome = await saveDraft(modelOptions)
+    if (outcome === 'failed') return
+    await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
+    if (outcome !== 'saved') return
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
   }
 
   const updatePermissionMode = (mode: AgentSettings['permissions']['mode']) => {
@@ -742,29 +577,8 @@ export function SettingsModal({
     })
   }
 
-  const isDirty = useMemo(() => {
-    if (!draft) return false
-    if (dirtySecrets.size > 0) return true
-    if (!baselineSignature) return false
-    return draftSignature(draft, telegramAllowedUserIds, telegramAllowedChatIds) !== baselineSignature
-  }, [draft, dirtySecrets, baselineSignature, telegramAllowedUserIds, telegramAllowedChatIds])
-
   const refreshMcpCredentials = async () => {
-    const fresh = await fetchSettings()
-    // A credential operation is immediate. Reconcile only its metadata so an
-    // unrelated edit made while the IPC request was pending stays in the draft.
-    setDraft(current => current ? {
-      ...current, settings_version: fresh.settings_version,
-      mcp: { ...current.mcp, servers: current.mcp.servers.map(server => {
-        const savedServer = fresh.mcp.servers.find(item => item.server_id === server.server_id)
-        if (!savedServer) return server
-        const ordinary = (target: 'env' | 'headers') => Object.fromEntries(Object.entries(server[target])
-          .filter(([key]) => !savedServer.credential_refs?.[target]?.[key]))
-        return { ...server, credential_refs: savedServer.credential_refs,
-          legacy_secret_fields: savedServer.legacy_secret_fields, env: ordinary('env'), headers: ordinary('headers') }
-      }) },
-    } : current)
-    setBaselineSignature(current => current ? JSON.stringify({ ...JSON.parse(current), mcp: fresh.mcp }) : current)
+    reconcileMcpCredentials(await fetchSettings())
     await loadMcpDiagnostics()
   }
 
@@ -829,27 +643,17 @@ export function SettingsModal({
   // Built-in skills are always on and hidden; only skills the user added are listed.
   const userSkills = draft.available_skills.filter((skill) => !skill.hidden && skill.tier !== 'internal')
   const browserSkillEnabled = !!draft.tools.skills['browser-use'] && (browserSkill?.available ?? true)
-  const mcpFeatureEnabled = !!draft.mcp.enabled
-  const mcpFeatureDiagnostics = Object.values(mcpDiagnostics)
-  const mcpFeatureAvailable = mcpFeatureDiagnostics[0]?.feature_available ?? true
-  const mcpFeatureUnavailableReason = mcpFeatureDiagnostics[0]?.feature_unavailable_reason ?? ''
   const allowedDomainsInput = draft.browser.allowed_domains.join(', ')
   const extensionStatus = browserDiagnostics?.extension
   const waitingForExtension = Boolean(extensionStatus?.installed) && !extensionStatus?.connected
   const duplicateMcpNames = duplicateMcpServerNames(draft.mcp.servers)
-  const connectionSecretValues: ConnectionSecretValues = {
-    openai: openaiKey,
-    google: googleKey,
-    tavily: tavilyKey,
-    telegramBot: telegramBotToken,
-  }
   const connectionSecretStatuses: ConnectionSecretStatuses = {
     openai: draft.api_keys.has_openai_key,
     google: draft.api_keys.has_google_key,
     tavily: draft.api_keys.has_tavily_key,
     telegramBot: Boolean(draft.api_keys.has_telegram_bot_token),
   }
-  const telegramAllowlistConfigured = Boolean(telegramAllowedUserIds.trim() || telegramAllowedChatIds.trim())
+  const telegramAllowlistConfigured = Boolean(draft.telegram_allowed_user_ids.trim() || draft.telegram_allowed_chat_ids.trim())
   const customInstructionsDirty = customInstructions !== customInstructionsSavedContent
   const speechToTextIsCloud = draft.speech_to_text.engine === 'cloud'
   const speechToTextReady = speechToTextIsCloud ? Boolean(speechToTextStatus?.cloud_configured) : Boolean(speechToTextStatus?.downloaded)
@@ -890,11 +694,13 @@ export function SettingsModal({
 
   const footerMessage = duplicateMcpNames.length > 0
     ? { icon: AlertCircle, tone: 'danger' as const, text: FOOTER_COPY.duplicateMcp }
-    : saved
-      ? { icon: CheckCircle2, tone: 'ok' as const, text: FOOTER_COPY.saved }
-      : isDirty
-        ? { icon: AlertCircle, tone: 'warn' as const, text: FOOTER_COPY.dirty }
-        : { icon: CheckCircle2, tone: 'neutral' as const, text: FOOTER_COPY.clean }
+    : saveError
+      ? { icon: AlertCircle, tone: 'danger' as const, text: saveError }
+      : saved
+        ? { icon: CheckCircle2, tone: 'ok' as const, text: FOOTER_COPY.saved }
+        : isDirty
+          ? { icon: AlertCircle, tone: 'warn' as const, text: FOOTER_COPY.dirty }
+          : { icon: CheckCircle2, tone: 'neutral' as const, text: FOOTER_COPY.clean }
 
   return (
     <div
@@ -1179,9 +985,12 @@ export function SettingsModal({
                           description="Numeric IDs, separated by commas."
                         >
                           <input
-                            value={telegramAllowedUserIds}
+                            value={draft.telegram_allowed_user_ids}
                             aria-label="Allowed user IDs"
-                            onChange={(e) => setTelegramAllowedUserIds(e.target.value)}
+                            onChange={(e) => {
+                              const ids = e.target.value
+                              updateDraft((current) => ({ ...current, telegram_allowed_user_ids: ids }))
+                            }}
                             placeholder="123456789, 987654321"
                             className="st-input"
                           />
@@ -1191,9 +1000,12 @@ export function SettingsModal({
                           description="Group IDs usually start with -100."
                         >
                           <input
-                            value={telegramAllowedChatIds}
+                            value={draft.telegram_allowed_chat_ids}
                             aria-label="Allowed chat IDs"
-                            onChange={(e) => setTelegramAllowedChatIds(e.target.value)}
+                            onChange={(e) => {
+                              const ids = e.target.value
+                              updateDraft((current) => ({ ...current, telegram_allowed_chat_ids: ids }))
+                            }}
                             placeholder="-1001234567890"
                             className="st-input"
                           />
@@ -1589,114 +1401,14 @@ export function SettingsModal({
               )}
 
               {activeTab === 'tools' && toolsTab === 'mcp' && (
-                <>
-                  <div role="tabpanel" id="settings-tools-panel-mcp" aria-labelledby="settings-tools-tab-mcp" className="space-y-4" tabIndex={0}>
-                    <SettingsCard
-                      title="External connections"
-                      description={MCP_COPY.intro}
-                      action={
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Dropdown<MCPServerTemplateKey>
-                            ariaLabel="Server template"
-                            value={mcpTemplate}
-                            options={(Object.entries(MCP_SERVER_TEMPLATES) as Array<[MCPServerTemplateKey, { label: string; build: () => unknown }]>).map(
-                              ([key, template]) => ({ value: key, label: template.label }),
-                            )}
-                            onChange={setMcpTemplate}
-                            size="sm"
-                            className="min-w-44"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => updateDraft((current) => ({
-                              ...current,
-                              mcp: {
-                                ...current.mcp,
-                                servers: [...current.mcp.servers, MCP_SERVER_TEMPLATES[mcpTemplate].build()],
-                              },
-                            }))}
-                            className="st-btn st-btn-primary st-btn-sm"
-                          >
-                            <Plus size={13} />
-                            Add server
-                          </button>
-                        </div>
-                      }
-                    >
-                      <SwitchRow
-                        label="Enable MCP servers"
-                        checked={mcpFeatureEnabled}
-                        onChange={(checked) => updateDraft((current) => ({
-                          ...current,
-                          mcp: { ...current.mcp, enabled: checked },
-                        }))}
-                      />
-                    </SettingsCard>
-
-                    {!mcpFeatureAvailable && (
-                      <Note tone="warn" icon={AlertCircle}>
-                        The MCP bridge is built in, but the backend Python environment is missing the mcp package
-                        {mcpFeatureUnavailableReason ? ` (${mcpFeatureUnavailableReason})` : ''}.
-                      </Note>
-                    )}
-                    {duplicateMcpNames.length > 0 && (
-                      <Note tone="danger" icon={AlertCircle}>
-                        MCP server names must be unique. Duplicated: {duplicateMcpNames.join(', ')}
-                      </Note>
-                    )}
-
-                    {draft.mcp.servers.length === 0 ? (
-                      <SettingsCard>
-                        <div className="p-8 text-center">
-                          <p className="st-label">No external connections</p>
-                          <p className="st-desc mx-auto mt-1.5">{MCP_COPY.intro}</p>
-                        </div>
-                      </SettingsCard>
-                    ) : (
-                      draft.mcp.servers.map((server, index) => {
-                        const diagnostic = server.name ? mcpDiagnostics[server.name] : undefined
-                        const statusText = !mcpFeatureEnabled
-                          ? 'MCP bridge is off'
-                          : diagnostic?.feature_available === false
-                            ? 'Backend dependency missing'
-                          : diagnostic
-                            ? diagnostic.connected
-                              ? `Connected — ${diagnostic.tool_count} tools`
-                              : diagnostic.state === 'unhealthy'
-                                ? `Unhealthy — ${diagnostic.unhealthy_reason || diagnostic.last_error || 'liveness check failed'}`
-                                : diagnostic.last_error || 'Not connected'
-                            : 'Save or reconnect to check'
-
-                        return (
-                          <McpServerCard
-                            key={`mcp-server-${index}`}
-                            server={server}
-                            index={index}
-                            diagnostic={diagnostic}
-                            statusText={statusText}
-                            bridgeEnabled={mcpFeatureEnabled && (diagnostic?.feature_available ?? mcpFeatureAvailable)}
-                            reconnectingServer={reconnectingServer}
-                            advancedOpen={!!openMcpAdvanced[index]}
-                            onToggleAdvanced={() => setOpenMcpAdvanced((current) => ({ ...current, [index]: !current[index] }))}
-                            onReconnect={() => handleReconnectServer(server.name)}
-                            onRemove={() => updateDraft((current) => ({
-                              ...current,
-                              mcp: {
-                                ...current.mcp,
-                                servers: current.mcp.servers.filter((_, serverIndex) => serverIndex !== index),
-                              },
-                            }))}
-                            onUpdate={(updater) => updateMcpServer(index, updater)}
-                            credentialsDisabled={isDirty || saving}
-                            onCredentialsChanged={refreshMcpCredentials}
-                          />
-                        )
-                      })
-                    )}
-
-                    {draft.mcp.servers.length > 0 && <Note tone="warn">{MCP_COPY.plaintextWarning}</Note>}
-                  </div>
-                </>
+                <McpSettings
+                  mcp={draft.mcp}
+                  diagnostics={mcpDiagnostics}
+                  onChange={(updater) => updateDraft((current) => ({ ...current, mcp: updater(current.mcp) }))}
+                  onDiagnostic={(name, diagnostic) => setMcpDiagnostics((current) => ({ ...current, [name]: diagnostic }))}
+                  credentialsDisabled={isDirty || saving}
+                  onCredentialsChanged={refreshMcpCredentials}
+                />
               )}
 
               {activeTab === 'tools' && toolsTab === 'plugins' && (
@@ -1771,226 +1483,12 @@ export function SettingsModal({
               )}
 
               {activeTab === 'sandbox' && (
-                <>
-                  <PageHeader title={PAGE_COPY.sandbox.label} description={PAGE_COPY.sandbox.blurb} />
-                  <div className="space-y-4">
-
-                    <SettingsCard>
-                      <SwitchRow
-                        label="Allow shell commands"
-                        checked={draft.sandbox.enabled}
-                        onChange={(checked) => updateDraft((current) => ({
-                          ...current,
-                          sandbox: { ...current.sandbox, enabled: checked },
-                        }))}
-                      />
-                    </SettingsCard>
-
-                    <SettingsCard title="Policy">
-                      <SettingRow
-                        label="Isolation mode"
-                        description={SANDBOX_COPY.modeHelp[draft.sandbox.mode as keyof typeof SANDBOX_COPY.modeHelp] ?? SANDBOX_COPY.mode}
-                      >
-                        <Dropdown
-                          ariaLabel="Isolation mode"
-                          value={draft.sandbox.mode}
-                          options={[
-                            { value: 'off', label: 'Off — no shell' },
-                            { value: 'auto', label: 'Automatic' },
-                            { value: 'enforce', label: 'Strong isolation only' },
-                            { value: 'host', label: 'Host, with approval' },
-                            { value: 'docker', label: 'Docker' },
-                            { value: 'local_restricted', label: 'Host, best effort' },
-                          ]}
-                          onChange={(mode) => updateDraft((current) => ({
-                            ...current,
-                            sandbox: { ...current.sandbox, mode },
-                          }))}
-                        />
-                      </SettingRow>
-                      <SettingRow
-                        label="Container network"
-                        description={SANDBOX_COPY.networkHelp[draft.sandbox.network.default as keyof typeof SANDBOX_COPY.networkHelp] ?? SANDBOX_COPY.network}
-                      >
-                        <Dropdown
-                          ariaLabel="Container network"
-                          value={draft.sandbox.network.default}
-                          options={[
-                            { value: 'deny', label: 'Blocked' },
-                            { value: 'allow_with_approval', label: 'Follow approval mode' },
-                            { value: 'allow', label: 'Allowed' },
-                          ]}
-                          onChange={(defaultNetwork) => updateDraft((current) => ({
-                            ...current,
-                            sandbox: {
-                              ...current.sandbox,
-                              network: { ...current.sandbox.network, default: defaultNetwork },
-                            },
-                          }))}
-                        />
-                      </SettingRow>
-                      <SettingRow
-                        label="Container files"
-                        description={SANDBOX_COPY.writeStrategyHelp[draft.sandbox.default_write_strategy as keyof typeof SANDBOX_COPY.writeStrategyHelp] ?? SANDBOX_COPY.writeStrategy}
-                      >
-                        <Dropdown
-                          ariaLabel="Container files"
-                          value={draft.sandbox.default_write_strategy}
-                          options={[
-                            { value: 'discard', label: 'Discard them' },
-                            { value: 'copy_out', label: 'Copy them back' },
-                            { value: 'direct_rw', label: 'Write directly' },
-                          ]}
-                          onChange={(strategy) => updateDraft((current) => ({
-                            ...current,
-                            sandbox: { ...current.sandbox, default_write_strategy: strategy },
-                          }))}
-                        />
-                      </SettingRow>
-                    </SettingsCard>
-
-                    {draft.sandbox.mode === 'enforce' && !sandboxStatus?.backends?.docker?.available && (
-                      <Note tone="warn" icon={AlertCircle}>{SANDBOX_COPY.enforceNeedsDocker}</Note>
-                    )}
-
-                    <SettingsCard title="Current status" description="Representative command under saved settings. Each actual command is classified again; unsaved changes are not applied.">
-                      <ExecutionEnvironment environment={sandboxStatus?.execution_environment} />
-                      <div className="st-row">
-                        <div className="min-w-0">
-                          <p className="st-label">Representative backend</p>
-                          <p className="st-desc mt-1">
-                            {sandboxStatus?.selected_backend || 'Checking…'} · {sandboxStatus?.isolation || 'unknown'} isolation
-                            {sandboxStatus?.reason_code ? ` · ${sandboxStatus.reason_code}` : ''}
-                          </p>
-                          {sandboxStatus?.reason && (
-                            <p className="st-desc mt-1">{sandboxStatus.reason}</p>
-                          )}
-                          {sandboxStatus?.fallback_backend && sandboxStatus.fallback_backend !== sandboxStatus.selected_backend && (
-                            <p className="st-desc mt-1">
-                              PowerShell fallback: {sandboxStatus.fallback_backend} · {sandboxStatus.fallback_isolation}
-                              {sandboxStatus.fallback_reason_code ? ` · ${sandboxStatus.fallback_reason_code}` : ''}
-                            </p>
-                          )}
-                          {sandboxStatus?.python_import_support && sandboxStatus.python_import_support !== 'probed' && (
-                            <p className="st-desc mt-1">
-                              Python imports: {sandboxStatus.python_import_support}
-                              {sandboxStatus.python_import_detail ? ` · ${sandboxStatus.python_import_detail}` : ''}
-                            </p>
-                          )}
-                        </div>
-                        <div className="st-row-control-auto">
-                          <Badge tone={sandboxStatus?.isolation === 'strong' ? 'ok' : 'warn'}>
-                            {sandboxStatus?.isolation || 'Checking…'}
-                          </Badge>
-                        </div>
-                      </div>
-                    </SettingsCard>
-
-                    <SettingsCard title="Available sandbox engines">
-                      {['docker', 'local_restricted', 'host'].map((backend) => {
-                        const status = sandboxStatus?.backends?.[backend]
-                        return (
-                          <div key={backend} className="st-row">
-                            <div className="min-w-0">
-                              <p className="st-label capitalize">{backend.replace('_', ' ')}</p>
-                              <p className="st-desc mt-1">
-                                {status?.available ? `${status.security_label} isolation` : status?.reason || 'Checking…'}
-                              </p>
-                            </div>
-                            <div className="st-row-control-auto">
-                              <Badge tone={status?.available ? 'ok' : 'warn'}>
-                                {status?.available ? 'Available' : 'Not available'}
-                              </Badge>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </SettingsCard>
-
-                    <SettingsCard title="Docker">
-                      <SwitchRow
-                        label="Use Docker when available"
-                        checked={draft.sandbox.docker.enabled}
-                        onChange={(checked) => updateDraft((current) => ({
-                          ...current,
-                          sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, enabled: checked } },
-                        }))}
-                      />
-                        <SettingRow label="Container image" description={SANDBOX_COPY.dockerImage} wide>
-                        <div className="flex w-full gap-2">
-                          <input
-                            value={draft.sandbox.docker.image}
-                            aria-label="Container image"
-                            onChange={(e) => updateDraft((current) => ({
-                              ...current,
-                              sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, image: e.target.value } },
-                            }))}
-                            placeholder="python:3.12-slim@sha256:…"
-                            className="st-input min-w-0 flex-1 font-mono text-xs"
-                          />
-                          <button
-                            type="button"
-                            className="st-btn st-btn-secondary"
-                            disabled={resolvingDockerImage}
-                            onClick={async () => {
-                              setResolvingDockerImage(true)
-                              setDockerResolveMessage('')
-                              try {
-                                const result = await resolveSandboxDockerImage(draft.sandbox.docker.image)
-                                updateDraft((current) => ({
-                                  ...current,
-                                  sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, image: result.image } },
-                                }))
-                                setDockerResolveMessage(result.detail)
-                                setSandboxStatus(result.sandbox)
-                              } catch (error) {
-                                setDockerResolveMessage(error instanceof Error ? error.message : 'Docker image could not be resolved.')
-                              } finally {
-                                setResolvingDockerImage(false)
-                              }
-                            }}
-                          >
-                            {resolvingDockerImage ? 'Resolving…' : 'Resolve & pull'}
-                          </button>
-                        </div>
-                        {dockerResolveMessage && <p className="st-desc mt-2">{dockerResolveMessage}</p>}
-                      </SettingRow>
-                      <SwitchRow
-                        label="Read-only container"
-                        description={SANDBOX_COPY.dockerReadOnly}
-                        checked={draft.sandbox.docker.read_only_root}
-                        onChange={(checked) => updateDraft((current) => ({
-                          ...current,
-                          sandbox: { ...current.sandbox, docker: { ...current.sandbox.docker, read_only_root: checked } },
-                        }))}
-                      />
-                    </SettingsCard>
-
-                    <SettingsCard title="Per-command limits">
-                      {([
-                        { key: 'timeout_seconds' as const, label: 'Time limit', unit: 'seconds' },
-                        { key: 'memory_mb' as const, label: 'Memory limit', unit: 'MB' },
-                        { key: 'cpus' as const, label: 'CPU limit', unit: 'cores' },
-                        { key: 'pids' as const, label: 'Process limit', unit: 'processes' },
-                      ]).map(({ key, label, unit }) => (
-                        <NumberRow
-                          key={key}
-                          label={label}
-                          ariaLabel={`Sandbox ${label.toLowerCase()}`}
-                          unit={unit}
-                          value={draft.sandbox.resources[key]}
-                          onChange={(value) => updateDraft((current) => ({
-                            ...current,
-                            sandbox: {
-                              ...current.sandbox,
-                              resources: { ...current.sandbox.resources, [key]: Number(value) },
-                            },
-                          }))}
-                        />
-                      ))}
-                    </SettingsCard>
-                  </div>
-                </>
+                <SandboxSettings
+                  sandbox={draft.sandbox}
+                  status={sandboxStatus}
+                  onChange={(updater) => updateDraft((current) => ({ ...current, sandbox: updater(current.sandbox) }))}
+                  onStatus={setSandboxStatus}
+                />
               )}
             </div>
           </div>
@@ -2011,7 +1509,7 @@ export function SettingsModal({
               </>
             ) : (
               <>
-                <p className="st-desc flex items-center gap-1.5">
+                <p className="st-desc flex items-center gap-1.5" role={saveError ? 'alert' : undefined}>
                   <footerMessage.icon
                     size={14}
                     className="shrink-0"
@@ -2122,483 +1620,4 @@ function extensionConnectionStatus(diagnostics: BrowserUseDiagnostics | null, sk
   // The built-in browser server the extension connects to.
   if (diagnostics.devtools.state === 'failed' || diagnostics.devtools.state === 'unhealthy') return 'Needs attention'
   return 'Waiting for Chrome'
-}
-
-function McpServerCard({
-  server,
-  index,
-  diagnostic,
-  statusText,
-  bridgeEnabled,
-  reconnectingServer,
-  advancedOpen,
-  onToggleAdvanced,
-  onReconnect,
-  onRemove,
-  onUpdate,
-  credentialsDisabled,
-  onCredentialsChanged,
-}: {
-  server: AgentSettings['mcp']['servers'][number]
-  index: number
-  diagnostic?: MCPServerDiagnostics
-  statusText: string
-  bridgeEnabled: boolean
-  reconnectingServer: string
-  advancedOpen: boolean
-  onToggleAdvanced: () => void
-  onReconnect: () => void
-  onRemove: () => void
-  onUpdate: (updater: (server: AgentSettings['mcp']['servers'][number]) => AgentSettings['mcp']['servers'][number]) => void
-  credentialsDisabled: boolean
-  onCredentialsChanged: () => Promise<void>
-}) {
-  const dotClass = diagnostic?.connected
-    ? 'st-dot st-dot-ok'
-    : diagnostic?.last_error || diagnostic?.unhealthy_reason || diagnostic?.state === 'unhealthy'
-      ? 'st-dot st-dot-warn'
-      : 'st-dot'
-  const isHttp = server.transport === 'streamable_http'
-
-  return (
-    <section className="st-card">
-      <header className="st-card-head flex items-center gap-2">
-        <span className={dotClass} />
-        <input
-          value={server.name}
-          aria-label={`Server name ${index + 1}`}
-          onChange={(e) => onUpdate((current) => ({ ...current, name: e.target.value }))}
-          placeholder="Server name"
-          className="st-input min-w-0 flex-1 font-medium"
-        />
-        <Switch
-          label={`Enable server ${index + 1}`}
-          checked={server.enabled}
-          onChange={(checked) => onUpdate((current) => ({ ...current, enabled: checked }))}
-        />
-        <button
-          type="button"
-          onClick={onRemove}
-          className="st-btn st-btn-ghost st-btn-icon"
-          aria-label={`Remove MCP server ${index + 1}`}
-        >
-          <Trash2 size={13} />
-        </button>
-      </header>
-
-      <SettingRow
-        label="Connection type"
-      >
-        <Dropdown<AgentSettings['mcp']['servers'][number]['transport']>
-          ariaLabel={`Transport for server ${index + 1}`}
-          value={server.transport}
-          options={[
-            { value: 'stdio', label: 'Run a local program' },
-            { value: 'streamable_http', label: 'Connect to a URL' },
-          ]}
-          onChange={(transport) => onUpdate((current) => ({ ...current, transport }))}
-        />
-      </SettingRow>
-
-      <StackedRow
-        label={isHttp ? 'Server URL' : 'Command'}
-      >
-        <input
-          value={isHttp ? server.url : server.command}
-          aria-label={isHttp ? `Server URL ${index + 1}` : `Command ${index + 1}`}
-          onChange={(e) => onUpdate((current) => isHttp
-            ? { ...current, url: e.target.value }
-            : { ...current, command: e.target.value })}
-          placeholder={isHttp ? 'http://127.0.0.1:3000/mcp' : 'npx'}
-          className="st-input font-mono text-xs"
-        />
-      </StackedRow>
-
-      {!isHttp && (
-        <div className="st-row-stacked">
-          <EditableList
-            title="Arguments"
-            emptyText="No arguments. Most servers need at least one."
-            addLabel="Add argument"
-            values={server.args}
-            placeholder={(itemIndex) => `Argument ${itemIndex + 1}`}
-            onAdd={() => onUpdate((current) => ({ ...current, args: [...current.args, ''] }))}
-            onChange={(itemIndex, value) => onUpdate((current) => ({
-              ...current,
-              args: current.args.map((item, currentIndex) => currentIndex === itemIndex ? value : item),
-            }))}
-            onRemove={(itemIndex) => onUpdate((current) => ({
-              ...current,
-              args: current.args.filter((_, currentIndex) => currentIndex !== itemIndex),
-            }))}
-          />
-        </div>
-      )}
-
-      {!isHttp && (
-      <SettingRow label="Working folder" wide>
-          <input
-            value={server.cwd}
-            aria-label={`Working directory ${index + 1}`}
-            onChange={(e) => onUpdate((current) => ({ ...current, cwd: e.target.value }))}
-            placeholder="Optional"
-            className="st-input font-mono text-xs"
-          />
-        </SettingRow>
-      )}
-
-      <SettingRow label="Personal note" wide>
-        <input
-          value={server.description}
-          aria-label={`Server description ${index + 1}`}
-          onChange={(e) => onUpdate((current) => ({ ...current, description: e.target.value }))}
-          placeholder="Optional"
-          className="st-input"
-        />
-      </SettingRow>
-
-      <div className="st-card-foot flex flex-wrap items-center justify-between gap-3">
-        <span
-          className="st-hint"
-          style={{
-            color: diagnostic?.connected
-              ? 'var(--st-ok)'
-              : diagnostic?.last_error
-                ? 'var(--st-warn)'
-                : 'var(--st-text-faint)',
-          }}
-        >
-          {statusText}
-          {diagnostic?.state ? ` · ${diagnostic.state}` : ''}
-        </span>
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={onToggleAdvanced} className="st-btn st-btn-ghost">
-            {advancedOpen ? 'Hide advanced' : 'Advanced'}
-          </button>
-          <button
-            type="button"
-            onClick={onReconnect}
-            disabled={!server.name || reconnectingServer === server.name || !bridgeEnabled}
-            className="st-btn st-btn-secondary"
-          >
-            {reconnectingServer === server.name ? 'Reconnecting…' : 'Reconnect'}
-          </button>
-        </div>
-      </div>
-
-      {advancedOpen && (
-        <div className="st-divider-t">
-          <McpCredentials key={`${server.server_id}-${server.transport}`} server={server}
-            disabled={credentialsDisabled} onChanged={onCredentialsChanged} />
-          <NumberRow
-            label="Startup timeout"
-            ariaLabel={`Startup timeout for server ${index + 1}`}
-            unit="ms"
-            min={1000}
-            value={server.startup_timeout_ms}
-            onChange={(value) => onUpdate((current) => ({ ...current, startup_timeout_ms: Number(value || 0) }))}
-          />
-          <NumberRow
-            label="Call timeout"
-            ariaLabel={`Call timeout for server ${index + 1}`}
-            unit="ms"
-            min={1000}
-            value={server.call_timeout_ms}
-            onChange={(value) => onUpdate((current) => ({ ...current, call_timeout_ms: Number(value || 0) }))}
-          />
-          <SwitchRow
-            label="Reconnect automatically"
-            checked={server.reconnect_on_unhealthy}
-            onChange={(checked) => onUpdate((current) => ({ ...current, reconnect_on_unhealthy: checked }))}
-          />
-          <div className="st-row-stacked">
-            <EditableList
-              title="Tool allow list"
-              emptyText={MCP_COPY.allowList}
-              addLabel="Add tool"
-              values={server.allow_list}
-              placeholder={() => 'Tool name'}
-              onAdd={() => onUpdate((current) => ({ ...current, allow_list: [...current.allow_list, ''] }))}
-              onChange={(toolIndex, value) => onUpdate((current) => ({
-                ...current,
-                allow_list: current.allow_list.map((item, currentIndex) => currentIndex === toolIndex ? value : item),
-              }))}
-              onRemove={(toolIndex) => onUpdate((current) => ({
-                ...current,
-                allow_list: current.allow_list.filter((_, currentIndex) => currentIndex !== toolIndex),
-              }))}
-            />
-          </div>
-          <div className="st-row-stacked">
-            <EditableList
-              title="Trusted tools"
-              emptyText={MCP_COPY.trustedTools}
-              addLabel="Add trusted tool"
-              values={server.trusted_tools}
-              placeholder={() => 'Remote tool name'}
-              onAdd={() => onUpdate((current) => ({ ...current, trusted_tools: [...current.trusted_tools, ''] }))}
-              onChange={(toolIndex, value) => onUpdate((current) => ({
-                ...current,
-                trusted_tools: current.trusted_tools.map((item, currentIndex) => currentIndex === toolIndex ? value : item),
-              }))}
-              onRemove={(toolIndex) => onUpdate((current) => ({
-                ...current,
-                trusted_tools: current.trusted_tools.filter((_, currentIndex) => currentIndex !== toolIndex),
-              }))}
-            />
-          </div>
-          <div className="st-row-stacked">
-            <KeyValueEditor
-              title="Tool risk overrides"
-              addLabel="Add override"
-              emptyText={MCP_COPY.riskOverrides}
-              entries={server.tool_risk_overrides as Record<string, string>}
-              keyPlaceholder="Remote tool name"
-              valuePlaceholder="low, medium, or high"
-              onAdd={() => onUpdate((current) => ({
-                ...current,
-                tool_risk_overrides: { ...current.tool_risk_overrides, '': 'medium' },
-              }))}
-              onChange={(entryIndex, key, value) => onUpdate((current) => ({
-                ...current,
-                tool_risk_overrides: renameEntry(
-                  current.tool_risk_overrides as Record<string, string>,
-                  entryIndex,
-                  key,
-                  value,
-                ) as AgentSettings['mcp']['servers'][number]['tool_risk_overrides'],
-              }))}
-              onRemove={(entryIndex) => onUpdate((current) => ({
-                ...current,
-                tool_risk_overrides: removeEntry(
-                  current.tool_risk_overrides as Record<string, string>,
-                  entryIndex,
-                ) as AgentSettings['mcp']['servers'][number]['tool_risk_overrides'],
-              }))}
-            />
-          </div>
-          <div className="st-row-stacked">
-            {isHttp ? (
-              <KeyValueEditor
-                title="HTTP headers"
-                addLabel="Add header"
-                emptyText="No headers configured."
-                entries={server.headers}
-                keyPlaceholder="Header"
-                valuePlaceholder="Value"
-                onAdd={() => onUpdate((current) => ({ ...current, headers: { ...current.headers, '': '' } }))}
-                onChange={(entryIndex, key, value) => onUpdate((current) => ({
-                  ...current,
-                  headers: renameEntry(current.headers, entryIndex, key, value),
-                }))}
-                onRemove={(entryIndex) => onUpdate((current) => ({
-                  ...current,
-                  headers: removeEntry(current.headers, entryIndex),
-                }))}
-              />
-            ) : (
-              <KeyValueEditor
-                title="Environment variables"
-                addLabel="Add variable"
-                emptyText="No environment variables configured."
-                entries={server.env}
-                keyPlaceholder="Name"
-                valuePlaceholder="Value"
-                onAdd={() => onUpdate((current) => ({ ...current, env: { ...current.env, '': '' } }))}
-                onChange={(entryIndex, key, value) => onUpdate((current) => ({
-                  ...current,
-                  env: renameEntry(current.env, entryIndex, key, value),
-                }))}
-                onRemove={(entryIndex) => onUpdate((current) => ({
-                  ...current,
-                  env: removeEntry(current.env, entryIndex),
-                }))}
-              />
-            )}
-          </div>
-          {diagnostic && (
-            <div className="st-row-stacked">
-              <McpDiagnostics diagnostic={diagnostic} />
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  )
-}
-
-/** Replace the entry at `index`, preserving key order. */
-function renameEntry(
-  entries: Record<string, string>,
-  index: number,
-  key: string,
-  value: string,
-): Record<string, string> {
-  const next: Record<string, string> = {}
-  Object.entries(entries).forEach(([entryKey, entryValue], currentIndex) => {
-    if (currentIndex === index) next[key] = value
-    else next[entryKey] = entryValue
-  })
-  return next
-}
-
-function removeEntry(entries: Record<string, string>, index: number): Record<string, string> {
-  const next: Record<string, string> = {}
-  Object.entries(entries).forEach(([entryKey, entryValue], currentIndex) => {
-    if (currentIndex !== index) next[entryKey] = entryValue
-  })
-  return next
-}
-
-function EditableList({
-  title,
-  emptyText,
-  addLabel,
-  values,
-  placeholder,
-  onAdd,
-  onChange,
-  onRemove,
-}: {
-  title: string
-  emptyText: string
-  addLabel: string
-  values: string[]
-  placeholder: (index: number) => string
-  onAdd: () => void
-  onChange: (index: number, value: string) => void
-  onRemove: (index: number) => void
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-3">
-        <p className="st-label">{title}</p>
-        <button type="button" onClick={onAdd} className="st-btn st-btn-ghost">
-          <Plus size={12} />
-          {addLabel}
-        </button>
-      </div>
-      {values.length === 0 ? (
-        <p className="st-hint">{emptyText}</p>
-      ) : (
-        values.map((value, itemIndex) => (
-          <div key={`${title}-${itemIndex}`} className="flex gap-2">
-            <input
-              value={value}
-              aria-label={`${title} ${itemIndex + 1}`}
-              onChange={(e) => onChange(itemIndex, e.target.value)}
-              placeholder={placeholder(itemIndex)}
-              className="st-input min-w-0 flex-1 font-mono text-xs"
-            />
-            <button
-              type="button"
-              onClick={() => onRemove(itemIndex)}
-              className="st-btn st-btn-ghost st-btn-icon shrink-0"
-              aria-label={`Remove ${title} item ${itemIndex + 1}`}
-            >
-              <Trash2 size={13} />
-            </button>
-          </div>
-        ))
-      )}
-    </div>
-  )
-}
-
-function KeyValueEditor({
-  title,
-  addLabel,
-  emptyText,
-  entries,
-  keyPlaceholder,
-  valuePlaceholder,
-  onAdd,
-  onChange,
-  onRemove,
-}: {
-  title: string
-  addLabel: string
-  emptyText: string
-  entries: Record<string, string>
-  keyPlaceholder: string
-  valuePlaceholder: string
-  onAdd: () => void
-  onChange: (entryIndex: number, key: string, value: string) => void
-  onRemove: (entryIndex: number) => void
-}) {
-  const entryList = Object.entries(entries)
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-3">
-        <p className="st-label">{title}</p>
-        <button type="button" onClick={onAdd} className="st-btn st-btn-ghost">
-          <Plus size={12} />
-          {addLabel}
-        </button>
-      </div>
-      {entryList.length === 0 ? (
-        <p className="st-hint">{emptyText}</p>
-      ) : (
-        entryList.map(([entryKey, entryValue], entryIndex) => (
-          <div key={`${title}-${entryIndex}`} className="grid grid-cols-[1fr_1fr_auto] gap-2">
-            <input
-              value={entryKey}
-              aria-label={`${title} name ${entryIndex + 1}`}
-              onChange={(e) => onChange(entryIndex, e.target.value, entryValue)}
-              placeholder={keyPlaceholder}
-              className="st-input min-w-0 font-mono text-xs"
-            />
-            <input
-              value={entryValue}
-              aria-label={`${title} value ${entryIndex + 1}`}
-              onChange={(e) => onChange(entryIndex, entryKey, e.target.value)}
-              placeholder={valuePlaceholder}
-              className="st-input min-w-0 font-mono text-xs"
-            />
-            <button
-              type="button"
-              onClick={() => onRemove(entryIndex)}
-              className="st-btn st-btn-ghost st-btn-icon"
-              aria-label={`Remove ${title} item ${entryIndex + 1}`}
-            >
-              <Trash2 size={13} />
-            </button>
-          </div>
-        ))
-      )}
-    </div>
-  )
-}
-
-function McpDiagnostics({ diagnostic }: { diagnostic: MCPServerDiagnostics }) {
-  return (
-    <div className="space-y-2">
-      <p className="st-label">Diagnostics</p>
-      <div className="grid gap-2 sm:grid-cols-2">
-        <ReadOnlyValue
-          label={diagnostic.transport === 'streamable_http' ? 'URL' : 'Command'}
-          value={diagnostic.transport === 'streamable_http'
-            ? diagnostic.url || ''
-            : [diagnostic.command, ...(diagnostic.args || [])].filter(Boolean).join(' ')}
-        />
-        <ReadOnlyValue label="Working directory" value={diagnostic.cwd || ''} />
-        <ReadOnlyValue label="Executable" value={diagnostic.resolved_executable || ''} />
-        <ReadOnlyValue label="Process ID" value={diagnostic.pid ? String(diagnostic.pid) : ''} />
-        <ReadOnlyValue label="Connected at" value={diagnostic.connected_at || ''} />
-        <ReadOnlyValue
-          label="Last call"
-          value={diagnostic.last_call_duration_ms ? `${diagnostic.last_call_duration_ms} ms` : ''}
-        />
-        <ReadOnlyValue label="Failed calls" value={String(diagnostic.failed_call_count)} />
-        <ReadOnlyValue label="Tools exposed" value={String(diagnostic.reflected_tool_names?.length ?? 0)} />
-      </div>
-      {diagnostic.unhealthy_reason && <Note tone="warn">{diagnostic.unhealthy_reason}</Note>}
-      {(diagnostic.reflected_tool_names?.length ?? 0) > 0 && (
-        <ReadOnlyValue label="Tool names" value={diagnostic.reflected_tool_names.join(', ')} />
-      )}
-      {diagnostic.stderr_tail && (
-        <pre className="st-code max-h-32 overflow-auto whitespace-pre-wrap">{diagnostic.stderr_tail}</pre>
-      )}
-    </div>
-  )
 }

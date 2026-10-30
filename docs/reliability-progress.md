@@ -178,3 +178,26 @@ Public event fields, tool identities, permissions, attachment scope and persiste
 | `git diff --check` | Passed. |
 
 Frontend, application workflows, Python 3.12, real Docker and GitHub-hosted CI were not run for this backend-only change.
+
+## ARC-01, second extraction: settings draft ownership and sections
+
+Updated: 30 October 2026.
+
+| Work item | Behavior implemented | Evidence |
+| --- | --- | --- |
+| Draft-versus-saved ownership | `useSettingsDraft` owns the draft, the last saved copy it is compared with, edited connection keys and the save lifecycle. The previous JSON-signature baseline, which an MCP credential refresh patched by parsing it, is replaced by a saved settings object. Telegram allowlists live in the draft rather than separate state. Immediate MCP credential operations still reconcile only their metadata into both copies. | Six hook tests: dirty tracking, trimmed allowlists, browser key payload limited to edited keys, failed save, key failure after a successful settings save and its retry, credential reconciliation preserving unrelated edits. |
+| Save failure handling | A rejected settings save previously escaped the click handler and showed nothing. It now keeps the draft and reports the reason in the footer as an alert. When settings save but writing edited Electron keys fails, the saved settings become the baseline immediately, so a retry carries the new settings version instead of being rejected as stale; only the keys stay unsaved. | Shell test of a rejected save (alert, edit kept, close asks to discard); hook test of the key-failure retry. |
+| Sandbox section | `SandboxSettings` renders the sandbox page from the draft's sandbox slice and the saved-settings status, and owns Docker image resolution state. | Four component tests: slice-only edits, enforce-without-Docker warning, resolved image pinned into the draft with status reported, failed resolution keeps the typed image. Shell test saves a sandbox edit. |
+| MCP section | `McpSettings` renders the MCP tab, server cards, list/key-value editors and diagnostics from the draft's MCP slice. It owns template, advanced-panel and reconnect state; live diagnostics stay in the shell because saves and refreshes reload them. Credential controls stay disabled while the draft has unsaved changes or a save is running. | Two component tests: add/edit/remove with duplicate-name feedback, reconnect reporting the server diagnostic. The existing Tools/MCP shell test and MCP credential tests pass unchanged. |
+
+`SettingsModal.tsx` went from 2,604 to about 1,630 lines. The settings request payload, settings version checks, credential IPC and visible copy (apart from the two new save-failure messages) are unchanged. Remaining large pages (connections, browser, model, identity) can follow the same pattern; UX-02 focus work builds on this shell.
+
+### Verification
+
+| Invocation | Result |
+| --- | --- |
+| Frontend `npm run verify` before the change | **132 UI/App tests and 32 Electron tests passed**; TypeScript and renderer build passed. |
+| Frontend `npm run verify` after the change | **146 UI/App tests and 32 Electron tests passed**; TypeScript and renderer build passed. |
+| `tsc --noUnusedLocals` on the changed settings files | No unused locals. |
+| Windows `npm run test:app` | **8 passed, 1 failed**, 3.2 minutes. The failure is the clipboard workflow: it clicks a "Monaw extension" button that `cc9e109` replaced with a status cell, so it fails before reaching settings code changed here. Fixed separately. A first attempt from the sandboxed Git Bash shell could not start any backend because `uv` was denied its cache directory; the run above used PowerShell. |
+| `git diff --check` | Passed. |

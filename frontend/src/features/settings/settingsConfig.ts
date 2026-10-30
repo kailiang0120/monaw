@@ -236,7 +236,7 @@ const emptySpeechToText = (): AgentSettings['speech_to_text'] => ({
   cloud_model: 'gemini-2.5-flash',
 })
 
-const emptySandbox = (): AgentSettings['sandbox'] => ({
+export const emptySandbox = (): AgentSettings['sandbox'] => ({
   enabled: true,
   mode: 'auto',
   default_profile: 'standard',

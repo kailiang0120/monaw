@@ -991,4 +991,36 @@ describe('SettingsModal', () => {
     expect(screen.queryByPlaceholderText('Alias')).not.toBeInTheDocument()
     expect(screen.queryByRole('switch')).not.toBeInTheDocument()
   })
+
+  it('reports a failed save in the footer and keeps the unsaved edit', async () => {
+    mocks.updateSettings.mockRejectedValueOnce(new Error('Settings changed in another window.'))
+    const onClose = vi.fn()
+    render(<SettingsModal onClose={onClose} />)
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /Identity/i }))[0])
+    fireEvent.change(await screen.findByLabelText('Your name'), { target: { value: 'Kai' } })
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Settings were not saved. Settings changed in another window.',
+    )
+    expect(screen.getByLabelText('Your name')).toHaveValue('Kai')
+    expect(screen.getByRole('button', { name: /Save changes/i })).toBeEnabled()
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Cancel' })[0])
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByText('Close settings and lose your unsaved changes?')).toBeInTheDocument()
+  })
+
+  it('saves sandbox edits made on the Sandbox page', async () => {
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /Sandbox/i }))[0])
+    fireEvent.change(await screen.findByLabelText('Sandbox time limit'), { target: { value: '45' } })
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      sandbox: expect.objectContaining({ resources: expect.objectContaining({ timeout_seconds: 45 }) }),
+    })))
+  })
 })
