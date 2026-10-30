@@ -101,6 +101,7 @@ dependency, and commit both `pyproject.toml` and `uv.lock`. Use
 - [Permissions](permissions.md)
 - [Sandboxing](sandboxing.md)
 - [Operations](operations.md)
+- [Windows packaging](packaging.md)
 - [API route reference](api.md)
 
 ## Runtime Layout

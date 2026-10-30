@@ -27,6 +27,7 @@ backend/.tmp/manual-db-check/
 # Node / Electron
 node_modules/
 frontend/dist/
+frontend/release/
 *.log
 *.db
 *.db-shm

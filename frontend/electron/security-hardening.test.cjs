@@ -50,7 +50,8 @@ test('backend startup defaults to authenticated loopback control plane', () => {
   assert.ok(generateControlSecret().length >= 32)
   assert.match(mainSource, /MONAW_CONTROL_SECRET:\s*CONTROL_SECRET/)
   assert.match(mainSource, /MONAW_ALLOW_DEVELOPMENT_TOKEN:\s*'0'/)
-  assert.match(mainSource, /--host',\s*BACKEND_HOST/)
+  // The loopback host reaches the backend's --host argument through backendLaunch (see backend-launch.test.cjs).
+  assert.match(mainSource, /host:\s*BACKEND_HOST/)
 })
 
 test('backend shutdown waits for the complete Windows process tree', () => {

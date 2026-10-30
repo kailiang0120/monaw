@@ -6,6 +6,7 @@ const http = require('http')
 const fs = require('fs')
 const { fileURLToPath } = require('url')
 const runtimeConfig = require('../config/runtime.json')
+const { backendLaunch } = require('./backend-launch.cjs')
 const { backendPort, useDevelopmentRenderer } = require('./runtime-options.cjs')
 const {
   generateControlSecret,
@@ -49,11 +50,15 @@ let backendProcess = null
 let backendUvCommand = null
 let appQuitting = false
 
-function getBackendPath() {
-  if (isDev) {
-    return path.join(__dirname, '../../backend')
-  }
-  return path.join(process.resourcesPath, 'backend')
+function currentBackendLaunch() {
+  return backendLaunch({
+    packaged: !isDev,
+    resourcesPath: process.resourcesPath,
+    sourceBackendDir: path.join(__dirname, '../../backend'),
+    uvCommand: backendUvCommand,
+    host: BACKEND_HOST,
+    port: BACKEND_PORT,
+  })
 }
 
 function getMonawHomeDir() {
@@ -125,18 +130,18 @@ function spawnBackend() {
   fs.mkdirSync(runtimeDir, { recursive: true })
   fs.mkdirSync(workspaceDir, { recursive: true })
 
-  const backendDir = getBackendPath()
-  const cmd = backendUvCommand || 'uv'
+  const launch = currentBackendLaunch()
 
-  console.log('[main] Spawning backend from', backendDir, 'with', cmd)
+  console.log('[main] Spawning backend from', launch.cwd, 'with', launch.command)
 
   const proc = spawn(
-    cmd,
-    ['run', '--locked', '--no-dev', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)],
+    launch.command,
+    launch.args,
     {
-      cwd: backendDir,
+      cwd: launch.cwd,
       env: {
         ...process.env,
+        ...launch.env,
         MONAW_CONTROL_SECRET: CONTROL_SECRET,
         MONAW_ALLOW_DEVELOPMENT_TOKEN: '0',
         CORS_ALLOW_ORIGINS: useDevServer
@@ -475,7 +480,7 @@ function createWindow() {
 app.whenReady().then(async () => {
   installContentSecurityPolicy()
   installMediaPermissionHandler()
-  backendUvCommand = await pickBackendUv()
+  if (!currentBackendLaunch().frozen) backendUvCommand = await pickBackendUv()
   spawnBackend()
   createWindow()
 

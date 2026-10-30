@@ -255,3 +255,18 @@ An empty new chat now shows a "Get started" guide instead of only "Ready." when 
 | Windows `npm run test:app` (PowerShell) | **9 passed**, 2.5 minutes. |
 
 Not checked: the guide's appearance in the running app and with a screen reader. UX-02 is complete apart from those manual passes.
+
+## DIST-02: packaging proof and installer candidate
+
+Updated: 31 October 2026.
+
+| Work item | Behavior implemented | Evidence |
+| --- | --- | --- |
+| Frozen backend | `backend/monaw_backend.py` and `backend/packaging/monaw-backend.spec` build `monaw-backend.exe` with PyInstaller (new `packaging` dependency group). The executable also accepts `-m` and `-c` because the backend starts the built-in browser server and the detached Chrome launcher with `sys.executable`. The app package ships as plain files for disk-loaded skills, migrations and prompts. | With only the Windows folders on `PATH`: `/health` in 1.3–1.7 s; authenticated settings and diagnostics; all built-in skills loaded; browser server started through `-m` and connected with 20 tools; `-c` executed. |
+| Packaged launch path | `electron/backend-launch.cjs` runs the frozen backend from `resources/backend` when present and otherwise keeps the uv launch; Electron skips looking for uv when frozen and points the backend at the bundled extension. | Three launch tests; the security test now checks the loopback host through the launch module. Packaged app without development tools on `PATH`: healthy backend in 4 s on first start, authenticated renderer calls, browser server running, no Monaw processes left after kill. |
+| Installer | electron-builder NSIS target: per-user, choosable folder, user data kept on uninstall. `scripts/package-windows.ps1` builds both stages. | 220 MB installer built in 87 s; 755 MB installed (backend 381 MB). |
+| User data outside the install | Prerequisite commit moved user-created skills to `~/.monaw/skills`, so nothing is written into the install folder. | See the skill commit and [packaging.md](packaging.md). |
+
+The installer was built but not installed: installing writes Start-menu entries and an uninstall key to the current user profile, and the plan places install and upgrade checks on a clean Windows machine. Release blockers recorded in [packaging.md](packaging.md): the GPLv3 ffmpeg build bundled by `imageio-ffmpeg`, unsigned executables, and the missing third-party notice file. Clean install, upgrade, repeated launch, port conflict and missing-dependency checks remain for QA-01 expansion against an installed candidate.
+
+The source-app workflows still pass with the new launch module (**9 passed**, 2.5 minutes), and Electron unit tests pass (**35**).

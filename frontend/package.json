@@ -22,7 +22,9 @@
     "verify:ci": "npm run test:ci && npm run typecheck && npm run build:renderer",
     "typecheck:app": "tsc --noEmit -p tsconfig.e2e.json",
     "test:app": "npm run build:renderer && npm run typecheck:app && playwright test",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "package:win": "npm run build:renderer && electron-builder --win --x64",
+    "package:win:dir": "npm run build:renderer && electron-builder --win --x64 --dir"
   },
   "dependencies": {
     "electron-store": "^8.2.0",
@@ -42,11 +44,56 @@
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.0.1",
     "electron": "^41.3.0",
+    "electron-builder": "^26.18.0",
     "jsdom": "^29.0.2",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
     "typescript": "^5.5.3",
     "vite": "^8.0.10",
     "vitest": "^4.1.4"
+  },
+  "build": {
+    "appId": "com.monaw.agent",
+    "productName": "Monaw",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "!electron/**/*.test.cjs",
+      "assets/app-icon.png",
+      "config/runtime.json",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/monaw-backend",
+        "to": "backend"
+      },
+      {
+        "from": "../browser-extension",
+        "to": "browser-extension"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/app-icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Monaw-Setup-${version}-x64.${ext}"
+    }
   }
 }
