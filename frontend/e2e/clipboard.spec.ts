@@ -14,7 +14,6 @@ test('extension folder Copy writes the OS clipboard from the sandboxed renderer'
     // fixture suppresses Explorer/Chrome launch; browser settings stay untouched.
     await desktop.page.getByRole('button', { name: 'Settings', exact: true }).click()
     await desktop.page.getByRole('button', { name: 'Browser', exact: true }).click()
-    await desktop.page.getByRole('button', { name: 'Monaw extension', exact: true }).click()
     const installed = desktop.page.waitForResponse(response => response.url().endsWith('/extension/install') && response.request().method() === 'POST')
     await desktop.page.getByRole('button', { name: 'Set up extension', exact: true }).click()
     expect((await installed).status()).toBe(200)
