@@ -243,12 +243,12 @@ const emptyIdentity = (): AgentSettings['identity'] => ({
 })
 
 /**
- * The provider voice input uses, or '' without a key. Mirrors the backend's
- * resolve_stt_provider: "auto" follows the chat provider when its key is saved,
- * then prefers OpenAI, then Google.
+ * The provider a feature uses with the saved API keys, or '' without a key.
+ * Mirrors the backend's resolve_key_provider: "auto" follows the chat provider
+ * when its key is saved, then prefers OpenAI, then Google.
  */
-export function activeSpeechProvider(
-  preference: AgentSettings['speech_to_text']['provider'],
+export function activeKeyProvider(
+  preference: 'auto' | 'openai' | 'gemini',
   keys: { openai: boolean; gemini: boolean },
   chatProvider: string,
 ): '' | 'openai' | 'gemini' {
@@ -365,7 +365,7 @@ export function normalizeDraft(
       retrieval_limit: clampInteger(settings.memory?.retrieval_limit, 6, 1, 20),
       max_injected_chars: clampInteger(settings.memory?.max_injected_chars, 2500, 500, 10000),
       min_relevance_score: Math.min(1, Math.max(0, Number(settings.memory?.min_relevance_score ?? 0.15))),
-      embedding_mode: settings.memory?.embedding_mode ?? 'keyword',
+      semantic_search: (['auto', 'off', 'openai', 'gemini', 'local'] as const).find((choice) => choice === settings.memory?.semantic_search) ?? 'auto',
       embedding_model: settings.memory?.embedding_model ?? '',
       embedding_endpoint: settings.memory?.embedding_endpoint ?? '',
       embedding_timeout: settings.memory?.embedding_timeout ?? 5,

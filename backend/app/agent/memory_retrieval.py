@@ -24,13 +24,32 @@ from app.agent.memory_models import (
 )
 
 class MemoryRetrieval:
+    def _semantic_choice(self) -> str:
+        """The saved choice: auto, off, openai, gemini or local."""
+        return str(self._setting("semantic_search", "auto"))
+
+    def _semantic_provider(self) -> str:
+        """The embedding provider in use, or "" for keyword search only."""
+        choice = self._semantic_choice()
+        if not self.enabled or choice == "off":
+            return ""
+        if choice == "local":
+            return "local"
+        from app.agent.api_key_providers import resolve_key_provider, saved_api_keys
+        from app.config import settings
+        chat_provider = str(getattr(getattr(self.settings, "llm", None), "provider", "") or "")
+        return resolve_key_provider(choice, saved_api_keys(settings), chat_provider)
+
     def _index(self) -> SemanticIndex:
-        provider = EmbeddingProvider(str(self._setting("embedding_mode", "keyword")), str(self._setting("embedding_model", "")), str(self._setting("embedding_endpoint", "")), float(self._setting("embedding_timeout", 5)))
+        provider_name = self._semantic_provider()
+        # A model typed for one provider means nothing to another, so "auto" uses each provider's default.
+        model = "" if self._semantic_choice() == "auto" else str(self._setting("embedding_model", ""))
+        provider = EmbeddingProvider(provider_name, model, str(self._setting("embedding_endpoint", "")), float(self._setting("embedding_timeout", 5)))
         root_key = hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:16]
         return SemanticIndex(RUNTIME_DIR / "memory-index" / f"{root_key}.sqlite3", provider)
 
     async def _await_semantic(self, query: str, candidates: list[MemoryEntry]) -> None:
-        if not self.enabled or str(self._setting("embedding_mode", "keyword")) == "keyword" or not candidates:
+        if not candidates or not self._semantic_provider():
             return
         index = self._index()
         signature = tuple((e.scope, e.workspace, e.id, content_hash(e.content)) for e in candidates)
@@ -64,27 +83,31 @@ class MemoryRetrieval:
             yield
 
     def index_health(self) -> dict[str, Any]:
-        mode = str(self._setting("embedding_mode", "keyword"))
-        if not self.enabled or mode == "keyword":
+        mode = self._semantic_choice()
+        if not self.enabled or mode == "off":
             return {"mode": mode, "status": "disabled", "entries": 0}
+        provider = self._semantic_provider()
+        if not provider:
+            if mode == "auto":
+                # No key is a normal state: keyword search carries on.
+                return {"mode": mode, "status": "disabled", "entries": 0,
+                        "error": "Add an OpenAI or Google API key in Connections to search memories by meaning."}
+            key = "an OpenAI" if mode == "openai" else "a Google"
+            return {"mode": mode, "status": "unconfigured", "entries": 0, "error": f"Add {key} API key in Connections."}
         index = self._index()
         if not index.provider.model:
             return {"mode": mode, "status": "unconfigured", "entries": 0, "error": "Choose an embedding model."}
-        if mode == "local":
+        if provider == "local":
             endpoint = urlparse(index.provider.endpoint)
             if endpoint.scheme != "http" or endpoint.hostname not in ("localhost", "127.0.0.1", "::1"):
                 return {"mode": mode, "status": "unconfigured", "entries": 0, "error": "Enter a local service address."}
-        elif mode == "provider":
-            from app.config import settings
-            if not settings.openai_api_key:
-                return {"mode": mode, "status": "unconfigured", "entries": 0, "error": "Configure an OpenAI API key in Connections."}
-        health = {"mode": mode, **index.health()}
+        health = {"mode": mode, "model": index.provider.model, **index.health()}
         if self._semantic_error and health["status"] == "ready":
             health.update(status="degraded", error=self._semantic_error)
         return health
 
     def rebuild_index(self, workspace: str = "") -> dict[str, Any]:
-        if not self.enabled or str(self._setting("embedding_mode", "keyword")) == "keyword":
+        if not self._semantic_provider():
             return {"status": "disabled", "entries": 0}
         try:
             index = self._index()
@@ -106,7 +129,7 @@ class MemoryRetrieval:
             return {"status": "error", "entries": 0, "error": self._semantic_error}
 
     def _semantic_results(self, query: str, candidates: list[MemoryEntry]) -> list[tuple[MemoryEntry, float]]:
-        if not self.enabled or str(self._setting("embedding_mode", "keyword")) == "keyword" or not candidates:
+        if not candidates or not self._semantic_provider():
             return []
         index = self._index()
         signature = tuple((e.scope, e.workspace, e.id, content_hash(e.content)) for e in candidates)

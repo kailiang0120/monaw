@@ -26,16 +26,37 @@ class EmbeddingError(RuntimeError):
     pass
 
 
+DEFAULT_EMBEDDING_MODELS = {'openai': 'text-embedding-3-small', 'gemini': 'gemini-embedding-001'}
+# Gemini returns 3072 values by default; 768 keeps the index small.
+GEMINI_EMBEDDING_DIMENSIONS = 768
+# Cosine similarity a memory needs to count as a match. Models spread their
+# scores differently: Gemini rates unrelated text higher than OpenAI does.
+# These are starting points, not values tuned on real memories.
+SIMILARITY_THRESHOLDS = {'openai': 0.3, 'gemini': 0.65, 'local': 0.45}
+
+
 class EmbeddingProvider:
     def __init__(self, mode: str, model: str, endpoint: str = '', timeout: float = 5.0):
-        self.mode, self.model, self.endpoint = mode, model, endpoint
+        self.mode, self.endpoint = mode, endpoint
+        self.model = model or DEFAULT_EMBEDDING_MODELS.get(mode, '')
         self.timeout = max(1.0, min(float(timeout), 30.0))
+        self.threshold = SIMILARITY_THRESHOLDS.get(mode, 0.45)
 
     @property
     def identity(self) -> str:
         return f'{self.mode}:{self.model}:{self.endpoint}'
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed saved memories."""
+        return self._embed(texts, 'RETRIEVAL_DOCUMENT')
+
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a search query. Gemini embeds queries differently from documents."""
+        if self.mode == 'gemini':
+            return self._embed([text], 'RETRIEVAL_QUERY')[0]
+        return self.embed([text])[0]
+
+    def _embed(self, texts: list[str], task: str) -> list[list[float]]:
         if not texts:
             return []
         if self.mode == 'local':
@@ -46,10 +67,10 @@ class EmbeddingProvider:
             with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=self.timeout) as response:
                 payload = json.load(response)
             vectors = [item['embedding'] for item in sorted(payload['data'], key=lambda item: item['index'])]
-        elif self.mode == 'provider':
+        elif self.mode == 'openai':
             from app.config import settings
-            if not settings.openai_api_key or not self.model:
-                raise EmbeddingError('OpenAI API key and embedding model are required')
+            if not settings.openai_api_key:
+                raise EmbeddingError('An OpenAI API key is required')
             from openai import OpenAI
             client = OpenAI(api_key=settings.openai_api_key, timeout=self.timeout, max_retries=0)
             try:
@@ -57,6 +78,19 @@ class EmbeddingProvider:
                 vectors = [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
             finally:
                 client.close()
+        elif self.mode == 'gemini':
+            from app.config import settings
+            if not settings.google_api_key:
+                raise EmbeddingError('A Google API key is required')
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=settings.google_api_key, http_options=types.HttpOptions(timeout=int(self.timeout * 1000)))
+            response = client.models.embed_content(
+                model=self.model,
+                contents=texts,
+                config=types.EmbedContentConfig(task_type=task, output_dimensionality=GEMINI_EMBEDDING_DIMENSIONS),
+            )
+            vectors = [list(item.values or []) for item in response.embeddings or []]
         else:
             raise EmbeddingError('Semantic embeddings are disabled')
         if len(vectors) != len(texts) or not vectors or not vectors[0]:
@@ -117,7 +151,7 @@ class SemanticIndex:
                 raise EmbeddingError('Index changed during retrieval')
             self.rebuild(stale, guard)
             return self.search(query, entries, guard, True)
-        query_vector = self.provider.embed([query])[0]
+        query_vector = self.provider.embed_query(query)
         ranked = []
         for e in entries:
             h, model, dimension, raw = cached[(e.scope, e.workspace, e.id)]
@@ -127,7 +161,7 @@ class SemanticIndex:
                 raise EmbeddingError('Embedding dimension changed; index rebuilt; retry search')
             denom = math.sqrt(sum(x*x for x in vector) * sum(x*x for x in query_vector))
             similarity = sum(a*b for a, b in zip(vector, query_vector)) / denom if denom else 0.0
-            if similarity >= 0.45:
+            if similarity >= self.provider.threshold:
                 ranked.append((e, similarity))
         return sorted(ranked, key=lambda pair: (-pair[1], pair[0].id))
 

@@ -6,9 +6,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.agent.api_key_providers import resolve_key_provider, saved_api_keys
+
 logger = logging.getLogger(__name__)
 
-STT_PROVIDERS = ("openai", "gemini")
 OPENAI_STT_MODEL = "gpt-4o-mini-transcribe"
 GEMINI_STT_MODEL = "gemini-2.5-flash"
 STT_REQUEST_TIMEOUT_SECONDS = 120
@@ -49,26 +50,6 @@ def _runtime_stt_settings():
     return stt_settings, base_settings, chat_provider
 
 
-def _provider_keys(base_settings) -> dict[str, str]:
-    return {
-        "openai": str(getattr(base_settings, "openai_api_key", "") or "").strip(),
-        "gemini": str(getattr(base_settings, "google_api_key", "") or "").strip(),
-    }
-
-
-def resolve_stt_provider(preference: str, keys: dict[str, str], chat_provider: str = "") -> str:
-    """Return the provider voice input uses, or "" when it has no key.
-
-    "auto" follows the chat model's provider when its key is saved, then
-    prefers OpenAI, then Google.
-    """
-    if preference in STT_PROVIDERS:
-        return preference if keys.get(preference) else ""
-    if chat_provider in STT_PROVIDERS and keys.get(chat_provider):
-        return chat_provider
-    return next((provider for provider in STT_PROVIDERS if keys.get(provider)), "")
-
-
 def _model_for(provider: str) -> str:
     return OPENAI_STT_MODEL if provider == "openai" else GEMINI_STT_MODEL if provider == "gemini" else ""
 
@@ -76,7 +57,7 @@ def _model_for(provider: str) -> str:
 def speech_to_text_status() -> dict[str, Any]:
     stt_settings, base_settings, chat_provider = _runtime_stt_settings()
     preference = str(getattr(stt_settings, "provider", "") or "auto")
-    active = resolve_stt_provider(preference, _provider_keys(base_settings), chat_provider)
+    active = resolve_key_provider(preference, saved_api_keys(base_settings), chat_provider)
     return {
         "provider": preference,
         "active_provider": active,
@@ -97,8 +78,8 @@ async def transcribe_audio_file(path: str | Path) -> str:
         raise ValueError("Audio file exceeds the 25 MB transcription limit.")
     stt_settings, base_settings, chat_provider = _runtime_stt_settings()
     preference = str(getattr(stt_settings, "provider", "") or "auto")
-    keys = _provider_keys(base_settings)
-    provider = resolve_stt_provider(preference, keys, chat_provider)
+    keys = saved_api_keys(base_settings)
+    provider = resolve_key_provider(preference, keys, chat_provider)
     if not provider:
         if preference == "openai":
             raise SpeechToTextNotConfigured("Voice input is set to OpenAI. Add an OpenAI API key in Settings > Connections.")

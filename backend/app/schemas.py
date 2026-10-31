@@ -263,7 +263,7 @@ class MemorySettingsPayload(BaseModel):
     retrieval_limit: int = Field(6, ge=1, le=20)
     max_injected_chars: int = Field(2500, ge=500, le=10000)
     min_relevance_score: float = Field(0.15, ge=0.0, le=1.0)
-    embedding_mode: Literal["keyword", "local", "provider"] = "keyword"
+    semantic_search: Literal["auto", "off", "openai", "gemini", "local"] = "auto"
     embedding_model: str = ""
     embedding_endpoint: str = ""
     embedding_timeout: float = Field(5.0, ge=1.0, le=30.0)

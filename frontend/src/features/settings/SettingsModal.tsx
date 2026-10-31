@@ -86,7 +86,7 @@ import type {
 } from '../../lib/api/types'
 import {
   PERMISSION_PROFILES,
-  activeSpeechProvider,
+  activeKeyProvider,
   applyPermissionProfile,
   duplicateMcpServerNames,
   FALLBACK_MODEL_OPTIONS,
@@ -597,7 +597,7 @@ export function SettingsModal({
   }
   const telegramAllowlistConfigured = Boolean(draft.telegram_allowed_user_ids.trim() || draft.telegram_allowed_chat_ids.trim())
   const customInstructionsDirty = customInstructions !== customInstructionsSavedContent
-  const speechProvider = activeSpeechProvider(draft.speech_to_text.provider, {
+  const speechProvider = activeKeyProvider(draft.speech_to_text.provider, {
     openai: draft.api_keys.has_openai_key,
     gemini: draft.api_keys.has_google_key,
   }, draft.llm.provider)
@@ -987,7 +987,12 @@ export function SettingsModal({
                           memory: { ...current.memory, enabled },
                         }))}
                       />
-                      <MemoryRetrieval memory={draft.memory} onChange={(memory) => updateDraft((current) => ({ ...current, memory }))} />
+                      <MemoryRetrieval
+                        memory={draft.memory}
+                        onChange={(memory) => updateDraft((current) => ({ ...current, memory }))}
+                        keys={{ openai: draft.api_keys.has_openai_key, gemini: draft.api_keys.has_google_key }}
+                        chatProvider={draft.llm.provider}
+                      />
                     </SettingsCard>
 
                     <SettingsCard

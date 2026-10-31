@@ -571,7 +571,8 @@ export interface AgentSettings {
     retrieval_limit: number
     max_injected_chars: number
     min_relevance_score: number
-    embedding_mode?: 'keyword' | 'local' | 'provider'
+    /** "auto" uses the saved OpenAI or Google key; "off" matches by keywords only. */
+    semantic_search?: 'auto' | 'off' | 'openai' | 'gemini' | 'local'
     embedding_model?: string
     embedding_endpoint?: string
     embedding_timeout?: number

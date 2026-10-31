@@ -214,10 +214,26 @@ class MemorySettings(BaseModel):
     retrieval_limit: int = Field(6, ge=1, le=20)
     max_injected_chars: int = Field(2500, ge=500, le=10000)
     min_relevance_score: float = Field(0.15, ge=0.0, le=1.0)
-    embedding_mode: Literal["keyword", "local", "provider"] = "keyword"
+    # Searching memories by meaning. "auto" uses the saved OpenAI or Google
+    # key and falls back to keywords without one; "off" is keywords only.
+    semantic_search: Literal["auto", "off", "openai", "gemini", "local"] = "auto"
+    # Used by "local", and by "openai" or "gemini" in place of their default model.
     embedding_model: str = ""
     embedding_endpoint: str = ""
     embedding_timeout: float = Field(5.0, ge=1.0, le=30.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_embedding_mode(cls, value: Any) -> Any:
+        # embedding_mode came before semantic search used the saved keys.
+        # Nobody chose "keyword" on purpose (it was only the default), so it
+        # becomes "auto"; "provider" meant OpenAI.
+        if not isinstance(value, dict) or "embedding_mode" not in value:
+            return value
+        old = str(value.get("embedding_mode", ""))
+        value = {key: item for key, item in value.items() if key != "embedding_mode"}
+        value.setdefault("semantic_search", {"provider": "openai", "local": "local"}.get(old, "auto"))
+        return value
 
 
 class ToolSettings(BaseModel):

@@ -6,6 +6,7 @@ import pytest
 
 from app.api.routes import speech_to_text as stt_route
 from app.agent import speech_to_text as stt
+from app.agent.api_key_providers import resolve_key_provider
 from app.agent.settings_store import SpeechToTextSettings
 from app.schemas import SpeechToTextTranscriptionRequest
 
@@ -35,8 +36,8 @@ def _use_settings(monkeypatch, *, provider="auto", openai_key="", google_key="",
         ("gemini", {"openai": "sk", "gemini": "g"}, "openai", "gemini"),
     ],
 )
-def test_resolve_stt_provider(preference, keys, chat_provider, expected):
-    assert stt.resolve_stt_provider(preference, keys, chat_provider) == expected
+def test_resolve_key_provider(preference, keys, chat_provider, expected):
+    assert resolve_key_provider(preference, keys, chat_provider) == expected
 
 
 def test_speech_to_text_status_reports_the_provider_in_use(monkeypatch):

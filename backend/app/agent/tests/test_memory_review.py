@@ -17,7 +17,7 @@ def hybrid(tmp_path, monkeypatch):
     from app.agent import memory_retrieval
     monkeypatch.setattr(memory_retrieval, "RUNTIME_DIR", tmp_path / "runtime")
     settings = SimpleNamespace(memory=SimpleNamespace(
-        enabled=True, embedding_mode="local", embedding_model="review-model",
+        enabled=True, semantic_search="local", embedding_model="review-model",
         embedding_endpoint="http://127.0.0.1:1/v1/embeddings", embedding_timeout=2,
     ))
     return MemoryStore(root=tmp_path / "memory", settings=settings)
@@ -84,7 +84,7 @@ def test_corrupt_index_rebuild_preserves_markdown(hybrid, monkeypatch):
 def test_first_memory_access_honors_saved_settings_before_chat(monkeypatch):
     from app.agent import settings_store
     from app.agent.memory_store import get_memory_store, reset_memory_store
-    saved = SimpleNamespace(memory=SimpleNamespace(enabled=False, embedding_mode="provider"))
+    saved = SimpleNamespace(memory=SimpleNamespace(enabled=False, semantic_search="openai"))
     monkeypatch.setattr(settings_store, "load_agent_settings", lambda *args, **kwargs: saved)
     reset_memory_store()
     assert get_memory_store().enabled is False

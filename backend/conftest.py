@@ -77,6 +77,7 @@ TEST_GROUPS = {
     },
     "memory": {
         "test_memory_review.py",
+        "test_memory_embeddings.py",
         "test_memory_store.py",
         "test_memory_archive.py",
         "test_memory_context_management.py",

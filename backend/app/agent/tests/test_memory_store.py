@@ -435,7 +435,7 @@ def test_semantic_index_scope_and_canonical_validation(tmp_path, monkeypatch):
     def vectors(self, texts):
         return [[1.0, 0.0] if ('automobile' in t or 'car' in t) else [0.0, 1.0] for t in texts]
     monkeypatch.setattr(EmbeddingProvider, 'embed', vectors)
-    settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model='test', embedding_endpoint='http://127.0.0.1:1', embedding_timeout=2))
+    settings = SimpleNamespace(memory=SimpleNamespace(semantic_search='local', embedding_model='test', embedding_endpoint='http://127.0.0.1:1', embedding_timeout=2))
     store = module.MemoryStore(root=tmp_path / 'memory', settings=settings)
     first = store.add('The automobile is red', scope='workspace', workspace=str(tmp_path / 'one'))
     store.add('The automobile is blue', scope='workspace', workspace=str(tmp_path / 'two'))
@@ -487,7 +487,7 @@ def test_disabled_memory_never_invokes_embedding(store, repo, monkeypatch):
     from app.agent.memory_index import EmbeddingProvider
     import asyncio
     store.add('The user prefers jasmine tea', scope='global')
-    store.settings = SimpleNamespace(memory=SimpleNamespace(enabled=False, embedding_mode='local'))
+    store.settings = SimpleNamespace(memory=SimpleNamespace(enabled=False, semantic_search='local'))
     monkeypatch.setattr(EmbeddingProvider, 'embed', lambda *a: (_ for _ in ()).throw(AssertionError('embedding invoked')))
     assert asyncio.run(store.build_prompt_async('tea', workspace=repo)) == ''
     assert store.rebuild_index(repo)['status'] == 'disabled'
@@ -558,7 +558,7 @@ def test_async_memory_tool_retrieves_semantic_on_first_query(tmp_path, monkeypat
     import asyncio
     monkeypatch.setattr(memory_retrieval, 'RUNTIME_DIR', tmp_path / 'runtime')
     monkeypatch.setattr(EmbeddingProvider, 'embed', lambda self, texts: [[1.0, 0.0] for _ in texts])
-    settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model='fake', embedding_timeout=2))
+    settings = SimpleNamespace(memory=SimpleNamespace(semantic_search='local', embedding_model='fake', embedding_timeout=2))
     store = MemoryStore(root=tmp_path / 'memory', settings=settings)
     entry = store.add('The automobile is crimson', scope='global')
     monkeypatch.setattr(memory_tools, 'get_memory_store', lambda: store)
@@ -574,7 +574,7 @@ def test_cached_semantic_result_uses_current_metadata(tmp_path, monkeypatch):
     import asyncio
     monkeypatch.setattr(memory_retrieval, 'RUNTIME_DIR', tmp_path / 'runtime')
     monkeypatch.setattr(EmbeddingProvider, 'embed', lambda self, texts: [[1.0, 0.0] for _ in texts])
-    settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model='fake', embedding_timeout=2))
+    settings = SimpleNamespace(memory=SimpleNamespace(semantic_search='local', embedding_model='fake', embedding_timeout=2))
     store = MemoryStore(root=tmp_path / 'memory', settings=settings)
     entry = store.add('The automobile is crimson', scope='global')
     asyncio.run(store.search_async('car'))
@@ -595,7 +595,7 @@ def test_stale_turn_cannot_attach_provenance_to_newer_correction(store, repo):
 
 def test_health_reports_missing_embedding_configuration(store):
     from types import SimpleNamespace
-    store.settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model=''))
+    store.settings = SimpleNamespace(memory=SimpleNamespace(semantic_search='local', embedding_model=''))
     assert store.index_health()['status'] == 'unconfigured'
     store.settings.memory.embedding_model = 'example'
     store.settings.memory.embedding_endpoint = 'https://not-local.example/v1/embeddings'
@@ -610,7 +610,7 @@ def test_failed_semantic_query_cache_is_bounded_and_cleared(tmp_path, monkeypatc
     monkeypatch.setattr(memory_retrieval, 'RUNTIME_DIR', tmp_path / 'runtime')
     def fail(*args): raise RuntimeError('offline')
     monkeypatch.setattr(EmbeddingProvider, 'embed', fail)
-    settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model='fake', embedding_timeout=2))
+    settings = SimpleNamespace(memory=SimpleNamespace(semantic_search='local', embedding_model='fake', embedding_timeout=2))
     store = MemoryStore(root=tmp_path / 'memory', settings=settings)
     entry = store.add('The user prefers jasmine tea', scope='global')
     async def run():
