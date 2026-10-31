@@ -28,6 +28,7 @@ Monaw.exe                          Electron
 resources/app.asar                 Built renderer, Electron main and preload
 resources/backend/monaw-backend.exe  Frozen backend
 resources/backend/_internal/       Python runtime, libraries, and the app package as plain files
+resources/backend/_internal/codex_cli_bin/  codex.exe, rg.exe and their metadata, for ChatGPT sign-in
 resources/browser-extension/       The Monaw Chrome extension that setup copies for the user
 ```
 
@@ -35,6 +36,7 @@ resources/browser-extension/       The Monaw Chrome extension that setup copies 
 - The frozen executable also accepts `-m <module>` and `-c <code>`, because the backend starts helpers with `sys.executable` (the built-in browser server and the detached Chrome launcher). See `backend/monaw_backend.py`.
 - The app package ships as plain files beside the frozen modules. Skills load from their folders, migrations and prompts are read from disk, and modules find resources relative to their own files.
 - Electron points the backend at the bundled extension with `MONAW_BROWSER_EXTENSION_SOURCE`.
+- Signing in with ChatGPT, and chatting through that account, run Codex's app-server from `openai-codex-cli-bin`. The package finds `codex.exe` next to its `codex-package.json`, so the spec copies both, plus `rg.exe`, as files. Codex's code-mode host and its shell and sandbox helpers are left out because Monaw turns those features off. The packaged-app check `can reach the bundled Codex for ChatGPT sign-in` fails if they go missing.
 - All mutable data stays in the Monaw home (`~/.monaw` by default): settings, conversations, memory, runtime files, the installed copy of the extension, and skills the user creates (`~/.monaw/skills`). The install folder is never written to, so it can be replaced on upgrade.
 
 ## Measurements (first candidate, 31 October 2026)
@@ -78,9 +80,11 @@ Built from branch `drop-local-speech` in 168 s; SHA-256 `2AB73F4D8E202CF3580AAC9
 
 After merging with the hybrid memory retrieval work, `main` built in 117 s: `Monaw-Setup-1.0.0-x64.exe`, 133.3 MB (139,743,918 bytes), SHA-256 `21425334263137A136D83F8F5512A53FC4116B1029F591B5A47B6FBE54E5E888`, installed size 390 MB. The packaged-app checks passed (5 of 5, 28.4 s), and the frozen backend passed the memory smoke check (semantic recall on the first query through a local embedding test server, workspace isolation, restart, forgetting and rebuilding the index). Two baseline runs: cold start 2.36 s and 1.76 s, warm 1.59 s and 1.73 s, fresh database 4,096 bytes; idle API requests 0 and 4 per minute. Across five runs today the idle count was 0, 16, 0, 0 and 4, which points to late startup requests landing in the observation window rather than polling; the baseline script does not yet separate the two.
 
-### Release `7d84272` (v1.0.0)
+### Release v1.0.0
 
-The installer published as v1.0.0 was built from commit `7d84272`: `Monaw-Setup-1.0.0-x64.exe`, 133.3 MB (139,779,224 bytes), SHA-256 `61E3F6BACB10E413B90B4E70D4648376B151475DD31316BE7F2F077E874D95BB`, frozen backend 89 MB. The packaged-app checks passed (5 of 5, 29.1 s). On the development machine, with no earlier Monaw install, a silent per-user install (`/S /D=<folder>`) took 18 s and used 390 MB; the installed app, started with a fresh Monaw home, served `/health` 3.4 s after launch and refused an unauthenticated settings request; closing it left no Monaw processes. A silent uninstall removed the app folder, the Start menu shortcut and the uninstall entry, and kept the Monaw home.
+The first v1.0.0 installer, built from `7d84272` (133.3 MB, SHA-256 `61E3F6BACB10E413B90B4E70D4648376B151475DD31316BE7F2F077E874D95BB`), left out the Codex runtime, so signing in with ChatGPT and chatting through that account failed with "missing its package metadata". It passed the packaged-app checks of the time because none of them reached Codex. A silent per-user install (`/S /D=<folder>`) of that build took 18 s; the installed app served `/health` 3.4 s after launch and refused an unauthenticated settings request, and a silent uninstall removed the app folder, the Start menu shortcut and the uninstall entry while keeping the Monaw home.
+
+The replacement installer bundles `codex.exe` and `rg.exe`: `Monaw-Setup-1.0.0-x64.exe`, 207.8 MB (217,886,132 bytes), SHA-256 `355F30AF2E252C6E6AD9DFC48931EDAFDD21B080D7393AF508065F9E664715F3`, frozen backend 401 MB, unpacked app 705 MB. The packaged-app checks passed (6 of 6, 35.6 s), including the new ChatGPT status check. The frozen backend reported the account as not connected, returned an `auth.openai.com` sign-in link, and its Codex process ended with it. This installer was not installed on the development machine, which already had v1.0.0 installed.
 
 The PyInstaller spec leaves out `mcp.cli`, the MCP command-line tool, which needs `typer`; `typer` arrived only through `huggingface_hub`.
 

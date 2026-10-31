@@ -33,6 +33,20 @@ for package in ("tiktoken", "tiktoken_ext", "scrapling", "openai_codex", "mcp", 
     binaries += package_binaries
     hiddenimports += package_hidden
 
+# ChatGPT sign-in runs Codex's app-server from openai-codex-cli-bin, which finds
+# codex.exe beside its package metadata at runtime. Monaw turns off Codex's
+# code-mode host, shell and sandbox, so their helper executables (about 90 MB)
+# stay out; rg.exe is the one PATH helper Codex expects.
+import codex_cli_bin
+
+codex_dir = Path(codex_cli_bin.__file__).parent
+hiddenimports.append("codex_cli_bin")
+datas += [
+    (str(codex_dir / "codex-package.json"), "codex_cli_bin"),
+    (str(codex_dir / "bin" / "codex.exe"), "codex_cli_bin/bin"),
+    *[(str(path), "codex_cli_bin/codex-path") for path in (codex_dir / "codex-path").glob("*") if path.is_file()],
+]
+
 a = Analysis(
     [str(backend / "monaw_backend.py")],
     pathex=[str(backend)],

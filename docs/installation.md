@@ -7,7 +7,7 @@ The installer is published with each [release](https://github.com/kailiang0120/m
 ## Requirements
 
 - Windows 10 or 11, 64-bit (x64). Arm devices and 32-bit Windows are not supported.
-- About 400 MB of disk space for the app, plus the Monaw home folder (`%USERPROFILE%\.monaw`).
+- About 700 MB of disk space for the app, plus the Monaw home folder (`%USERPROFILE%\.monaw`). About 300 MB of that is the Codex runtime used for signing in with ChatGPT.
 - An API key for OpenAI or Google, or an OpenAI account, to use a model.
 - Optional: Google Chrome 125 or later for browser control, and Docker Desktop for isolated shell commands.
 - Voice input sends recordings to OpenAI or Google and needs an API key for one of them; an OpenAI account sign-in does not cover it.

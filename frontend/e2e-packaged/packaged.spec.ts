@@ -150,6 +150,20 @@ test('keeps settings across a restart', async () => {
   await second.quit()
 })
 
+test('can reach the bundled Codex for ChatGPT sign-in', async () => {
+  // Sign-in runs codex.exe from the package; without it the status call fails.
+  const desktop = track(new PackagedApp(home, await freePort()))
+  await desktop.start()
+  const status = desktop.page.waitForResponse((response) => response.url().endsWith('/api/openai-account/status'), { timeout: 60_000 })
+  await desktop.page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await desktop.page.getByRole('button', { name: 'Connections', exact: true }).click()
+  const response = await status
+  expect(response.status()).toBe(200)
+  expect(await response.json()).toMatchObject({ connected: false })
+  await expect(desktop.page.getByText('OpenAI account status unavailable.')).toHaveCount(0)
+  await desktop.quit()
+})
+
 test('a second launch leaves the running app and its single backend alone', async () => {
   const desktop = track(new PackagedApp(home, await freePort()))
   await desktop.start()
