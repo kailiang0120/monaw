@@ -321,13 +321,13 @@ Pushing `9c5285f` ran CI on GitHub ([run 41170820654](https://github.com/kailian
 | Frontend (Node 20.19.0) | All 181 Vitest tests passed, then `node --test electron/*.test.cjs` failed with "Could not find": nothing expands the glob on Windows, and Node 20 does not expand it itself. | `scripts/run-electron-tests.cjs` lists the files; all 37 Electron tests run. Not yet run on Node 20 locally. |
 | Electron and backend workflows (Windows) | Playwright forces colour in its workers, so `uv cache dir` and `uv python find` returned paths wrapped in ANSI escape codes. The backend's uv rejected that cache path. | The harness calls uv with `--color never`. With `FORCE_COLOR=1` one workflow failed the same way before the fix; after it, all **9 passed** (2.9 minutes). |
 
-These fixes have not run on GitHub yet.
+With these fixes, [run 41172096702](https://github.com/kailiang0120/monaw/actions/runs/41172096702) on `bdbd993` passed all **14 jobs**, including the real Linux Docker job, Node 20.19.0 and the Windows application workflows.
 
 ## Status of the plan
 
 All fifteen packages have an implementation. What is still open needs resources or decisions outside this machine:
 
-- **Stage A:** the real Docker checks pass locally. GitHub-hosted CI has run once; its three failing jobs are fixed locally (see above) and need a CI run on GitHub to confirm.
+- **Stage A:** complete. The real Docker checks pass locally and on GitHub, and GitHub-hosted CI passes every job on `bdbd993`.
 - **Stage B:** a manual keyboard-only and screen-reader walkthrough of the installed app.
 - **Stage C:** a clean Windows install and an upgrade between two installed versions; code signing; third-party notices; and a decision on the GPLv3 ffmpeg build bundled by `imageio-ffmpeg`. Long-conversation rendering, representative database growth and stop-to-quiescence baselines need a packaged fixture and are not measured.
 
