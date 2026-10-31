@@ -8,8 +8,9 @@ import { execFileSync } from 'node:child_process'
 
 const require = createRequire(import.meta.url)
 const frontend = resolve(import.meta.dirname, '..')
-const uvCache = execFileSync('uv', ['cache', 'dir'], { encoding: 'utf8', windowsHide: true }).trim()
-const python = execFileSync('uv', ['python', 'find', '--project', resolve(frontend, '../backend')], { encoding: 'utf8', windowsHide: true }).trim()
+// Playwright forces colour in workers; without --color never uv wraps these paths in escape codes.
+const uvCache = execFileSync('uv', ['--color', 'never', 'cache', 'dir'], { encoding: 'utf8', windowsHide: true }).trim()
+const python = execFileSync('uv', ['--color', 'never', 'python', 'find', '--project', resolve(frontend, '../backend')], { encoding: 'utf8', windowsHide: true }).trim()
 
 async function freePort(): Promise<number> {
   const server = createServer()
