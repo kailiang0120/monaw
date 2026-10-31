@@ -59,19 +59,20 @@ def test_usage_adds_up_by_category(home):
     assert not any(item["id"] == "legacy_speech" for item in usage["categories"])
 
 
-def test_browser_cleanup_keeps_sign_ins(home):
-    profile = home / "browser" / "profiles" / "managed"
-    cookies = _write(profile / "Default" / "Network" / "Cookies", 300)
-    _write(profile / "Default" / "Cache" / "f_000001", 2000)
-    _write(profile / "BrowserMetrics" / "metrics.pma", 1000)
+def test_old_browser_profile_is_listed_until_deleted_and_the_extension_stays(home):
+    _write(home / "browser" / "profiles" / "managed" / "Default" / "Cache" / "f_000001", 2000)
+    _write(home / "browser" / "profiles" / "managed" / "Default" / "Network" / "Cookies", 300)
+    extension = _write(home / "browser" / "extension" / "manifest.json", 50)
 
-    before = _category(storage.storage_usage(), "browser")
-    result = storage.clean_storage("browser")
+    listed = _category(storage.storage_usage(), "legacy_browser")
+    result = storage.clean_storage("legacy_browser")
 
-    assert (before["bytes"], before["cleanable_bytes"]) == (3300, 3000)
-    assert result["freed_bytes"] == 3000
-    assert cookies.read_bytes() == b"x" * 300
-    assert _category(result["usage"], "browser")["cleanable_bytes"] == 0
+    assert (listed["bytes"], listed["cleanable_bytes"], listed["clean"]) == (2300, 2300, "backend")
+    assert "signed out" in listed["warning"]
+    assert result["freed_bytes"] == 2300
+    assert not (home / "browser" / "profiles").exists()
+    assert extension.exists()
+    assert not any(item["id"] == "legacy_browser" for item in result["usage"]["categories"])
 
 
 def test_log_cleanup_empties_the_open_backend_log(home):
@@ -101,10 +102,12 @@ def test_outputs_and_uploads_are_emptied_but_their_folders_stay(home):
 
 def test_old_voice_model_is_listed_only_while_it_exists(home):
     _write(home / "models" / "faster-whisper" / "base" / "model.bin", 5000)
+    other = _write(home / "models" / "other" / "keep.bin", 10)
 
     assert _category(storage.storage_usage(), "legacy_speech")["cleanable_bytes"] == 5000
     storage.clean_storage("legacy_speech")
     assert not any(item["id"] == "legacy_speech" for item in storage.storage_usage()["categories"])
+    assert other.exists()
 
 
 def test_chats_are_not_deleted_during_a_reply(home, monkeypatch):

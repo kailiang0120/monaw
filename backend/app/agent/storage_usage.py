@@ -10,18 +10,6 @@ from typing import Callable
 
 from app.agent.runtime_paths import MONAW_HOME_DIR, RUNTIME_DIR, WORKSPACE_DIR
 
-# Chromium folders in the built-in browser profile that only hold caches and
-# metrics. Clearing them keeps cookies and sign-ins.
-BROWSER_CACHE_DIRS = (
-    "BrowserMetrics",
-    "GrShaderCache",
-    "ShaderCache",
-    "GraphiteDawnCache",
-    "component_crx_cache",
-    "optimization_guide_model_store",
-    "OnDeviceHeadSuggestModel",
-)
-BROWSER_PROFILE_CACHE_DIRS = ("Cache", "Code Cache", "GPUCache", "DawnWebGPUCache", "DawnGraphiteCache")
 # The Electron window's own caches; the app clears these through its session.
 APP_CACHE_DIRS = ("Cache", "Code Cache", "GPUCache", "DawnWebGPUCache", "DawnGraphiteCache")
 
@@ -36,8 +24,6 @@ class Category:
     label: str
     description: str
     paths: Callable[[], list[Path]]
-    # Paths whose contents cleaning removes, when narrower than `paths`.
-    cleanable_paths: Callable[[], list[Path]] | None = None
     # "backend" cleans here, "app" asks the desktop app to, None has no cleanup.
     clean: str | None = None
     clean_label: str = ""
@@ -79,23 +65,6 @@ def _remove(path: Path) -> None:
             pass
         return
     shutil.rmtree(path, ignore_errors=True)
-
-
-def _browser_profiles() -> list[Path]:
-    root = MONAW_HOME_DIR / "browser" / "profiles"
-    try:
-        return [path for path in root.iterdir() if path.is_dir() and not path.is_symlink()]
-    except OSError:
-        return []
-
-
-def _browser_cache_paths() -> list[Path]:
-    paths: list[Path] = []
-    for profile in _browser_profiles():
-        paths += [profile / name for name in BROWSER_CACHE_DIRS]
-        for inner in [profile / "Default", *profile.glob("Profile *")]:
-            paths += [inner / name for name in BROWSER_PROFILE_CACHE_DIRS]
-    return paths
 
 
 def _log_paths() -> list[Path]:
@@ -193,18 +162,19 @@ CATEGORIES: tuple[Category, ...] = (
         lambda: [RUNTIME_DIR / "exec", RUNTIME_DIR / "sandbox"], clean="backend", clean_label="Clear outputs",
     ),
     Category(
-        "browser", "Built-in browser", "The browser the agent uses. Cleaning removes its caches and keeps sign-ins.",
-        lambda: [MONAW_HOME_DIR / "browser" / "profiles"], cleanable_paths=_browser_cache_paths,
-        clean="backend", clean_label="Clear browser cache",
-    ),
-    Category(
         "app_cache", "App cache", "Cached pages and graphics for the Monaw window. It refills as you use the app.",
         lambda: [RUNTIME_DIR / "electron" / name for name in APP_CACHE_DIRS],
         clean="app", clean_label="Clear app cache",
     ),
     Category(
+        "legacy_browser", "Old browser profile",
+        "The Chrome profile earlier versions launched for the agent. Monaw now uses your own Chrome through its extension.",
+        lambda: [MONAW_HOME_DIR / "browser" / "profiles"], clean="backend", clean_label="Delete profile",
+        warning="Sites signed in there are signed out; your own Chrome is not affected.",
+    ),
+    Category(
         "legacy_speech", "Old voice model", "The offline Whisper model earlier versions downloaded. Voice input no longer uses it.",
-        lambda: [MONAW_HOME_DIR / "models"], clean="backend", clean_label="Delete model",
+        lambda: [MONAW_HOME_DIR / "models" / "faster-whisper"], clean="backend", clean_label="Delete model",
     ),
     Category(
         "memory", "Memory", "What the agent remembers about you. Manage it under Identity.",
@@ -226,8 +196,9 @@ _CLEANERS: dict[str, Callable[[], None]] = {
     "activity": _clean_activity,
     "logs": _clean_logs,
     "outputs": _remove_contents(lambda: [RUNTIME_DIR / "exec", RUNTIME_DIR / "sandbox"]),
-    "browser": _remove_contents(_browser_cache_paths),
-    "legacy_speech": _remove_contents(lambda: [MONAW_HOME_DIR / "models"]),
+    # Leftovers from earlier versions go entirely, folder and all.
+    "legacy_browser": lambda: _remove(MONAW_HOME_DIR / "browser" / "profiles"),
+    "legacy_speech": lambda: _remove(MONAW_HOME_DIR / "models" / "faster-whisper"),
 }
 
 
@@ -243,15 +214,14 @@ def storage_usage() -> dict:
     categories = []
     for category in CATEGORIES:
         size = sum(_size(path) for path in category.paths())
-        if category.id == "legacy_speech" and not size:
+        if category.id.startswith("legacy_") and not size:
             continue
-        cleanable = sum(_size(path) for path in category.cleanable_paths()) if category.cleanable_paths else size
         categories.append({
             "id": category.id,
             "label": category.label,
             "description": category.description,
             "bytes": size,
-            "cleanable_bytes": cleanable if category.clean else 0,
+            "cleanable_bytes": size if category.clean else 0,
             "clean": category.clean,
             "clean_label": category.clean_label,
             "warning": category.warning,

@@ -12,7 +12,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   activity: '#c08a2e',
   logs: '#a8743f',
   outputs: '#8a6fb8',
-  browser: '#4c7fc0',
+  legacy_browser: '#4c7fc0',
   app_cache: '#5fa3d6',
   legacy_speech: '#c06a5a',
   memory: '#b45f95',
