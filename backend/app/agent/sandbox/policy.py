@@ -253,7 +253,6 @@ _PYTHON_312_STDLIB_MODULES = frozenset(
         "modulefinder",
         "multiprocessing",
         "netrc",
-        "nis",
         "nntplib",
         "ntpath",
         "nturl2path",

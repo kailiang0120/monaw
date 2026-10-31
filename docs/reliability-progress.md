@@ -299,11 +299,23 @@ The candidate was built from commit `fdf05aea5f7d592b150f7e5901e02e390a811561` w
 
 During startup the renderer's stored-key sync can reach the backend before it listens and logs `ECONNREFUSED`; it retries and succeeds, as before this work.
 
+## Real Docker run, 31 October
+
+Docker Desktop was running (engine 29.5.2, Linux containers), so the three steps of CI's Linux Docker job were run locally on Windows with Python 3.11.15. GitHub-hosted CI still has not run.
+
+| Step | Result |
+| --- | --- |
+| Pull the pinned image `python:3.12-slim@sha256:2c941e86…3c4a` | Pulled. |
+| `MONAW_REQUIRE_DOCKER_TESTS=1` pytest over `test_sandbox_docker.py` and `test_sandbox_image_inventory.py` | **26 passed**, none skipped. The real simple-command and network/root-isolation tests pass, so the historical Docker failure from the first batch is resolved. |
+| Inventory check against the offline module table | Failed first: the table listed `nis`, which the image cannot import (`ModuleNotFoundError`). `nis` was removed from the table and its test; the check now finds 204 importable modules and nothing claimed that is absent. `test_sandbox.py` (**145 passed**) and the Docker suites pass again. |
+
+No containers from the run were left behind.
+
 ## Status of the plan
 
 All fifteen packages have an implementation. What is still open needs resources or decisions outside this machine:
 
-- **Stage A:** the real Linux Docker job and GitHub-hosted CI have not run on these commits (nothing has been pushed), and Docker is unavailable locally.
+- **Stage A:** the real Docker checks now pass locally (see above), but GitHub-hosted CI, including its Linux Docker job, has not run on these commits because nothing has been pushed.
 - **Stage B:** a manual keyboard-only and screen-reader walkthrough of the installed app.
 - **Stage C:** a clean Windows install and an upgrade between two installed versions; code signing; third-party notices; and a decision on the GPLv3 ffmpeg build bundled by `imageio-ffmpeg`. Long-conversation rendering, representative database growth and stop-to-quiescence baselines need a packaged fixture and are not measured.
 

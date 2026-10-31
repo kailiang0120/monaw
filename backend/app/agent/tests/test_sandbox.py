@@ -440,7 +440,6 @@ def test_python_312_offline_inventory_matches_slim_image_constraints(monkeypatch
         "genericpath",
         "grp",
         "idlelib",
-        "nis",
         "ntpath",
         "nturl2path",
         "opcode",
