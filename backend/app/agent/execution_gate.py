@@ -36,6 +36,7 @@ from app.agent.run_context import (
     current_control_session_id,
     current_conversation_id,
     current_execution_source,
+    current_interactive,
 )
 
 ToolExecute = Callable[[IterationBudget, dict[str, Any], dict[str, Any]], Awaitable[str]]
@@ -90,6 +91,11 @@ class ExecutionGateService:
             auto_approved = False
             if pending_event["event"] == "approval_required":
                 ticket = get_approval_ticket(pending_event["data"]["ticket_id"])
+                # Tool content can name a ticket, but cannot route another
+                # tool's action into review or replay.
+                if ticket is not None and ticket.tool_name != tool_dict.get("name"):
+                    return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch",
+                                       "error": "Approval ticket does not belong to this tool."})
                 validation_error = "ticket missing" if ticket is None else ticket_validation_error(
                     ticket, expected_session_id=current_control_session_id(),
                     expected_conversation_id=current_conversation_id(),
@@ -103,7 +109,7 @@ class ExecutionGateService:
                               "decision": "deny", "resolved_by": "auto_review:retry_guard", "reason": reason}})
                         cleanup_approval_resume(ticket.id)
                         return blocked
-                if (ticket is not None and ticket.interactive and review_client is not None
+                if (ticket is not None and ticket.interactive and current_interactive() and review_client is not None
                         and load_agent_settings().permissions.mode == "auto_review"
                         and not requires_user_review(ticket)
                         and not ticket_validation_error(ticket,
@@ -202,15 +208,18 @@ class ExecutionGateService:
             return None
 
         status = data.get("status")
+        if not isinstance(data.get("ticket_id"), str) or not data["ticket_id"].strip():
+            return None
         if status == "pending_approval":
+            sandbox = data.get("sandbox") if isinstance(data.get("sandbox"), dict) else {}
             return {
                 "event": "approval_required",
                 "data": {
                     "ticket_id": data.get("ticket_id", ""),
                     "action": data.get("action", ""),
                     "reason": data.get("reason", ""),
-                    **({"execution_environment": data["sandbox"]["execution_environment"]}
-                       if (data.get("sandbox") or {}).get("execution_environment") else {}),
+                    **({"execution_environment": sandbox["execution_environment"]}
+                       if sandbox.get("execution_environment") else {}),
                 },
             }
         if status == "pending_access_grant":
@@ -253,12 +262,14 @@ class ExecutionGateService:
         # response.
         if event_kind == "access_grant_required":
             grant_ticket = get_grant_ticket(ticket_id)
-            if grant_ticket is not None and not grant_ticket.interactive and grant_ticket.status == "pending":
+            if (grant_ticket is not None and (not grant_ticket.interactive or not current_interactive())
+                    and grant_ticket.status == "pending"):
                 resolve_grant(ticket_id, "deny")
                 signal_grant_resume(ticket_id, "deny")
         else:
             approval_ticket = get_approval_ticket(ticket_id)
-            if approval_ticket is not None and not approval_ticket.interactive and approval_ticket.status.value == "pending":
+            if (approval_ticket is not None and (not approval_ticket.interactive or not current_interactive())
+                    and approval_ticket.status.value == "pending"):
                 reject_ticket(ticket_id, resolved_by="system")
                 signal_approval_resume(ticket_id, "rejected")
 
