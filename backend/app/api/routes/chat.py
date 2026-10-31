@@ -61,7 +61,7 @@ def _prepare_conversation_workspace(req: ChatRequest, conv_id: str) -> None:
     if req.workspace_dir is not None:
         from app.agent.conversation_workspace import validate_workspace_dir
         from app.agent.database import get_db
-        from app.agent.turn_loop import _conversation_title_from_prompt
+        from app.agent.turn_text import conversation_title_from_prompt
 
         try:
             workspace_dir = validate_workspace_dir(req.workspace_dir)
@@ -70,7 +70,7 @@ def _prepare_conversation_workspace(req: ChatRequest, conv_id: str) -> None:
         db = get_db()
         existing = db.get_conversation(conv_id)
         if existing is None:
-            db.create_conversation(conv_id, _conversation_title_from_prompt(req.message), workspace_dir)
+            db.create_conversation(conv_id, conversation_title_from_prompt(req.message), workspace_dir)
         elif existing.get("workspace_dir", "") != workspace_dir:
             raise HTTPException(status_code=409, detail="Change the working folder before starting a task.")
 

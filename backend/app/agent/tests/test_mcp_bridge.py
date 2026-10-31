@@ -721,11 +721,11 @@ def _call_with_session(session, tool_name: str) -> str:
 
 def test_mcp_image_blocks_are_saved_as_files_and_attached(monkeypatch, tmp_path):
     import base64
-    from app.agent import turn_loop
+    from app.agent import tool_observations
     from app.skills.mcp_bridge import images as images_module
 
     monkeypatch.setattr(images_module, "configured_screenshots_dir", lambda: tmp_path)
-    monkeypatch.setattr(turn_loop, "configured_screenshots_dir", lambda: tmp_path)
+    monkeypatch.setattr(tool_observations, "configured_screenshots_dir", lambda: tmp_path)
     image = _png_bytes(800, 600)
 
     output = _call_with_session(_ImageSession(image), "take_screenshot")
@@ -742,17 +742,17 @@ def test_mcp_image_blocks_are_saved_as_files_and_attached(monkeypatch, tmp_path)
     assert saved.read_bytes() == image
     assert payload["images"] == [{"path": str(saved), "mime_type": "image/png", "width": 800, "height": 600}]
 
-    assert turn_loop._extract_image_attachments("mcp__chrome-devtools__take_screenshot", output) == [
+    assert tool_observations.extract_image_attachments("mcp__chrome-devtools__take_screenshot", output) == [
         {"path": str(saved), "mime_type": "image/png"}
     ]
 
 
 def test_mcp_images_too_small_to_preview_are_dropped(monkeypatch, tmp_path):
-    from app.agent import turn_loop
+    from app.agent import tool_observations
     from app.skills.mcp_bridge import images as images_module
 
     monkeypatch.setattr(images_module, "configured_screenshots_dir", lambda: tmp_path)
-    monkeypatch.setattr(turn_loop, "configured_screenshots_dir", lambda: tmp_path)
+    monkeypatch.setattr(tool_observations, "configured_screenshots_dir", lambda: tmp_path)
 
     payload = json.loads(_call_with_session(_ImageSession(_png_bytes(4, 4)), "take_screenshot"))
 
@@ -762,11 +762,11 @@ def test_mcp_images_too_small_to_preview_are_dropped(monkeypatch, tmp_path):
 
 
 def test_mcp_image_attachments_ignore_paths_outside_the_screenshots_folder(monkeypatch, tmp_path):
-    from app.agent import turn_loop
+    from app.agent import tool_observations
 
     outside = tmp_path / "elsewhere.png"
     outside.write_bytes(_png_bytes(100, 100))
-    monkeypatch.setattr(turn_loop, "configured_screenshots_dir", lambda: tmp_path / "screenshots")
+    monkeypatch.setattr(tool_observations, "configured_screenshots_dir", lambda: tmp_path / "screenshots")
     forged = json.dumps({"ok": True, "status": "ok", "images": [{"path": str(outside), "mime_type": "image/png"}]})
 
-    assert turn_loop._extract_image_attachments("mcp__notes__render", forged) == []
+    assert tool_observations.extract_image_attachments("mcp__notes__render", forged) == []

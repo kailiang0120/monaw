@@ -8,7 +8,9 @@ from pathlib import Path
 from app.agent.iteration_budget import IterationBudget
 from app.agent.tool_registry import ToolRegistry
 from app.agent.steering import SteeringInbox, SteeringMessage
-from app.agent.turn_loop import TurnLoop, _conversation_title_from_prompt, _extract_image_attachments, _repeat_key
+from app.agent.tool_observations import extract_image_attachments
+from app.agent.turn_loop import TurnLoop
+from app.agent.turn_text import conversation_title_from_prompt
 from app.agent.run_context import current_conversation_id
 from app.agent.controller_policy import load_policy, update_permitted_roots
 from app.agent.llm_client import LLMClient, LLMResponse, ToolCallRequest
@@ -42,9 +44,9 @@ def png_header(width: int, height: int) -> bytes:
 
 
 def test_conversation_title_uses_first_line_and_stays_compact() -> None:
-    assert _conversation_title_from_prompt("Summarize the report. Include three key risks.") == "Summarize the report"
-    assert _conversation_title_from_prompt("  Compare   these options\nThen explain the tradeoffs") == "Compare these options"
-    assert _conversation_title_from_prompt("Review the complete quarterly performance and provide detailed recommendations") == "Review the complete quarterly performance and…"
+    assert conversation_title_from_prompt("Summarize the report. Include three key risks.") == "Summarize the report"
+    assert conversation_title_from_prompt("  Compare   these options\nThen explain the tradeoffs") == "Compare these options"
+    assert conversation_title_from_prompt("Review the complete quarterly performance and provide detailed recommendations") == "Review the complete quarterly performance and…"
 
 
 def test_concurrent_turns_keep_repetition_policy_isolated():
@@ -2619,7 +2621,7 @@ def test_turn_loop_attaches_tool_screenshots_for_the_model_to_read():
 def test_extract_image_attachments_supports_computer_window_state():
     output = json.dumps({"status": "ok", "screenshot": {"path": r"C:\tmp\desktop.png"}})
 
-    assert _extract_image_attachments("computer_functions_get_window_state", output) == [
+    assert extract_image_attachments("computer_functions_get_window_state", output) == [
         {"path": r"C:\tmp\desktop.png", "mime_type": "image/png"}
     ]
 
@@ -3272,17 +3274,17 @@ def test_turn_loop_recomputes_system_prompt_after_registry_refresh():
 
 
 def test_browser_helpers_cover_devtools_tools():
-    from app.agent import turn_loop as tl
+    from app.agent import tool_observations as tl
 
     devtools = "mcp__chrome-devtools__"
     for name in ("click", "fill", "fill_form", "type_text", "press_key", "hover", "drag",
                  "navigate_page", "new_page", "handle_dialog", "upload_file"):
-        assert tl._is_browser_repeat_guarded(devtools + name, {}) is True
-        assert tl._is_browser_observation_action(devtools + name, {}) is False
+        assert tl.is_browser_repeat_guarded(devtools + name, {}) is True
+        assert tl.is_browser_observation_action(devtools + name, {}) is False
     for name in ("take_snapshot", "take_screenshot", "list_pages", "wait_for"):
-        assert tl._is_browser_observation_action(devtools + name, {}) is True
-        assert tl._is_browser_repeat_guarded(devtools + name, {}) is False
-    assert tl._is_browser_repeat_guarded("mcp__notes__click", {}) is False
+        assert tl.is_browser_observation_action(devtools + name, {}) is True
+        assert tl.is_browser_repeat_guarded(devtools + name, {}) is False
+    assert tl.is_browser_repeat_guarded("mcp__notes__click", {}) is False
 
     describe = TurnLoop._describe_tool_step
     assert describe(devtools + "take_snapshot", {}) == "Inspect the current browser page"
@@ -3293,10 +3295,10 @@ def test_browser_helpers_cover_devtools_tools():
     assert describe(devtools + "navigate_page", {"url": "https://example.com"}) == "Open the requested browser page"
     # The read-only HTTP fetcher is neither guarded nor an observation reset.
     assert describe("browser_fetch", {"url": "https://example.com"}) == "Fetch the requested web page"
-    assert tl._is_browser_repeat_guarded("browser_fetch", {}) is False
-    assert tl._is_browser_observation_action("browser_fetch", {}) is False
+    assert tl.is_browser_repeat_guarded("browser_fetch", {}) is False
+    assert tl.is_browser_observation_action("browser_fetch", {}) is False
 
-    recovery = tl._build_repeat_recovery_prompt(
+    recovery = tl.build_repeat_recovery_prompt(
         reason_code="stalled_repeat_detected", tool_name=devtools + "click", arguments={"uid": "1_2"},
     )
     assert "`mcp__chrome-devtools__take_snapshot`" in recovery
@@ -3304,9 +3306,9 @@ def test_browser_helpers_cover_devtools_tools():
     assert "browser_session" not in recovery
 
     output = json.dumps({"ok": True, "status": "ok", "content": [{"type": "text", "text": "Successfully clicked\nmore"}]})
-    assert tl._compact_tool_observation(devtools + "click", output) == "Successfully clicked"
+    assert tl.compact_tool_observation(devtools + "click", output) == "Successfully clicked"
     changed = json.dumps({"ok": True, "status": "ok", "content": [{"type": "text", "text": "Navigated to /next"}]})
-    assert tl._repeat_key(devtools + "click", {"uid": "1_2"}, output) != tl._repeat_key(
+    assert tl.browser_repeat_key(devtools + "click", {"uid": "1_2"}, output) != tl.browser_repeat_key(
         devtools + "click", {"uid": "1_2"}, changed,
     )
 

@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import ast
 import json
 import logging
-import mimetypes
-import re
 import time
 import uuid
 from collections import defaultdict
-from pathlib import Path
-from typing import Any, AsyncIterator, Callable
-from urllib.parse import urlparse
+from typing import AsyncIterator, Callable
 
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.iteration_budget import IterationBudget
@@ -29,13 +24,7 @@ from app.agent.observability.recorder import (
     usage_from_any,
 )
 from app.agent.observability.ports import ObservabilityPort
-from app.agent.output_workspace import configured_screenshots_dir
-from app.agent.response_attachments import (
-    collect_response_attachments,
-    get_image_dimensions,
-    public_runtime_attachments,
-    screenshot_dimension_problem,
-)
+from app.agent.response_attachments import collect_response_attachments, public_runtime_attachments
 from app.agent.run_events import RunEventPublisher
 from app.agent.run_context import (
     reset_current_conversation_id,
@@ -55,6 +44,35 @@ from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.tool_registry import ToolRegistry, can_parallelize
 from app.agent.tool_cancellation import set_tool_scope, reset_tool_scope
 from app.agent.harness.workers import unfinished_workers
+from app.agent.tool_observations import (
+    DEVTOOLS_PREFIX,
+    DEVTOOLS_STEP_DESCRIPTIONS,
+    attachment_image_payloads,
+    blocked_tool_key,
+    browser_repeat_key,
+    build_repeat_recovery_prompt,
+    compact_tool_observation,
+    extract_image_attachments,
+    is_browser_observation_action,
+    is_browser_repeat_guarded,
+    is_devtools_tool,
+    parse_tool_json,
+    tool_error_code,
+)
+from app.agent.turn_text import (
+    FINAL_ANSWER_TOOL_NAME,
+    TOOL_REPROMPT_MESSAGE,
+    WEB_SEARCH_RESULT_REPROMPT_MESSAGE,
+    completion_protocol_prompt,
+    conversation_title_from_prompt,
+    emit_progress_message,
+    emit_typewriter_tokens,
+    final_answer_attachment_paths,
+    final_answer_includes_web_search_results,
+    final_answer_text,
+    json_text_as_final_answer,
+    plain_text_describes_next_action,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,532 +84,7 @@ def conversation_turn_running(conversation_id: str) -> bool:
     return lock is not None and lock.locked()
 
 
-def _conversation_title_from_prompt(message: str) -> str:
-    """Make a compact, readable title from the first line or sentence of a prompt."""
-    first_line = " ".join(message.splitlines()[0].split()) if message.splitlines() else ""
-    sentence_end = re.search(r"[.!?](?:\s|$)", first_line)
-    if sentence_end:
-        first_line = first_line[: sentence_end.start()]
-    first_line = first_line.strip(" .!?\t")
-    if len(first_line) <= 48:
-        return first_line or "New Conversation"
-    shortened = first_line[:48].rsplit(" ", 1)[0].rstrip(" ,:;-")
-    return f"{shortened or first_line[:48].rstrip()}…"
-
 HEARTBEAT_INTERVAL_S = 10.0
-RECOVERY_RESULT_LIMIT = 1400
-FINAL_RESPONSE_TYPEWRITER_CHARS = 8
-FINAL_RESPONSE_TYPEWRITER_MAX_CHUNKS = 240
-
-# Reflected names of the built-in browser server (mcp_bridge/builtin.py), served by the Monaw extension.
-_DEVTOOLS_PREFIX = "mcp__chrome-devtools__"
-_DEVTOOLS_SNAPSHOT_TOOL = f"{_DEVTOOLS_PREFIX}take_snapshot"
-_DEVTOOLS_LIST_PAGES_TOOL = f"{_DEVTOOLS_PREFIX}list_pages"
-_DEVTOOLS_MUTATING_TOOLS = {
-    f"{_DEVTOOLS_PREFIX}{name}"
-    for name in (
-        "click", "fill", "fill_form", "type_text", "press_key", "hover", "drag",
-        "navigate_page", "new_page", "handle_dialog", "upload_file",
-        # Also exempt from the blanket identical-call cap (registry repeat_safe),
-        # so this page-state-aware guard must cover them.
-        "close_page",
-    )
-}
-_DEVTOOLS_OBSERVATION_TOOLS = {
-    f"{_DEVTOOLS_PREFIX}{name}" for name in ("take_snapshot", "take_screenshot", "list_pages", "wait_for")
-}
-_DEVTOOLS_STEP_DESCRIPTIONS = {
-    "take_snapshot": "Inspect the current browser page",
-    "list_pages": "Inspect open browser tabs",
-    "select_page": "Switch to the relevant browser tab",
-    "take_screenshot": "Capture a screenshot of the browser page",
-    "new_page": "Open the requested browser page in a new tab",
-    "close_page": "Close the browser tab",
-    "click": "Click the identified browser element",
-    "hover": "Hover over the identified browser element",
-    "drag": "Drag the identified browser element",
-    "fill": "Fill the identified browser field",
-    "type_text": "Type into the focused browser field",
-    "fill_form": "Fill the identified browser form fields",
-    "press_key": "Press a key in the browser page",
-    "handle_dialog": "Handle the browser dialog",
-    "wait_for": "Wait for the expected text on the browser page",
-    "upload_file": "Upload a file through the browser page",
-    "evaluate_script": "Run a script in the browser page",
-}
-
-FINAL_ANSWER_TOOL_NAME = "final_answer"
-
-
-def _is_devtools_tool(tool_name: str) -> bool:
-    return tool_name.startswith(_DEVTOOLS_PREFIX)
-
-
-def _completion_protocol_prompt(system_prompt: str) -> str:
-    protocol_lines = [
-        "## Completion Protocol",
-        "- When the task is complete, reply to the user directly. A normal assistant answer finishes the turn.",
-        "- If more work is needed, call the next real tool. You may include a short progress update with that tool call.",
-        "- Do not send a separate text-only progress message saying you will act later; call the tool now.",
-        "- When delivering a file created by a tool, include its exact local path in the final answer.",
-        "- Do not try to inspect, expand, collapse, click, or control the chat UI, reasoning trace, progress messages, message bubbles, or tool cards. Those are frontend display surfaces, not part of the task.",
-        "- Do not claim that you already answered a fresh user question unless the persisted conversation history shows that exact answer.",
-    ]
-    protocol = "\n".join(protocol_lines)
-    return f"{system_prompt}\n\n{protocol}" if system_prompt else protocol
-
-
-_TOOL_REPROMPT_MESSAGE = (
-    "Your last message described an action you intend to take, but did not call a tool. "
-    "Call the next real task tool now. If no action is needed, give the user your final answer directly."
-)
-
-
-def _compact_for_recovery(value: object, *, limit: int = RECOVERY_RESULT_LIMIT) -> str:
-    if value is None:
-        return "No previous result is available."
-    if isinstance(value, str):
-        text = value.strip()
-    else:
-        text = json.dumps(value, sort_keys=True, ensure_ascii=False)
-    if not text:
-        return "No previous result is available."
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}... [truncated]"
-
-
-def _build_repeat_recovery_prompt(
-    *,
-    reason_code: str,
-    tool_name: str,
-    arguments: dict,
-    last_result: object = None,
-) -> str:
-    arguments_text = _compact_for_recovery(arguments, limit=900)
-    result_text = _compact_for_recovery(last_result)
-    if reason_code == "stalled_repeat_detected":
-        observations = f"`{_DEVTOOLS_SNAPSHOT_TOOL}`, `{_DEVTOOLS_LIST_PAGES_TOOL}`, "
-        next_steps = (
-            "For the next step, use a browser observation or finish the turn: "
-            f"{observations}"
-            "or answer the user directly. After inspection, only act again if the target or arguments change."
-        )
-    elif reason_code == "repeated_blocked_tool_result":
-        next_steps = (
-            "Do not call the same tool with the same arguments again in this turn. "
-            "Ask for permission or access changes if needed, choose a different permitted action, "
-            "or answer the user with the blocker."
-        )
-    else:
-        next_steps = (
-            "Do not call this exact tool with these exact arguments again in this turn. "
-            "Use the prior result, inspect current state, choose a different action, "
-            "or answer the user directly."
-        )
-    return (
-        "Loop recovery checkpoint: the last tool request repeated a blocked or stalled action.\n\n"
-        f"Reason: `{reason_code}`\n"
-        f"Repeated tool: `{tool_name}`\n"
-        f"Repeated arguments:\n{arguments_text}\n\n"
-        f"Last available result:\n{result_text}\n\n"
-        f"{next_steps}"
-    )
-
-_WEB_SEARCH_RESULT_REPROMPT_MESSAGE = (
-    "Your final answer did not include the actual web_search results. Use the web_search "
-    "tool output above and provide a concrete answer with the result titles, source URLs, "
-    "and key snippets. Do not just say the result is ready or visible above; include the "
-    "results in your answer."
-)
-
-
-def _parse_tool_output(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-    content = value.strip()
-    if not content:
-        return ""
-    try:
-        return json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    try:
-        return ast.literal_eval(content)
-    except (SyntaxError, ValueError, TypeError):
-        return content
-
-
-def _search_results_from_output(value: object) -> list[dict]:
-    payload = _parse_tool_output(value)
-    if isinstance(payload, dict):
-        results = payload.get("results")
-        if isinstance(results, list):
-            return [item for item in results if isinstance(item, dict)]
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    return []
-
-
-def _important_words(text: str) -> set[str]:
-    stop_words = {
-        "about",
-        "after",
-        "from",
-        "headlines",
-        "latest",
-        "news",
-        "result",
-        "results",
-        "source",
-        "that",
-        "this",
-        "with",
-    }
-    words = {
-        "".join(ch for ch in word.lower() if ch.isalnum())
-        for word in str(text or "").split()
-    }
-    return {word for word in words if len(word) >= 4 and word not in stop_words}
-
-
-def _final_answer_includes_web_search_results(answer: str, tool_calls: list[dict]) -> bool:
-    web_outputs = [
-        tool_call.get("output")
-        for tool_call in tool_calls
-        if str(tool_call.get("tool_name") or "") == "web_search"
-    ]
-    if not web_outputs:
-        return True
-
-    results: list[dict] = []
-    for output in web_outputs:
-        results.extend(_search_results_from_output(output))
-    if not results:
-        return True
-
-    answer_text = str(answer or "")
-    answer_lower = answer_text.lower()
-
-    for result in results[:5]:
-        url = str(result.get("url") or "").strip()
-        title = str(result.get("title") or "").strip()
-        domain = urlparse(url).netloc.lower().removeprefix("www.")
-        if domain and domain in answer_lower:
-            return True
-        title_words = _important_words(title)
-        if title_words and len(title_words.intersection(_important_words(answer_text))) >= 2:
-            return True
-    return False
-
-
-def _emit_progress_message(emit: Callable[[dict], None], text: str) -> None:
-    content = str(text or "").strip()
-    if content:
-        emit({"event": "progress", "data": {"content": content}})
-
-
-def _typewriter_chunks(text: str) -> list[str]:
-    content = str(text or "")
-    if not content:
-        return []
-    chunk_size = max(
-        FINAL_RESPONSE_TYPEWRITER_CHARS,
-        (len(content) + FINAL_RESPONSE_TYPEWRITER_MAX_CHUNKS - 1)
-        // FINAL_RESPONSE_TYPEWRITER_MAX_CHUNKS,
-    )
-    return [
-        content[index:index + chunk_size]
-        for index in range(0, len(content), chunk_size)
-    ]
-
-
-async def _emit_typewriter_tokens(emit: Callable[[dict], None], text: str) -> None:
-    chunks = _typewriter_chunks(text)
-    if not chunks:
-        return
-    # The client already paces rendering. Delaying these SSE events adds a
-    # second playback stage between reasoning and the first visible answer.
-    for chunk in chunks:
-        emit({"event": "token", "data": {"content": chunk}})
-
-
-def _final_answer_text(arguments: dict, fallback_content: str) -> str:
-    answer = str(arguments.get("answer") or arguments.get("summary") or "").strip()
-    return answer or fallback_content.strip() or "Done."
-
-
-def _final_answer_attachment_paths(arguments: dict) -> list[str]:
-    raw_paths = arguments.get("attachment_paths")
-    if not isinstance(raw_paths, list):
-        return []
-    paths: list[str] = []
-    seen: set[str] = set()
-    for raw_path in raw_paths:
-        if not isinstance(raw_path, str):
-            continue
-        path = raw_path.strip()
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        paths.append(path)
-    return paths
-
-
-def _strip_json_fence(text: str) -> str:
-    content = str(text or "").strip()
-    if not content.startswith("```"):
-        return content
-    lines = content.splitlines()
-    if len(lines) < 2 or not lines[-1].strip().startswith("```"):
-        return content
-    return "\n".join(lines[1:-1]).strip()
-
-
-def _coerce_final_answer_args(arguments: Any) -> dict | None:
-    """Return the arguments dict for a final_answer payload, decoding a JSON string
-    if needed; None when the payload is not a usable dict."""
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except json.JSONDecodeError:
-            arguments = {}
-    return arguments if isinstance(arguments, dict) else None
-
-
-def _json_text_as_final_answer(text: str) -> str | None:
-    """Accept plain-text JSON only when it matches the final_answer schema."""
-    content = _strip_json_fence(text)
-    if not content:
-        return None
-    try:
-        payload = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    if isinstance(payload.get("answer"), str):
-        answer = payload["answer"].strip()
-        return answer or None
-    if isinstance(payload.get("summary"), str):
-        summary = payload["summary"].strip()
-        return summary or None
-
-    tool_name = str(payload.get("tool_name") or payload.get("name") or "").strip()
-    if tool_name == FINAL_ANSWER_TOOL_NAME:
-        arguments = _coerce_final_answer_args(payload.get("arguments"))
-        if arguments is not None:
-            return _final_answer_text(arguments, content)
-
-    function_payload = payload.get("function")
-    if isinstance(function_payload, dict) and str(function_payload.get("name") or "") == FINAL_ANSWER_TOOL_NAME:
-        arguments = _coerce_final_answer_args(function_payload.get("arguments"))
-        if arguments is not None:
-            return _final_answer_text(arguments, content)
-
-    return None
-
-
-_PENDING_ACTION_PHRASES = (
-    "let me ",
-    "i'll ",
-    "i will ",
-    "i need to ",
-    "i should ",
-    "i'm going to ",
-    "i am going to ",
-    "next i ",
-    "now i ",
-    "proceed to ",
-    "continue to ",
-)
-
-_PROGRESS_OPENERS = (
-    "searching ",
-    "checking ",
-    "opening ",
-    "inspecting ",
-    "running ",
-    "fetching ",
-    "taking ",
-    "still checking ",
-    "still searching ",
-)
-
-
-def _plain_text_describes_next_action(text: str) -> bool:
-    """Distinguish a short tool intent from a completed natural-language answer."""
-    content = str(text or "").strip()
-    if not content or len(content) > 320 or len(content.splitlines()) > 2:
-        return False
-    last_sentence = re.split(r"(?<=[.!?])\s+", content)[-1].lower().lstrip(" \t-:—–")
-    return last_sentence.startswith((*_PENDING_ACTION_PHRASES, *_PROGRESS_OPENERS))
-
-
-def _is_browser_repeat_guarded(tool_name: str, arguments: dict) -> bool:
-    return tool_name in _DEVTOOLS_MUTATING_TOOLS
-
-
-def _is_browser_observation_action(tool_name: str, arguments: dict) -> bool:
-    return tool_name in _DEVTOOLS_OBSERVATION_TOOLS
-
-
-def _parse_tool_json(tool_output: str) -> dict:
-    try:
-        data = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _tool_error_code(tool_output: str) -> str:
-    payload = _parse_tool_json(tool_output)
-    for key in ("code", "reason_code", "error_code"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            return value
-    return "tool_error"
-
-
-_MAX_MCP_IMAGE_ATTACHMENTS = 4
-
-
-def _extract_mcp_image_attachments(tool_output: str) -> list[dict]:
-    """Attach images the MCP bridge saved to the screenshots folder (never arbitrary paths)."""
-    payload = _parse_tool_json(tool_output)
-    images = payload.get("images") if isinstance(payload.get("images"), list) else []
-    if not images:
-        return []
-    try:
-        screenshots_dir = configured_screenshots_dir().resolve()
-    except OSError:
-        return []
-    attachments: list[dict] = []
-    for image in images[:_MAX_MCP_IMAGE_ATTACHMENTS]:
-        if not isinstance(image, dict):
-            continue
-        raw_path = str(image.get("path") or "").strip()
-        if not raw_path:
-            continue
-        path = Path(raw_path).resolve()
-        if path.parent != screenshots_dir or not path.is_file():
-            continue
-        dimensions = get_image_dimensions(path)
-        if dimensions is not None and screenshot_dimension_problem(*dimensions):
-            continue
-        mime_type = str(image.get("mime_type") or "") or mimetypes.guess_type(str(path))[0] or "image/png"
-        attachments.append({"path": str(path), "mime_type": mime_type})
-    return attachments
-
-
-def _extract_image_attachments(tool_name: str, tool_output: str) -> list[dict]:
-    if tool_name.startswith("mcp__"):
-        return _extract_mcp_image_attachments(tool_output)
-    if tool_name != "computer_functions_get_window_state":
-        return []
-    payload = _parse_tool_json(tool_output)
-    screenshot = payload.get("screenshot") if isinstance(payload.get("screenshot"), dict) else {}
-    path = str(
-        payload.get("screenshot_path")
-        or payload.get("path")
-        or screenshot.get("screenshot_path")
-        or screenshot.get("path")
-        or ""
-    ).strip()
-    if not path:
-        return []
-    mime_type = mimetypes.guess_type(path)[0] or "image/png"
-    return [{"path": path, "mime_type": mime_type}]
-
-
-def _attachment_image_payloads(attachments: list[dict] | None) -> list[dict]:
-    payloads: list[dict] = []
-    for attachment in attachments or []:
-        mime_type = str(attachment.get("mime_type") or "").strip()
-        path = str(attachment.get("path") or "").strip()
-        if not path:
-            continue
-        if not mime_type:
-            mime_type = mimetypes.guess_type(path)[0] or ""
-        if mime_type.startswith("image/"):
-            payloads.append({"path": path, "mime_type": mime_type})
-    return payloads
-
-
-def _browser_state_fingerprint(tool_output: str) -> str:
-    """Describe the page state a DevTools result reports (its text content)."""
-    payload = _parse_tool_json(tool_output)
-    stable = {
-        "is_error": bool(payload.get("is_error")),
-        # DevTools results describe the page only in text (page list, snapshot).
-        "mcp_text": _mcp_text_content(payload),
-    }
-    return json.dumps(stable, sort_keys=True, ensure_ascii=False)
-
-
-def _mcp_text_content(payload: dict) -> str:
-    content = payload.get("content")
-    if not isinstance(content, list):
-        return ""
-    return "\n".join(
-        str(item.get("text") or "")
-        for item in content
-        if isinstance(item, dict) and item.get("type") == "text"
-    ).strip()
-
-
-def _repeat_key(tool_name: str, arguments: dict, tool_output: str) -> str:
-    return json.dumps(
-        {
-            "tool": tool_name,
-            "arguments": arguments,
-            "state": _browser_state_fingerprint(tool_output),
-        },
-        sort_keys=True,
-        ensure_ascii=False,
-    )
-
-
-def _blocked_tool_key(tool_name: str, arguments: dict, tool_output: str) -> str | None:
-    payload = _parse_tool_json(tool_output)
-    if str(payload.get("status") or "").lower() != "blocked":
-        return None
-    return json.dumps(
-        {
-            "tool": tool_name,
-            "arguments": arguments,
-            "reason_code": payload.get("reason_code") or payload.get("code") or "",
-            "reason": payload.get("reason") or payload.get("error") or "",
-        },
-        sort_keys=True,
-        ensure_ascii=False,
-    )
-
-
-def _compact_tool_observation(tool_name: str, tool_output: str) -> str:
-    payload = _parse_tool_json(tool_output)
-    if not payload:
-        return "Tool completed."
-    if str(payload.get("status") or "").lower() == "error":
-        return tool_output
-    parts: list[str] = []
-    page = payload.get("page") if isinstance(payload.get("page"), dict) else {}
-    if page:
-        page_label = page.get("title") or page.get("url")
-        if page_label:
-            parts.append(f"page={page_label}")
-    if _is_devtools_tool(tool_name):
-        if payload.get("is_error"):
-            parts.append("error")
-        first_line = next((line.strip() for line in _mcp_text_content(payload).splitlines() if line.strip()), "")
-        if first_line:
-            parts.append(first_line[:160])
-        images = payload.get("images") if isinstance(payload.get("images"), list) else []
-        parts.extend(
-            f"screenshot={image.get('path')}" for image in images if isinstance(image, dict) and image.get("path")
-        )
-    return "; ".join(parts) or "Tool completed."
 
 
 async def _heartbeat_pump(
@@ -689,8 +182,8 @@ class TurnLoop:
 
     @staticmethod
     def _describe_tool_step(tool_name: str, arguments: dict) -> str:
-        if _is_devtools_tool(tool_name):
-            short_name = tool_name[len(_DEVTOOLS_PREFIX):]
+        if is_devtools_tool(tool_name):
+            short_name = tool_name[len(DEVTOOLS_PREFIX):]
             if short_name == "navigate_page":
                 direction = str(arguments.get("type") or "url").strip().lower()
                 if direction in {"back", "forward"}:
@@ -698,7 +191,7 @@ class TurnLoop:
                 if direction == "reload":
                     return "Reload the browser page"
                 return "Open the requested browser page"
-            return _DEVTOOLS_STEP_DESCRIPTIONS.get(short_name, f"Run browser action `{short_name}`")
+            return DEVTOOLS_STEP_DESCRIPTIONS.get(short_name, f"Run browser action `{short_name}`")
         if tool_name == "browser_fetch":
             return "Fetch the requested web page"
         return f"Run `{tool_name}`"
@@ -878,7 +371,7 @@ class TurnLoop:
             content = str(text or "").strip()
             if content:
                 latest_progress_text = content
-                _emit_progress_message(_put, content)
+                emit_progress_message(_put, content)
 
         def _assistant_message_on_cancel() -> str:
             if final_text.strip():
@@ -971,7 +464,7 @@ class TurnLoop:
             budget = self._new_turn_budget()
             policy.begin_turn()
             self.memory.get_or_create(
-                conversation_id, title=_conversation_title_from_prompt(message)
+                conversation_id, title=conversation_title_from_prompt(message)
             )
             self.memory.set_task_goal(conversation_id, message)
             self.memory.set_active_task(conversation_id, None)
@@ -1005,7 +498,7 @@ class TurnLoop:
                     base_prompt = f"{base_prompt}\n\n{long_term_context}" if base_prompt else long_term_context
                 if review_state.denials:
                     base_prompt = f"{base_prompt}\n\n{review_state.instructions()}"
-                return _completion_protocol_prompt(base_prompt)
+                return completion_protocol_prompt(base_prompt)
 
             initial_visible_tools = self.registry.get_all_tools(visible_only=True)
             await self.memory.ensure_context_fits(
@@ -1016,7 +509,7 @@ class TurnLoop:
             )
             messages = self.memory.build_llm_messages(conversation_id)
             initial_message = {"role": "user", "content": message}
-            initial_images = _attachment_image_payloads(attachments)
+            initial_images = attachment_image_payloads(attachments)
             if initial_images:
                 initial_message["images"] = initial_images
                 initial_message["ephemeral"] = True
@@ -1032,7 +525,7 @@ class TurnLoop:
                 pending = steering.drain() if steering is not None else []
                 for item in pending:
                     entry = {"role": "user", "content": item.message}
-                    images = _attachment_image_payloads(item.attachments)
+                    images = attachment_image_payloads(item.attachments)
                     if images:
                         entry.update({"images": images, "ephemeral": True})
                     messages.append(entry)
@@ -1173,21 +666,21 @@ class TurnLoop:
 
                 status = self._tool_output_status(tool_output, status)
                 recovery_prompt = ""
-                review_result = _parse_tool_json(tool_output)
+                review_result = parse_tool_json(tool_output)
                 review_code = str(review_result.get("reason_code") or "")
                 if review_code in {"auto_review_retry_blocked", "auto_review_limit"}:
                     stop_requested = True
                     terminal_error = True
                     incomplete_reason_code = review_code
                     final_text = "Paused: " + str(review_result.get("reason") or "Auto Review blocked this action.")
-                blocked_key = _blocked_tool_key(tool_name, arguments, tool_output)
+                blocked_key = blocked_tool_key(tool_name, arguments, tool_output)
                 if review_code.startswith("auto_review_"):
                     blocked_key = None
                 if blocked_key is not None:
                     blocked_tool_counts[blocked_key] = blocked_tool_counts.get(blocked_key, 0) + 1
                     if blocked_tool_counts[blocked_key] >= 2:
                         status = "error"
-                        blocked_payload = _parse_tool_json(tool_output)
+                        blocked_payload = parse_tool_json(tool_output)
                         if blocked_key not in blocked_tool_recoveries:
                             blocked_tool_recoveries.add(blocked_key)
                             policy_repeat_recoveries.add(tool_call_signature(tool_name, arguments))
@@ -1207,7 +700,7 @@ class TurnLoop:
                                 },
                                 ensure_ascii=False,
                             )
-                            recovery_prompt = _build_repeat_recovery_prompt(
+                            recovery_prompt = build_repeat_recovery_prompt(
                                 reason_code="repeated_blocked_tool_result",
                                 tool_name=tool_name,
                                 arguments=arguments,
@@ -1271,10 +764,10 @@ class TurnLoop:
                                 output={"last_result": blocked_payload},
                                 metadata={"after_recovery": True},
                             )
-                if _is_browser_observation_action(tool_name, arguments) and status == "ok":
+                if is_browser_observation_action(tool_name, arguments) and status == "ok":
                     browser_repeat_counts.clear()
-                if _is_browser_repeat_guarded(tool_name, arguments) and status == "ok":
-                    repeat_key = _repeat_key(tool_name, arguments, tool_output)
+                if is_browser_repeat_guarded(tool_name, arguments) and status == "ok":
+                    repeat_key = browser_repeat_key(tool_name, arguments, tool_output)
                     browser_repeat_counts[repeat_key] = browser_repeat_counts.get(repeat_key, 0) + 1
                     if browser_repeat_counts[repeat_key] >= 2:
                         status = "error"
@@ -1296,7 +789,7 @@ class TurnLoop:
                                 },
                                 ensure_ascii=False,
                             )
-                            recovery_prompt = _build_repeat_recovery_prompt(
+                            recovery_prompt = build_repeat_recovery_prompt(
                                 reason_code="stalled_repeat_detected",
                                 tool_name=tool_name,
                                 arguments=arguments,
@@ -1362,14 +855,14 @@ class TurnLoop:
                             )
 
                 raw_tool_output = tool_output
-                result_payload = _parse_tool_json(raw_tool_output)
+                result_payload = parse_tool_json(raw_tool_output)
                 if result_payload.get("worker_state") == "stopping":
                     stop_requested = True
                     incomplete_reason_code = "tool_still_running"
                     final_text = "Paused: a tool is still stopping after cancellation or timeout. Wait for it to finish, then continue and verify its last action."
                 tool_batch.record_output(prepared["active_key"], raw_tool_output, status)
                 active_call = tool_batch.get(prepared["active_key"])
-                image_attachments = _extract_image_attachments(tool_name, raw_tool_output)
+                image_attachments = extract_image_attachments(tool_name, raw_tool_output)
                 tool_result = ToolCallResult.from_output(
                     call_id=call_id,
                     name=tool_name,
@@ -1400,7 +893,7 @@ class TurnLoop:
                     call_id,
                     prepared["obs_tool_started_at"],
                     risk=policy_decision.risk,
-                    error_code=_tool_error_code(raw_tool_output) if status != "ok" else "",
+                    error_code=tool_error_code(raw_tool_output) if status != "ok" else "",
                     duration_ms=active_call.duration_ms if active_call is not None else None,
                 )
                 if active_call is not None:
@@ -1415,7 +908,7 @@ class TurnLoop:
                         "data": {
                             "step_id": step_id,
                             "verified": verified,
-                            "detail": _compact_tool_observation(tool_name, raw_tool_output) if verified else raw_tool_output,
+                            "detail": compact_tool_observation(tool_name, raw_tool_output) if verified else raw_tool_output,
                         },
                     })
                     _put({
@@ -1701,10 +1194,10 @@ class TurnLoop:
                             metadata={"limit": budget.max_iterations, "consumed": budget.consumed},
                         )
                     else:
-                        json_final_text = _json_text_as_final_answer(assistant_content)
+                        json_final_text = json_text_as_final_answer(assistant_content)
                         if json_final_text is not None:
                             final_text = json_final_text
-                        elif visible_tools and _plain_text_describes_next_action(assistant_content):
+                        elif visible_tools and plain_text_describes_next_action(assistant_content):
                             consecutive_text_only += 1
                             _emit_agent_progress(assistant_content)
                             messages.append({"role": "assistant", "content": assistant_content})
@@ -1723,9 +1216,9 @@ class TurnLoop:
                                 )
                                 break
                             force_tool_choice_next = True
-                            messages.append({"role": "user", "content": _TOOL_REPROMPT_MESSAGE})
+                            messages.append({"role": "user", "content": TOOL_REPROMPT_MESSAGE})
                             continue
-                        if not _final_answer_includes_web_search_results(final_text, persisted_tool_calls):
+                        if not final_answer_includes_web_search_results(final_text, persisted_tool_calls):
                             if web_search_reprompted or budget.remaining <= 0:
                                 terminal_error = True
                                 incomplete_reason_code = "web_search_results_missing"
@@ -1733,7 +1226,7 @@ class TurnLoop:
                                 break
                             web_search_reprompted = True
                             messages.append({"role": "assistant", "content": assistant_content})
-                            messages.append({"role": "user", "content": _WEB_SEARCH_RESULT_REPROMPT_MESSAGE})
+                            messages.append({"role": "user", "content": WEB_SEARCH_RESULT_REPROMPT_MESSAGE})
                             continue
                         if assistant_content:
                             messages.append({"role": "assistant", "content": assistant_content})
@@ -1775,9 +1268,9 @@ class TurnLoop:
                     )
                 if final_answer_call is not None and not call_dicts:
                     final_args = final_answer_call.arguments if isinstance(final_answer_call.arguments, dict) else {}
-                    final_text = _final_answer_text(final_args, llm_response.content)
-                    candidate_attachment_paths = _final_answer_attachment_paths(final_args)
-                    if not _final_answer_includes_web_search_results(final_text, persisted_tool_calls):
+                    final_text = final_answer_text(final_args, llm_response.content)
+                    candidate_attachment_paths = final_answer_attachment_paths(final_args)
+                    if not final_answer_includes_web_search_results(final_text, persisted_tool_calls):
                         if web_search_reprompted or budget.remaining <= 0:
                             terminal_error = True
                             incomplete_reason_code = "web_search_results_missing"
@@ -1791,7 +1284,7 @@ class TurnLoop:
                             budget.consumed,
                             budget.remaining,
                         )
-                        messages.append({"role": "user", "content": _WEB_SEARCH_RESULT_REPROMPT_MESSAGE})
+                        messages.append({"role": "user", "content": WEB_SEARCH_RESULT_REPROMPT_MESSAGE})
                         final_text = ""
                         final_attachment_paths = []
                         continue
@@ -2066,7 +1559,7 @@ class TurnLoop:
                                 )
                                 if signature not in policy_repeat_recoveries:
                                     policy_repeat_recoveries.add(signature)
-                                    recovery_prompt = _build_repeat_recovery_prompt(
+                                    recovery_prompt = build_repeat_recovery_prompt(
                                         reason_code="repeated_tool_call_blocked",
                                         tool_name=tool_name,
                                         arguments=arguments,
@@ -2292,7 +1785,7 @@ class TurnLoop:
                 and not terminal_error
                 and not iteration_limit_hit
             ):
-                await _emit_typewriter_tokens(_emit_response_event, final_text)
+                await emit_typewriter_tokens(_emit_response_event, final_text)
                 streamed_answer_text = final_text
 
             response_duration_ms = _response_duration_ms()

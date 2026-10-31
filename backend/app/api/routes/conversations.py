@@ -243,7 +243,7 @@ async def create_conversation(body: ConversationCreate):
 
 @router.get("/conversations/{conv_id}/context-usage", response_model=ContextUsagePayload)
 async def get_context_usage(conv_id: str):
-    from app.agent.turn_loop import _completion_protocol_prompt
+    from app.agent.turn_text import completion_protocol_prompt
     from app.agent.workspace_instructions import build_workspace_instruction_prompt
 
     db = get_db()
@@ -278,7 +278,7 @@ async def get_context_usage(conv_id: str):
             skill_sections.get("computer_use_policy", ""),
             build_identity_prompt(runtime_settings),
             workspace_prompt,
-            _completion_protocol_prompt(""),
+            completion_protocol_prompt(""),
         ]
         if part
     )
