@@ -59,6 +59,10 @@ With `PATH` limited to the Windows folders (no Python, uv, Node, npm or Git), th
 
 Built from commit `fdf05ae`: `Monaw-Setup-1.0.0-x64.exe`, 220.4 MB, SHA-256 `F7FB6CC5922A479DF52D25E0D4E7675E646915F8B8B3A6B01622D12656D81C7B`. With `measure-baseline.ps1`: cold start to a healthy backend 1.75 s, warm 1.61 s, no API requests while idle for 60 s, fresh database 4,096 bytes. The packaged-app checks passed (5 of 5).
 
+### Candidate `378725e`
+
+Built from commit `378725e`, the first commit on which GitHub-hosted CI passed every job, in 196 s: `Monaw-Setup-1.0.0-x64.exe`, 220.4 MB (231,089,429 bytes), SHA-256 `671FE209AC83B3064D9AF92BE19A75604CDBB53F08AC0EA4302945DAB20D9F5D`. Unsigned and not installed. With `measure-baseline.ps1 -SkipTests`: cold start to a healthy backend 1.76 s, warm 1.57 s, no API requests while idle for 60 s, fresh database 4,096 bytes. The packaged-app checks passed (5 of 5, 26.3 s). The version is still 1.0.0, so this file replaces the `fdf05ae` installer of the same name.
+
 ## Licensing to resolve before publishing
 
 The ffmpeg executable bundled by `imageio-ffmpeg` is a GPLv3 build (`--enable-gpl --enable-version3`, with x264 and x265). Monaw is Apache-2.0. Distributing that binary in the installer carries GPLv3 obligations for it. The options are to ship an LGPL ffmpeg build, decode audio through the `av` libraries already bundled, or download ffmpeg on demand. Speech-to-text is its only user (`backend/app/agent/speech_to_text.py`). Other bundled native packages checked (`av`, `ctranslate2`, `onnxruntime`, `faster-whisper`, `pywin32`) use permissive licenses. A complete third-party notice file has not been produced.
