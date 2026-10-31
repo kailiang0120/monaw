@@ -27,7 +27,7 @@ from app.agent.approval_broker import (
     reject_ticket,
     signal_resume as signal_approval_resume,
 )
-from app.agent.approval_review import AutoReviewState, review_action
+from app.agent.approval_review import AutoReviewState, requires_user_review, review_action
 from app.agent.settings_store import load_agent_settings
 from app.agent.execution_resume import resume_approved_ticket
 from app.agent.iteration_budget import IterationBudget
@@ -105,6 +105,7 @@ class ExecutionGateService:
                         return blocked
                 if (ticket is not None and ticket.interactive and review_client is not None
                         and load_agent_settings().permissions.mode == "auto_review"
+                        and not requires_user_review(ticket)
                         and not ticket_validation_error(ticket,
                             expected_session_id=current_control_session_id(),
                             expected_conversation_id=current_conversation_id(),

@@ -17,7 +17,7 @@ There is no WSL backend. Long-running sessions use the local host runners and ar
 
 - `strong`: Docker container isolation with `--network none` when network denial is requested, dropped capabilities, PID/memory/CPU limits, and a read-only root filesystem by default.
 - `advisory`: `local_restricted` host execution with process-tree cleanup and resource/output limits. It does not isolate the filesystem or network.
-- `none`: `local_direct` host execution. It is selected only as a compatibility fallback and follows the selected permission mode.
+- `none`: `local_direct` host execution. It is selected only as a compatibility fallback and follows the selected permission mode, except for the always-ask cases below.
 
 The shipped Docker image is pinned as `python:3.12-slim@sha256:<64-hex-digest>`. Settings can pull a tag and resolve it to an immutable digest. Resolution also probes which standard-library modules are actually importable in that exact image and caches the inventory under the immutable reference. The probe runs without network access, capabilities, or a writable root; each import uses a separate isolated interpreter. Cached inventories are bounded to the eight most recently probed images, so repinning does not accumulate them; an evicted image fails closed until it is probed again. If the image is unpinned, capability status reports `docker_image_not_pinned` and the Docker runner will not start.
 
@@ -42,7 +42,14 @@ Subprocesses receive a minimal environment allowlist. Secret-looking explicit va
 
 ## Permission and execution boundaries
 
-Permission mode controls approval; sandbox mode controls where a permitted command runs. Full Access does not add another host-runner approval. Default asks once; Auto Review checks the same pending ticket. Docker/enforce stay fail-closed when Docker is unavailable or a command is incompatible.
+Permission mode controls approval; sandbox mode controls where a permitted command runs. Default asks once; Auto Review checks the same pending ticket. Docker/enforce stay fail-closed when Docker is unavailable or a command is incompatible.
+
+Two host cases ask regardless of permission mode, including Full Access. The decision marks them `always_ask`:
+
+- A host run while Docker is available, unless the user chose `host` or `local_restricted` in settings. In `auto` this covers PowerShell/cmd syntax, developer tooling, project scripts and package commands. Choose `host` mode to let these follow the permission mode again.
+- An `untrusted` command (download-and-run pipelines, package installs, clone-and-run) on the host. These are also `user_review_only`: Auto Review never approves them, and the ticket waits for the user.
+
+Host runs are marked with an amber **On your PC** badge on the collapsed tool row, and the environment panel and approval card turn amber. `execution_environment.on_host`, `always_ask` and `user_review_only` carry the same facts for clients.
 
 The manager reclassifies the actual command rather than trusting a caller's preview or profile, enforces configured resource ceilings, and rejects backend mismatch. A requested network allowance cannot override configured container network denial. `allow_with_approval` permits container network for commands authorized by the selected permission mode. Host execution has no network or filesystem isolation; container network and copy-out settings do not impose those guarantees on host commands. Docker keeps its image environment rather than inheriting Windows PATH and shell variables.
 

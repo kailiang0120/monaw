@@ -584,6 +584,19 @@ class SandboxPolicy:
                 requested_host_shell = effective_shell
                 effective_shell = self._effective_shell(request, backend, profile)
 
+        always_ask, user_review_only = self._host_consent(profile)
+        explicit_approval_required = always_ask or requires_confirmation(ActionType.EXEC, self.permissions)
+        consent_note = (
+            " Untrusted commands on your PC always need your own approval; Auto Review cannot approve them."
+            if user_review_only
+            else " It runs on your PC instead of Docker, so you are asked every time."
+            if always_ask
+            else ""
+        )
+
+        def with_consent_note(reason: str) -> str:
+            return f"{reason.rstrip('.')}.{consent_note}" if consent_note else reason
+
         if backend == "local_direct":
             return SandboxDecision(
                 allowed=True,
@@ -600,8 +613,10 @@ class SandboxPolicy:
                 requested_shell=request.shell,
                 effective_shell=effective_shell,
                 filesystem_policy="host",
-                explicit_approval_required=requires_confirmation(ActionType.EXEC, self.permissions),
-                reason=(
+                explicit_approval_required=explicit_approval_required,
+                always_ask=always_ask,
+                user_review_only=user_review_only,
+                reason=with_consent_note(
                     self._host_fallback_reason(request.command, runner="direct")
                     + self._host_fallback_shell_note(request, requested_host_shell, effective_shell)
                     if host_tool_fallback
@@ -651,8 +666,10 @@ class SandboxPolicy:
                 requested_shell=request.shell,
                 effective_shell=effective_shell,
                 filesystem_policy="host",
-                explicit_approval_required=requires_confirmation(ActionType.EXEC, self.permissions),
-                reason=(
+                explicit_approval_required=explicit_approval_required,
+                always_ask=always_ask,
+                user_review_only=user_review_only,
+                reason=with_consent_note(
                     self._host_fallback_reason(request.command, runner="advisory")
                     + self._host_fallback_shell_note(request, requested_host_shell, effective_shell)
                     if host_tool_fallback
@@ -1111,6 +1128,19 @@ class SandboxPolicy:
         if self.capabilities.docker.available:
             return "docker"
         return "local_restricted" if self.capabilities.local_restricted.available else "local_direct"
+
+    def _host_consent(self, profile: SandboxProfile) -> tuple[bool, bool]:
+        """Return (always_ask, user_review_only) for a command that will run on the host.
+
+        Untrusted commands on the host always need the user's own approval.
+        Any host run while Docker is available, unless the user chose a host
+        mode in settings, asks every time even under Full Access.
+        """
+        untrusted = profile == "untrusted"
+        bypasses_docker = (
+            self.capabilities.docker.available and self.settings.mode not in {"host", "local_restricted"}
+        )
+        return untrusted or bypasses_docker, untrusted
 
     def _network_mode(self, requested: SandboxNetworkMode | None) -> SandboxNetworkMode:
         if requested is not None:

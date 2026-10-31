@@ -65,6 +65,13 @@ def bounded_review_context(context: dict | None) -> dict:
     return result
 
 
+def requires_user_review(ticket: ApprovalTicket) -> bool:
+    """Untrusted host commands are settled by the user only, never by Auto Review."""
+    args = ticket.payload.get("args") if isinstance(ticket.payload, dict) else None
+    sandbox = args.get("sandbox") if isinstance(args, dict) else None
+    return bool(isinstance(sandbox, dict) and sandbox.get("user_review_only"))
+
+
 def action_signature(ticket: ApprovalTicket) -> str:
     return json.dumps({"tool": ticket.tool_name, "type": ticket.action_type,
                        "path": ticket.target_path, "app": ticket.target_app,

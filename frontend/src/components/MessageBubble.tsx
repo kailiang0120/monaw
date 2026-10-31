@@ -37,7 +37,7 @@ import { DEFAULT_AGENT_NAME, resolveAgentName } from '../lib/identity'
 import { isBrowserTool, toolDisplayName } from '../lib/toolNames'
 import type { UploadedAttachment } from '../lib/api/types'
 import type { ActivityItem, ApprovalNotice, Message, ToolCall } from '../hooks/useChat'
-import { ExecutionEnvironment } from './ExecutionEnvironment'
+import { ExecutionEnvironment, runsOnHost } from './ExecutionEnvironment'
 import type { ExecutionEnvironment as Environment } from '../lib/api/types'
 
 const MIN_IMAGE_PREVIEW_DIMENSION_PX = 16
@@ -653,6 +653,7 @@ function ToolCallScroller({
         const status = toolCallStatus(toolCall)
         const isExpanded = expandedId === key
         const label = toolCallActivityLabel(toolCall)
+        const environment = toolCall.output !== undefined ? toolEnvironment(toolCall.output) : undefined
 
         return (
             <li
@@ -670,6 +671,11 @@ function ToolCallScroller({
                   ? <SquareTerminal size={13} className="shrink-0 text-neutral-500" aria-hidden />
                   : <Wrench size={13} className="shrink-0 text-neutral-500" aria-hidden />}
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-400">{label}</span>
+                {runsOnHost(environment) && (
+                  <span className="status-pill shrink-0 border-amber-400/20 bg-amber-400/10 text-amber-200">
+                    On your PC
+                  </span>
+                )}
                 <ToolTabStatusIcon status={status} />
                 <span className="shrink-0 text-neutral-600" aria-hidden>
                   {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -686,7 +692,7 @@ function ToolCallScroller({
                   {toolCall.input && <ToolPayloadInline label="Input" value={toolCall.input} />}
                   {toolCall.output !== undefined ? (
                     <>
-                      <ExecutionEnvironment environment={toolEnvironment(toolCall.output)} />
+                      <ExecutionEnvironment environment={environment} />
                       <ToolPayloadInline label="Result" value={toolCall.output} />
                     </>
                   ) : toolCall.pending ? (

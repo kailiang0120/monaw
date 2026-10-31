@@ -33,6 +33,7 @@ def execution_environment(metadata: dict[str, Any], *, blocked: bool = False) ->
         filesystem = network = writes = "No execution"
     return {
         "backend": backend,
+        "on_host": not blocked and backend in {"local_direct", "local_restricted"},
         "summary": "Blocked before execution" if blocked else summary,
         "workspace": str(metadata.get("host_workdir") or metadata.get("workdir") or ""),
         "execution_workspace": "/workspace" if docker else str(metadata.get("workdir") or ""),
@@ -42,6 +43,8 @@ def execution_environment(metadata: dict[str, Any], *, blocked: bool = False) ->
         "network": network,
         "writes": writes,
         "approval_required": bool(metadata.get("explicit_approval_required")),
+        "always_ask": bool(metadata.get("always_ask")),
+        "user_review_only": bool(metadata.get("user_review_only")),
         "reason": str(metadata.get("reason") or ""),
         "scope": "Shell command only. Desktop automation, personal Chrome, and external MCP tools use their own permissions and environments.",
     }
@@ -52,7 +55,7 @@ def consent_environment(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: metadata.get(key) for key in (
         "backend", "workdir", "effective_shell", "mode", "profile", "required_isolation",
         "network", "network_enforcement", "filesystem_policy", "write_strategy",
-        "explicit_approval_required",
+        "explicit_approval_required", "always_ask", "user_review_only",
         "runtime_policy",
     )}
 

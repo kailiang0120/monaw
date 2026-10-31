@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ExecutionEnvironment } from '../lib/api/types'
 import { ApprovalToast } from './ApprovalToast'
+import { ExecutionEnvironment as ExecutionEnvironmentPanel } from './ExecutionEnvironment'
 import { MessageBubble } from './MessageBubble'
 
 const { pending } = vi.hoisted(() => ({ pending: vi.fn() }))
@@ -54,6 +55,23 @@ it('shows effective execution details when the tool result is opened', () => {
   fireEvent.click(screen.getByRole('button', { expanded: false }))
   fireEvent.click(screen.getByRole('button', { expanded: false }))
   expect(screen.getByText(environment.summary)).toBeInTheDocument()
+})
+
+it('marks a host run on the collapsed tool row and not a Docker run', () => {
+  const docker: ExecutionEnvironment = { ...environment, backend: 'docker', summary: 'Runs in Docker', on_host: false }
+  render(<MessageBubble message={{ id: '5', role: 'assistant', content: '', toolCalls: [
+    { tool: 'exec', input: '{}', output: JSON.stringify({ status: 'ok', sandbox: { execution_environment: { ...environment, on_host: true } } }) },
+    { tool: 'exec', input: '{}', output: JSON.stringify({ status: 'ok', sandbox: { execution_environment: docker } }) },
+  ] }} />)
+  fireEvent.click(screen.getByRole('button', { expanded: false }))
+  expect(screen.getAllByText('On your PC')).toHaveLength(1)
+})
+
+it('says when a host run asks every time or needs the user rather than Auto Review', () => {
+  const { rerender } = render(<ExecutionEnvironmentPanel environment={{ ...environment, always_ask: true }} />)
+  expect(screen.getByText('Asks you every time: runs on your PC instead of Docker')).toBeInTheDocument()
+  rerender(<ExecutionEnvironmentPanel environment={{ ...environment, always_ask: true, user_review_only: true }} />)
+  expect(screen.getByText(/Auto Review cannot approve untrusted commands/)).toBeInTheDocument()
 })
 
 it('keeps malformed tool output available without rendering an invalid disclosure', () => {

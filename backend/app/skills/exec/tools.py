@@ -89,6 +89,8 @@ def _sandbox_metadata(decision: SandboxDecision, workdir: str) -> dict[str, Any]
         "effective_shell": decision.effective_shell,
         "filesystem_policy": decision.filesystem_policy,
         "explicit_approval_required": decision.explicit_approval_required,
+        "always_ask": decision.always_ask,
+        "user_review_only": decision.user_review_only,
         "reason": decision.reason,
         "reason_code": decision.reason_code,
         "workdir": workdir,
@@ -248,15 +250,17 @@ def _permission_check(
         )
     if decision.requires_access_grant:
         return _pending_access_grant(workdir)
-    # Permission mode owns consent; choosing a host backend must not add a
-    # second, unconditional prompt after Full Access already authorized exec.
-    sandbox["explicit_approval_required"] = bool(decision.requires_confirmation)
+    # Permission mode owns consent, except for host runs the sandbox policy
+    # marks always_ask: a fallback around Docker or an untrusted command on
+    # the host asks even after Full Access authorized exec.
+    needs_approval = bool(decision.requires_confirmation or sandbox.get("always_ask"))
+    sandbox["explicit_approval_required"] = needs_approval
     sandbox["execution_environment"] = execution_environment(sandbox)
     if bypass_confirmation and approved_sandbox is not None:
         # A ticket consents to the disclosed environment, not a later fallback,
         # workspace, shell, network policy, or write strategy.
         bypass_confirmation = consent_environment(approved_sandbox) == consent_environment(sandbox)
-    if decision.requires_confirmation and not bypass_confirmation:
+    if needs_approval and not bypass_confirmation:
         if host_approval_required:
             decision = SimpleNamespace(
                 reason=str(

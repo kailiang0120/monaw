@@ -774,6 +774,10 @@ export interface ExecutionEnvironment {
   network: string
   writes: string
   approval_required: boolean
+  /** Absent on results saved before the field existed; fall back to the backend name. */
+  on_host?: boolean
+  always_ask?: boolean
+  user_review_only?: boolean
   reason: string
   scope: string
 }

@@ -191,6 +191,10 @@ class SandboxDecision(BaseModel):
     effective_shell: str = "powershell"
     filesystem_policy: str = "none"
     explicit_approval_required: bool = False
+    # Host runs that ask the user whatever the permission mode says.
+    always_ask: bool = False
+    # Only the user, never Auto Review, may approve.
+    user_review_only: bool = False
     reason: str = ""
     reason_code: str = "allowed"
 

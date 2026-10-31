@@ -198,6 +198,32 @@ def test_auto_review_only_runs_exact_validated_approved_actions(monkeypatch, res
     assert events[0]["event"] == ("approval_resolved" if should_run else "approval_required")
 
 
+def test_auto_review_leaves_untrusted_host_commands_to_the_user(monkeypatch):
+    import app.agent.execution_gate as gate
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "auto_review"
+    monkeypatch.setattr(gate, "load_agent_settings", lambda: settings)
+    calls = []
+    register_executor("exec", lambda payload: calls.append(payload) or '{"status":"ok"}')
+    ticket = create_ticket(tool_name="exec", interactive=True, payload={
+        "input_str": '{"command":"npm install"}',
+        "args": {"command": "npm install", "sandbox": {"user_review_only": True}},
+    })
+    class Reviewer:
+        async def chat(self, **_kwargs):
+            raise AssertionError("Auto Review must not see untrusted host commands")
+    events = []
+    asyncio.run(ExecutionGateService(default_timeout_seconds=0.01).resolve_pending_output(
+        tool_output=json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
+        tool_dict={"name": "exec"}, arguments={}, budget=IterationBudget(max_iterations=1),
+        execute_tool=_fake_execute_tool, emit=events.append, review_client=Reviewer(),
+        user_request="Install the dependencies."))
+    assert calls == []
+    assert ticket.resolved_by != "auto_review"
+    assert events[0]["event"] == "approval_required"
+
+
 def test_auto_review_cannot_approve_a_changed_payload(monkeypatch):
     import app.agent.execution_gate as gate
     from app.agent.settings_store import AgentSettings

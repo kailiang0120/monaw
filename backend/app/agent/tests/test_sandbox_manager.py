@@ -99,6 +99,57 @@ def test_strict_sandbox_stays_blocked_in_full_access_without_docker():
     assert decision.backend == "none"
 
 
+def _full_access_policy(*, mode: str = "auto", docker: bool) -> SandboxPolicy:
+    settings = AgentSettings()
+    settings.permissions.mode = "full_access"
+    settings.sandbox.mode = mode
+    return SandboxPolicy(settings.sandbox, capabilities=_capabilities(docker=docker), permissions=settings.permissions)
+
+
+def test_host_fallback_around_docker_asks_even_in_full_access():
+    decision = _full_access_policy(docker=True).decide(
+        SandboxRunRequest(command="Write-Output hi", shell="powershell"))
+    assert decision.allowed
+    assert decision.backend in {"local_direct", "local_restricted"}
+    assert decision.always_ask and decision.explicit_approval_required
+    assert not decision.user_review_only
+    assert decision.reason.endswith("so you are asked every time.")
+
+
+def test_untrusted_host_command_needs_the_users_own_approval_in_full_access():
+    decision = _full_access_policy(docker=False).decide(SandboxRunRequest(command="npm install", shell="bash"))
+    assert decision.allowed
+    assert decision.backend in {"local_direct", "local_restricted"}
+    assert decision.always_ask and decision.user_review_only and decision.explicit_approval_required
+    assert "Auto Review cannot approve them" in decision.reason
+
+
+@pytest.mark.parametrize("mode,docker", [("host", True), ("auto", False)])
+def test_trusted_host_command_follows_full_access_when_host_is_chosen_or_docker_is_missing(mode, docker):
+    decision = _full_access_policy(mode=mode, docker=docker).decide(SandboxRunRequest(command="echo safe"))
+    assert decision.allowed
+    assert decision.backend in {"local_direct", "local_restricted"}
+    assert not decision.always_ask and not decision.explicit_approval_required
+
+
+def test_exec_tool_asks_for_host_fallback_although_permission_mode_does_not(monkeypatch, tmp_path):
+    _allow_exec(monkeypatch, confirmation=False)
+    monkeypatch.setattr(exec_tools, "_ACTIVE_SETTINGS", _settings_with_sandbox())
+    monkeypatch.setattr(
+        exec_tools, "build_sandbox_decision",
+        lambda **_kwargs: _full_access_policy(docker=True).decide(
+            SandboxRunRequest(command="Write-Output hi", shell="powershell", workdir=str(tmp_path))),
+    )
+    monkeypatch.setattr(exec_tools, "create_ticket", lambda **_kwargs: SimpleNamespace(id="ticket-1"))
+
+    result = json.loads(exec_tools.exec_tool("Write-Output hi", shell="powershell", workdir=str(tmp_path)))
+
+    assert result["status"] == "pending_approval"
+    assert result["sandbox"]["always_ask"] is True
+    assert result["sandbox"]["execution_environment"]["on_host"] is True
+    assert result["sandbox"]["execution_environment"]["always_ask"] is True
+
+
 def _settings_with_sandbox(**patch):
     settings = AgentSettings()
     for key, value in patch.items():

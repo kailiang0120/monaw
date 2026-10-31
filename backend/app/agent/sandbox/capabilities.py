@@ -200,7 +200,10 @@ def get_sandbox_status(
         execution_environment=execution_environment({
             **representative.model_dump(), "workdir": probe_workdir,
             "runtime_policy": runtime_policy(settings, representative.backend),
-            "explicit_approval_required": requires_confirmation(ActionType.EXEC, policy.permissions),
+            "explicit_approval_required": (
+                representative.explicit_approval_required
+                or requires_confirmation(ActionType.EXEC, policy.permissions)
+            ),
         }, blocked=not representative.allowed),
         enabled=settings.enabled,
         mode=settings.mode,
@@ -229,7 +232,7 @@ def get_sandbox_status(
                 "security_label": "none",
                 "network_enforcement": "none",
                 "version": "",
-                "reason": "Approvals follow the selected permission mode.",
+                "reason": "Approvals follow the selected permission mode; untrusted commands always ask you.",
             },
         },
     )
