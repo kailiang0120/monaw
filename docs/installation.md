@@ -7,10 +7,10 @@ The current installer is a test candidate. It is unsigned and has not yet been c
 ## Requirements
 
 - Windows 10 or 11, 64-bit (x64). Arm devices and 32-bit Windows are not supported.
-- About 800 MB of disk space for the app, plus the Monaw home folder (`%USERPROFILE%\.monaw`).
+- About 400 MB of disk space for the app, plus the Monaw home folder (`%USERPROFILE%\.monaw`).
 - An API key for OpenAI or Google, or an OpenAI account, to use a model.
 - Optional: Google Chrome 125 or later for browser control, and Docker Desktop for isolated shell commands.
-- Optional: about 140 MB more if you download the local speech model in Settings > Model.
+- Voice input sends recordings to OpenAI or Google and needs an API key for one of them; an OpenAI account sign-in does not cover it.
 
 ## Install
 
@@ -68,4 +68,4 @@ Use **Settings > Apps > Installed apps > Monaw > Uninstall**. Uninstalling keeps
 
 - Installing on a clean Windows machine and upgrading from one installed version to the next.
 - Code signing.
-- Third-party license notices for bundled components, including a GPLv3 ffmpeg build that must be resolved before publishing (see [packaging](packaging.md#licensing-to-resolve-before-publishing)).
+- Third-party license notices for bundled components (see [packaging](packaging.md#licensing-to-resolve-before-publishing)).

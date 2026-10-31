@@ -329,6 +329,6 @@ All fifteen packages have an implementation. What is still open needs resources 
 
 - **Stage A:** complete. The real Docker checks pass locally and on GitHub, and GitHub-hosted CI passes every job on `bdbd993`.
 - **Stage B:** a manual keyboard-only and screen-reader walkthrough of the installed app.
-- **Stage C:** a clean Windows install and an upgrade between two installed versions; code signing; third-party notices; and a decision on the GPLv3 ffmpeg build bundled by `imageio-ffmpeg`. Long-conversation rendering, representative database growth and stop-to-quiescence baselines need a packaged fixture and are not measured.
+- **Stage C:** a clean Windows install and an upgrade between two installed versions; code signing; and third-party notices. The GPLv3 ffmpeg build left the installer with local speech-to-text (see [packaging](packaging.md#size-reduction-cloud-only-speech)). Long-conversation rendering, representative database growth and stop-to-quiescence baselines need a packaged fixture and are not measured.
 
 No rating reassessment is claimed.
