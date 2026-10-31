@@ -150,21 +150,24 @@ export function ChatWindow({
           <p className="text-sm font-medium">Loading conversation</p>
         </div>
       ) : messages.length === 0 ? (
-        <div className="flex min-h-0 flex-1 select-none flex-col items-center justify-[safe_center] gap-5 overflow-y-auto px-4 py-6">
-          <picture>
-            <source media="(prefers-reduced-motion: reduce)" srcSet={stillMascotImg} />
-            <img
-              src={startMascotImg}
-              alt={assistantLabel}
-              className="h-28 w-28 object-contain drop-shadow-[0_8px_24px_rgba(79,122,43,0.18)]"
-              draggable={false}
-            />
-          </picture>
-          <div className="text-center">
-            <p className="text-base font-medium tracking-tight text-neutral-400">{assistantLabel}</p>
-            {!emptyState && <p className="mt-0.5 text-[13px] text-neutral-600">Ready.</p>}
+        <div className="flex min-h-0 flex-1 select-none flex-col overflow-y-auto px-4 py-6">
+          {/* Auto margins centre the content but keep its top reachable when the guide overflows. */}
+          <div className="my-auto flex flex-col items-center gap-5">
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcSet={stillMascotImg} />
+              <img
+                src={startMascotImg}
+                alt={assistantLabel}
+                className="h-28 w-28 object-contain drop-shadow-[0_8px_24px_rgba(79,122,43,0.18)]"
+                draggable={false}
+              />
+            </picture>
+            <div className="text-center">
+              <p className="text-base font-medium tracking-tight text-neutral-400">{assistantLabel}</p>
+              {!emptyState && <p className="mt-0.5 text-[13px] text-neutral-600">Ready.</p>}
+            </div>
+            {emptyState}
           </div>
-          {emptyState}
         </div>
       ) : (
         <div
