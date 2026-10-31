@@ -664,6 +664,13 @@ class Database:
             "scheduled_task_outputs_truncated": int(truncated),
         }
 
+    def compact(self) -> None:
+        """Give the space freed by deletions back to the disk."""
+        with self._lock:
+            self.conn.commit()
+            self.conn.execute("VACUUM")
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     def clear_scheduled_task_outputs(self) -> dict[str, int]:
         with self._lock:
             row = self.conn.execute(

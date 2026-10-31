@@ -16,6 +16,7 @@ from app.api.routes.settings import router as settings_router
 from app.api.routes.mcp_credentials import router as mcp_credentials_router
 from app.api.routes.scheduled_tasks import router as scheduled_tasks_router
 from app.api.routes.speech_to_text import router as speech_to_text_router
+from app.api.routes.storage import router as storage_router
 from app.api.routes.uploads import router as uploads_router
 from app.security.control_plane import require_control_session
 
@@ -36,4 +37,5 @@ router.include_router(sandbox_router)
 router.include_router(files_router)
 router.include_router(uploads_router)
 router.include_router(speech_to_text_router)
+router.include_router(storage_router)
 router.include_router(scheduled_tasks_router)

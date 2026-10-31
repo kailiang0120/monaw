@@ -37,6 +37,7 @@ import type {
   ObservabilityRunDetail,
   ObservabilitySummary,
 } from '../../lib/api/types'
+import { formatBytes } from '../../lib/formatBytes'
 
 type ViewMode = 'runs' | 'errors' | 'backend' | 'report'
 const VIRTUALIZE_OBSERVABILITY_THRESHOLD = 60
@@ -78,17 +79,6 @@ function metricNumber(metrics: Record<string, unknown>, key: string): number {
   return typeof value === 'number' ? value : 0
 }
 
-function formatBytes(value: number): string {
-  if (!value) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let amount = value
-  let index = 0
-  while (amount >= 1024 && index < units.length - 1) {
-    amount /= 1024
-    index += 1
-  }
-  return `${amount.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
-}
 
 function formatDuration(value: number): string {
   if (!value) return '-'

@@ -41,6 +41,8 @@ Everything you create stays in the Monaw home folder, not in the install folder:
 
 API keys are stored with Windows data protection for your user account, not in these files.
 
+Settings → Storage shows how much of this folder each kind of data uses and clears what is safe to clear. The activity log, logs and screenshots, command outputs, the built-in browser's caches (sign-ins stay), the app's own cache and an old offline voice model can be cleared without losing anything you made. Deleting all chats or uploaded files asks first and cannot be undone, and chats cannot be deleted while a reply is running. Memory, the ChatGPT sign-in runtime and the workspace are shown but not cleared here. After deleting chats or the activity log, Monaw compacts the database so the space returns to the disk.
+
 ## Upgrade
 
 There is no automatic update. To upgrade:

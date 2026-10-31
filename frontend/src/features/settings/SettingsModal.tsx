@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
+  HardDrive,
   AlertCircle,
   Bot,
   CheckCircle2,
@@ -26,6 +27,7 @@ import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel
 import { McpSettings } from './McpSettings'
 import { MemoryRetrieval } from './MemoryRetrieval'
 import { SandboxSettings } from './SandboxSettings'
+import { StorageSettings } from './StorageSettings'
 import { useSettingsDraft } from './useSettingsDraft'
 import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
 import { useModalFocus } from '../../hooks/useModalFocus'
@@ -122,6 +124,7 @@ const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
   permissions: Shield,
   sandbox: Container,
   observability: Activity,
+  storage: HardDrive,
 }
 
 /**
@@ -132,7 +135,7 @@ const NAV_GROUPS: Array<{ id: string; label: string; items: SettingsTab[] }> = [
   { id: 'intelligence', label: 'Intelligence', items: ['model'] },
   { id: 'capabilities', label: 'Capabilities', items: ['tools', 'browser'] },
   { id: 'safety', label: 'Safety', items: ['permissions', 'sandbox'] },
-  { id: 'inspect', label: 'Inspect', items: ['observability'] },
+  { id: 'inspect', label: 'Inspect', items: ['observability', 'storage'] },
 ]
 
 const ALL_TABS: SettingsTab[] = NAV_GROUPS.flatMap((group) => group.items)
@@ -1332,6 +1335,13 @@ export function SettingsModal({
                     </div>
                   </SettingsCard>
                 </div>
+              )}
+
+              {activeTab === 'storage' && (
+                <>
+                  <PageHeader title={PAGE_COPY.storage.label} />
+                  <StorageSettings />
+                </>
               )}
 
               {activeTab === 'observability' && (

@@ -7,6 +7,8 @@ import type {
   SandboxStatus,
   SettingsUpdatePayload,
   SpeechToTextStatus,
+  StorageCleanResult,
+  StorageUsage,
   WorkspaceInstructions,
 } from './types'
 
@@ -83,6 +85,18 @@ export async function updateWorkspaceInstructions(content: string): Promise<Work
 export async function resetWorkspaceInstructions(): Promise<WorkspaceInstructions> {
   const res = await apiFetch(`${BASE}/api/settings/workspace-instructions`, { method: 'DELETE' })
   if (!res.ok) await throwApiError(res, 'Failed to reset custom instructions')
+  return res.json()
+}
+
+export async function fetchStorageUsage(signal?: AbortSignal): Promise<StorageUsage> {
+  const res = await apiFetch(`${BASE}/api/settings/storage`, { signal })
+  if (!res.ok) await throwApiError(res, 'Failed to measure storage')
+  return res.json()
+}
+
+export async function cleanStorage(category: string): Promise<StorageCleanResult> {
+  const res = await apiFetch(`${BASE}/api/settings/storage/${encodeURIComponent(category)}/clean`, { method: 'POST' })
+  if (!res.ok) await throwApiError(res, 'Cleanup failed')
   return res.json()
 }
 

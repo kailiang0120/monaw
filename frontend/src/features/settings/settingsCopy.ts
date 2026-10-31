@@ -41,6 +41,11 @@ export const PAGE_COPY = {
     blurb: 'Set up the Monaw Chrome extension, choose which sites the agent may open, and where it saves screenshots.',
     keywords: 'chrome extension profile connection screenshots automation domains reconnect',
   },
+  storage: {
+    label: 'Storage',
+    blurb: 'See how much disk Monaw uses and clear what it can rebuild or no longer needs.',
+    keywords: 'disk space storage size cleanup clean cache delete chats history logs files',
+  },
   observability: {
     label: 'Activity log',
     blurb: 'Inspect what the agent actually did: traces, token usage, and errors.',

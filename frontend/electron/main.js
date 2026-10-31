@@ -731,6 +731,16 @@ ipcMain.handle('window:control', async (event, action) => {
   return window.isMaximized()
 })
 
+ipcMain.handle('storage:clear-app-cache', async (event) => {
+  assertTrustedIpcSender(event)
+  // Cached pages, compiled scripts and shaders; settings and sign-ins stay.
+  const appSession = event.sender.session
+  await appSession.clearCache()
+  await appSession.clearCodeCaches({})
+  await appSession.clearStorageData({ storages: ['shadercache'] })
+  return true
+})
+
 ipcMain.handle('window:is-maximized', async (event) => {
   assertTrustedIpcSender(event)
   return Boolean(BrowserWindow.fromWebContents(event.sender)?.isMaximized())

@@ -335,6 +335,17 @@ class ObservabilityRecorder:
         """Apply age and storage retention without deleting active-day event files."""
         self._cleanup_retention()
 
+    def compact(self) -> None:
+        """Give the space freed by deletions back to the disk."""
+        with self._lock:
+            try:
+                with self._connect() as conn:
+                    conn.commit()
+                    conn.execute("VACUUM")
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                self._increment_metric("dropped_events")
+
     def delete_all(self) -> dict[str, int]:
         """Delete all persisted observability rows and artifacts."""
         counts = {

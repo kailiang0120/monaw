@@ -78,6 +78,7 @@ const electronAPI = Object.freeze({
   windowControl: (action) => ipcRenderer.invoke('window:control', windowAction(action)),
   isWindowMaximized: () => ipcRenderer.invoke('window:is-maximized'),
   onWindowMaximized,
+  clearAppCache: () => ipcRenderer.invoke('storage:clear-app-cache'),
   backendBaseUrl,
   platform: process.platform,
   isElectron: true,

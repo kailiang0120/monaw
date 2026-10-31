@@ -145,6 +145,29 @@ class OkResponse(BaseModel):
     ok: bool = True
 
 
+class StorageCategory(BaseModel):
+    id: str
+    label: str
+    description: str
+    bytes: int
+    cleanable_bytes: int = 0
+    # "backend" cleans through the API, "app" through the desktop app, None not at all.
+    clean: Optional[Literal["backend", "app"]] = None
+    clean_label: str = ""
+    warning: str = ""
+
+
+class StorageUsage(BaseModel):
+    location: str
+    total_bytes: int
+    categories: list[StorageCategory]
+
+
+class StorageCleanResult(BaseModel):
+    freed_bytes: int
+    usage: StorageUsage
+
+
 class ChatJobCreateResponse(BaseModel):
     job_id: str
     conversation_id: str

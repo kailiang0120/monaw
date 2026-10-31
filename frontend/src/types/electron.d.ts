@@ -23,6 +23,8 @@ declare global {
       isWindowMaximized?: () => Promise<boolean>
       /** Returns a function that stops listening. */
       onWindowMaximized?: (listener: (maximized: boolean) => void) => () => void
+      /** Clears the window's HTTP, code and shader caches. */
+      clearAppCache?: () => Promise<boolean>
       backendBaseUrl: string
       platform?: string
       isElectron: boolean

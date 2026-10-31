@@ -652,6 +652,31 @@ export interface ModelOptions {
 /** "auto" uses whichever OpenAI or Google key is saved. */
 export type SpeechToTextProvider = 'auto' | 'openai' | 'gemini'
 
+export interface StorageCategory {
+  id: string
+  label: string
+  description: string
+  bytes: number
+  /** What cleaning would free; 0 when the category has no cleanup. */
+  cleanable_bytes: number
+  /** "backend" cleans through the API, "app" through the desktop app. */
+  clean: 'backend' | 'app' | null
+  clean_label: string
+  /** Shown before a cleanup that cannot be undone. */
+  warning: string
+}
+
+export interface StorageUsage {
+  location: string
+  total_bytes: number
+  categories: StorageCategory[]
+}
+
+export interface StorageCleanResult {
+  freed_bytes: number
+  usage: StorageUsage
+}
+
 export interface SpeechToTextStatus {
   provider: SpeechToTextProvider
   /** The provider voice input uses now; empty when it has no key. */
