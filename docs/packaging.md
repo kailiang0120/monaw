@@ -78,6 +78,10 @@ Built from branch `drop-local-speech` in 168 s; SHA-256 `2AB73F4D8E202CF3580AAC9
 
 After merging with the hybrid memory retrieval work, `main` built in 117 s: `Monaw-Setup-1.0.0-x64.exe`, 133.3 MB (139,743,918 bytes), SHA-256 `21425334263137A136D83F8F5512A53FC4116B1029F591B5A47B6FBE54E5E888`, installed size 390 MB. The packaged-app checks passed (5 of 5, 28.4 s), and the frozen backend passed the memory smoke check (semantic recall on the first query through a local embedding test server, workspace isolation, restart, forgetting and rebuilding the index). Two baseline runs: cold start 2.36 s and 1.76 s, warm 1.59 s and 1.73 s, fresh database 4,096 bytes; idle API requests 0 and 4 per minute. Across five runs today the idle count was 0, 16, 0, 0 and 4, which points to late startup requests landing in the observation window rather than polling; the baseline script does not yet separate the two.
 
+### Release `7d84272` (v1.0.0)
+
+The installer published as v1.0.0 was built from commit `7d84272`: `Monaw-Setup-1.0.0-x64.exe`, 133.3 MB (139,779,224 bytes), SHA-256 `61E3F6BACB10E413B90B4E70D4648376B151475DD31316BE7F2F077E874D95BB`, frozen backend 89 MB. The packaged-app checks passed (5 of 5, 29.1 s). On the development machine, with no earlier Monaw install, a silent per-user install (`/S /D=<folder>`) took 18 s and used 390 MB; the installed app, started with a fresh Monaw home, served `/health` 3.4 s after launch and refused an unauthenticated settings request; closing it left no Monaw processes. A silent uninstall removed the app folder, the Start menu shortcut and the uninstall entry, and kept the Monaw home.
+
 The PyInstaller spec leaves out `mcp.cli`, the MCP command-line tool, which needs `typer`; `typer` arrived only through `huggingface_hub`.
 
 ## Licensing to resolve before publishing
