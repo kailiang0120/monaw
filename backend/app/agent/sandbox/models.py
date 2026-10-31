@@ -50,6 +50,8 @@ class SandboxRunMetadata(BaseModel):
     host_workdir: str = ""
     effective_shell: str = ""
     explicit_approval_required: bool = False
+    always_ask: bool = False
+    user_review_only: bool = False
     runtime_policy: dict = Field(default_factory=dict)
     inherited_env_keys: list[str] = Field(default_factory=list)
     explicit_env_keys: list[str] = Field(default_factory=list)

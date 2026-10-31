@@ -595,7 +595,10 @@ class SandboxPolicy:
         )
 
         def with_consent_note(reason: str) -> str:
-            return f"{reason.rstrip('.')}.{consent_note}" if consent_note else reason
+            if not consent_note:
+                return reason
+            # The permission mode no longer decides; the note says what does.
+            return f"{reason.replace(' under the selected permission mode', '').rstrip('.')}.{consent_note}"
 
         if backend == "local_direct":
             return SandboxDecision(

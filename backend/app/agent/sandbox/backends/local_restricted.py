@@ -34,6 +34,8 @@ class LocalRestrictedRunner:
             host_workdir=request.workdir,
             effective_shell=request.shell,
             explicit_approval_required=bool(request.env_metadata.get("explicit_approval_required", False)),
+            always_ask=bool(request.env_metadata.get("always_ask", False)),
+            user_review_only=bool(request.env_metadata.get("user_review_only", False)),
             inherited_env_keys=list(request.env_metadata.get("inherited_env_keys", [])),
             explicit_env_keys=list(request.env_metadata.get("explicit_env_keys", [])),
             blocked_env_keys=list(request.env_metadata.get("blocked_env_keys", [])),

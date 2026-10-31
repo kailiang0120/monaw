@@ -166,6 +166,7 @@ export interface SavedMessage {
     preview_only?: boolean
     has_full_input?: boolean
     has_full_output?: boolean
+    on_host?: boolean
   }[]
   created_at: string
 }

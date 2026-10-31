@@ -57,14 +57,30 @@ it('shows effective execution details when the tool result is opened', () => {
   expect(screen.getByText(environment.summary)).toBeInTheDocument()
 })
 
-it('marks a host run on the collapsed tool row and not a Docker run', () => {
+it('marks a host run on the collapsed group and its own row, not a Docker run', () => {
   const docker: ExecutionEnvironment = { ...environment, backend: 'docker', summary: 'Runs in Docker', on_host: false }
   render(<MessageBubble message={{ id: '5', role: 'assistant', content: '', toolCalls: [
     { tool: 'exec', input: '{}', output: JSON.stringify({ status: 'ok', sandbox: { execution_environment: { ...environment, on_host: true } } }) },
     { tool: 'exec', input: '{}', output: JSON.stringify({ status: 'ok', sandbox: { execution_environment: docker } }) },
   ] }} />)
-  fireEvent.click(screen.getByRole('button', { expanded: false }))
   expect(screen.getAllByText('On your PC')).toHaveLength(1)
+  fireEvent.click(screen.getByRole('button', { expanded: false }))
+  expect(screen.getAllByText('On your PC')).toHaveLength(2)
+})
+
+it('keeps the host badge on a history preview too short to parse', () => {
+  render(<MessageBubble message={{ id: '7', role: 'assistant', content: '', toolCalls: [
+    { tool: 'exec', input: '{}', output: '{"sandbox": {"backend": "local_dir\n\n[history preview truncated]', previewOnly: true, onHost: true },
+  ] }} />)
+  expect(screen.getByText('On your PC')).toBeInTheDocument()
+})
+
+it('leaves the group unmarked when every command ran in Docker', () => {
+  const docker: ExecutionEnvironment = { ...environment, backend: 'docker', summary: 'Runs in Docker', on_host: false }
+  render(<MessageBubble message={{ id: '6', role: 'assistant', content: '', toolCalls: [
+    { tool: 'exec', input: '{}', output: JSON.stringify({ status: 'ok', sandbox: { execution_environment: docker } }) },
+  ] }} />)
+  expect(screen.queryByText('On your PC')).not.toBeInTheDocument()
 })
 
 it('says when a host run asks every time or needs the user rather than Auto Review', () => {

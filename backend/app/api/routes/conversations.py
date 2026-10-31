@@ -48,6 +48,7 @@ HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX = "\n\n[history preview truncated]"
 TOOL_CALL_MODE_NONE = "none"
 TOOL_CALL_MODE_SUMMARY = "summary"
 TOOL_CALL_MODE_FULL = "full"
+HOST_BACKENDS = {"local_direct", "local_restricted"}
 CONVERSATION_LIST_LIMIT_MAX = 200
 MESSAGE_LIMIT_MAX = 200
 MESSAGE_TOOL_CALL_LIMIT_MAX = 200
@@ -152,6 +153,21 @@ def _tool_call_preview(preview: object, original_length: object, limit: int) -> 
     return text.rstrip() + HISTORY_TOOL_PAYLOAD_TRUNCATED_SUFFIX
 
 
+def _ran_on_host(on_host: object, backend: object) -> bool:
+    """Same rule as the client: older results without on_host fall back to the backend."""
+    return bool(on_host) if on_host is not None else str(backend or "") in HOST_BACKENDS
+
+
+def _output_ran_on_host(output: str) -> bool:
+    if '"execution_environment"' not in output:
+        return False
+    try:
+        environment = json.loads(output)["sandbox"]["execution_environment"]
+        return _ran_on_host(environment.get("on_host"), environment.get("backend"))
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def _full_tool_calls(rows, *, limit: int | None) -> list[ToolCallOut]:
     tool_calls: list[ToolCallOut] = []
     for tc in rows:
@@ -169,6 +185,7 @@ def _full_tool_calls(rows, *, limit: int | None) -> list[ToolCallOut]:
                 preview_only=input_truncated or output_truncated,
                 has_full_input=not input_truncated,
                 has_full_output=not output_truncated,
+                on_host=_output_ran_on_host(output_text),
             )
         )
     return tool_calls
@@ -190,7 +207,15 @@ def _summary_tool_calls(db, *, message_id: int, limit: int) -> list[ToolCallOut]
                 ELSE substr(COALESCE(output, ''), 1, ?)
             END AS output_preview,
             length(COALESCE(input, '')) AS input_length,
-            length(COALESCE(output, '')) AS output_length
+            length(COALESCE(output, '')) AS output_length,
+            CASE
+                WHEN instr(output, '"execution_environment"') > 0 AND json_valid(output)
+                THEN json_extract(output, '$.sandbox.execution_environment.on_host')
+            END AS on_host,
+            CASE
+                WHEN instr(output, '"execution_environment"') > 0 AND json_valid(output)
+                THEN json_extract(output, '$.sandbox.execution_environment.backend')
+            END AS host_backend
         FROM tool_calls
         WHERE message_id = ?
         ORDER BY id
@@ -207,6 +232,7 @@ def _summary_tool_calls(db, *, message_id: int, limit: int) -> list[ToolCallOut]
             preview_only=True,
             has_full_input=int(row["input_length"] or 0) > len(str(row["input_preview"] or "")),
             has_full_output=int(row["output_length"] or 0) > len(str(row["output_preview"] or "")),
+            on_host=_ran_on_host(row["on_host"], row["host_backend"]),
         )
         for row in rows
     ]

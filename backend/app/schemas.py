@@ -670,6 +670,8 @@ class ToolCallOut(BaseModel):
     preview_only: bool = False
     has_full_input: bool = False
     has_full_output: bool = False
+    # Read from the full output, so a truncated preview keeps its host badge.
+    on_host: bool = False
 
 
 class MessageOut(BaseModel):

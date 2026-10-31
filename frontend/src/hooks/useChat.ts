@@ -31,6 +31,8 @@ export interface ToolCall {
   pending?: boolean
   status?: string
   previewOnly?: boolean
+  // From history, where the output may be a preview too short to parse.
+  onHost?: boolean
 }
 
 export type ActivityItem =
@@ -108,6 +110,7 @@ function savedMessageToMessage(m: SavedMessage): Message {
           pending: false,
           status: tc.status,
           previewOnly: tc.preview_only ?? false,
+          onHost: tc.on_host ?? false,
         }))
       : undefined,
   }

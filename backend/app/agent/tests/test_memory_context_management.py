@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -438,6 +439,33 @@ def test_messages_endpoint_returns_preview_tool_calls_and_detail_endpoint(monkey
     assert detail_payload[0]["preview_only"] is False
     assert detail_payload[0]["input"] == long_input
     assert detail_payload[0]["output"] == long_output
+
+
+def test_truncated_tool_call_previews_still_say_whether_the_command_ran_on_the_host(monkeypatch, tmp_path):
+    db = Database(tmp_path / "agent.db")
+    db.init_db()
+    db.create_conversation("conv-host", "Host history")
+    message_id = db.add_message("conv-host", "assistant", "Done.")
+    padding = {"inherited_env_keys": ["KEY"] * 400}
+    outputs = {
+        "host": {"sandbox": {**padding, "execution_environment": {"backend": "local_direct", "on_host": True}}},
+        "docker": {"sandbox": {**padding, "execution_environment": {"backend": "docker", "on_host": False}}},
+        "legacy": {"sandbox": {**padding, "execution_environment": {"backend": "local_restricted"}}},
+    }
+    for output in outputs.values():
+        db.add_tool_call(message_id=message_id, conv_id="conv-host", tool_name="exec",
+                         tool_input="{}", tool_output=json.dumps(output), status="complete")
+    db.add_tool_call(message_id=message_id, conv_id="conv-host", tool_name="exec",
+                     tool_input="{}", tool_output='{"execution_environment": not json', status="complete")
+    monkeypatch.setattr(routes_mod, "get_db", lambda: db)
+    client = TestClient(app)
+
+    summary = client.get("/api/conversations/conv-host/messages?tool_call_mode=summary").json()
+    detail = client.get(f"/api/messages/{message_id}/tool-calls").json()
+
+    assert summary["messages"][-1]["tool_calls"][0]["preview_only"] is True
+    assert [call["on_host"] for call in summary["messages"][-1]["tool_calls"]] == [True, False, True, False]
+    assert [call["on_host"] for call in detail] == [True, False, True, False]
 
 
 def test_messages_endpoint_returns_full_tool_calls_by_default(monkeypatch, tmp_path):

@@ -483,6 +483,8 @@ function ToolActivityGroup({
   const pendingTool = toolCalls.find((call) => call.pending)
   const allCommands = toolCalls.every((call) => /^exec(?:_|$)/.test(call.tool))
   const allBrowser = toolCalls.every((call) => isBrowserTool(call.tool))
+  // Repeat the host badge here: the rows below are hidden until the group opens.
+  const onHost = toolCalls.some(callRanOnHost)
   const label = pendingTool
     ? toolCallActivityLabel(pendingTool)
     : allCommands ? `Ran ${toolCalls.length === 1 ? 'command' : 'commands'}`
@@ -504,6 +506,7 @@ function ToolActivityGroup({
         {allCommands ? <SquareTerminal size={14} className="shrink-0" aria-hidden />
           : <Wrench size={14} className="shrink-0" aria-hidden />}
         <span className="min-w-0 flex-1 truncate" title={label}>{label}</span>
+        {onHost && <HostBadge />}
         {expanded ? <ChevronDown size={13} className="shrink-0" aria-hidden />
           : <ChevronRight size={13} className="shrink-0" aria-hidden />}
       </button>
@@ -513,6 +516,19 @@ function ToolActivityGroup({
         </div>
       )}
     </div>
+  )
+}
+
+function callRanOnHost(toolCall: ToolCall): boolean {
+  return Boolean(toolCall.onHost)
+    || (toolCall.output !== undefined && runsOnHost(toolEnvironment(toolCall.output)))
+}
+
+function HostBadge() {
+  return (
+    <span className="status-pill shrink-0 border-amber-400/20 bg-amber-400/10 text-amber-200">
+      On your PC
+    </span>
   )
 }
 
@@ -628,6 +644,7 @@ function ToolCallScroller({
             pending: false,
             status: toolCall.status,
             previewOnly: false,
+            onHost: toolCall.on_host ?? false,
           })),
         )
       })
@@ -671,11 +688,7 @@ function ToolCallScroller({
                   ? <SquareTerminal size={13} className="shrink-0 text-neutral-500" aria-hidden />
                   : <Wrench size={13} className="shrink-0 text-neutral-500" aria-hidden />}
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-400">{label}</span>
-                {runsOnHost(environment) && (
-                  <span className="status-pill shrink-0 border-amber-400/20 bg-amber-400/10 text-amber-200">
-                    On your PC
-                  </span>
-                )}
+                {callRanOnHost(toolCall) && <HostBadge />}
                 <ToolTabStatusIcon status={status} />
                 <span className="shrink-0 text-neutral-600" aria-hidden>
                   {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}

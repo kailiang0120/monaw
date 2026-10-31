@@ -114,6 +114,7 @@ def test_host_fallback_around_docker_asks_even_in_full_access():
     assert decision.always_ask and decision.explicit_approval_required
     assert not decision.user_review_only
     assert decision.reason.endswith("so you are asked every time.")
+    assert "under the selected permission mode" not in decision.reason
 
 
 def test_untrusted_host_command_needs_the_users_own_approval_in_full_access():
@@ -544,6 +545,21 @@ def test_sandbox_metadata_is_honest_for_local_direct(tmp_path):
     assert result.sandbox["filesystem_isolation"] == "none"
     assert result.sandbox["process_isolation"] == "none"
     assert result.sandbox["network_isolation"] == "none"
+
+
+@pytest.mark.parametrize("runner", [LocalDirectRunner, LocalRestrictedRunner])
+def test_host_run_result_keeps_the_consent_it_was_approved_under(runner, tmp_path):
+    shell, command = _python_command("print('ok')")
+    request = _request(command)
+    request.shell = shell  # type: ignore[assignment]
+    request.workdir = str(tmp_path)
+    request.env_metadata = {**request.env_metadata, "always_ask": True, "user_review_only": True}
+
+    result = runner().run(request)
+
+    assert result.sandbox["always_ask"] is True
+    assert result.sandbox["execution_environment"]["always_ask"] is True
+    assert result.sandbox["execution_environment"]["user_review_only"] is True
 
 
 def test_local_restricted_timeout_kills_process(tmp_path):
