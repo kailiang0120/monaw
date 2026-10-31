@@ -127,6 +127,35 @@ def test_docker_command_mounts_allowed_workspace_for_direct_rw(tmp_path):
     assert ",target=/workspace" in command[command.index("--mount") + 1]
 
 
+def test_docker_mount_runs_as_the_host_user_on_posix_hosts(monkeypatch, tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
+    request = _request("echo ok")
+    request.shell = "bash"
+    runner = DockerRunner(settings.sandbox)
+    monkeypatch.setattr(docker_backend.os, "getuid", lambda: 1001, raising=False)
+    monkeypatch.setattr(docker_backend.os, "getgid", lambda: 121, raising=False)
+
+    mounted = runner.docker_command(request, mount_source=tmp_path)
+    unmounted = runner.docker_command(request)
+
+    assert ["--user", "1001:121"] == mounted[mounted.index("--user") : mounted.index("--user") + 2]
+    assert mounted.index("--user") < mounted.index(settings.sandbox.docker.image)
+    assert "--user" not in unmounted
+
+
+def test_docker_mount_keeps_the_image_user_on_windows_hosts(monkeypatch, tmp_path):
+    settings = AgentSettings()
+    settings.sandbox.docker.image = "python@sha256:" + "a" * 64
+    request = _request("echo ok")
+    request.shell = "bash"
+    monkeypatch.delattr(docker_backend.os, "getuid", raising=False)
+
+    command = DockerRunner(settings.sandbox).docker_command(request, mount_source=tmp_path)
+
+    assert "--user" not in command
+
+
 def test_docker_copy_out_uses_a_run_workspace(tmp_path):
     settings = AgentSettings()
     settings.sandbox.allowed_bind_roots = [str(tmp_path)]

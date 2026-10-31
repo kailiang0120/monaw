@@ -161,6 +161,11 @@ class DockerRunner:
             if mount_read_only:
                 mount += ",readonly"
             command.extend(["--mount", mount])
+            # On a Linux host the daemon enforces host file ownership, and root
+            # without capabilities cannot use another user's files. Run as the
+            # host user so the mount behaves as it does under Docker Desktop.
+            if hasattr(os, "getuid"):
+                command.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
         # Host PATH and Windows shell variables are not a container environment.
         # Only explicitly supplied values may replace the image's defaults.
         inherited = {key.upper() for key in request.env_metadata.get("inherited_env_keys", [])}
