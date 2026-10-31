@@ -9,9 +9,7 @@ from fastapi import APIRouter, HTTPException
 from app.agent.runtime_paths import runtime_path
 from app.agent.speech_to_text import (
     MAX_TRANSCRIPTION_BYTES,
-    SpeechToTextCloudNotConfigured,
-    SpeechToTextDependencyMissing,
-    SpeechToTextModelMissing,
+    SpeechToTextNotConfigured,
     transcribe_audio_file,
 )
 from app.schemas import SpeechToTextTranscriptionRequest, SpeechToTextTranscriptionResponse
@@ -64,14 +62,8 @@ async def transcribe_speech_to_text(body: SpeechToTextTranscriptionRequest):
             target_path,
         )
         text = await transcribe_audio_file(target_path)
-    except SpeechToTextModelMissing as exc:
-        logger.warning("speech-to-text[%s]: model missing: %s", request_id, exc)
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except SpeechToTextDependencyMissing as exc:
-        logger.warning("speech-to-text[%s]: dependency missing: %s", request_id, exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except SpeechToTextCloudNotConfigured as exc:
-        logger.warning("speech-to-text[%s]: cloud not configured: %s", request_id, exc)
+    except SpeechToTextNotConfigured as exc:
+        logger.warning("speech-to-text[%s]: not configured: %s", request_id, exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception:
         logger.exception("speech-to-text[%s]: transcription failed", request_id)

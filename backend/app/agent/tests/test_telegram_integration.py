@@ -13,9 +13,8 @@ from app.agent import response_attachments as attachments_module
 from app.agent.llm_constants import GEMINI_CHAT_MODELS, OPENAI_CHAT_MODELS
 from app.agent.response_attachments import collect_response_attachments, resolve_attachment_path
 from app.agent.speech_to_text import (
-    VOICE_MODEL_NOT_READY_MESSAGE,
-    SpeechToTextCloudNotConfigured,
-    SpeechToTextModelMissing,
+    VOICE_INPUT_NOT_CONFIGURED_MESSAGE,
+    SpeechToTextNotConfigured,
 )
 from app.integrations.telegram import agent_bridge as telegram_agent_bridge
 from app.integrations.telegram import bridge as telegram_bridge
@@ -1021,7 +1020,7 @@ def test_prepare_telegram_message_input_transcribes_voice(monkeypatch):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def test_telegram_voice_missing_model_returns_clear_message(monkeypatch):
+def test_telegram_voice_without_api_key_returns_clear_message(monkeypatch):
     tmp_dir = _workspace_tmp_dir()
     try:
         calls = []
@@ -1034,7 +1033,7 @@ def test_telegram_voice_missing_model_returns_clear_message(monkeypatch):
                 calls.append(("message", kwargs))
 
         async def fake_prepare(*_args, **_kwargs):
-            raise SpeechToTextModelMissing(VOICE_MODEL_NOT_READY_MESSAGE)
+            raise SpeechToTextNotConfigured(VOICE_INPUT_NOT_CONFIGURED_MESSAGE)
 
         bridge = TelegramAgentBridge(
             session_store=TelegramSessionStore(tmp_dir / "sessions.json"),
@@ -1055,46 +1054,7 @@ def test_telegram_voice_missing_model_returns_clear_message(monkeypatch):
 
         asyncio.run(_handle_authorized_message(update, context))
 
-        assert ("message", {"chat_id": 12345, "text": VOICE_MODEL_NOT_READY_MESSAGE}) in calls
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-def test_telegram_voice_cloud_missing_key_returns_clear_message(monkeypatch):
-    tmp_dir = _workspace_tmp_dir()
-    try:
-        calls = []
-
-        class Bot:
-            async def send_chat_action(self, **kwargs):
-                calls.append(("action", kwargs))
-
-            async def send_message(self, **kwargs):
-                calls.append(("message", kwargs))
-
-        async def fake_prepare(*_args, **_kwargs):
-            raise SpeechToTextCloudNotConfigured("Google API key is required for cloud speech-to-text.")
-
-        bridge = TelegramAgentBridge(
-            session_store=TelegramSessionStore(tmp_dir / "sessions.json"),
-            runner=lambda **_kwargs: None,
-            initialize_conversation=lambda _conv_id, _title: None,
-        )
-        context = SimpleNamespace(
-            bot=Bot(),
-            application=SimpleNamespace(bot_data={"agent_bridge": bridge}),
-        )
-        update = SimpleNamespace(
-            effective_chat=SimpleNamespace(id=12345),
-            effective_message=SimpleNamespace(message_thread_id=None),
-            effective_user=SimpleNamespace(full_name="Kai", username="kai", id=99),
-        )
-
-        monkeypatch.setattr(telegram_bridge, "prepare_telegram_message_input", fake_prepare)
-
-        asyncio.run(_handle_authorized_message(update, context))
-
-        assert ("message", {"chat_id": 12345, "text": "Google API key is required for cloud speech-to-text."}) in calls
+        assert ("message", {"chat_id": 12345, "text": VOICE_INPUT_NOT_CONFIGURED_MESSAGE}) in calls
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

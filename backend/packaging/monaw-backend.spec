@@ -24,8 +24,11 @@ for path in app_dir.rglob("*"):
 binaries = []
 hiddenimports = collect_submodules("app", filter=lambda name: ".tests" not in name)
 # Packages that load data files, plugins or native libraries at runtime.
-for package in ("faster_whisper", "ctranslate2", "imageio_ffmpeg", "tiktoken", "tiktoken_ext", "scrapling", "openai_codex", "mcp", "uvicorn"):
-    package_datas, package_binaries, package_hidden = collect_all(package)
+# mcp.cli is the MCP command-line tool, which needs typer and is not used here.
+for package in ("tiktoken", "tiktoken_ext", "scrapling", "openai_codex", "mcp", "uvicorn"):
+    package_datas, package_binaries, package_hidden = collect_all(
+        package, filter_submodules=lambda name: not name.startswith("mcp.cli")
+    )
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hidden
@@ -36,7 +39,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["pytest", "_pytest", "tkinter"],
+    excludes=["pytest", "_pytest", "tkinter", "mcp.cli"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

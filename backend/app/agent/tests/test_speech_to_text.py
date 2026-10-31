@@ -6,164 +6,151 @@ import pytest
 
 from app.api.routes import speech_to_text as stt_route
 from app.agent import speech_to_text as stt
+from app.agent.settings_store import SpeechToTextSettings
 from app.schemas import SpeechToTextTranscriptionRequest
 
 
-def test_speech_to_text_status_reports_default_local_model(tmp_path, monkeypatch):
-    model_dir = tmp_path / "base"
-    model_dir.mkdir()
-    (model_dir / "model.bin").write_bytes(b"model")
-    (model_dir / "config.json").write_text("{}", encoding="utf-8")
-
-    monkeypatch.setattr(stt, "stt_model_dir", lambda: model_dir)
-    monkeypatch.setattr(stt, "_dependency_available", lambda: True)
+def _use_settings(monkeypatch, *, provider="auto", openai_key="", google_key="", chat_provider="openai"):
     monkeypatch.setattr(
         stt,
         "_runtime_stt_settings",
         lambda: (
-            types.SimpleNamespace(engine="local", local_model="base", cloud_model="gemini-2.5-flash"),
-            types.SimpleNamespace(google_api_key=""),
+            types.SimpleNamespace(provider=provider),
+            types.SimpleNamespace(openai_api_key=openai_key, google_api_key=google_key),
+            chat_provider,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("preference", "keys", "chat_provider", "expected"),
+    [
+        ("auto", {"openai": "sk", "gemini": "g"}, "gemini", "gemini"),
+        ("auto", {"openai": "sk", "gemini": "g"}, "openai", "openai"),
+        ("auto", {"openai": "sk", "gemini": "g"}, "codex", "openai"),
+        ("auto", {"openai": "", "gemini": "g"}, "codex", "gemini"),
+        ("auto", {"openai": "", "gemini": "g"}, "openai", "gemini"),
+        ("auto", {"openai": "", "gemini": ""}, "openai", ""),
+        ("openai", {"openai": "", "gemini": "g"}, "gemini", ""),
+        ("gemini", {"openai": "sk", "gemini": "g"}, "openai", "gemini"),
+    ],
+)
+def test_resolve_stt_provider(preference, keys, chat_provider, expected):
+    assert stt.resolve_stt_provider(preference, keys, chat_provider) == expected
+
+
+def test_speech_to_text_status_reports_the_provider_in_use(monkeypatch):
+    _use_settings(monkeypatch, google_key="g", chat_provider="codex")
+
+    assert stt.speech_to_text_status() == {
+        "provider": "auto",
+        "active_provider": "gemini",
+        "model": stt.GEMINI_STT_MODEL,
+        "configured": True,
+    }
+
+
+def test_speech_to_text_status_without_keys_is_not_configured(monkeypatch):
+    _use_settings(monkeypatch)
 
     status = stt.speech_to_text_status()
 
-    assert status["provider"] == "faster-whisper"
-    assert status["label"] == "Powered by faster-whisper"
-    assert status["engine"] == "local"
-    assert status["cloud_provider"] == "gemini"
-    assert status["cloud_model"] == "gemini-2.5-flash"
-    assert status["model_id"] == "base"
-    assert status["model_label"] == "Whisper base"
-    assert status["downloaded"] is True
-    assert status["dependency_available"] is True
-    assert status["loaded"] is False
+    assert status["configured"] is False
+    assert status["active_provider"] == ""
+    assert status["model"] == ""
 
 
-def test_download_default_stt_model_uses_faster_whisper_utils(tmp_path, monkeypatch):
-    model_dir = tmp_path / "base"
-
-    def fake_download_model(model_id, *, output_dir, local_files_only):
-        assert model_id == "base"
-        assert local_files_only is False
-        assert output_dir == str(model_dir)
-        model_dir.mkdir(parents=True, exist_ok=True)
-        (model_dir / "model.bin").write_bytes(b"model")
-        (model_dir / "config.json").write_text("{}", encoding="utf-8")
-
-    fake_package = types.ModuleType("faster_whisper")
-    fake_utils = types.ModuleType("faster_whisper.utils")
-    fake_utils.download_model = fake_download_model
-    fake_package.utils = fake_utils
-
-    monkeypatch.setitem(sys.modules, "faster_whisper", fake_package)
-    monkeypatch.setitem(sys.modules, "faster_whisper.utils", fake_utils)
-    monkeypatch.setattr(stt, "stt_model_dir", lambda: model_dir)
-
-    status = stt.download_default_stt_model()
-
-    assert status["downloaded"] is True
-    assert status["download_dir"] == str(model_dir)
-
-
-def test_delete_stt_model_offloads_and_removes_model_dir(tmp_path, monkeypatch):
-    model_dir = tmp_path / "base"
-    model_dir.mkdir()
-    (model_dir / "model.bin").write_bytes(b"model")
-    (model_dir / "config.json").write_text("{}", encoding="utf-8")
-    stt._MODEL_CACHE[(str(model_dir), "cpu", "int8")] = object()
-    monkeypatch.setattr(stt, "stt_model_dir", lambda: model_dir)
-    monkeypatch.setattr(stt, "_dependency_available", lambda: True)
-
-    status = stt.delete_stt_model()
-
-    assert not model_dir.exists()
-    assert stt._MODEL_CACHE == {}
-    assert status["downloaded"] is False
-    assert status["loaded"] is False
-
-
-def test_offload_stt_model_clears_loaded_model_cache(monkeypatch):
-    stt._MODEL_CACHE[("path", "cpu", "int8")] = object()
-    monkeypatch.setattr(stt, "is_stt_model_downloaded", lambda: True)
-    monkeypatch.setattr(stt, "_dependency_available", lambda: True)
-
-    status = stt.offload_stt_model()
-
-    assert stt._MODEL_CACHE == {}
-    assert status["loaded"] is False
-
-
-def test_transcribe_audio_requires_downloaded_local_model(tmp_path, monkeypatch):
+def test_transcribe_audio_without_keys_names_both_providers(tmp_path, monkeypatch):
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"voice")
-    monkeypatch.setattr(stt, "stt_model_dir", lambda: tmp_path / "missing-model")
-    monkeypatch.setattr(
-        stt,
-        "_runtime_stt_settings",
-        lambda: (
-            types.SimpleNamespace(engine="local", local_model="base", cloud_model="gemini-2.5-flash"),
-            types.SimpleNamespace(google_api_key=""),
-        ),
-    )
+    _use_settings(monkeypatch)
 
-    with pytest.raises(stt.SpeechToTextModelMissing, match="not installed/configured"):
+    with pytest.raises(stt.SpeechToTextNotConfigured, match="OpenAI or Google API key"):
         asyncio.run(stt.transcribe_audio_file(audio_path))
 
 
-def test_transcribe_audio_requires_google_key_for_cloud_engine(tmp_path, monkeypatch):
+def test_transcribe_audio_with_chosen_provider_missing_its_key(tmp_path, monkeypatch):
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"voice")
-    monkeypatch.setattr(
-        stt,
-        "_runtime_stt_settings",
-        lambda: (
-            types.SimpleNamespace(engine="cloud", cloud_model="gemini-2.5-flash"),
-            types.SimpleNamespace(google_api_key=""),
-        ),
-    )
+    _use_settings(monkeypatch, provider="openai", google_key="g")
 
-    with pytest.raises(stt.SpeechToTextCloudNotConfigured, match="Google API key"):
+    with pytest.raises(stt.SpeechToTextNotConfigured, match="set to OpenAI"):
         asyncio.run(stt.transcribe_audio_file(audio_path))
 
 
-def test_transcription_route_returns_clear_missing_model_error(tmp_path, monkeypatch):
+def test_transcribe_audio_sends_the_recording_to_openai(tmp_path, monkeypatch):
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"RIFF-voice")
+    _use_settings(monkeypatch, openai_key="sk-test")
+    calls = []
+
+    class FakeTranscriptions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(text="  hello there  ")
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self.audio = types.SimpleNamespace(transcriptions=FakeTranscriptions())
+
+        async def close(self):
+            calls.append("closed")
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(AsyncOpenAI=FakeAsyncOpenAI))
+
+    assert asyncio.run(stt.transcribe_audio_file(audio_path)) == "hello there"
+    assert calls[0]["api_key"] == "sk-test"
+    assert calls[1] == {"model": stt.OPENAI_STT_MODEL, "file": ("voice.wav", b"RIFF-voice", "audio/wav")}
+    assert calls[2] == "closed"
+
+
+def test_transcribe_audio_sends_telegram_ogg_to_gemini_with_its_type(tmp_path, monkeypatch):
+    audio_path = tmp_path / "telegram-voice.oga"
+    audio_path.write_bytes(b"OggS-voice")
+    _use_settings(monkeypatch, provider="gemini", openai_key="sk", google_key="g-test")
+    from google.genai import models
+
+    sent = {}
+
+    async def fake_generate_content(self, *, model, contents, config):
+        sent.update(model=model, part=contents[0]["parts"][1], config=config)
+        return types.SimpleNamespace(text="kia ora\n")
+
+    monkeypatch.setattr(models.AsyncModels, "generate_content", fake_generate_content)
+
+    assert asyncio.run(stt.transcribe_audio_file(audio_path)) == "kia ora"
+    assert sent["model"] == stt.GEMINI_STT_MODEL
+    assert sent["part"].inline_data.mime_type == "audio/ogg"
+    assert sent["part"].inline_data.data == b"OggS-voice"
+    assert sent["config"].thinking_config.thinking_budget == 0
+
+
+def test_settings_from_the_local_engine_migrate_to_a_cloud_provider():
+    assert SpeechToTextSettings.model_validate({"engine": "local", "local_model": "base"}).provider == "auto"
+    assert SpeechToTextSettings.model_validate(
+        {"engine": "cloud", "cloud_provider": "gemini", "cloud_model": "gemini-2.5-flash"}
+    ).provider == "gemini"
+    assert SpeechToTextSettings.model_validate({"provider": "whisper"}).provider == "auto"
+    assert SpeechToTextSettings().model_dump() == {"provider": "auto"}
+
+
+def test_transcription_route_returns_clear_not_configured_error(tmp_path, monkeypatch):
     monkeypatch.setattr(stt_route, "runtime_path", lambda *parts: tmp_path.joinpath(*parts))
 
     async def fake_transcribe_audio_file(_path):
-        raise stt.SpeechToTextModelMissing(stt.VOICE_MODEL_NOT_READY_MESSAGE)
+        raise stt.SpeechToTextNotConfigured(stt.VOICE_INPUT_NOT_CONFIGURED_MESSAGE)
 
     monkeypatch.setattr(stt_route, "transcribe_audio_file", fake_transcribe_audio_file)
     body = SpeechToTextTranscriptionRequest(
-        filename="voice.webm",
+        filename="voice.wav",
         data_base64="dm9pY2U=",
-        mime_type="audio/webm",
+        mime_type="audio/wav",
     )
 
     with pytest.raises(stt_route.HTTPException) as exc_info:
         asyncio.run(stt_route.transcribe_speech_to_text(body))
 
     assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == stt.VOICE_MODEL_NOT_READY_MESSAGE
-    assert not list(tmp_path.rglob("*.*"))
-
-
-def test_transcription_route_returns_clear_cloud_config_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(stt_route, "runtime_path", lambda *parts: tmp_path.joinpath(*parts))
-
-    async def fake_transcribe_audio_file(_path):
-        raise stt.SpeechToTextCloudNotConfigured("Google API key is required for cloud speech-to-text.")
-
-    monkeypatch.setattr(stt_route, "transcribe_audio_file", fake_transcribe_audio_file)
-    body = SpeechToTextTranscriptionRequest(
-        filename="voice.webm",
-        data_base64="dm9pY2U=",
-        mime_type="audio/webm",
-    )
-
-    with pytest.raises(stt_route.HTTPException) as exc_info:
-        asyncio.run(stt_route.transcribe_speech_to_text(body))
-
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "Google API key is required for cloud speech-to-text."
+    assert exc_info.value.detail == stt.VOICE_INPUT_NOT_CONFIGURED_MESSAGE
     assert not list(tmp_path.rglob("*.*"))

@@ -214,10 +214,7 @@ class LLMSettingsPayload(BaseModel):
 
 
 class SpeechToTextSettingsPayload(BaseModel):
-    engine: str = Field("local", pattern="^(local|cloud)$")
-    local_model: str = "base"
-    cloud_provider: str = Field("gemini", pattern="^gemini$")
-    cloud_model: str = "gemini-2.5-flash"
+    provider: str = Field("auto", pattern="^(auto|openai|gemini)$")
 
 
 class MCPServerConfigPayload(BaseModel):
@@ -394,18 +391,9 @@ class WorkspaceInstructionsPayload(BaseModel):
 
 class SpeechToTextStatusPayload(BaseModel):
     provider: str
-    label: str
-    engine: str
-    cloud_provider: str = "gemini"
-    cloud_model: str = ""
-    cloud_configured: bool = False
-    model_id: str
-    model_label: str
-    model_size: str
-    downloaded: bool
-    download_dir: str
-    dependency_available: bool
-    loaded: bool
+    active_provider: str = ""
+    model: str = ""
+    configured: bool = False
 
 
 class ControllerPolicyMarkdownPayload(BaseModel):

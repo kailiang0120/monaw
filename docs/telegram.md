@@ -105,20 +105,20 @@ Telegram text messages run through the same agent stream as desktop chat.
 
 Photos and documents are downloaded into Monaw's runtime upload store and passed to the agent as chat attachments. Telegram voice messages, audio messages, and audio documents are transcribed before the agent receives them. The desktop chat input also has a microphone button that uses the same speech-to-text path and inserts the transcript into the text field while dictating.
 
-Speech-to-text supports two engines:
+Speech-to-text sends the audio to OpenAI or Google with the API key saved in Settings -> Connections. An OpenAI account sign-in (ChatGPT) does not cover it.
 
-| Engine | Behavior |
+| Provider | Model |
 | --- | --- |
-| Local | Powered by `faster-whisper` with the Whisper base model. Open Settings -> Model -> Speech to Text and download the local model before sending voice input. The same panel can offload the loaded model from memory or delete the downloaded files. |
-| Cloud | Uses Gemini with `gemini-2.5-flash`. Configure a Google API key in Settings -> Connections before using this mode. |
+| OpenAI | `gpt-4o-mini-transcribe` |
+| Google | `gemini-2.5-flash` |
 
-If the local voice model is not installed yet, Telegram replies:
+Settings -> Model -> Voice input chooses the provider. Automatic, the default, uses the chat model's provider when its key is saved, then OpenAI, then Google. The desktop microphone uploads 16 kHz mono WAV; Telegram voice notes are sent in their own OGG format.
+
+If no key is saved for the chosen provider, Telegram replies with the missing key message instead of sending the audio to the agent:
 
 ```text
-Voice model is not installed/configured yet. Open Settings > Model > Speech to Text and download the model first.
+Voice input needs an OpenAI or Google API key. Add one in Settings > Connections.
 ```
-
-If cloud speech-to-text is selected without a Google API key, Telegram replies with the missing key message instead of sending the audio to the agent.
 
 Only one Telegram request per chat/thread runs at a time. If another message arrives while a request is running, the bot replies:
 

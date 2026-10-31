@@ -7,7 +7,6 @@ import {
   ChevronDown,
   Container,
   Copy,
-  Download,
   Folder,
   Globe2,
   KeyRound,
@@ -18,7 +17,6 @@ import {
   Save,
   Search,
   Shield,
-  Trash2,
   UserRound,
   Wrench,
   X,
@@ -65,15 +63,11 @@ import {
   reconnectBrowser,
 } from '../../lib/api/diagnostics'
 import {
-  deleteSpeechToTextModel,
-  downloadSpeechToTextModel,
   fetchModelOptions,
   fetchOpenAIAccountStatus,
   fetchSettings,
   fetchSandboxStatus,
-  fetchSpeechToTextStatus,
   fetchWorkspaceInstructions,
-  offloadSpeechToTextModel,
   logoutOpenAIAccount,
   resetWorkspaceInstructions,
   startOpenAIAccountLogin,
@@ -88,10 +82,10 @@ import type {
   BrowserUseDiagnostics,
   MCPServerDiagnostics,
   SandboxStatus,
-  SpeechToTextStatus,
 } from '../../lib/api/types'
 import {
   PERMISSION_PROFILES,
+  activeSpeechProvider,
   applyPermissionProfile,
   duplicateMcpServerNames,
   FALLBACK_MODEL_OPTIONS,
@@ -192,7 +186,6 @@ export function SettingsModal({
   const [browserDiagnostics, setBrowserDiagnostics] = useState<BrowserUseDiagnostics | null>(null)
   const [mcpDiagnostics, setMcpDiagnostics] = useState<Record<string, MCPServerDiagnostics>>({})
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
-  const [speechToTextStatus, setSpeechToTextStatus] = useState<SpeechToTextStatus | null>(null)
   const [customInstructions, setCustomInstructions] = useState('')
   const [customInstructionsPath, setCustomInstructionsPath] = useState('')
   const [customInstructionsSavedContent, setCustomInstructionsSavedContent] = useState('')
@@ -205,10 +198,6 @@ export function SettingsModal({
   const [extensionError, setExtensionError] = useState('')
   const [extensionFolderCopied, setExtensionFolderCopied] = useState(false)
   const [extensionCopyError, setExtensionCopyError] = useState('')
-  const [downloadingSpeechToText, setDownloadingSpeechToText] = useState(false)
-  const [offloadingSpeechToText, setOffloadingSpeechToText] = useState(false)
-  const [deletingSpeechToText, setDeletingSpeechToText] = useState(false)
-  const [speechToTextError, setSpeechToTextError] = useState('')
   const [saved, setSaved] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null)
@@ -317,17 +306,6 @@ export function SettingsModal({
     }
   }
 
-  const loadSpeechToTextStatus = async (signal?: AbortSignal) => {
-    try {
-      setSpeechToTextStatus(await fetchSpeechToTextStatus(signal))
-      setSpeechToTextError('')
-    } catch (error) {
-      if (signal?.aborted) return
-      setSpeechToTextStatus(null)
-      setSpeechToTextError(error instanceof Error ? error.message : 'Speech-to-text status could not be loaded.')
-    }
-  }
-
   const loadWorkspaceInstructions = async (signal?: AbortSignal) => {
     try {
       const instructions = await fetchWorkspaceInstructions(signal)
@@ -376,7 +354,6 @@ export function SettingsModal({
         loadMcpDiagnostics(signal),
         loadBrowserDiagnostics(signal),
         loadSandboxStatus(signal),
-        loadSpeechToTextStatus(signal),
         loadWorkspaceInstructions(signal),
       ])
 
@@ -456,42 +433,6 @@ export function SettingsModal({
     } catch {
       setExtensionFolderCopied(false)
       setExtensionCopyError('Could not copy automatically. Select the folder and press Ctrl+C (⌘C on Mac).')
-    }
-  }
-
-  const handleDownloadSpeechToText = async () => {
-    setDownloadingSpeechToText(true)
-    setSpeechToTextError('')
-    try {
-      setSpeechToTextStatus(await downloadSpeechToTextModel())
-    } catch (error) {
-      setSpeechToTextError(error instanceof Error ? error.message : 'Failed to download speech-to-text model.')
-    } finally {
-      setDownloadingSpeechToText(false)
-    }
-  }
-
-  const handleOffloadSpeechToText = async () => {
-    setOffloadingSpeechToText(true)
-    setSpeechToTextError('')
-    try {
-      setSpeechToTextStatus(await offloadSpeechToTextModel())
-    } catch (error) {
-      setSpeechToTextError(error instanceof Error ? error.message : 'Failed to offload speech-to-text model.')
-    } finally {
-      setOffloadingSpeechToText(false)
-    }
-  }
-
-  const handleDeleteSpeechToText = async () => {
-    setDeletingSpeechToText(true)
-    setSpeechToTextError('')
-    try {
-      setSpeechToTextStatus(await deleteSpeechToTextModel())
-    } catch (error) {
-      setSpeechToTextError(error instanceof Error ? error.message : 'Failed to delete speech-to-text model.')
-    } finally {
-      setDeletingSpeechToText(false)
     }
   }
 
@@ -655,21 +596,16 @@ export function SettingsModal({
   }
   const telegramAllowlistConfigured = Boolean(draft.telegram_allowed_user_ids.trim() || draft.telegram_allowed_chat_ids.trim())
   const customInstructionsDirty = customInstructions !== customInstructionsSavedContent
-  const speechToTextIsCloud = draft.speech_to_text.engine === 'cloud'
-  const speechToTextReady = speechToTextIsCloud ? Boolean(speechToTextStatus?.cloud_configured) : Boolean(speechToTextStatus?.downloaded)
-  const speechToTextPanelStatus = speechToTextIsCloud
-    ? (speechToTextStatus?.cloud_configured ? 'Uses your saved Google API key.' : 'Save a Google API key in Connections.')
-    : deletingSpeechToText
-      ? 'Deleting local speech model…'
-      : offloadingSpeechToText
-        ? 'Offloading speech model…'
-        : speechToTextStatus?.loaded
-          ? 'Model is loaded in memory.'
-          : speechToTextStatus?.downloaded
-            ? 'Local transcription is ready.'
-            : downloadingSpeechToText
-              ? 'Downloading Whisper base…'
-              : 'Download once before voice input.'
+  const speechProvider = activeSpeechProvider(draft.speech_to_text.provider, {
+    openai: draft.api_keys.has_openai_key,
+    gemini: draft.api_keys.has_google_key,
+  }, draft.llm.provider)
+  const speechProviderName = speechProvider === 'openai' ? 'OpenAI' : 'Google'
+  const speechKeyNeeded = draft.speech_to_text.provider === 'openai'
+    ? 'Save an OpenAI API key in Connections.'
+    : draft.speech_to_text.provider === 'gemini'
+      ? 'Save a Google API key in Connections.'
+      : 'Save an OpenAI or Google API key in Connections.'
 
 
   const getSkillHealth = (skill: AgentSettings['available_skills'][number]) => {
@@ -813,24 +749,23 @@ export function SettingsModal({
                     <SettingsCard
                       title="Voice input"
                       action={
-                        <Badge tone={speechToTextReady ? 'ok' : 'warn'}>
-                          {speechToTextIsCloud
-                            ? (speechToTextReady ? 'Cloud ready' : 'Key needed')
-                            : (speechToTextReady ? 'Ready' : 'Download needed')}
+                        <Badge tone={speechProvider ? 'ok' : 'warn'}>
+                          {speechProvider ? `Using ${speechProviderName}` : 'Key needed'}
                         </Badge>
                       }
                     >
-                      <SettingRow label="Speech recognition" description={MODEL_COPY.speechEngine}>
-                        <Dropdown<AgentSettings['speech_to_text']['engine']>
-                          ariaLabel="Speech recognition"
-                          value={draft.speech_to_text.engine}
+                      <SettingRow label="Speech provider" description={MODEL_COPY.speechProvider}>
+                        <Dropdown<AgentSettings['speech_to_text']['provider']>
+                          ariaLabel="Speech provider"
+                          value={draft.speech_to_text.provider}
                           options={[
-                            { value: 'local', label: 'Local (offline)' },
-                            { value: 'cloud', label: 'Cloud (Google)' },
+                            { value: 'auto', label: 'Automatic' },
+                            { value: 'openai', label: 'OpenAI' },
+                            { value: 'gemini', label: 'Google' },
                           ]}
-                          onChange={(engine) => updateDraft((current) => ({
+                          onChange={(provider) => updateDraft((current) => ({
                             ...current,
-                            speech_to_text: { ...current.speech_to_text, engine },
+                            speech_to_text: { ...current.speech_to_text, provider },
                           }))}
                         />
                       </SettingRow>
@@ -838,51 +773,13 @@ export function SettingsModal({
                         <div className="min-w-0">
                           <p className="st-label flex items-center gap-2">
                             <Mic size={13} style={{ color: 'var(--st-accent-text)' }} />
-                            {speechToTextIsCloud
-                              ? draft.speech_to_text.cloud_model
-                              : (speechToTextStatus ? `${speechToTextStatus.model_label} (${speechToTextStatus.model_size})` : 'Whisper base (~142 MB)')}
+                            {speechProvider ? `${speechProviderName} transcription` : 'Voice input is off'}
                           </p>
-                          <p className="st-desc mt-1">{speechToTextPanelStatus}</p>
-                        </div>
-                        <div className="st-row-control-auto flex items-center gap-1.5">
-                          {speechToTextStatus?.loaded && <Badge tone="ok">In memory</Badge>}
-                          <button
-                            type="button"
-                            onClick={handleDownloadSpeechToText}
-                            disabled={speechToTextIsCloud || downloadingSpeechToText || speechToTextStatus?.downloaded}
-                            aria-label="Download local speech model"
-                            title={speechToTextStatus?.downloaded ? 'Already downloaded' : 'Download the model (about 142 MB)'}
-                            className="st-btn st-btn-secondary st-btn-icon"
-                          >
-                            {downloadingSpeechToText ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleOffloadSpeechToText}
-                            disabled={speechToTextIsCloud || offloadingSpeechToText || !speechToTextStatus?.loaded}
-                            aria-label="Offload local speech model"
-                            title="Free the memory it is using, keeping the download"
-                            className="st-btn st-btn-secondary st-btn-icon"
-                          >
-                            {offloadingSpeechToText ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleDeleteSpeechToText}
-                            disabled={speechToTextIsCloud || deletingSpeechToText || !speechToTextStatus?.downloaded}
-                            aria-label="Delete local speech model"
-                            title="Delete the downloaded model from disk"
-                            className="st-btn st-btn-danger st-btn-icon"
-                          >
-                            {deletingSpeechToText ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                          </button>
+                          <p className="st-desc mt-1">
+                            {speechProvider ? `Uses your saved ${speechProviderName} API key.` : speechKeyNeeded}
+                          </p>
                         </div>
                       </div>
-                      {speechToTextError && (
-                        <div className="px-4 pb-4">
-                          <Note tone="danger">{speechToTextError}</Note>
-                        </div>
-                      )}
                     </SettingsCard>
 
                   </div>

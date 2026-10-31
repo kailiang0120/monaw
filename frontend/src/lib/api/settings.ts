@@ -92,23 +92,6 @@ export async function fetchSpeechToTextStatus(signal?: AbortSignal): Promise<Spe
   return res.json()
 }
 
-export async function downloadSpeechToTextModel(): Promise<SpeechToTextStatus> {
-  const res = await apiFetch(`${BASE}/api/settings/speech-to-text/download`, { method: 'POST' })
-  if (!res.ok) await throwApiError(res, 'Failed to download speech-to-text model')
-  return res.json()
-}
-
-export async function offloadSpeechToTextModel(): Promise<SpeechToTextStatus> {
-  const res = await apiFetch(`${BASE}/api/settings/speech-to-text/offload`, { method: 'POST' })
-  if (!res.ok) await throwApiError(res, 'Failed to offload speech-to-text model')
-  return res.json()
-}
-
-export async function deleteSpeechToTextModel(): Promise<SpeechToTextStatus> {
-  const res = await apiFetch(`${BASE}/api/settings/speech-to-text/model`, { method: 'DELETE' })
-  if (!res.ok) await throwApiError(res, 'Failed to delete speech-to-text model')
-  return res.json()
-}
 
 export async function fetchSandboxStatus(signal?: AbortSignal): Promise<SandboxStatus> {
   const res = await apiFetch(`${BASE}/api/sandbox/status`, { signal })
