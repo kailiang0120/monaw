@@ -3,7 +3,7 @@ import { FileText, Loader2, Mic, Paperclip, Send, Shield, Square, Terminal, X } 
 import { ContextUsageBar } from './ContextUsageBar'
 import { WorkspacePicker } from './WorkspacePicker'
 import { Dropdown } from './Dropdown'
-import { formatReasoningEffort, providerOptions, reasoningEffortsForProvider } from '../features/settings/settingsConfig'
+import { compactModelLabel, formatReasoningEffort, providerOptions, reasoningEffortsForProvider } from '../features/settings/settingsConfig'
 import { fetchContextUsage } from '../lib/api/conversations'
 import { transcribeSpeech } from '../lib/api/speechToText'
 import { uploadAttachment } from '../lib/api/uploads'
@@ -164,6 +164,7 @@ export function InputBar({
       provider.models.map((model) => ({
         value: `${provider.id}:${model}`,
         label: `${provider.label} · ${model}`,
+        shortLabel: compactModelLabel(provider.id, provider.label, model),
       })),
     )
   const selectedModelAvailable = modelChoices.some(

@@ -5,6 +5,8 @@ import { Check, ChevronDown } from 'lucide-react'
 export interface DropdownOption<T extends string> {
   value: T
   label: string
+  /** Shown on the closed control instead of `label` when space is tight; the menu keeps `label`. */
+  shortLabel?: string
 }
 
 interface Props<T extends string> {
@@ -212,11 +214,12 @@ export function Dropdown<T extends string>({
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
+        title={active?.shortLabel ? active.label : undefined}
         className={`st-select ${size === 'sm' ? 'st-select-sm' : ''}`}
       >
         <span className="flex min-w-0 items-center gap-1.5">
           {icon}
-          <span className="truncate">{active?.label ?? placeholder ?? 'Select'}</span>
+          <span className="truncate">{active?.shortLabel ?? active?.label ?? placeholder ?? 'Select'}</span>
         </span>
         <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>

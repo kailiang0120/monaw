@@ -115,6 +115,9 @@ describe('InputBar model picker', () => {
     fireEvent.change(composer, { target: { value: 'Typing after Settings closes' } })
     expect(composer).toHaveValue('Typing after Settings closes')
 
+    // The closed control uses a short name that fits; the full name stays in the tooltip and menu.
+    expect(screen.getByRole('button', { name: 'Model' })).toHaveTextContent('API · gpt-6-luna')
+    expect(screen.getByRole('button', { name: 'Model' })).toHaveAttribute('title', 'OpenAI API · gpt-6-luna')
     fireEvent.click(screen.getByRole('button', { name: 'Model' }))
     expect(screen.getByRole('option', { name: 'OpenAI account · gpt-6-astra' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'OpenAI API · gpt-6.1-sol' })).toBeInTheDocument()

@@ -53,6 +53,19 @@ export function providerOptions(catalog: ModelOptionsCatalog = FALLBACK_MODEL_OP
   return catalog.providers.length > 0 ? catalog.providers : FALLBACK_MODEL_OPTIONS.providers
 }
 
+const COMPACT_PROVIDER_LABELS: Record<string, string> = {
+  openai: 'API',
+  codex: 'ChatGPT',
+  gemini: 'Gemini',
+}
+
+/** Short "provider · model" text for the composer's model control, e.g. "ChatGPT · gpt-6-luna". */
+export function compactModelLabel(provider: string, label: string, model: string): string {
+  const name = COMPACT_PROVIDER_LABELS[provider] ?? label
+  const shortModel = provider === 'gemini' ? model.replace(/^gemini-/, '').replace(/-latest$/, '') : model
+  return `${name} · ${shortModel}`
+}
+
 export function providerLabel(
   provider: AgentSettings['llm']['provider'],
   catalog: ModelOptionsCatalog = FALLBACK_MODEL_OPTIONS,
