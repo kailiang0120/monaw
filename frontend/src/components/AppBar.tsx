@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { PanelLeftClose, PanelLeftOpen, ShieldAlert, ShieldCheck, ShieldHalf, SquarePen } from 'lucide-react'
+import { Copy, Minus, PanelLeftClose, PanelLeftOpen, ShieldAlert, ShieldCheck, ShieldHalf, Square, SquarePen, X } from 'lucide-react'
 import type { AgentSettings } from '../lib/api/types'
 import { resolveAgentName } from '../lib/identity'
 import appLogo from '../assets/Logo.png'
@@ -42,6 +42,37 @@ function platformClass(): string {
   if (platform === 'darwin') return 'app-bar--mac'
   if (platform) return 'app-bar--caption'
   return ''
+}
+
+// Windows and Linux get Monaw-styled window buttons; macOS keeps its traffic lights.
+function WindowControls() {
+  const api = typeof window !== 'undefined' ? window.electronAPI : undefined
+  const [maximized, setMaximized] = useState(false)
+  useEffect(() => {
+    if (!api?.windowControl) return
+    let active = true
+    let changed = false
+    // A maximize event that arrives first is newer than this initial answer.
+    void api.isWindowMaximized?.().then((value) => { if (active && !changed) setMaximized(value) }, () => {})
+    const stop = api.onWindowMaximized?.((value) => { changed = true; setMaximized(value) })
+    return () => { active = false; stop?.() }
+  }, [api])
+  if (!api?.windowControl || !api.platform || api.platform === 'darwin') return null
+  const control = (action: 'minimize' | 'toggle-maximize' | 'close') => { void api.windowControl?.(action).catch(() => {}) }
+  const maximizeLabel = maximized ? 'Restore' : 'Maximize'
+  return (
+    <div className="app-bar-window-controls no-drag" role="group" aria-label="Window">
+      <button type="button" className="app-bar-icon-button" onClick={() => control('minimize')} aria-label="Minimize" title="Minimize">
+        <Minus size={15} />
+      </button>
+      <button type="button" className="app-bar-icon-button" onClick={() => control('toggle-maximize')} aria-label={maximizeLabel} title={maximizeLabel}>
+        {maximized ? <Copy size={12} className="-scale-x-100" /> : <Square size={12} />}
+      </button>
+      <button type="button" className="app-bar-icon-button app-bar-window-close" onClick={() => control('close')} aria-label="Close" title="Close">
+        <X size={15} />
+      </button>
+    </div>
+  )
 }
 
 export function AppBar({
@@ -182,6 +213,7 @@ export function AppBar({
           <SquarePen size={14} />
           <span>New chat</span>
         </button>
+        <WindowControls />
       </div>
 
     </header>

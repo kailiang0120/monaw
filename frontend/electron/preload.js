@@ -9,6 +9,21 @@ const backendBaseUrl = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(
   ? backendBaseUrlCandidate
   : ''
 const credentialIds = new Set(['openai', 'google', 'tavily', 'telegramBot'])
+const windowActions = new Set(['minimize', 'toggle-maximize', 'close'])
+
+function windowAction(value) {
+  if (typeof value !== 'string' || !windowActions.has(value)) {
+    throw new TypeError('Unsupported window action')
+  }
+  return value
+}
+
+function onWindowMaximized(listener) {
+  if (typeof listener !== 'function') throw new TypeError('Invalid window listener')
+  const handler = (_event, maximized) => listener(Boolean(maximized))
+  ipcRenderer.on('window:maximized', handler)
+  return () => ipcRenderer.removeListener('window:maximized', handler)
+}
 
 function credentialId(value) {
   if (typeof value !== 'string' || !credentialIds.has(value)) {
@@ -60,6 +75,9 @@ const electronAPI = Object.freeze({
   selectDirectory: (defaultPath) => ipcRenderer.invoke('dialog:select-directory', optionalString(defaultPath, 'default path')),
   setTheme: (value) => ipcRenderer.invoke('theme:set', theme(value)),
   writeClipboardText: (text) => ipcRenderer.invoke('clipboard:write-text', safeString(text, 'clipboard text')),
+  windowControl: (action) => ipcRenderer.invoke('window:control', windowAction(action)),
+  isWindowMaximized: () => ipcRenderer.invoke('window:is-maximized'),
+  onWindowMaximized,
   backendBaseUrl,
   platform: process.platform,
   isElectron: true,

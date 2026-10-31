@@ -41,6 +41,8 @@ test('preload API is frozen and validates arguments', () => {
   assert.match(preloadSource, /safeString\(value,\s*'credential value'\)/)
   assert.match(preloadSource, /optionalString\(defaultPath,\s*'default path'\)/)
   assert.match(preloadSource, /theme\(value\)/)
+  assert.match(preloadSource, /windowAction\(action\)/)
+  assert.match(mainSource, /ipcMain\.handle\('window:control', async \(event, action\) => \{\s+assertTrustedIpcSender\(event\)\s+if \(!WINDOW_ACTIONS\.has\(action\)\)/)
 })
 
 test('backend startup defaults to authenticated loopback control plane', () => {

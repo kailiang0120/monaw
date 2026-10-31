@@ -19,6 +19,10 @@ declare global {
       selectDirectory?: (defaultPath?: string) => Promise<string>
       setTheme?: (theme: 'dark' | 'light') => Promise<void>
       writeClipboardText?: (text: string) => Promise<void>
+      windowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => Promise<boolean>
+      isWindowMaximized?: () => Promise<boolean>
+      /** Returns a function that stops listening. */
+      onWindowMaximized?: (listener: (maximized: boolean) => void) => () => void
       backendBaseUrl: string
       platform?: string
       isElectron: boolean

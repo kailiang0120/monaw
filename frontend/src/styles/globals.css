@@ -594,8 +594,6 @@
     color: var(--st-text);
     user-select: none;
     transition: grid-template-columns 220ms ease-in-out;
-    /* Leave room for native caption buttons drawn by Window Controls Overlay. */
-    padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
   }
 
   .app-bar--collapsed {
@@ -828,6 +826,20 @@
     transition: background-color 150ms, border-color 150ms, color 150ms;
   }
 
+  .app-bar-window-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.125rem;
+    margin-left: 0.375rem;
+    padding-left: 0.5rem;
+    border-left: 1px solid var(--st-border);
+  }
+
+  .app-bar-window-close:hover {
+    background: var(--st-danger-soft);
+    color: var(--st-danger);
+  }
+
   .app-bar-new:hover {
     border-color: var(--st-accent-border);
     background: var(--st-accent-soft);
@@ -877,8 +889,8 @@
 }
 
 @layer utilities {
-  /* Full-window overlays stop at the app bar: on Windows the native caption
-     buttons are drawn above the page, so anything under them gets covered. */
+  /* Full-window overlays stop at the app bar so the window buttons and the
+     drag region in it stay usable while a dialog is open. */
   .below-app-bar {
     top: var(--app-bar-height, 0px) !important;
   }

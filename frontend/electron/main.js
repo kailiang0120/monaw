@@ -40,11 +40,7 @@ const APP_THEME_COLORS = {
 }
 // The renderer draws its own app bar; on Windows/Linux the native caption
 // buttons are overlaid on it, so their colors must match the bar surface.
-const APP_BAR_HEIGHT = 44
-const TITLE_BAR_OVERLAY = {
-  dark: { color: '#1a1917', symbolColor: '#b2afa5', height: APP_BAR_HEIGHT },
-  light: { color: '#ecebe3', symbolColor: '#5f5d56', height: APP_BAR_HEIGHT },
-}
+const WINDOW_ACTIONS = new Set(['minimize', 'toggle-maximize', 'close'])
 
 let mainWindow = null
 let backendProcess = null
@@ -456,9 +452,6 @@ function applyNativeTheme(theme) {
   nativeTheme.themeSource = safeTheme
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setBackgroundColor(APP_THEME_COLORS[safeTheme])
-    if (process.platform !== 'darwin') {
-      mainWindow.setTitleBarOverlay(TITLE_BAR_OVERLAY[safeTheme])
-    }
   }
 }
 
@@ -473,10 +466,12 @@ function createWindow() {
     height: 800,
     minWidth: 800,
     minHeight: 600,
+    // On Windows and Linux the renderer draws its own window buttons in the
+    // app bar (window:control), so no native caption buttons are shown.
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
     ...(process.platform === 'darwin'
       ? { frame: false, trafficLightPosition: { x: 16, y: 15 } }
-      : { titleBarOverlay: TITLE_BAR_OVERLAY.dark }),
+      : {}),
     autoHideMenuBar: true,
     backgroundColor: APP_THEME_COLORS.dark,
     ...(appIconPath ? { icon: appIconPath } : {}),
@@ -510,6 +505,9 @@ function createWindow() {
   mainWindow.webContents.on('will-frame-navigate', handleUntrustedNavigation)
   mainWindow.webContents.on('will-redirect', handleUntrustedNavigation)
 
+  const sendMaximized = () => mainWindow?.webContents.send('window:maximized', mainWindow.isMaximized())
+  mainWindow.on('maximize', sendMaximized)
+  mainWindow.on('unmaximize', sendMaximized)
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
@@ -719,6 +717,23 @@ ipcMain.handle('mcp:credential', async (event, input) => {
 ipcMain.handle('theme:set', async (event, theme) => {
   assertTrustedIpcSender(event)
   applyNativeTheme(assertTheme(theme))
+})
+
+ipcMain.handle('window:control', async (event, action) => {
+  assertTrustedIpcSender(event)
+  if (!WINDOW_ACTIONS.has(action)) throw new Error('IPC request rejected: invalid window action')
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (!window) return false
+  if (action === 'minimize') window.minimize()
+  else if (action === 'close') window.close()
+  else if (window.isMaximized()) window.unmaximize()
+  else window.maximize()
+  return window.isMaximized()
+})
+
+ipcMain.handle('window:is-maximized', async (event) => {
+  assertTrustedIpcSender(event)
+  return Boolean(BrowserWindow.fromWebContents(event.sender)?.isMaximized())
 })
 
 ipcMain.handle('clipboard:write-text', async (event, text) => {
