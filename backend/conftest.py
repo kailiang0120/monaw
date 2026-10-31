@@ -23,6 +23,7 @@ TEST_GROUPS = {
         "test_codex_account_provider.py",
         "test_execution_gate.py",
         "test_approval_review.py",
+        "test_approval_injection.py",
         "test_execution_resume.py",
         "test_iteration_budget.py",
         "test_job_manager.py",
