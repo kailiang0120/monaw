@@ -14,7 +14,7 @@
     "build:renderer": "vite build",
     "build": "vite build",
     "test": "vitest run && npm run test:electron",
-    "test:electron": "node --test electron/*.test.cjs",
+    "test:electron": "node scripts/run-electron-tests.cjs",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "verify": "npm run test && npm run typecheck && npm run build:renderer",
