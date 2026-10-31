@@ -31,7 +31,9 @@ DEFAULT_EMBEDDING_MODELS = {'openai': 'text-embedding-3-small', 'gemini': 'gemin
 GEMINI_EMBEDDING_DIMENSIONS = 768
 # Cosine similarity a memory needs to count as a match. Models spread their
 # scores differently: Gemini rates unrelated text higher than OpenAI does.
-# These are starting points, not values tuned on real memories.
+# OpenAI's value is the best F1 on scripts/calibrate-memory-embeddings.py
+# (related pairs median 0.42, unrelated median 0.09). Gemini's and the local
+# value have not been measured yet; run that script with a Google key.
 SIMILARITY_THRESHOLDS = {'openai': 0.3, 'gemini': 0.65, 'local': 0.45}
 
 
