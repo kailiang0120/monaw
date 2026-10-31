@@ -76,6 +76,8 @@ The measurements above are for the first candidates, which bundled local Whisper
 
 Built from branch `drop-local-speech` in 168 s; SHA-256 `2AB73F4D8E202CF3580AAC9D5C56313CF559518F10DFDBD970FF9D030D27F4BD`. The packaged-app checks passed (5 of 5, 29.8 s). The frozen backend imports the OpenAI transcription client, the Gemini client and the MCP clients. With `measure-baseline.ps1 -SkipTests`: cold start 1.71 s, warm 1.58 s, no API requests while idle for 60 s, fresh database 4,096 bytes. A first run of the same measurement counted 16 idle requests per minute; a manual launch showed every request inside the first seconds of startup, and the repeat measured none.
 
+After merging with the hybrid memory retrieval work, `main` built in 117 s: `Monaw-Setup-1.0.0-x64.exe`, 133.3 MB (139,743,918 bytes), SHA-256 `21425334263137A136D83F8F5512A53FC4116B1029F591B5A47B6FBE54E5E888`, installed size 390 MB. The packaged-app checks passed (5 of 5, 28.4 s), and the frozen backend passed the memory smoke check (semantic recall on the first query through a local embedding test server, workspace isolation, restart, forgetting and rebuilding the index). Two baseline runs: cold start 2.36 s and 1.76 s, warm 1.59 s and 1.73 s, fresh database 4,096 bytes; idle API requests 0 and 4 per minute. Across five runs today the idle count was 0, 16, 0, 0 and 4, which points to late startup requests landing in the observation window rather than polling; the baseline script does not yet separate the two.
+
 The PyInstaller spec leaves out `mcp.cli`, the MCP command-line tool, which needs `typer`; `typer` arrived only through `huggingface_hub`.
 
 ## Licensing to resolve before publishing
