@@ -554,10 +554,7 @@ export interface AgentSettings {
     max_llm_call_seconds: number
   }
   speech_to_text: {
-    engine: 'local' | 'cloud'
-    local_model: string
-    cloud_provider: 'gemini'
-    cloud_model: string
+    provider: SpeechToTextProvider
   }
   mcp: {
     enabled: boolean
@@ -651,20 +648,15 @@ export interface ModelOptions {
   }>
 }
 
+/** "auto" uses whichever OpenAI or Google key is saved. */
+export type SpeechToTextProvider = 'auto' | 'openai' | 'gemini'
+
 export interface SpeechToTextStatus {
-  provider: 'faster-whisper'
-  label: string
-  engine: 'local' | 'cloud'
-  cloud_provider: 'gemini'
-  cloud_model: string
-  cloud_configured: boolean
-  model_id: string
-  model_label: string
-  model_size: string
-  downloaded: boolean
-  download_dir: string
-  dependency_available: boolean
-  loaded: boolean
+  provider: SpeechToTextProvider
+  /** The provider voice input uses now; empty when it has no key. */
+  active_provider: '' | 'openai' | 'gemini'
+  model: string
+  configured: boolean
 }
 
 export interface SpeechToTextTranscription {

@@ -28,12 +28,7 @@
     "test:packaged": "npm run typecheck:app && playwright test -c playwright.packaged.config.ts"
   },
   "dependencies": {
-    "electron-store": "^8.2.0",
-    "lucide-react": "^0.446.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-markdown": "^9.0.1",
-    "remark-gfm": "^4.0.0"
+    "electron-store": "^8.2.0"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
@@ -47,7 +42,12 @@
     "electron": "^41.3.0",
     "electron-builder": "^26.18.0",
     "jsdom": "^29.0.2",
+    "lucide-react": "^0.446.0",
     "postcss": "^8.4.47",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0",
     "tailwindcss": "^3.4.13",
     "typescript": "^5.5.3",
     "vite": "^8.0.10",
@@ -95,6 +95,9 @@
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
       "artifactName": "Monaw-Setup-${version}-x64.${ext}"
-    }
+    },
+    "electronLanguages": [
+      "en-US"
+    ]
   }
 }

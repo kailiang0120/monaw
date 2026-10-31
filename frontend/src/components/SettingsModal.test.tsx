@@ -21,11 +21,7 @@ const mocks = vi.hoisted(() => ({
   startOpenAIAccountLogin: vi.fn(),
   logoutOpenAIAccount: vi.fn(),
   fetchSandboxStatus: vi.fn(),
-  fetchSpeechToTextStatus: vi.fn(),
   fetchWorkspaceInstructions: vi.fn(),
-  downloadSpeechToTextModel: vi.fn(),
-  offloadSpeechToTextModel: vi.fn(),
-  deleteSpeechToTextModel: vi.fn(),
   updateWorkspaceInstructions: vi.fn(),
   resetWorkspaceInstructions: vi.fn(),
   updateSettings: vi.fn(),
@@ -71,11 +67,7 @@ vi.mock('../lib/api/settings', () => ({
   startOpenAIAccountLogin: mocks.startOpenAIAccountLogin,
   logoutOpenAIAccount: mocks.logoutOpenAIAccount,
   fetchSandboxStatus: mocks.fetchSandboxStatus,
-  fetchSpeechToTextStatus: mocks.fetchSpeechToTextStatus,
   fetchWorkspaceInstructions: mocks.fetchWorkspaceInstructions,
-  downloadSpeechToTextModel: mocks.downloadSpeechToTextModel,
-  offloadSpeechToTextModel: mocks.offloadSpeechToTextModel,
-  deleteSpeechToTextModel: mocks.deleteSpeechToTextModel,
   updateWorkspaceInstructions: mocks.updateWorkspaceInstructions,
   resetWorkspaceInstructions: mocks.resetWorkspaceInstructions,
   updateSettings: mocks.updateSettings,
@@ -92,10 +84,7 @@ function buildSettings(overrides: Record<string, unknown> = {}) {
       max_llm_call_seconds: 300,
     },
     speech_to_text: {
-      engine: 'local',
-      local_model: 'base',
-      cloud_provider: 'gemini',
-      cloud_model: 'gemini-2.5-flash',
+      provider: 'auto',
     },
     mcp: {
       enabled: true,
@@ -326,66 +315,6 @@ describe('SettingsModal', () => {
       default_network: 'deny',
       default_write_strategy: 'copy_out',
       backends: {},
-    })
-    mocks.fetchSpeechToTextStatus.mockResolvedValue({
-      provider: 'faster-whisper',
-      label: 'Powered by faster-whisper',
-      engine: 'local',
-      cloud_provider: 'gemini',
-      cloud_model: 'gemini-2.5-flash',
-      cloud_configured: true,
-      model_id: 'base',
-      model_label: 'Whisper base',
-      model_size: '~142 MB',
-      downloaded: false,
-      download_dir: 'C:/runtime/models/faster-whisper/base',
-      dependency_available: true,
-      loaded: false,
-    })
-    mocks.downloadSpeechToTextModel.mockResolvedValue({
-      provider: 'faster-whisper',
-      label: 'Powered by faster-whisper',
-      engine: 'local',
-      cloud_provider: 'gemini',
-      cloud_model: 'gemini-2.5-flash',
-      cloud_configured: true,
-      model_id: 'base',
-      model_label: 'Whisper base',
-      model_size: '~142 MB',
-      downloaded: true,
-      download_dir: 'C:/runtime/models/faster-whisper/base',
-      dependency_available: true,
-      loaded: false,
-    })
-    mocks.offloadSpeechToTextModel.mockResolvedValue({
-      provider: 'faster-whisper',
-      label: 'Powered by faster-whisper',
-      engine: 'local',
-      cloud_provider: 'gemini',
-      cloud_model: 'gemini-2.5-flash',
-      cloud_configured: true,
-      model_id: 'base',
-      model_label: 'Whisper base',
-      model_size: '~142 MB',
-      downloaded: true,
-      download_dir: 'C:/runtime/models/faster-whisper/base',
-      dependency_available: true,
-      loaded: false,
-    })
-    mocks.deleteSpeechToTextModel.mockResolvedValue({
-      provider: 'faster-whisper',
-      label: 'Powered by faster-whisper',
-      engine: 'local',
-      cloud_provider: 'gemini',
-      cloud_model: 'gemini-2.5-flash',
-      cloud_configured: true,
-      model_id: 'base',
-      model_label: 'Whisper base',
-      model_size: '~142 MB',
-      downloaded: false,
-      download_dir: 'C:/runtime/models/faster-whisper/base',
-      dependency_available: true,
-      loaded: false,
     })
     mocks.fetchWorkspaceInstructions.mockResolvedValue({
       path: 'C:/Users/Kai/.monaw/workspace/AGENTS.md',
@@ -618,16 +547,32 @@ describe('SettingsModal', () => {
     expect(await screen.findByText('No skills added yet. Ask Monaw to create one, and it will appear here.')).toBeInTheDocument()
   })
 
-  it('shows faster-whisper speech-to-text status and downloads the local model', async () => {
+  it('shows which saved API key voice input uses', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
-    expect(await screen.findByText('Whisper base (~142 MB)')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /Download local speech model/i }))
+    expect(await screen.findByText('Using OpenAI')).toBeInTheDocument()
+    expect(screen.getByText('Uses your saved OpenAI API key.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /speech model/i })).not.toBeInTheDocument()
 
-    await waitFor(() => {
-      expect(mocks.downloadSpeechToTextModel).toHaveBeenCalled()
-    })
-    expect(await screen.findByRole('button', { name: /Download local speech model/i })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Speech provider' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Google' }))
+
+    expect(await screen.findByText('Using Google')).toBeInTheDocument()
+  })
+
+  it('asks for an API key before voice input can be used', async () => {
+    vi.mocked(fetchSettings).mockResolvedValue(buildSettings({
+      api_keys: {
+        has_openai_key: false,
+        has_google_key: false,
+        has_tavily_key: false,
+        has_telegram_bot_token: false,
+      },
+    }) as any)
+    render(<SettingsModal onClose={() => {}} />)
+
+    expect(await screen.findByText('Key needed')).toBeInTheDocument()
+    expect(screen.getByText('Save an OpenAI or Google API key in Connections.')).toBeInTheDocument()
   })
 
   it('uses masked Electron credential status without reading plaintext keys', async () => {

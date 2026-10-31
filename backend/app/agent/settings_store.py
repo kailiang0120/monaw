@@ -129,22 +129,19 @@ class LLMSettings(BaseModel):
 
 
 class SpeechToTextSettings(BaseModel):
-    engine: Literal["local", "cloud"] = "local"
-    local_model: str = "base"
-    cloud_provider: Literal["gemini"] = "gemini"
-    cloud_model: str = "gemini-2.5-flash"
+    # "auto" uses whichever OpenAI or Google key is saved.
+    provider: Literal["auto", "openai", "gemini"] = "auto"
 
-    @model_validator(mode="after")
-    def normalize_values(self) -> "SpeechToTextSettings":
-        if self.engine not in {"local", "cloud"}:
-            self.engine = "local"
-        if not self.local_model:
-            self.local_model = "base"
-        if self.cloud_provider != "gemini":
-            self.cloud_provider = "gemini"
-        if not self.cloud_model or self.cloud_model == "gemini-3.1-flash-lite":
-            self.cloud_model = "gemini-2.5-flash"
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_local_engine(cls, value: Any) -> Any:
+        # Settings from before local Whisper was removed hold engine/cloud_*
+        # fields. Choosing the cloud engine meant Gemini; local becomes auto.
+        if isinstance(value, dict) and "provider" not in value:
+            return {"provider": "gemini" if value.get("engine") == "cloud" else "auto"}
+        if isinstance(value, dict) and value.get("provider") not in {"auto", "openai", "gemini"}:
+            return {**value, "provider": "auto"}
+        return value
 
 
 class MCPServerConfig(BaseModel):

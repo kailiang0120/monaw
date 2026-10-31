@@ -91,9 +91,6 @@ unauthenticated runtime endpoint.
 | `POST` | `/api/settings/mcp-credentials/revoke` | `mcp:credentials` | `stream/file/none` |
 | `GET` | `/api/settings/model-options` | `settings:read` | `ModelOptionsPayload` |
 | `GET` | `/api/settings/speech-to-text` | `settings:read` | `SpeechToTextStatusPayload` |
-| `POST` | `/api/settings/speech-to-text/download` | `settings:write` | `SpeechToTextStatusPayload` |
-| `DELETE` | `/api/settings/speech-to-text/model` | `settings:write` | `SpeechToTextStatusPayload` |
-| `POST` | `/api/settings/speech-to-text/offload` | `settings:write` | `SpeechToTextStatusPayload` |
 | `DELETE` | `/api/settings/workspace-instructions` | `settings:write` | `WorkspaceInstructionsPayload` |
 | `GET` | `/api/settings/workspace-instructions` | `settings:read` | `WorkspaceInstructionsPayload` |
 | `PUT` | `/api/settings/workspace-instructions` | `settings:write` | `WorkspaceInstructionsPayload` |

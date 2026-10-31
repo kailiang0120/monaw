@@ -51,7 +51,6 @@ Windows 11 x64 development machine; Python 3.11 backend, Electron 41.3.0, PyInst
 | Installer | 220 MB |
 | Frozen backend to `/health`, standalone | 1.3–1.7 seconds |
 | Packaged app launch to healthy backend, first start | 4 seconds |
-| Optional download | The local speech model (Whisper base, about 142 MB) downloads only when the user asks for it |
 
 With `PATH` limited to the Windows folders (no Python, uv, Node, npm or Git), the frozen backend served `/health` and authenticated API calls. It loaded every built-in skill from disk, with web search unavailable only because no Tavily key was set. It started the built-in browser server through `-m` (connected, 20 tools) and ran `-c`. The packaged app started the frozen backend, the renderer made authenticated calls, and killing the app left no Monaw processes.
 
@@ -63,9 +62,25 @@ Built from commit `fdf05ae`: `Monaw-Setup-1.0.0-x64.exe`, 220.4 MB, SHA-256 `F7F
 
 Built from commit `378725e`, the first commit on which GitHub-hosted CI passed every job, in 196 s: `Monaw-Setup-1.0.0-x64.exe`, 220.4 MB (231,089,429 bytes), SHA-256 `671FE209AC83B3064D9AF92BE19A75604CDBB53F08AC0EA4302945DAB20D9F5D`. Unsigned and not installed. With `measure-baseline.ps1 -SkipTests`: cold start to a healthy backend 1.76 s, warm 1.57 s, no API requests while idle for 60 s, fresh database 4,096 bytes. The packaged-app checks passed (5 of 5, 26.3 s). The version is still 1.0.0, so this file replaces the `fdf05ae` installer of the same name.
 
+### Size reduction (cloud-only speech)
+
+The measurements above are for the first candidates, which bundled local Whisper. Speech-to-text now goes to OpenAI or Google with the user's API key, so the frozen backend no longer carries `faster-whisper`, `ctranslate2`, `onnxruntime`, `av`, `imageio-ffmpeg`, `tokenizers`, `huggingface_hub` or `numpy`. The package also ships only Chromium's `en-US` language pack (`electronLanguages`), and `app.asar` no longer contains `node_modules` the renderer bundle already includes: React, the Markdown renderer and the icons moved to `devDependencies`, leaving `electron-store`, which the main process loads.
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| Installer | 220.4 MB | 133.2 MB (139,706,176 bytes) |
+| Installed size | 755 MB | 390 MB |
+| Frozen backend | 381 MB, 1,422 files | 86 MB, 1,228 files |
+| `app.asar` | 34 MB | 6.1 MB |
+| Chromium language packs | 55 | 1 |
+
+Built from branch `drop-local-speech` in 168 s; SHA-256 `2AB73F4D8E202CF3580AAC9D5C56313CF559518F10DFDBD970FF9D030D27F4BD`. The packaged-app checks passed (5 of 5, 29.8 s). The frozen backend imports the OpenAI transcription client, the Gemini client and the MCP clients. With `measure-baseline.ps1 -SkipTests`: cold start 1.71 s, warm 1.58 s, no API requests while idle for 60 s, fresh database 4,096 bytes. A first run of the same measurement counted 16 idle requests per minute; a manual launch showed every request inside the first seconds of startup, and the repeat measured none.
+
+The PyInstaller spec leaves out `mcp.cli`, the MCP command-line tool, which needs `typer`; `typer` arrived only through `huggingface_hub`.
+
 ## Licensing to resolve before publishing
 
-The ffmpeg executable bundled by `imageio-ffmpeg` is a GPLv3 build (`--enable-gpl --enable-version3`, with x264 and x265). Monaw is Apache-2.0. Distributing that binary in the installer carries GPLv3 obligations for it. The options are to ship an LGPL ffmpeg build, decode audio through the `av` libraries already bundled, or download ffmpeg on demand. Speech-to-text is its only user (`backend/app/agent/speech_to_text.py`). Other bundled native packages checked (`av`, `ctranslate2`, `onnxruntime`, `faster-whisper`, `pywin32`) use permissive licenses. A complete third-party notice file has not been produced.
+The GPLv3 ffmpeg build that `imageio-ffmpeg` used to bundle is gone with local speech-to-text. Other bundled native packages checked (`pywin32`) use permissive licenses. A complete third-party notice file has not been produced.
 
 ## Not yet verified
 

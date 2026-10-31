@@ -633,15 +633,11 @@ def test_runtime_namespace_includes_identity_settings():
 
 def test_runtime_namespace_includes_speech_to_text_settings():
     settings_data = AgentSettings()
-    settings_data.speech_to_text.engine = "cloud"
-    settings_data.speech_to_text.cloud_model = "gemini-2.5-flash"
+    settings_data.speech_to_text.provider = "gemini"
 
     runtime = build_runtime_namespace(_base_settings(), settings_data)
 
-    assert runtime.speech_to_text.engine == "cloud"
-    assert runtime.speech_to_text.local_model == "base"
-    assert runtime.speech_to_text.cloud_provider == "gemini"
-    assert runtime.speech_to_text.cloud_model == "gemini-2.5-flash"
+    assert runtime.speech_to_text.provider == "gemini"
 
 
 def test_runtime_namespace_includes_llm_runtime_limits():

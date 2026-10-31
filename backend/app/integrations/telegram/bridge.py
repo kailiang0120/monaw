@@ -42,9 +42,8 @@ from app.integrations.telegram.agent_bridge import (
 )
 from app.agent.speech_to_text import (
     MAX_TRANSCRIPTION_BYTES,
-    VOICE_MODEL_NOT_READY_MESSAGE,
-    SpeechToTextCloudNotConfigured,
-    SpeechToTextModelMissing,
+    VOICE_INPUT_NOT_CONFIGURED_MESSAGE,
+    SpeechToTextNotConfigured,
     transcribe_audio_file,
 )
 
@@ -1051,10 +1050,10 @@ async def _handle_authorized_message(update: Update, context: ContextTypes.DEFAU
             context,
             conversation_id=conversation_id,
         )
-    except (SpeechToTextModelMissing, SpeechToTextCloudNotConfigured) as exc:
+    except SpeechToTextNotConfigured as exc:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=str(exc) or VOICE_MODEL_NOT_READY_MESSAGE,
+            text=str(exc) or VOICE_INPUT_NOT_CONFIGURED_MESSAGE,
         )
         return
     except Exception as exc:

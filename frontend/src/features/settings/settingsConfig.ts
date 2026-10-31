@@ -242,11 +242,24 @@ const emptyIdentity = (): AgentSettings['identity'] => ({
   communication_style: '',
 })
 
+/**
+ * The provider voice input uses, or '' without a key. Mirrors the backend's
+ * resolve_stt_provider: "auto" follows the chat provider when its key is saved,
+ * then prefers OpenAI, then Google.
+ */
+export function activeSpeechProvider(
+  preference: AgentSettings['speech_to_text']['provider'],
+  keys: { openai: boolean; gemini: boolean },
+  chatProvider: string,
+): '' | 'openai' | 'gemini' {
+  if (preference !== 'auto') return keys[preference] ? preference : ''
+  if ((chatProvider === 'openai' || chatProvider === 'gemini') && keys[chatProvider]) return chatProvider
+  if (keys.openai) return 'openai'
+  return keys.gemini ? 'gemini' : ''
+}
+
 const emptySpeechToText = (): AgentSettings['speech_to_text'] => ({
-  engine: 'local',
-  local_model: 'base',
-  cloud_provider: 'gemini',
-  cloud_model: 'gemini-2.5-flash',
+  provider: 'auto',
 })
 
 export const emptySandbox = (): AgentSettings['sandbox'] => ({
@@ -358,14 +371,7 @@ export function normalizeDraft(
       embedding_timeout: settings.memory?.embedding_timeout ?? 5,
     },
     speech_to_text: {
-      ...emptySpeechToText(),
-      ...(settings.speech_to_text ?? {}),
-      engine: settings.speech_to_text?.engine === 'cloud' ? 'cloud' : 'local',
-      cloud_provider: 'gemini',
-      cloud_model: settings.speech_to_text?.cloud_model === 'gemini-3.1-flash-lite'
-        ? 'gemini-2.5-flash'
-        : settings.speech_to_text?.cloud_model || 'gemini-2.5-flash',
-      local_model: settings.speech_to_text?.local_model || 'base',
+      provider: (['auto', 'openai', 'gemini'] as const).find((provider) => provider === settings.speech_to_text?.provider) ?? 'auto',
     },
     sandbox: {
       ...emptySandbox(),

@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -21,13 +20,7 @@ from app.agent.settings_store import (
     settings_version,
 )
 from app.agent.ui_events import publish_ui_event
-from app.agent.speech_to_text import (
-    SpeechToTextDependencyMissing,
-    delete_stt_model,
-    download_default_stt_model,
-    offload_stt_model,
-    speech_to_text_status,
-)
+from app.agent.speech_to_text import speech_to_text_status
 from app.agent.workspace_instructions import (
     reset_workspace_instruction_file,
     save_workspace_instruction_content,
@@ -274,27 +267,6 @@ async def reset_workspace_instructions():
 @router.get("/settings/speech-to-text", response_model=SpeechToTextStatusPayload)
 async def get_speech_to_text_status():
     return speech_to_text_status()
-
-
-@router.post("/settings/speech-to-text/download", response_model=SpeechToTextStatusPayload)
-async def download_speech_to_text_model():
-    try:
-        return await asyncio.to_thread(download_default_stt_model)
-    except SpeechToTextDependencyMissing as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Failed to download speech-to-text model.")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@router.post("/settings/speech-to-text/offload", response_model=SpeechToTextStatusPayload)
-async def offload_speech_to_text_model():
-    return offload_stt_model()
-
-
-@router.delete("/settings/speech-to-text/model", response_model=SpeechToTextStatusPayload)
-async def delete_speech_to_text_model():
-    return delete_stt_model()
 
 
 @router.get("/settings/controller-policy", response_model=ControllerPolicyOut)
