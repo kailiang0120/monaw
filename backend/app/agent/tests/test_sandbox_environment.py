@@ -164,6 +164,24 @@ def test_exec_tool_blocks_explicit_secret_env(monkeypatch, tmp_path):
     assert result["sandbox"]["blocked_env_keys"] == ["OPENAI_API_KEY"]
 
 
+def test_exec_tool_blocks_env_that_changes_which_code_runs(monkeypatch, tmp_path):
+    _allow_exec(monkeypatch)
+    shell, command = _python_env_command("NODE_OPTIONS")
+
+    result = json.loads(
+        exec_tools.exec_tool(
+            command,
+            shell=shell,
+            workdir=str(tmp_path),
+            env={"NODE_OPTIONS": "--require C:\\Users\\Public\\evil.js"},
+        )
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "code_loading_env_not_supported"
+    assert result["blocked_env_keys"] == ["NODE_OPTIONS"]
+
+
 def test_exec_start_uses_sanitized_env(monkeypatch, tmp_path):
     _allow_exec(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "should-not-leak")

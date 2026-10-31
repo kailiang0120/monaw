@@ -20,6 +20,10 @@ from app.agent.sandbox.models import (
 from app.agent.settings_store import PermissionSettings, SandboxSettings
 from app.agent.permission_actions import ActionType, requires_confirmation
 
+_DOWNLOADERS = (
+    r"(?:curl|wget|irm|iwr|Invoke-RestMethod|Invoke-WebRequest|DownloadString|DownloadData|DownloadFile|Start-BitsTransfer)"
+)
+
 _UNTRUSTED_PATTERNS = [
     r"\bcurl\b.*\|\s*(sh|bash|cmd|powershell|pwsh)\b",
     r"\bwget\b.*\|\s*(sh|bash)\b",
@@ -35,7 +39,38 @@ _UNTRUSTED_PATTERNS = [
     r"\buv\s+pip\s+install\b",
     r"\bpoetry\s+install\b",
     r"\bpython\s+setup\.py\b",
-    r"\bgit\s+clone\b.*(&&|;|\|)",
+    r"\bgit\s+clone\b[\s\S]*(&&|;|\||\n)",
+    # Download and evaluate without a pipe, or pipe into an interpreter.
+    rf"\b(?:iex|Invoke-Expression)\b[\s\S]*\b{_DOWNLOADERS}\b",
+    rf"\[scriptblock\]::Create\b[\s\S]*\b{_DOWNLOADERS}\b",
+    rf"\b{_DOWNLOADERS}\b.*\|\s*(?:iex|Invoke-Expression|powershell|pwsh|cmd)\b",
+    rf"\b{_DOWNLOADERS}\b.*\|\s*(?:python[\d.]*|py|node|perl|ruby|php)(?:\.exe)?\s*-?\s*(?:$|[|;&)])",
+    r"\b(?:sh|bash|zsh|dash|eval|source)\b.*(?:\$\(|<\()\s*(?:curl|wget)\b",
+    r"\b(?:curl|wget)\b.*\|\s*(?:zsh|dash)\b",
+    rf"\b{_DOWNLOADERS}\b[^\n]*?(?:\s-o\b|--output\b|-OutFile\b|\s>\s*\S)[\s\S]*?(?:&&|;|\|\||\n)\s*&?\s*"
+    r"(?:sh|bash|zsh|pwsh|powershell|cmd|python[\d.]*|py|node|msiexec|Start-Process|\.{1,2}[\\/])",
+    r"\b(?:exec|eval)\s*\(.*\b(?:urlopen|requests\.get|urllib\.request)\b",
+    # Encoded PowerShell hides the script from the approval.
+    r"\b(?:powershell|pwsh)(?:\.exe)?\b[^|;&\n]*\s-(?:e|ec|en[a-z]*)\b",
+    # Windows binaries that fetch or run remote code.
+    r"\bcertutil\b.*\s-urlcache\b",
+    r"\bbitsadmin\b.*\s/transfer\b",
+    r"\bmshta\b",
+    r"\bregsvr32\b.*\s/i:\s*\S*https?:",
+    r"\bmsiexec\b.*https?://",
+    r"\brundll32\b.*javascript:",
+    # Package installs under other spellings, and package runners.
+    r"\bnpm\s+(?:i|in|ins|inst|insta|instal|isnt|isntall|add|exec)\b",
+    r"\b(?:yarn|pnpm|bun)\s+(?:install|i|add)\b",
+    r"\bbunx\b",
+    r"\bnpx\b[^\n|;&]*\s(?:-y|--yes|-p|--package)\b",
+    r"\buvx\b",
+    r"\buv\s+tool\s+(?:install|run)\b",
+    r"\bpipx\s+run\b",
+    r"\b(?:winget|choco|scoop|gem|cargo|go)\s+install\b",
+    r"\bgo\s+run\s+\S+@",
+    r"\bInstall-(?:Module|Package|Script)\b",
+    r"\bdeno\s+run\b.*https?://",
 ]
 
 _CONTAINED_UNTRUSTED_PATTERNS = [
@@ -444,19 +479,76 @@ _BLOCKED_PATTERNS = [
     r"\bbcdedit\b",
     r"\btakeown\b",
     r"\bicacls\b\s+[A-Za-z]:\\",
-    r"\brm\s+-rf\s+/",
     r"\bRemove-Item\b(?=[\s\S]*\s-Recurse\b)(?=[\s\S]*\s-Force\b)(?=[\s\S]*[A-Za-z]:\\)",
-    r"\breg\s+(add|delete|save|restore)\b",
+    r"\breg\s+(add|delete|save|restore|import|copy|load|unload)\b",
     r"\bSet-ItemProperty\b.*Registry::",
+    r"\b(?:Set|New|Remove|Rename|Clear|Copy|Move)-Item(?:Property)?\b.*\b(?:HKLM|HKCU|HKCR|HKU|HKCC):",
+    r"\bvssadmin\b.*\bdelete\s+shadows\b",
+    r"\bwmic\b.*\bshadowcopy\b.*\bdelete\b",
+    r"\bWin32_ShadowCopy\b.*\bRemove-(?:CimInstance|WmiObject)\b",
+    r"\b(?:Clear-Disk|Initialize-Disk|Remove-Partition)\b",
+    r"\b(?:Set|Add|Remove)-MpPreference\b",
+    r"\bnetsh\b.*\b(?:advfirewall|firewall)\b.*\b(?:set|add|delete)\b",
 ]
+
+_DELETE_EXECUTABLES = {"rm", "remove-item", "ri", "del", "erase", "rd", "rmdir"}
+# Drives, the filesystem root, home and system folders, as a delete target.
+_ROOT_TARGET = re.compile(
+    r"/|~|\\|\$home|\$\{home\}|\$env:(?:userprofile|systemroot|windir|systemdrive|homedrive)"
+    r"|%(?:userprofile|systemroot|windir|systemdrive)%|[a-z]:|/[a-z]|/mnt/[a-z]"
+    r"|[a-z]:[\\/](?:windows|users|program files(?: \(x86\))?)",
+    re.IGNORECASE,
+)
+
+
+def _command_variants(command: str) -> list[str]:
+    """The command with line continuations joined, plus a copy without the
+    PowerShell backtick and cmd caret escapes that hide names like i`ex."""
+    joined = re.sub(r"[\\`^]\r?\n", " ", str(command or ""))
+    unescaped = re.sub(r"[`^](?=[A-Za-z])", "", joined)
+    return [joined] if unescaped == joined else [joined, unescaped]
+
+
+def _is_root_target(token: str) -> bool:
+    trimmed = token.strip("'\"")
+    return bool(_ROOT_TARGET.fullmatch(trimmed.rstrip("/\\*.") or trimmed[:1]))
+
+
+def _deletes_a_root(command: str) -> bool:
+    """A recursive delete of a root, home or system folder in any flag order
+    or shell spelling: rm -r -f /, rd /s /q C:\\, ri C:\\ -r -fo."""
+    for segment in re.split(r"&&|\|\||[;|\n]", command):
+        tokens = segment.split()
+        if not tokens or tokens[0].lower().removesuffix(".exe") not in _DELETE_EXECUTABLES:
+            continue
+        posix = tokens[0].lower() == "rm"
+        recursive = False
+        targets = []
+        for token in tokens[1:]:
+            lowered = token.lower()
+            if lowered in {"/s", "--recursive"}:
+                recursive = True
+            elif lowered.startswith("-") and not lowered.startswith("--"):
+                # rm bundles flags (-rf, -Rf); PowerShell abbreviates -Recurse.
+                recursive = recursive or ("r" in lowered[1:] if posix else lowered[1:].startswith("r"))
+            elif not lowered.startswith("--") and not (not posix and re.fullmatch(r"/[a-z]", lowered)):
+                # cmd switches (/q, /f) look like Git Bash drives (/c) only outside rm.
+                targets.append(token)
+        if recursive and any(_is_root_target(target) for target in targets):
+            return True
+    return False
 
 
 def classify_command(command: str, *, default_profile: SandboxProfile = "standard") -> SandboxProfile:
-    text = str(command or "")
-    if any(re.search(pattern, text, re.IGNORECASE) for pattern in _BLOCKED_PATTERNS):
+    variants = _command_variants(command)
+    if any(
+        _deletes_a_root(text) or any(re.search(pattern, text, re.IGNORECASE) for pattern in _BLOCKED_PATTERNS)
+        for text in variants
+    ):
         return "blocked"
-    if any(re.search(pattern, text, re.IGNORECASE) for pattern in _UNTRUSTED_PATTERNS):
+    if any(re.search(pattern, text, re.IGNORECASE) for pattern in _UNTRUSTED_PATTERNS for text in variants):
         return "untrusted"
+    text = variants[0]
     if any(re.search(pattern, text, re.IGNORECASE) for pattern in _HOST_REQUIRED_PATTERNS):
         return "host_required"
     return default_profile

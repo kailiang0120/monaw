@@ -33,12 +33,21 @@ The agent workspace is an allowed bind root by default. `direct_rw` mounts the e
 
 ## Environment and troubleshooting
 
-Subprocesses receive a minimal environment allowlist. Secret-looking explicit variables are rejected with `secret_env_not_supported`. All runners clamp execution time and captured output; Docker also applies container resource limits.
+Subprocesses receive a minimal environment allowlist. Secret-looking explicit variables are rejected with `secret_env_not_supported`. Explicit variables that change which code runs (`PATH`, `PATHEXT`, `COMSPEC`, `PSModulePath`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `BASH_ENV`, `LD_*`, `GIT_SSH_COMMAND`, `GIT_CONFIG*`, `NPM_CONFIG_*`, pip index URLs and similar) are rejected with `code_loading_env_not_supported`, because an approval shows the command and not its environment. All runners clamp execution time and captured output; Docker also applies container resource limits.
 
 - `sandbox_backend_unavailable`: install/start Docker, resolve a pinned image, or choose auto/host mode.
 - `docker_image_not_pinned`: use **Resolve & pull** in Settings or enter an immutable `name@sha256:<digest>` reference.
 - `shell_execution_disabled`: change the mode from `off` only if shell execution is intended.
 - `unsupported_shell_for_backend`: Docker supports bash commands only; `auto` reports a host fallback under the selected permission mode for incompatible shell syntax, while `docker`/`enforce` block it.
+
+## Command classification
+
+Before choosing a backend, each command is classified as `blocked`, `untrusted`, `host_required` or the default profile. Matching runs on the command as written and on a copy with line continuations joined and PowerShell backtick and cmd caret escapes removed, so `i`ex` and `c^url` match like `iex` and `curl`.
+
+- `blocked` (never runs): recursive deletes of a drive, the filesystem root, the home folder or a system folder in any flag order or shell (`rm -r -f /`, `rd /s /q C:\`, `ri C:\ -r -fo`); registry writes through `reg` or PowerShell registry drives; shadow-copy deletion; disk wiping; Defender preference changes; firewall changes; boot and ownership changes. Deleting an ordinary absolute path such as `/tmp/build` is not blocked.
+- `untrusted` (always asks, only you can approve on the host): download-and-run with or without a pipe (`iex (irm …)`, `bash -c "$(curl …)"`, `curl … | python`, download to a file then run it), encoded PowerShell (`-EncodedCommand`, `-enc`, `-e`), Windows downloaders and remote installers (`certutil -urlcache`, `bitsadmin /transfer`, `mshta`, `regsvr32 /i:http…`, `msiexec http…`), package installs and package runners (`npm i/add`, `yarn/pnpm/bun add`, `npx -y`, `uvx`, `pipx run`, `winget/choco/scoop/gem/cargo/go install`, `Install-Module`), and clone-then-run.
+
+`backend/app/agent/tests/test_sandbox_adversarial.py` holds these shapes, plus ordinary lookalikes that must stay unflagged.
 
 ## Permission and execution boundaries
 

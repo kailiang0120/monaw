@@ -51,6 +51,7 @@ TEST_GROUPS = {
         "test_core_tools.py",
     },
     "sandbox": {
+        "test_sandbox_adversarial.py",
         "test_sandbox_disclosure.py",
         "test_sandbox.py",
         "test_sandbox_docker.py",

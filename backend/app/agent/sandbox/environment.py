@@ -49,6 +49,49 @@ _SECRET_PREFIXES = (
 )
 
 
+# Variables that change which code a command runs. An approval shows the
+# command, not its environment, so these would make "node --version" load
+# any script unseen.
+_CODE_LOADING_ENV_KEYS = {
+    "PATH",
+    "PATHEXT",
+    "COMSPEC",
+    "PSMODULEPATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONUSERBASE",
+    "BASH_ENV",
+    "ENV",
+    "PROMPT_COMMAND",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_EXEC_PATH",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_FIND_LINKS",
+}
+_CODE_LOADING_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_CONFIG", "NPM_CONFIG_")
+
+
+def is_code_loading_env_key(key: str) -> bool:
+    normalized = _normalize_key(key).upper()
+    return normalized in _CODE_LOADING_ENV_KEYS or normalized.startswith(_CODE_LOADING_ENV_PREFIXES)
+
+
 @dataclass(slots=True)
 class SanitizedEnvironment:
     env: dict[str, str]
@@ -135,9 +178,13 @@ def build_exec_environment(
 
     explicit_keys: list[str] = []
     blocked_keys: list[str] = []
+    code_loading_keys: list[str] = []
     for raw_key, raw_value in (requested_env or {}).items():
         key = _normalize_key(str(raw_key))
         if not key:
+            continue
+        if is_code_loading_env_key(key):
+            code_loading_keys.append(key)
             continue
         if is_secret_like_env_key(key):
             blocked_keys.append(key)
@@ -145,6 +192,22 @@ def build_exec_environment(
             continue
         env[key] = str(raw_value)
         explicit_keys.append(key)
+
+    if code_loading_keys:
+        return SanitizedEnvironment(
+            env=env,
+            inherited_keys=sorted(inherited_keys, key=str.upper),
+            explicit_keys=sorted(explicit_keys, key=str.upper),
+            blocked_keys=sorted(set(code_loading_keys), key=str.upper),
+            secret_like_keys=sorted(set(secret_like_keys), key=str.upper),
+            warnings=warnings,
+            blocked=True,
+            reason_code="code_loading_env_not_supported",
+            reason=(
+                "Environment variables that change which code runs (such as PATH, NODE_OPTIONS or "
+                "PYTHONPATH) are not supported. Put the setting in the command so it is shown for approval."
+            ),
+        )
 
     if blocked_keys and not allow_explicit_secret_env:
         return SanitizedEnvironment(
