@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 
 from app.agent.memory_store import MemoryWriteError, get_memory_store
@@ -32,7 +34,25 @@ async def search_memories(
     scope: str = Query("", pattern="^(global|workspace|)$"),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return get_memory_store().search(query, workspace=workspace, scope=scope, limit=limit)
+    return await get_memory_store().search_async(query, workspace=workspace, scope=scope, limit=limit)
+
+
+@router.get("/memories/inspect")
+async def inspect_memory(query: str = Query(..., min_length=1), workspace: str = ""):
+    store = get_memory_store()
+    results = await store.search_async(query, workspace=workspace, limit=store.retrieval_limit)
+    prompt = store.build_prompt(query, workspace=workspace)
+    return {"results": results, "prompt": prompt, "health": await asyncio.to_thread(store.index_health)}
+
+
+@router.get("/memories/index/health")
+async def memory_index_health():
+    return await asyncio.to_thread(get_memory_store().index_health)
+
+
+@router.post("/memories/index/rebuild")
+async def rebuild_memory_index(workspace: str = ""):
+    return await asyncio.to_thread(get_memory_store().rebuild_index, workspace)
 
 
 @router.get("/memories/workspaces", response_model=list[MemoryWorkspaceOut])

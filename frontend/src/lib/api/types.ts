@@ -574,6 +574,10 @@ export interface AgentSettings {
     retrieval_limit: number
     max_injected_chars: number
     min_relevance_score: number
+    embedding_mode?: 'keyword' | 'local' | 'provider'
+    embedding_model?: string
+    embedding_endpoint?: string
+    embedding_timeout?: number
   }
   tools: {
     skills: Record<string, boolean>

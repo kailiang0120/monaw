@@ -783,6 +783,7 @@ class TurnLoop:
         turn_thinking_parts: list[str] = []
         tool_batch = ToolBatchLedger()
         turn_persisted = False
+        persisted_user_ids: list[int] = []
         obs_usage_total = UsageStats()
 
         def _obs_event(event_type: str, **kwargs) -> None:
@@ -917,7 +918,7 @@ class TurnLoop:
             status: str,
             response_attachments: list[dict] | None = None,
         ) -> None:
-            nonlocal turn_persisted
+            nonlocal turn_persisted, persisted_user_ids
             if turn_persisted:
                 return
             if steering is not None:
@@ -932,7 +933,7 @@ class TurnLoop:
             response_duration_ms = _response_duration_ms()
             persist_turn = getattr(self.memory, "persist_turn", None)
             if callable(persist_turn):
-                await persist_turn(
+                persisted_ids = await persist_turn(
                     conversation_id,
                     message,
                     assistant_message,
@@ -944,6 +945,8 @@ class TurnLoop:
                     **({"steering_messages": steering_messages} if steering_messages else {}),
                     **attachment_kwargs,
                 )
+                if isinstance(persisted_ids, list):
+                    persisted_user_ids = [item for item in persisted_ids if isinstance(item, int)]
             else:
                 await self.memory.add_message_and_maybe_summarize(
                     conversation_id, "user", message
@@ -986,11 +989,11 @@ class TurnLoop:
                 )
                 return
             build_long_term_context = getattr(self.memory, "build_long_term_memory_context", None)
-            long_term_context = (
-                build_long_term_context(message, conversation_id=conversation_id, workspace=selected_workspace_dir())
-                if callable(build_long_term_context)
-                else ""
-            )
+            build_long_term_context_async = getattr(self.memory, "build_long_term_memory_context_async", None)
+            if callable(build_long_term_context_async):
+                long_term_context = await build_long_term_context_async(message, conversation_id=conversation_id, workspace=selected_workspace_dir())
+            else:
+                long_term_context = (build_long_term_context(message, conversation_id=conversation_id, workspace=selected_workspace_dir()) if callable(build_long_term_context) else "")
 
             review_state = AutoReviewState()
             build_review_context = getattr(self.memory, "build_approval_review_context", None)
@@ -2347,9 +2350,13 @@ class TurnLoop:
             # mid-turn) and runs as a background task after the user-visible `done`,
             # so it never delays the turn.
             schedule_memory_learning = getattr(self.memory, "schedule_memory_learning", None)
+            schedule_with_refs = getattr(self.memory, "schedule_memory_learning_with_refs", None)
             if callable(schedule_memory_learning):
                 try:
-                    schedule_memory_learning(user_message=_current_user_request(), workspace=selected_workspace_dir())
+                    if callable(schedule_with_refs) and persisted_user_ids:
+                        schedule_with_refs(user_message=_current_user_request(), workspace=selected_workspace_dir(), conversation_id=conversation_id, message_ids=persisted_user_ids)
+                    else:
+                        schedule_memory_learning(user_message=_current_user_request(), workspace=selected_workspace_dir())
                 except Exception:
                     logger.exception("schedule_memory_learning failed")
         except asyncio.CancelledError:
@@ -2423,6 +2430,9 @@ class TurnLoop:
             except Exception:
                 pass
         finally:
+            memory_store = getattr(self.memory, "memory_store", None)
+            if memory_store is not None and obs_run_id:
+                memory_store.discard_pending_sources(obs_run_id)
             reset_tool_scope(tool_scope_token)
             if obs_context_token is not None:
                 reset_current_run_id(obs_context_token)

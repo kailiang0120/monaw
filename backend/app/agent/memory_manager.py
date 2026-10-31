@@ -283,6 +283,15 @@ class MemoryManager:
             logger.warning("Memory prompt unavailable: %s", exc)
             return ""
 
+    async def build_long_term_memory_context_async(self, query: str, *, conversation_id: str = "", workspace: str = "") -> str:
+        if self.memory_store is None:
+            return ""
+        try:
+            return await self.memory_store.build_prompt_async(self._memory_query(query, conversation_id), workspace=workspace)
+        except Exception as exc:
+            logger.warning("Memory prompt unavailable: %s", exc)
+            return ""
+
     def _memory_query(self, query: str, conversation_id: str) -> str:
         if not conversation_id or self.memory_store is None:
             return query
@@ -624,11 +633,17 @@ class MemoryManager:
         steering_messages: list[str] | None = None,
         user_attachments: list[dict] | None = None,
         steering_attachments: list[list[dict]] | None = None,
-    ) -> None:
-        self._add_message_record(conversation_id, "user", user_message, response_attachments=user_attachments)
+    ) -> list[int]:
+        user_message_ids = [self._add_message_record(conversation_id, "user", user_message, response_attachments=user_attachments)]
         for index, steering_message in enumerate(steering_messages or []):
             attached = steering_attachments[index] if steering_attachments and index < len(steering_attachments) else []
-            self._add_message_record(conversation_id, "user", steering_message, response_attachments=attached)
+            user_message_ids.append(self._add_message_record(conversation_id, "user", steering_message, response_attachments=attached))
+        if self.memory_store is not None:
+            try:
+                from app.agent.observability.recorder import current_run_id
+                self.memory_store.attach_pending_sources(current_run_id(), conversation_id, user_message_ids)
+            except Exception as exc:
+                logger.warning("Could not attach memory sources: %s", exc)
         assistant_message_id = self._add_message_record(
             conversation_id,
             "assistant",
@@ -651,6 +666,12 @@ class MemoryManager:
         state = self.get_or_create(conversation_id)
         if len(state.recent_messages) > self.MAX_RECENT_MESSAGES:
             await self._summarize(conversation_id)
+        return user_message_ids
+
+    def schedule_memory_learning_with_refs(self, *, user_message: str, workspace: str, conversation_id: str, message_ids: list[int]) -> None:
+        if self.memory_store is not None:
+            refs = tuple(f"{conversation_id}:{message_id}" for message_id in message_ids)
+            self.memory_store.schedule_learning(user_message=user_message, workspace=workspace, source_refs=refs)
 
     def add_tool_outcome(self, conversation_id: str, tool_name: str, result: str) -> None:
         """Record a tool call result for context and persist."""

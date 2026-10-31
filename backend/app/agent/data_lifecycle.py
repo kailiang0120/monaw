@@ -134,8 +134,16 @@ def _rotate_backend_log() -> dict[str, int]:
 
 
 def _delete_memory_root() -> dict[str, int]:
-    root = Path(get_memory_store().root)
-    deleted = {"memory_files_deleted": _delete_tree_contents(root)}
+    store = get_memory_store()
+    root = Path(store.root)
+    removed = 0
+    if _approved_root(root) and not root.is_symlink() and hasattr(store, "clear"):
+        removed = store.clear()
+    elif hasattr(store, "_index"):
+        index = store._index()
+        if index.path.exists():
+            index.clear()
+    deleted = {"memory_files_deleted": removed + _delete_tree_contents(root)}
     try:
         if _approved_root(root):
             shutil.rmtree(root, ignore_errors=True)

@@ -423,3 +423,201 @@ def test_learning_runs_in_the_background_without_blocking_the_turn(store):
         return await task
 
     assert [item["content"] for item in asyncio.run(scenario())] == ["Likes green tea."]
+
+
+def test_semantic_index_scope_and_canonical_validation(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.agent import memory_store as module
+    from app.agent.memory_index import EmbeddingProvider
+
+    from app.agent import memory_retrieval
+    monkeypatch.setattr(memory_retrieval, 'RUNTIME_DIR', tmp_path / 'runtime')
+    def vectors(self, texts):
+        return [[1.0, 0.0] if ('automobile' in t or 'car' in t) else [0.0, 1.0] for t in texts]
+    monkeypatch.setattr(EmbeddingProvider, 'embed', vectors)
+    settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model='test', embedding_endpoint='http://127.0.0.1:1', embedding_timeout=2))
+    store = module.MemoryStore(root=tmp_path / 'memory', settings=settings)
+    first = store.add('The automobile is red', scope='workspace', workspace=str(tmp_path / 'one'))
+    store.add('The automobile is blue', scope='workspace', workspace=str(tmp_path / 'two'))
+    import asyncio
+    prompt = asyncio.run(store.build_prompt_async('car', workspace=str(tmp_path / 'one')))
+    assert 'automobile is red' in prompt
+    assert 'automobile is blue' not in prompt
+    assert store.delete(first.id, workspace=str(tmp_path / 'one'))
+    assert 'automobile is red' not in asyncio.run(store.build_prompt_async('car', workspace=str(tmp_path / 'one')))
+
+
+def test_retrieval_baseline_exact_paraphrase_and_no_match(store, repo):
+    entry = store.add('Deploy invoices with Helm charts', scope='workspace', workspace=repo)
+    cases = [('Helm invoices', True), ('release billing through Kubernetes', False), ('quantum bicycles', False)]
+    hits = [(bool(store.search(query, workspace=repo)), expected) for query, expected in cases]
+    # This records the current keyword baseline, not an embedding model benchmark.
+    assert hits == [(True, True), (False, False), (False, False)]
+    assert store.find(entry.id, workspace=repo) is not None
+
+
+def test_keyword_baseline_metrics(store, repo):
+    """Paraphrases remain relevant even when keyword retrieval misses them."""
+    invoice = store.add('Deploy invoices with Helm charts', scope='workspace', workspace=repo)
+    tea = store.add('The user prefers jasmine tea', scope='global')
+    cases = [('Helm invoices', {invoice.id}), ('jasmine tea', {tea.id}),
+             ('release billing through Kubernetes', {invoice.id}), ('flowers and quantum bicycles', set())]
+    true_positive = predicted = relevant = 0
+    for query, expected in cases:
+        actual = {item['id'] for item in store.search(query, workspace=repo)}
+        true_positive += len(actual & expected)
+        predicted += len(actual)
+        relevant += len(expected)
+    assert true_positive / relevant == 2 / 3
+    assert true_positive / predicted == 1.0
+
+
+def test_learned_source_refs_survive_restart_and_correction(store, repo):
+    refs = ('conversation-one:42',)
+    entry = store.add('The user prefers jasmine tea', scope='global', source='learned', source_refs=refs)
+    reopened = MemoryStore(root=store.root)
+    assert reopened.find(entry.id, repo).source_refs == refs
+    corrected = reopened.update(entry.id, workspace=repo, content='The user prefers oolong tea', source_refs=('conversation-one:43',))
+    assert corrected.id == entry.id
+    assert MemoryStore(root=store.root).find(entry.id, repo).source_refs == ('conversation-one:43',)
+
+
+def test_disabled_memory_never_invokes_embedding(store, repo, monkeypatch):
+    from types import SimpleNamespace
+    from app.agent.memory_index import EmbeddingProvider
+    import asyncio
+    store.add('The user prefers jasmine tea', scope='global')
+    store.settings = SimpleNamespace(memory=SimpleNamespace(enabled=False, embedding_mode='local'))
+    monkeypatch.setattr(EmbeddingProvider, 'embed', lambda *a: (_ for _ in ()).throw(AssertionError('embedding invoked')))
+    assert asyncio.run(store.build_prompt_async('tea', workspace=repo)) == ''
+    assert store.rebuild_index(repo)['status'] == 'disabled'
+
+
+def test_shared_evaluator_reports_keyword_baseline(tmp_path):
+    from app.agent.memory_evaluation import evaluate_retrieval
+    store = MemoryStore(root=tmp_path / 'evaluation')
+    result = evaluate_retrieval(store, store, str(tmp_path / 'one'), str(tmp_path / 'two'))
+    assert result['recall'] == 2 / 3
+    assert result['precision'] == 1
+    assert result['correction_passed'] and result['forget_passed'] and result['isolation_passed']
+    assert result['latency_ms_total'] >= 0 and result['prompt_chars'] > 0
+
+
+def test_mem0_adapter_only_indexes_canonical_entries_and_forgets(tmp_path):
+    from app.agent.memory_mem0 import Mem0EvaluationAdapter
+    class FakeMem0:
+        def __init__(self): self.data = {}
+        def add(self, content, *, user_id, infer, metadata):
+            assert not infer
+            self.data.setdefault(user_id, []).append({'memory': content, 'metadata': metadata, 'score': 1.0})
+        def search(self, query, *, user_id, limit):
+            return {'results': [item for item in self.data.get(user_id, []) if query.lower() in item['memory'].lower()][:limit]}
+        def delete_all(self, *, user_id): self.data.pop(user_id, None)
+    store = MemoryStore(root=tmp_path / 'memory')
+    item = store.add('The user prefers jasmine tea', scope='global')
+    adapter = Mem0EvaluationAdapter(store, FakeMem0())
+    assert adapter.search('jasmine')[0]['id'] == item.id
+    store.delete(item.id)
+    assert adapter.search('jasmine') == []
+    assert not adapter.client.data
+
+
+def test_explicit_source_refs_are_attached_only_to_the_matching_run(store, repo):
+    entry = store.add('The user prefers jasmine tea', scope='global')
+    store.note_pending_source('run-one', entry.id, repo)
+    store.attach_pending_sources('run-two', 'conversation', [91])
+    assert store.find(entry.id, repo).source_refs == ()
+    store.attach_pending_sources('run-one', 'conversation', [42, 43])
+    assert store.find(entry.id, repo).source_refs == ('conversation:42', 'conversation:43')
+    corrected = store.update(entry.id, workspace=repo, content='The user prefers oolong tea')
+    assert corrected.revision == 2 and corrected.supersedes_revision == 1
+    persisted = MemoryStore(root=store.root).find(entry.id, repo)
+    assert persisted.revision == 2 and persisted.supersedes_revision == 1
+
+
+def test_evaluator_uses_async_backend_and_its_results_for_prompt(tmp_path):
+    from app.agent.memory_evaluation import evaluate_retrieval
+    store = MemoryStore(root=tmp_path / 'evaluation')
+    class Backend:
+        def __init__(self): self.async_calls = 0
+        def search(self, *args, **kwargs): raise AssertionError('sync search used')
+        async def search_async(self, query, *, workspace):
+            self.async_calls += 1
+            return store.search(query, workspace=workspace)
+    backend = Backend()
+    result = evaluate_retrieval(store, backend, str(tmp_path / 'one'), str(tmp_path / 'two'))
+    assert backend.async_calls >= 8
+    assert result['manual_edit_passed']
+    assert result['prompt_chars'] > 0
+
+
+def test_async_memory_tool_retrieves_semantic_on_first_query(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.agent import memory_retrieval
+    from app.agent.memory_index import EmbeddingProvider
+    import asyncio
+    monkeypatch.setattr(memory_retrieval, 'RUNTIME_DIR', tmp_path / 'runtime')
+    monkeypatch.setattr(EmbeddingProvider, 'embed', lambda self, texts: [[1.0, 0.0] for _ in texts])
+    settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model='fake', embedding_timeout=2))
+    store = MemoryStore(root=tmp_path / 'memory', settings=settings)
+    entry = store.add('The automobile is crimson', scope='global')
+    monkeypatch.setattr(memory_tools, 'get_memory_store', lambda: store)
+    result = json.loads(asyncio.run(memory_tools._memory_search_async('car')))
+    assert result['memories'][0]['id'] == entry.id
+    assert result['memories'][0]['match_type'] == 'semantic'
+
+
+def test_cached_semantic_result_uses_current_metadata(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.agent import memory_retrieval
+    from app.agent.memory_index import EmbeddingProvider
+    import asyncio
+    monkeypatch.setattr(memory_retrieval, 'RUNTIME_DIR', tmp_path / 'runtime')
+    monkeypatch.setattr(EmbeddingProvider, 'embed', lambda self, texts: [[1.0, 0.0] for _ in texts])
+    settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model='fake', embedding_timeout=2))
+    store = MemoryStore(root=tmp_path / 'memory', settings=settings)
+    entry = store.add('The automobile is crimson', scope='global')
+    asyncio.run(store.search_async('car'))
+    store.update(entry.id, importance=9, kind='preference')
+    result = asyncio.run(store.search_async('car'))
+    assert result[0]['importance'] == 9 and result[0]['kind'] == 'preference'
+
+
+def test_stale_turn_cannot_attach_provenance_to_newer_correction(store, repo):
+    entry = store.add('The user prefers jasmine tea', scope='global')
+    store.note_pending_source('turn-a', entry.id, repo)
+    store.update(entry.id, workspace=repo, content='The user prefers oolong tea')
+    store.note_pending_source('turn-b', entry.id, repo)
+    store.attach_pending_sources('turn-b', 'chat-b', [2])
+    store.attach_pending_sources('turn-a', 'chat-a', [1])
+    assert store.find(entry.id, repo).source_refs == ('chat-b:2',)
+
+
+def test_health_reports_missing_embedding_configuration(store):
+    from types import SimpleNamespace
+    store.settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model=''))
+    assert store.index_health()['status'] == 'unconfigured'
+    store.settings.memory.embedding_model = 'example'
+    store.settings.memory.embedding_endpoint = 'https://not-local.example/v1/embeddings'
+    assert store.index_health()['status'] == 'unconfigured'
+
+
+def test_failed_semantic_query_cache_is_bounded_and_cleared(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.agent import memory_retrieval
+    from app.agent.memory_index import EmbeddingProvider
+    import asyncio
+    monkeypatch.setattr(memory_retrieval, 'RUNTIME_DIR', tmp_path / 'runtime')
+    def fail(*args): raise RuntimeError('offline')
+    monkeypatch.setattr(EmbeddingProvider, 'embed', fail)
+    settings = SimpleNamespace(memory=SimpleNamespace(embedding_mode='local', embedding_model='fake', embedding_timeout=2))
+    store = MemoryStore(root=tmp_path / 'memory', settings=settings)
+    entry = store.add('The user prefers jasmine tea', scope='global')
+    async def run():
+        for number in range(70):
+            await store.search_async(f'query {number}')
+    asyncio.run(run())
+    assert len(store._semantic_jobs) <= 32
+    assert len(store._semantic_failed_at) <= 32
+    store.delete(entry.id)
+    assert not store._semantic_jobs and not store._semantic_failed_at

@@ -43,6 +43,9 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/files/{attachment_id}/preview` | `files:read` | `stream/file/none` |
 | `GET` | `/api/memories` | `agent:run` | `list` |
 | `POST` | `/api/memories` | `agent:run` | `MemoryOut` |
+| `GET` | `/api/memories/index/health` | `agent:run` | `stream/file/none` |
+| `POST` | `/api/memories/index/rebuild` | `agent:run` | `stream/file/none` |
+| `GET` | `/api/memories/inspect` | `agent:run` | `stream/file/none` |
 | `GET` | `/api/memories/search` | `agent:run` | `list` |
 | `GET` | `/api/memories/workspaces` | `agent:run` | `list` |
 | `DELETE` | `/api/memories/{memory_id}` | `agent:run` | `OkResponse` |

@@ -76,6 +76,7 @@ TEST_GROUPS = {
         "test_screen_redaction.py",
     },
     "memory": {
+        "test_memory_review.py",
         "test_memory_store.py",
         "test_memory_archive.py",
         "test_memory_context_management.py",

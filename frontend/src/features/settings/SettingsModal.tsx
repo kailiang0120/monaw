@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel'
 import { McpSettings } from './McpSettings'
+import { MemoryRetrieval } from './MemoryRetrieval'
 import { SandboxSettings } from './SandboxSettings'
 import { useSettingsDraft } from './useSettingsDraft'
 import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
@@ -1089,6 +1090,7 @@ export function SettingsModal({
                           memory: { ...current.memory, enabled },
                         }))}
                       />
+                      <MemoryRetrieval memory={draft.memory} onChange={(memory) => updateDraft((current) => ({ ...current, memory }))} />
                     </SettingsCard>
 
                     <SettingsCard

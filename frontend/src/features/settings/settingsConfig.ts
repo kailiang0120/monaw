@@ -352,6 +352,10 @@ export function normalizeDraft(
       retrieval_limit: clampInteger(settings.memory?.retrieval_limit, 6, 1, 20),
       max_injected_chars: clampInteger(settings.memory?.max_injected_chars, 2500, 500, 10000),
       min_relevance_score: Math.min(1, Math.max(0, Number(settings.memory?.min_relevance_score ?? 0.15))),
+      embedding_mode: settings.memory?.embedding_mode ?? 'keyword',
+      embedding_model: settings.memory?.embedding_model ?? '',
+      embedding_endpoint: settings.memory?.embedding_endpoint ?? '',
+      embedding_timeout: settings.memory?.embedding_timeout ?? 5,
     },
     speech_to_text: {
       ...emptySpeechToText(),

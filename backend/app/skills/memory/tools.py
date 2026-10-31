@@ -4,6 +4,7 @@ import json
 
 from app.agent.conversation_workspace import selected_workspace_dir
 from app.agent.database import get_db
+from app.agent.observability.recorder import current_run_id
 from app.agent.memory_store import KINDS, MemoryWriteError, get_memory_store, grounded_in
 from app.agent.run_context import current_execution_principal, current_interactive
 
@@ -57,6 +58,13 @@ def _memory_search(query: str, scope: str = "all", limit: int = 6) -> str:
     return _json({"status": "ok", "memories": memories, "count": len(memories)})
 
 
+async def _memory_search_async(query: str, scope: str = "all", limit: int = 6) -> str:
+    bounded_query = str(query or "").strip()[:_MAX_MEMORY_QUERY_CHARS]
+    bounded_limit = max(1, min(_MAX_MEMORY_RETRIEVAL_BATCH, int(limit)))
+    memories = await get_memory_store().search_async(bounded_query, workspace=selected_workspace_dir(), scope="" if scope == "all" else scope, limit=bounded_limit)
+    return _json({"status": "ok", "memories": memories, "count": len(memories)})
+
+
 def _memory_remember(content: str, scope: str = "global", kind: str = "fact", importance: int = 5) -> str:
     blocked = _write_guard(content)
     if blocked:
@@ -72,6 +80,7 @@ def _memory_remember(content: str, scope: str = "global", kind: str = "fact", im
         )
     except MemoryWriteError as exc:
         return _json({"status": "error", "error": str(exc)})
+    get_memory_store().note_pending_source(current_run_id(), entry.id, selected_workspace_dir())
     return _json({"status": "ok", "memory": entry.public()})
 
 
@@ -85,6 +94,7 @@ def _memory_update(id: str, content: str) -> str:
         return _json({"status": "error", "error": str(exc)})
     if entry is None:
         return _json({"status": "error", "error": f"Memory {id} not found."})
+    get_memory_store().note_pending_source(current_run_id(), entry.id, selected_workspace_dir())
     return _json({"status": "ok", "memory": entry.public()})
 
 
@@ -122,9 +132,9 @@ def register_tools(registry, _settings=None) -> None:
                     },
                     "required": ["query"],
                 },
-                "callable": _memory_search,
+                "callable": _memory_search_async,
                 "domain": "general",
-                "execution_mode": "sync_stateless",
+                "execution_mode": "async",
                 "affinity_group": None,
                 "metadata": read_metadata,
             },

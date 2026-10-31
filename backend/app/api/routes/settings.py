@@ -149,6 +149,9 @@ async def update_settings(body: SettingsUpdate):
                 if getattr(updated, section) != getattr(current, section)
             }
             mcp_changed = "mcp" in changed_sections or _browser_connection_changed(current, updated)
+            if "memory" in changed_sections:
+                from app.agent.memory_store import get_memory_store
+                get_memory_store(settings=updated)
 
     def assign_if_changed(name: str, value: str | None, *, default: str | None = None) -> bool:
         if value is None:
