@@ -233,6 +233,23 @@ def test_tool_cannot_send_another_tools_ticket_to_auto_review(gate_setup):
     assert gate_setup == []
 
 
+def test_desktop_tool_keeps_tickets_for_the_inner_action_it_dispatches(gate_setup):
+    ticket = create_ticket(tool_name="computer_functions_launch_app", payload={"input_str": "{}"})
+    reviewer = Reviewer('{"decision":"ask","reason":"Confirm the launch."}')
+    result, events = resolve(json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
+                             reviewer, tool_name="computer_functions_act")
+    assert json.loads(result).get("reason_code") != "approval_ticket_mismatch"
+    assert events[0]["event"] == "approval_required"
+
+
+def test_desktop_tickets_still_cannot_cross_into_other_tools(gate_setup):
+    ticket = create_ticket(tool_name="computer_functions_launch_app", payload={"input_str": "{}"})
+    result, _events = resolve(json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
+                              Reviewer(), tool_name="mcp__read_page")
+    assert json.loads(result)["reason_code"] == "approval_ticket_mismatch"
+    assert ticket.status == TicketStatus.PENDING
+
+
 @pytest.mark.parametrize("injection", INJECTIONS)
 @pytest.mark.parametrize("interactive", [None, True])
 def test_scheduled_tickets_are_denied_despite_injected_approval(gate_setup, injection, interactive):

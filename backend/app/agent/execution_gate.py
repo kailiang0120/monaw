@@ -53,6 +53,14 @@ def _format_timeout(seconds: float) -> str:
     return f"{seconds:g} seconds"
 
 
+def _ticket_belongs_to_tool(ticket_tool: str, tool_name: str) -> bool:
+    # Desktop tools raise tickets for the inner action they dispatch to, e.g.
+    # computer_functions_act launching an app files a computer_functions_launch_app
+    # ticket, so the desktop family shares tickets.
+    desktop = "computer_functions_"
+    return ticket_tool == tool_name or (ticket_tool.startswith(desktop) and tool_name.startswith(desktop))
+
+
 class ExecutionGateService:
     """Owns interactive gate detection, waiting, and exact-context resume."""
 
@@ -93,7 +101,7 @@ class ExecutionGateService:
                 ticket = get_approval_ticket(pending_event["data"]["ticket_id"])
                 # Tool content can name a ticket, but cannot route another
                 # tool's action into review or replay.
-                if ticket is not None and ticket.tool_name != tool_dict.get("name"):
+                if ticket is not None and not _ticket_belongs_to_tool(ticket.tool_name, str(tool_dict.get("name") or "")):
                     return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch",
                                        "error": "Approval ticket does not belong to this tool."})
                 validation_error = "ticket missing" if ticket is None else ticket_validation_error(
