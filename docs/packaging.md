@@ -112,7 +112,7 @@ The GPLv3 ffmpeg build that `imageio-ffmpeg` used to bundle is gone with local s
 ## Not yet verified
 
 - Installing on a clean Windows machine. The packaged-app checks below run the unpacked build, not an installed one.
-- Upgrading from one installed version to the next while keeping conversations, memory, settings and stored credentials. There is no automatic update.
+- Upgrading from one installed version to the next. The upgrade check below covers settings, conversations and scheduled tasks; memory and stored credentials are not seeded. There is no automatic update.
 - Code signing. The installer and executables are unsigned, so Windows SmartScreen will warn.
 - Model-driven workflows in the packaged app, except through the live ChatGPT check below, which a person runs. The source workflows (`npm run test:app`) substitute the model provider through the Python path, which a frozen backend does not load, and the packaged build has no test hooks.
 
@@ -127,6 +127,19 @@ The GPLv3 ffmpeg build that `imageio-ffmpeg` used to bundle is gone with local s
 - a backend that stops while starting, which is reported.
 
 Startup failures are also written to `runtime/backend.log`.
+
+### Upgrade check (before publishing a release)
+
+Run the **Upgrade check** workflow (Actions > Upgrade check > Run workflow) on the branch to release, with the tag users have now. On a clean Windows runner it builds the installer, downloads the older one from that release, and runs `scripts/check-upgrade.ps1`, which:
+
+1. installs the older release silently into a folder with a space in its name;
+2. starts its backend against a fresh Monaw home and saves a user name, a conversation and a disabled scheduled task;
+3. starts `Monaw.exe` until its backend is healthy;
+4. installs the new build over it, as a user would, and checks `THIRD_PARTY_NOTICES.txt` arrived and `app.asar` changed;
+5. checks the settings, conversation and scheduled task are still there and the new `Monaw.exe` starts;
+6. uninstalls and checks the Monaw home is kept.
+
+The script refuses to run where Monaw is installed, because both installers share one uninstall entry. `-AppDir frontend\release\win-unpacked` instead checks the same data survives a restart of a build folder, without installing anything.
 
 ### Live ChatGPT check (before publishing a release)
 

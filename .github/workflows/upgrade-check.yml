@@ -1,0 +1,70 @@
+name: Upgrade check
+
+# Installs a published release on a clean runner, seeds data, installs this
+# commit's build over it and checks the data and the app survive. Run by hand
+# before publishing a release. See docs/packaging.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_tag:
+        description: Release to upgrade from
+        required: true
+        default: v1.0.0
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    name: Upgrade from ${{ inputs.from_tag }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build the installer
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+
+      - name: Download the ${{ inputs.from_tag }} installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ inputs.from_tag }}" --repo "${{ github.repository }}" --pattern "Monaw-Setup-*-x64.exe" --dir previous
+
+      - name: Upgrade
+        shell: pwsh
+        run: |
+          ./scripts/check-upgrade.ps1 `
+            -FromInstaller (Get-Item previous/Monaw-Setup-*-x64.exe).FullName `
+            -ToInstaller (Get-Item frontend/release/Monaw-Setup-*-x64.exe).FullName `
+            -WorkDir "$env:RUNNER_TEMP/monaw-upgrade"
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-check-logs
+          path: |
+            ${{ runner.temp }}/monaw-upgrade/*.log*
+            ${{ runner.temp }}/monaw-upgrade/home/runtime/*.log
+          if-no-files-found: warn
