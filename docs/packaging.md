@@ -114,7 +114,7 @@ The GPLv3 ffmpeg build that `imageio-ffmpeg` used to bundle is gone with local s
 - Installing on a clean Windows machine. The packaged-app checks below run the unpacked build, not an installed one.
 - Upgrading from one installed version to the next while keeping conversations, memory, settings and stored credentials. There is no automatic update.
 - Code signing. The installer and executables are unsigned, so Windows SmartScreen will warn.
-- Model-driven workflows in the packaged app. The source workflows (`npm run test:app`) substitute the model provider through the Python path, which a frozen backend does not load, and the packaged build has no test hooks.
+- Model-driven workflows in the packaged app, except through the live ChatGPT check below, which a person runs. The source workflows (`npm run test:app`) substitute the model provider through the Python path, which a frozen backend does not load, and the packaged build has no test hooks.
 
 ## Packaged-app checks
 
@@ -127,5 +127,17 @@ The GPLv3 ffmpeg build that `imageio-ffmpeg` used to bundle is gone with local s
 - a backend that stops while starting, which is reported.
 
 Startup failures are also written to `runtime/backend.log`.
+
+### Live ChatGPT check (before publishing a release)
+
+The first v1.0.0 installer passed every check above and still could not chat through a ChatGPT account. Before publishing a draft release, run the check that calls the real model, against the build or an installed copy:
+
+```powershell
+cd frontend
+$env:MONAW_LIVE_CHATGPT = "1"
+npm run test:packaged -- -g "ChatGPT account"
+```
+
+It starts the app with a fresh Monaw home, opens the ChatGPT sign-in page in your browser and waits up to 10 minutes for you to sign in. Then it asks the model to read a file in the workspace with a tool and reply with a code from it, and checks that the saved answer has the code and a tool call. It uses a little of the account's plan. Without `MONAW_LIVE_CHATGPT` it is skipped.
 
 `scripts/measure-baseline.ps1` measures the packaged app's cold and warm start, idle API requests and fresh database size, and records the commit it measured.

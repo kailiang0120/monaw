@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { createServer, type Server } from 'node:net'
 import { execFileSync, spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 
 // Drives the packaged app (release/win-unpacked by default, or MONAW_PACKAGED_APP)
 // with no development tools on PATH. The model is never called: a frozen
@@ -77,6 +78,19 @@ class PackagedApp {
     this.app.process().stdout?.on('data', capture)
     this.app.process().stderr?.on('data', capture)
     if (window) this.page = await this.app.firstWindow()
+  }
+
+  /** An authenticated call from the renderer, as the app makes it. */
+  async api(path: string, body?: unknown) {
+    return this.page.evaluate(async ({ path, body }) => {
+      const session = await window.electronAPI!.getControlSession()
+      const response = await fetch(window.electronAPI!.backendBaseUrl + path, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      return { status: response.status, data: await response.json() }
+    }, { path, body })
   }
 
   async quit() {
@@ -205,4 +219,47 @@ test('reports a backend that stops while starting', async () => {
   await expect.poll(() => startupLog(home), { timeout: 45_000 }).toMatch(/"kind":"exited","code":\d+/)
   expect(await health(desktop.port)).toBe(false)
   desktop.kill()
+})
+
+test.describe('with a ChatGPT account', () => {
+  // A release check, run by a person: it opens the ChatGPT sign-in page and
+  // waits for them to sign in, then has the model use a tool. See docs/packaging.md.
+  test.skip(!process.env.MONAW_LIVE_CHATGPT, 'Set MONAW_LIVE_CHATGPT=1 to sign in and call the model')
+
+  test('signs in and completes a model-driven tool task', async () => {
+    test.setTimeout(20 * 60_000)
+    const code = `release-${randomUUID().slice(0, 8)}`
+    await mkdir(join(home, 'runtime'), { recursive: true })
+    await mkdir(join(home, 'workspace'), { recursive: true })
+    await writeFile(join(home, 'workspace', 'release-check.txt'), `The release check code is ${code}.\n`)
+    await writeFile(join(home, 'runtime', 'settings.json'), JSON.stringify({
+      llm: { provider: 'codex' }, memory: { enabled: false, auto_learn: false },
+    }))
+    const desktop = track(new PackagedApp(home, await freePort()))
+    await desktop.start()
+    await expect.poll(() => health(desktop.port), { timeout: 30_000 }).toBe(true)
+
+    const login = await desktop.api('/api/openai-account/login', {})
+    expect(login.status).toBe(200)
+    await desktop.app.evaluate(({ shell }, url) => shell.openExternal(url), login.data.auth_url as string)
+    console.log('Sign in with ChatGPT in the browser window that just opened. Waiting up to 10 minutes.')
+    await expect.poll(async () => (await desktop.api('/api/openai-account/status')).data.connected, {
+      timeout: 10 * 60_000, intervals: [2_000],
+    }).toBe(true)
+
+    await desktop.page.getByRole('textbox', { name: 'Message', exact: true })
+      .fill('Use a tool to read release-check.txt in the workspace, then reply with only the code it contains.')
+    await desktop.page.getByRole('button', { name: 'Send message', exact: true }).click()
+    await expect.poll(async () => (await desktop.api('/api/chat/runs')).data.length, { timeout: 30_000 }).toBe(1)
+    await expect.poll(async () => (await desktop.api('/api/chat/runs')).data.length, { timeout: 5 * 60_000 }).toBe(0)
+
+    const conversations = await desktop.api('/api/conversations')
+    expect(conversations.data).toHaveLength(1)
+    const messages = await desktop.api(`/api/conversations/${conversations.data[0].id}/messages`)
+    const answer = messages.data.messages.findLast((message: { role: string }) => message.role === 'assistant')
+    expect(answer.content).toContain(code)
+    expect(answer.tool_calls.length).toBeGreaterThan(0)
+    await expect(desktop.page.getByText(code).last()).toBeVisible()
+    await desktop.quit()
+  })
 })
