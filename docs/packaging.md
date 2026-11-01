@@ -139,6 +139,8 @@ Run the **Upgrade check** workflow (Actions > Upgrade check > Run workflow) on t
 5. checks the settings, conversation and scheduled task are still there and the new `Monaw.exe` starts;
 6. uninstalls and checks the Monaw home is kept.
 
+First run, 1 November 2026, from the published v1.0.0 installer to `e1fb59b` ([run 41295028277](https://github.com/kailiang0120/monaw/actions/runs/41295028277)): passed. The v1.0.0 install took 29 s and the upgrade 13 s; both versions started from the installed folder, the seeded data survived, and uninstalling kept the Monaw home.
+
 The script refuses to run where Monaw is installed, because both installers share one uninstall entry. `-AppDir frontend\release\win-unpacked` instead checks the same data survives a restart of a build folder, without installing anything.
 
 ### Live ChatGPT check (before publishing a release)

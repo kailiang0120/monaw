@@ -68,7 +68,7 @@ Use **Settings > Apps > Installed apps > Monaw > Uninstall**. Uninstalling keeps
 
 ## What is not verified yet
 
-- Installing on a clean Windows machine and upgrading from one installed version to the next.
+- Upgrading with your own memory and saved credentials. An automated check installs v1.0.0, then the new version over it, on a clean Windows machine, and confirms settings, conversations and scheduled tasks are kept (see [packaging](packaging.md#upgrade-check-before-publishing-a-release)).
 - Code signing.
 
 Third-party license notices are in `THIRD_PARTY_NOTICES.txt` in the install folder (see [packaging](packaging.md#third-party-licenses)).
