@@ -17,9 +17,9 @@ export interface SettingsPageCopy {
 
 export const PAGE_COPY = {
   model: {
-    label: 'Voice',
-    blurb: 'Configure voice input.',
-    keywords: 'speech voice whisper transcription',
+    label: 'Model',
+    blurb: 'Configure voice input and how much a message may use.',
+    keywords: 'speech voice whisper transcription token limit usage budget cost spend',
   },
   apiKeys: {
     label: 'Connections',
@@ -78,6 +78,7 @@ export const MODEL_COPY = {
   maxIterations: 'How many model steps the agent may take while answering one chat message. 0 is no limit. Scheduled and Telegram runs stop at 200.',
   maxTurnSeconds: 'The wall-clock budget for answering one message, across all tool calls.',
   maxLlmCallSeconds: 'How long to wait for a single reply from the model before giving up.',
+  tokenLimit: 'Model tokens one message may use, counting everything sent to and from the model. You get a notice at 80%; at the limit the task pauses, and you can say "continue" to go on. Providers that report no usage are not limited.',
 } as const
 
 /* --------------------------------------------------------------- identity --- */

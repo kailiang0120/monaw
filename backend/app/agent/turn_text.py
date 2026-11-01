@@ -60,6 +60,7 @@ GUARD_WRAP_UP_REASON_CODES = frozenset({
     "repeated_blocked_tool_result",
     "repeated_tool_call_blocked",
     "stalled_repeat_detected",
+    "token_budget_exhausted",
 })
 
 

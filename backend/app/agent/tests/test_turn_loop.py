@@ -120,6 +120,76 @@ def test_turn_loop_checks_live_tool_context_and_preserves_full_history(monkeypat
     assert memory.persisted_turns[0]["tool_calls"][0]["output"] == output
 
 
+def test_turn_warns_then_pauses_at_its_token_limit():
+    from app.agent.observability.recorder import UsageStats
+
+    class TokenHungryLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            self.calls += 1
+            usage = UsageStats(input_tokens=300, output_tokens=100, total_tokens=400)
+            if not tools:
+                return LLMResponse(content="Inspected three times; paused at the token limit.",
+                                   tool_calls=[], finish_reason="stop", usage=usage)
+            return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                call_id=f"inspect-{self.calls}", tool_name="inspect", arguments={"step": self.calls})],
+                finish_reason="tool_calls", usage=usage)
+
+    llm = TokenHungryLLM()
+    loop = TurnLoop(llm_client=llm, registry=ToolRegistry([{
+        "name": "inspect", "callable": lambda step: f"step {step}",
+        "parameters": {"type": "object", "properties": {"step": {"type": "integer"}}},
+    }]), memory=PersistingFakeMemory(), observability=FakeObservability(), max_tokens_per_turn=1000)
+
+    async def collect():
+        return [event async for event in loop.run("inspect repeatedly", "token-limit", system_prompt="")]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    warnings = [event for event in events if event["event"] == "progress" and "token limit" in event["data"]["content"]]
+    assert [warning["data"]["content"] for warning in warnings] == [
+        "This task has used 800 of its 1,000-token limit and will pause when it reaches it."
+    ]
+    # Three tool rounds reach 1,200 tokens; the fourth round is replaced by a tool-less wrap-up.
+    assert llm.calls == 4
+    assert events[-1]["data"]["status"] == "paused"
+    assert events[-1]["data"]["summary"] == "Inspected three times; paused at the token limit."
+
+
+def test_turn_without_a_token_limit_runs_to_its_answer():
+    from app.agent.observability.recorder import UsageStats
+
+    class LLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            self.calls += 1
+            usage = UsageStats(total_tokens=10_000_000)
+            if self.calls < 3:
+                return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                    call_id=f"c{self.calls}", tool_name="inspect", arguments={})], finish_reason="tool_calls", usage=usage)
+            response = final_answer_response("All done")
+            response.usage = usage
+            return response
+
+    loop = TurnLoop(llm_client=LLM(), registry=ToolRegistry([{
+        "name": "inspect", "callable": lambda: "ok", "parameters": {"type": "object", "properties": {}},
+    }]), memory=PersistingFakeMemory(), observability=FakeObservability(), max_tokens_per_turn=0)
+
+    async def collect():
+        return [event async for event in loop.run("inspect", "no-token-limit", system_prompt="")]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert events[-1]["data"]["summary"] == "All done"
+    assert events[-1]["data"]["status"] == "complete"
+
+
 def test_internal_failure_checkpoints_completed_tool_and_user_request():
     memory = PersistingFakeMemory()
     def fail_recording(*args):

@@ -121,6 +121,8 @@ class TurnLoop:
     # tool call was blocked or repeated, or after this many guard blocks in all.
     STUCK_ROUNDS_LIMIT = 3
     GUARD_BLOCKS_LIMIT = 10
+    # Share of max_tokens_per_turn at which the user is told the task will pause.
+    TOKEN_WARNING_FRACTION = 0.8
 
     def __init__(
         self,
@@ -133,6 +135,7 @@ class TurnLoop:
         max_llm_call_seconds: float = 600.0,
         observability: ObservabilityPort | None = None,
         max_parallel_tool_calls: int = 4,
+        max_tokens_per_turn: int = 0,
     ) -> None:
         self.llm_client = llm_client
         self.registry = registry
@@ -144,6 +147,8 @@ class TurnLoop:
         self.max_turn_seconds = max_turn_seconds
         self.max_llm_call_seconds = max_llm_call_seconds
         self.max_parallel_tool_calls = max(1, int(max_parallel_tool_calls))
+        # Model tokens (input and output, as providers report them) per turn; 0 is no limit.
+        self.max_tokens_per_turn = max(0, int(max_tokens_per_turn))
         self.executor = ToolExecutor()
         self.max_identical_calls = 2
         self.execution_gate = ExecutionGateService(executor=self.executor)
@@ -587,6 +592,7 @@ class TurnLoop:
             answered_call_ids: set[str] = set()
             # Pause notices wait until the wrap-up call has had its chance to answer.
             pause_error_event: dict | None = None
+            token_warning_sent = False
             consecutive_text_only = 0
             force_tool_choice_next = False
             web_search_reprompted = False
@@ -991,6 +997,45 @@ class TurnLoop:
                 if _apply_steering():
                     consecutive_text_only = 0
                     force_tool_choice_next = False
+                token_limit = self.max_tokens_per_turn
+                tokens_used = obs_usage_total.total_tokens
+                if token_limit and tokens_used >= token_limit:
+                    final_text = (
+                        f"Paused: this task used {tokens_used:,} tokens, over its limit of {token_limit:,}. "
+                        "Continue to resume, or change the limit in Settings > Model."
+                    )
+                    budget_exhausted = True
+                    incomplete_reason_code = "token_budget_exhausted"
+                    logger.warning(
+                        "turn_loop paused: token budget exhausted conversation_id=%s limit=%s used=%s",
+                        conversation_id,
+                        token_limit,
+                        tokens_used,
+                    )
+                    pause_error_event = {
+                        "event": "error",
+                        "data": {
+                            "code": incomplete_reason_code,
+                            "message": final_text,
+                            "limit": token_limit,
+                            "consumed": tokens_used,
+                        },
+                    }
+                    _obs_event(
+                        "guardrail_triggered",
+                        level="warning",
+                        status="error",
+                        error_code=incomplete_reason_code,
+                        error_message=final_text,
+                        metadata={"token_limit": token_limit, "tokens_used": tokens_used},
+                    )
+                    break
+                if token_limit and not token_warning_sent and tokens_used >= token_limit * self.TOKEN_WARNING_FRACTION:
+                    token_warning_sent = True
+                    _put({"event": "progress", "data": {"content": (
+                        f"This task has used {tokens_used:,} of its {token_limit:,}-token limit "
+                        "and will pause when it reaches it."
+                    )}})
                 if not budget.consume():
                     final_text = "Iteration budget exhausted."
                     budget_exhausted = True

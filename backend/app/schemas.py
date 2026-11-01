@@ -4,7 +4,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agent.identity import DEFAULT_AGENT_NAME
-from app.agent.llm_constants import DEFAULT_OPENAI_CHAT_MODEL
+from app.agent.llm_constants import DEFAULT_MAX_TOKENS_PER_TURN, DEFAULT_OPENAI_CHAT_MODEL
 
 # M3: Allowed conversation_id pattern — alphanumeric, hyphens, underscores, 1-64 chars.
 # Rejects path traversal characters and empty strings.
@@ -253,6 +253,7 @@ class LLMSettingsPayload(BaseModel):
     custom_models: dict[str, list[str]] = Field(default_factory=dict)
     max_turn_seconds: int = Field(7200, ge=30, le=14400)
     max_llm_call_seconds: int = Field(600, ge=30, le=1800)
+    max_tokens_per_turn: int = Field(DEFAULT_MAX_TOKENS_PER_TURN, ge=0, le=100_000_000)
 
 
 class SpeechToTextSettingsPayload(BaseModel):

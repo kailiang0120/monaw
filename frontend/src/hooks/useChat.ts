@@ -707,6 +707,7 @@ export function useChat(conversationId: string | null) {
           setIsStreaming(false)
           const isPause = data?.code?.startsWith('iteration_limit_')
             || data?.code === 'iteration_budget_exhausted'
+            || data?.code === 'token_budget_exhausted'
             || data?.code === 'model_output_truncated'
             || data?.code === 'stalled_repeat_detected'
           setMessages((prev) =>

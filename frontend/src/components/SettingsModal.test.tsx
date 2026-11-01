@@ -340,7 +340,7 @@ describe('SettingsModal', () => {
   it('keeps model selection and image help out of Settings', async () => {
     render(<SettingsModal onClose={() => {}} />)
 
-    expect(await screen.findByRole('heading', { name: 'Voice' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Model' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Provider' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reasoning effort' })).not.toBeInTheDocument()
     expect(screen.queryByText('Reading images and screenshots')).not.toBeInTheDocument()
@@ -548,6 +548,18 @@ describe('SettingsModal', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
 
     expect(await screen.findByText('No skills added yet. Ask Monaw to create one, and it will appear here.')).toBeInTheDocument()
+  })
+
+  it('saves the token limit per message from the Model page', async () => {
+    render(<SettingsModal onClose={() => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Tokens per message' }))
+    fireEvent.click(screen.getByRole('option', { name: 'No limit' }))
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }))
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      llm: expect.objectContaining({ max_tokens_per_turn: 0 }),
+    })))
   })
 
   it('shows which saved API key voice input uses', async () => {
@@ -879,7 +891,7 @@ describe('SettingsModal', () => {
 
   it('has no memory page, request limits, or redundant identity summary', async () => {
     render(<SettingsModal onClose={() => {}} />)
-    await screen.findByRole('heading', { name: 'Voice' })
+    await screen.findByRole('heading', { name: 'Model' })
     expect(screen.queryByRole('button', { name: /^Memory$/i })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Tool iteration limit')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Turn timeout seconds')).not.toBeInTheDocument()

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agent.llm_constants import (
     CHAT_MODELS_BY_PROVIDER,
+    DEFAULT_MAX_TOKENS_PER_TURN,
     DEFAULT_OPENAI_CHAT_MODEL,
     MODEL_NAME_PATTERN,
     normalize_chat_model,
@@ -115,6 +116,8 @@ class LLMSettings(BaseModel):
     max_iterations_per_turn: int = Field(0, ge=0, le=500)
     max_turn_seconds: int = Field(7200, ge=30, le=14400)
     max_llm_call_seconds: int = Field(600, ge=30, le=1800)
+    # Model tokens per chat message before the task pauses; 0 is no limit.
+    max_tokens_per_turn: int = Field(DEFAULT_MAX_TOKENS_PER_TURN, ge=0, le=100_000_000)
     # Model names the user added per provider, offered beside the built-in ones.
     custom_models: dict[str, list[str]] = Field(default_factory=dict)
 
@@ -805,6 +808,7 @@ def build_runtime_namespace(base_settings, agent_settings: AgentSettings):
             max_iterations_per_turn=agent_settings.llm.max_iterations_per_turn,
             max_turn_seconds=agent_settings.llm.max_turn_seconds,
             max_llm_call_seconds=agent_settings.llm.max_llm_call_seconds,
+            max_tokens_per_turn=agent_settings.llm.max_tokens_per_turn,
         ),
         speech_to_text=SimpleNamespace(**agent_settings.speech_to_text.model_dump()),
         tools=SimpleNamespace(skills=dict(agent_settings.tools.skills)),

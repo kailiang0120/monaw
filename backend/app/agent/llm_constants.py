@@ -23,6 +23,9 @@ CHAT_MODELS_BY_PROVIDER = {
 
 MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$"
 
+# Model tokens one chat message may use before the task pauses for the user.
+DEFAULT_MAX_TOKENS_PER_TURN = 5_000_000
+
 
 def normalize_chat_model(provider: str, model_name: str, custom_models: tuple[str, ...] | list[str] = ()) -> str:
     """Migrate saved selections within their model family. A name the user added

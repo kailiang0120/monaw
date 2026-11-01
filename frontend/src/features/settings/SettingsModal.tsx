@@ -92,11 +92,13 @@ import {
   applyPermissionProfile,
   duplicateMcpServerNames,
   FALLBACK_MODEL_OPTIONS,
+  formatTokenLimit,
   formatUnavailableReason,
   normalizeDraft,
   parseModelNames,
   permissionProfileFromPermissions,
   providerLabel,
+  TOKEN_LIMIT_OPTIONS,
   type ModelOptionsCatalog,
 } from './settingsConfig'
 
@@ -820,6 +822,24 @@ export function SettingsModal({
                       </div>
                     </SettingsCard>
 
+                    <SettingsCard title="Usage limit">
+                      <SettingRow label="Tokens per message" description={MODEL_COPY.tokenLimit}>
+                        <Dropdown<string>
+                          ariaLabel="Tokens per message"
+                          value={String(draft.llm.max_tokens_per_turn)}
+                          options={[
+                            ...(TOKEN_LIMIT_OPTIONS.includes(draft.llm.max_tokens_per_turn)
+                              ? []
+                              : [draft.llm.max_tokens_per_turn]),
+                            ...TOKEN_LIMIT_OPTIONS,
+                          ].map((limit) => ({ value: String(limit), label: formatTokenLimit(limit) }))}
+                          onChange={(limit) => updateDraft((current) => ({
+                            ...current,
+                            llm: { ...current.llm, max_tokens_per_turn: Number(limit) },
+                          }))}
+                        />
+                      </SettingRow>
+                    </SettingsCard>
                   </div>
                 </>
               )}

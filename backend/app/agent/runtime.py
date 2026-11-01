@@ -9,6 +9,7 @@ import threading
 from typing import AsyncIterator
 
 from app.agent.llm_client import LLMClient
+from app.agent.llm_constants import DEFAULT_MAX_TOKENS_PER_TURN
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
 from app.agent.memory_store import get_memory_store
 from app.agent.memory_manager import MemoryManager
@@ -130,6 +131,9 @@ class AgentRuntime:
         max_iterations = getattr(llm_cfg, "max_iterations_per_turn", None) or 0
         max_turn_seconds = float(getattr(llm_cfg, "max_turn_seconds", None) or 7200)
         max_llm_call_seconds = float(getattr(llm_cfg, "max_llm_call_seconds", None) or 600)
+        max_tokens_per_turn = getattr(llm_cfg, "max_tokens_per_turn", None)
+        if max_tokens_per_turn is None:
+            max_tokens_per_turn = DEFAULT_MAX_TOKENS_PER_TURN
 
         self.turn_loop = TurnLoop(
             llm_client=self.llm_client,
@@ -138,6 +142,7 @@ class AgentRuntime:
             max_iterations=max_iterations,
             max_turn_seconds=max_turn_seconds,
             max_llm_call_seconds=max_llm_call_seconds,
+            max_tokens_per_turn=max_tokens_per_turn,
         )
         visible_tool_names = {
             tool["name"] for tool in self.tool_registry.get_all_tools(visible_only=True)
@@ -292,6 +297,7 @@ def _settings_cache_key(settings) -> str:
         str(getattr(llm_settings, "max_iterations_per_turn", "")),
         str(getattr(llm_settings, "max_turn_seconds", "")),
         str(getattr(llm_settings, "max_llm_call_seconds", "")),
+        str(getattr(llm_settings, "max_tokens_per_turn", "")),
         _key_fingerprint(getattr(settings, "google_api_key", "") or ""),
         _key_fingerprint(provider_key or ""),
     ]

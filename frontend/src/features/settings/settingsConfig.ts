@@ -112,6 +112,14 @@ export function reasoningEffortsForProvider(
     : OPENAI_REASONING_EFFORTS
 }
 
+/** Model tokens one chat message may use before the task pauses (backend DEFAULT_MAX_TOKENS_PER_TURN). */
+export const DEFAULT_MAX_TOKENS_PER_TURN = 5_000_000
+export const TOKEN_LIMIT_OPTIONS = [1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 0]
+
+export function formatTokenLimit(limit: number): string {
+  return limit === 0 ? 'No limit' : `${(limit / 1_000_000).toLocaleString()}M tokens`
+}
+
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return fallback
@@ -408,6 +416,7 @@ export function normalizeDraft(
       max_iterations_per_turn: clampInteger(settings.llm.max_iterations_per_turn, 0, 0, 500),
       max_turn_seconds: clampInteger(settings.llm.max_turn_seconds, 7200, 30, 14400),
       max_llm_call_seconds: clampInteger(settings.llm.max_llm_call_seconds, 600, 30, 1800),
+      max_tokens_per_turn: clampInteger(settings.llm.max_tokens_per_turn, DEFAULT_MAX_TOKENS_PER_TURN, 0, 100_000_000),
       custom_models: {
         openai: settings.llm.custom_models?.openai ?? [],
         codex: settings.llm.custom_models?.codex ?? [],

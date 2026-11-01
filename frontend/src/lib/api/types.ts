@@ -566,6 +566,8 @@ export interface AgentSettings {
     max_iterations_per_turn: number
     max_turn_seconds: number
     max_llm_call_seconds: number
+    /** Model tokens one chat message may use before the task pauses; 0 is no limit. */
+    max_tokens_per_turn: number
     /** Model names the user added, by provider. */
     custom_models?: Partial<Record<'openai' | 'gemini' | 'codex', string[]>>
   }
