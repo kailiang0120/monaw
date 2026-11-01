@@ -74,6 +74,22 @@ test('rejected file action is visible and leaves the disposable file unchanged',
   expect(rows.some((row: { tool_name: string; status: string }) => row.tool_name === 'fs_append' && row.status !== 'complete')).toBe(true)
 })
 
+test('starting a new chat leaves the running turn to finish in the background', async ({ desktop }) => {
+  await desktop.send('stream')
+  await desktop.started('stream')
+  await desktop.page.locator('button[aria-label="New chat"][tabindex="0"]').click()
+  await expect(desktop.page.getByRole('textbox', { name: 'Message', exact: true })).toBeEnabled()
+  await desktop.signal('stream.release')
+  await expect.poll(async () => {
+    const conversations = (await desktop.api('/api/conversations')).data
+    if (!conversations.length) return ''
+    const messages = (await desktop.api(`/api/conversations/${conversations[0].id}/messages`)).data.messages
+    return messages.at(-1)?.content ?? ''
+  }, { timeout: 30_000 }).toContain('Fixture stream completed.')
+  await desktop.page.getByText('[e2e:stream]', { exact: true }).last().click()
+  await expect(desktop.page.getByText('Fixture stream completed.', { exact: false }).last()).toBeVisible()
+})
+
 test('stop retains a completed sibling and cancels unfinished parallel work', async ({ desktop }) => {
   await desktop.send('parallel')
   await desktop.started('parallel')

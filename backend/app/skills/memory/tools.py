@@ -23,12 +23,23 @@ def _blocked(reason_code: str, error: str) -> str:
 
 
 def _current_user_request() -> str:
-    """The user's message for the running turn (the turn loop stores it as the task goal)."""
+    """The user's message for the running turn (the turn loop stores it as the task goal).
+
+    A short follow-up such as "continue" after a paused turn borrows the user's
+    earlier messages in this chat, so a request they already made can finish.
+    Only messages the user typed count, never tool output.
+    """
     conversation_id = current_execution_principal().conversation_id
     if not conversation_id:
         return ""
-    row = get_db().get_conversation(conversation_id) or {}
-    return str(row.get("task_goal") or "")
+    db = get_db()
+    request = str((db.get_conversation(conversation_id) or {}).get("task_goal") or "")
+    earlier = [
+        str(message.get("content") or "")
+        for message in db.get_recent_messages(conversation_id, limit=6)
+        if message.get("role") == "user" and str(message.get("content") or "").strip() != request.strip()
+    ]
+    return get_memory_store().expand_query(request, earlier)
 
 
 def _write_guard(content: str | None = None) -> str | None:

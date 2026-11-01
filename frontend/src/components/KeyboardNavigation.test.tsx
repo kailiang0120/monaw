@@ -17,6 +17,7 @@ function renderSidebar(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
     activeId: null,
     collapsed: false,
     onToggleCollapsed: vi.fn(),
+    onNewChat: vi.fn(),
     onSelect: vi.fn(),
     onDelete: vi.fn(),
     onRename: vi.fn().mockResolvedValue(true),
@@ -35,6 +36,14 @@ function renderSidebar(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
   render(<Sidebar {...props} />)
   return props
 }
+
+describe('new chat', () => {
+  it('starts from the sidebar, open or collapsed', () => {
+    const props = renderSidebar()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New chat' }).find((button) => button.tabIndex === 0)!)
+    expect(props.onNewChat).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('conversation history from the keyboard', () => {
   it('opens a conversation with a real button and renames it with F2', async () => {
@@ -124,5 +133,53 @@ describe('scheduled task actions from the keyboard', () => {
 
     expect(props.onDelete).toHaveBeenCalledWith('t1')
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+})
+
+describe('chat list by workspace', () => {
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString()
+  const chat = (id: string, workspace: string, minutesAgo: number, extra: Partial<Conversation> = {}) => ({
+    id, title: `Chat ${id}`, created_at: at(minutesAgo), updated_at: at(minutesAgo), workspace_dir: workspace, ...extra,
+  }) as Conversation
+
+  afterEach(() => { try { window.localStorage.clear() } catch { /* unavailable */ } })
+
+  it('stays by date while every chat shares one workspace', () => {
+    renderSidebar({ conversations: [chat('a', '', 1), chat('b', '', 2)] })
+    expect(screen.getByText('Today')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Default workspace/ })).not.toBeInTheDocument()
+  })
+
+  it('groups by workspace, newest project first, with a new chat per group', () => {
+    const conversations = [
+      chat('old', 'C:\\Projects\\alpha', 90),
+      chat('def', '', 30),
+      chat('new', 'D:/work/beta/', 5),
+    ]
+    const props = renderSidebar({ conversations })
+    const headers = screen.getAllByRole('button', { expanded: true }).map((button) => button.textContent)
+    expect(headers).toEqual(['Scheduled0', 'beta1', 'Default workspace1', 'alpha1'])
+    expect(screen.getByRole('button', { name: /^beta/ })).toHaveAttribute('title', 'D:/work/beta/')
+    expect(screen.queryByText('Today')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'New chat in alpha' }))
+    expect(props.onNewChat).toHaveBeenCalledWith('C:\\Projects\\alpha')
+  })
+
+  it('shows five chats per group, keeps the open and running ones, and remembers folding', () => {
+    const many = Array.from({ length: 8 }, (_, index) => chat(`m${index}`, 'C:\\big', index + 1, index === 6 ? { running: true } : {}))
+    renderSidebar({ conversations: [...many, chat('other', 'C:\\small', 50)], activeId: 'm7' })
+    // m0-m4, plus the running m6 and the open m7.
+    expect(screen.getAllByText(/^Chat m/)).toHaveLength(7)
+    fireEvent.click(screen.getByRole('button', { name: 'Show 1 more' }))
+    expect(screen.getAllByText(/^Chat m/)).toHaveLength(8)
+    fireEvent.click(screen.getByRole('button', { name: 'Show fewer' }))
+
+    fireEvent.click(screen.getByRole('button', { name: /^small/ }))
+    expect(screen.queryByText('Chat other')).not.toBeInTheDocument()
+    cleanup()
+    renderSidebar({ conversations: [...many, chat('other', 'C:\\small', 50)] })
+    expect(screen.queryByText('Chat other')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^small/ })).toHaveAttribute('aria-expanded', 'false')
   })
 })

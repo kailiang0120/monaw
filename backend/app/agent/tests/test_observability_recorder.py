@@ -282,3 +282,37 @@ def test_observability_records_execution_principal_metadata(tmp_path):
     assert detail["metadata"]["interactive"] is False
     assert detail["events"][-1]["metadata"]["policy"] == "restricted"
     assert detail["events"][-1]["metadata"]["principal_id"] == "telegram:1:kai"
+
+
+def test_replay_route_uses_the_callers_control_session(monkeypatch):
+    # The route read request.state without declaring request, so every replay failed.
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.agent import runtime
+    from app.api.routes import observability as routes
+
+    seen = {}
+
+    class Recorder:
+        def get_run(self, run_id, include_sensitive=False):
+            return {"run_id": run_id, "user_message": "List my files", "status": "complete", "tool_sequence": []}
+
+        def latest_run_for_conversation(self, conversation_id):
+            return {}
+
+        def record_replay(self, **kwargs):
+            return {"comparison_id": "cmp-1", **kwargs}
+
+    async def fake_stream(**kwargs):
+        seen.update(kwargs)
+        yield {"event": "done", "data": {"summary": "ok", "status": "complete"}}
+
+    monkeypatch.setattr(routes, "get_observability_recorder", lambda: Recorder())
+    monkeypatch.setattr(runtime, "run_agent_stream", fake_stream)
+    request = SimpleNamespace(state=SimpleNamespace(control_session=SimpleNamespace(session_id="session-9")))
+
+    asyncio.run(routes.replay_observability_run("run-1", request))
+
+    assert seen["control_session_id"] == "session-9"
+    assert seen["principal_id"] == "replay:session-9" and seen["interactive"] is False

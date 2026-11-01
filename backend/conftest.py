@@ -9,7 +9,9 @@ os.environ["MONAW_DISABLE_BUILTIN_MCP"] = "1"
 
 TEST_GROUPS = {
     "api": {
+        "test_chat_turn_detach.py",
         "test_conversation_workspace.py",
+        "test_code_integrity.py",
         "test_control_plane_auth.py",
         "test_main_config.py",
         "test_support_report.py",
@@ -20,7 +22,7 @@ TEST_GROUPS = {
     },
     "runtime": {
         "test_architecture_boundaries.py",
-        "test_codex_account_provider.py",
+        "test_chatgpt_account.py",
         "test_execution_gate.py",
         "test_approval_review.py",
         "test_approval_injection.py",
@@ -158,6 +160,70 @@ def isolate_user_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     user_skills = tmp_path / "user-skills"
     monkeypatch.setattr(skill_loader, "USER_SKILLS_DIR", user_skills)
     monkeypatch.setattr(skill_creator_tools, "SKILLS_DIR", user_skills)
+
+
+@pytest.fixture(autouse=True)
+def isolate_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Keep conversations out of the developer's real ~/.monaw/runtime/agent.db.
+
+    Code that reaches the shared get_db() singleton would otherwise add
+    conversations, such as an empty chat, to the app the developer uses.
+    """
+    import app.agent.database as database
+
+    database.reset_db()
+    monkeypatch.setattr(database, "_RUNTIME_DIR", tmp_path)
+    monkeypatch.setattr(database, "_DB_PATH", tmp_path / "agent.db")
+    # The legacy JSON import moves files it finds here into a backup folder.
+    monkeypatch.setattr(database, "_JSON_CONVERSATIONS_DIR", tmp_path / "conversations")
+    yield
+    database.reset_db()
+
+
+@pytest.fixture(autouse=True)
+def isolate_debug_log(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Keep chat-route debug lines out of the developer's ~/.monaw/runtime debug log."""
+    import app.debug_ndjson as debug_ndjson
+
+    monkeypatch.setattr(debug_ndjson, "_LOG_FILE", tmp_path_factory.mktemp("debug-log") / "debug.log")
+
+
+@pytest.fixture(autouse=True)
+def isolate_exec_artifacts(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Keep test command output files out of the developer's ~/.monaw/runtime/exec.
+
+    A folder of its own, so tests that expect tmp_path to stay empty still can.
+    """
+    import app.agent.sandbox.artifacts as artifacts
+
+    monkeypatch.setattr(artifacts, "EXEC_ARTIFACT_DIR", tmp_path_factory.mktemp("exec-artifacts"))
+
+
+@pytest.fixture(scope="session")
+def _test_observability_recorder(tmp_path_factory: pytest.TempPathFactory):
+    from app.agent.observability.recorder import ObservabilityRecorder
+
+    return ObservabilityRecorder(root=tmp_path_factory.mktemp("observability"))
+
+
+@pytest.fixture(autouse=True)
+def isolate_observability(_test_observability_recorder, monkeypatch: pytest.MonkeyPatch):
+    """Keep test runs out of the developer's ~/.monaw/runtime/observability.
+
+    One recorder for the session, since building one opens its database.
+    """
+    import app.agent.observability.recorder as recorder
+
+    monkeypatch.setattr(recorder, "_RECORDER", _test_observability_recorder)
+
+
+@pytest.fixture(autouse=True)
+def isolate_account_model_list(monkeypatch: pytest.MonkeyPatch):
+    """Keep the model catalog from fetching with the developer's signed-in ChatGPT account."""
+    import app.agent.model_catalog as model_catalog
+
+    monkeypatch.setattr(model_catalog, "_fetch_account_models", lambda: [])
+    monkeypatch.setattr(model_catalog, "_account_cache", None)
 
 
 @pytest.fixture(autouse=True)

@@ -311,3 +311,17 @@ def test_computer_functions_act_invalidates_on_focus_change(monkeypatch):
 
     assert result["status"] == "blocked"
     assert result["results"][0]["reason_code"] == "target_focus_changed"
+
+
+def test_computer_functions_clipboard_writes_plain_text_and_refuses_credentials(monkeypatch):
+    # A stale constant name made every write fail with a NameError.
+    written = []
+    monkeypatch.setattr(computer_tools, "current_interactive", lambda: True)
+    monkeypatch.setattr(computer_tools.window_ops, "_ctrl_clipboard",
+                        lambda action="read", text="": written.append((action, text)) or json.dumps({"status": "ok"}))
+
+    assert json.loads(computer_tools._computer_functions_clipboard("write", "monaw clipboard test"))["status"] == "ok"
+    blocked = json.loads(computer_tools._computer_functions_clipboard("write", "my API key is sk-123"))
+
+    assert written == [("write", "monaw clipboard test")]
+    assert blocked["reason_code"] == "credential_clipboard_restricted"

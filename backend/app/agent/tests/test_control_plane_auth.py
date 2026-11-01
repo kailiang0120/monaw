@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
@@ -319,6 +321,19 @@ def test_cors_allows_exact_desktop_origin_only(monkeypatch):
     assert allowed.status_code == 200
     assert allowed.headers["access-control-allow-origin"] == "null"
     assert rejected.status_code == 400
+
+
+@pytest.mark.parametrize("path, method, headers", [
+    # Run now sends Idempotency-Key; without it in the preflight list the browser
+    # blocked the request and showed "Failed to fetch".
+    ("/api/scheduled-tasks/task-1/run", "POST", "authorization,idempotency-key"),
+    ("/api/events", "GET", "authorization,last-event-id"),
+])
+def test_cors_preflight_allows_every_header_the_app_sends(path, method, headers):
+    response = TestClient(app).options(path, headers={
+        "Origin": "null", "Access-Control-Request-Method": method, "Access-Control-Request-Headers": headers,
+    })
+    assert response.status_code == 200
 
 
 def test_json_api_routes_declare_response_models():

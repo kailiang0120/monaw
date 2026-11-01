@@ -123,6 +123,37 @@ def test_steering_messages_persist_in_the_same_chat_and_reach_next_turn(monkeypa
     assert not any(item.get("content") == "Use a table" for item in manager.build_llm_messages("another-chat"))
 
 
+def test_a_steered_turn_is_saved_in_the_order_it_happened(monkeypatch, tmp_path):
+    _patch_memory_dirs(monkeypatch, tmp_path)
+    manager = MemoryManager(RecordingLLM())
+    manager.get_or_create("conv-steer-order")
+    calls = [{"tool_name": f"write_{index}", "input": "{}", "output": "ok", "status": "ok"} for index in range(5)]
+    asyncio.run(manager.persist_turn(
+        "conv-steer-order", "Write five files", "All done", tool_calls=calls,
+        steering_messages=["Also add a column", "Keep it short", "One more"], steering_tool_call_indexes=[2, 2, 4],
+    ))
+    db = manager._db
+    saved = db.get_messages("conv-steer-order", limit=50)
+    shape = [
+        (item["role"], item["content"], [call["tool_name"] for call in db.get_tool_calls_for_message(int(item["id"]))])
+        for item in saved
+    ]
+    # Two steers read at the same point share one segment above them.
+    assert shape == [
+        ("user", "Write five files", []),
+        ("assistant", "", ["write_0", "write_1"]),
+        ("user", "Also add a column", []),
+        ("user", "Keep it short", []),
+        ("assistant", "", ["write_2", "write_3"]),
+        ("user", "One more", []),
+        ("assistant", "All done", ["write_4"]),
+    ]
+    # Tool-only segments stay out of the model's history.
+    assert [item["content"] for item in manager.build_llm_messages("conv-steer-order") if item["content"]][-5:] == [
+        "Write five files", "Also add a column", "Keep it short", "One more", "All done",
+    ]
+
+
 def test_uploaded_images_survive_reopen_and_steering_without_cross_session_access(monkeypatch, tmp_path):
     from app.agent import response_attachments as attachment_module
     from app.agent.response_attachments import register_attachment_path, public_attachment_payload

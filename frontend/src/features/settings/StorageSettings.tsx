@@ -15,6 +15,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   legacy_browser: '#4c7fc0',
   app_cache: '#5fa3d6',
   legacy_speech: '#c06a5a',
+  legacy_codex: '#8c7a5a',
   memory: '#b45f95',
   account: '#7d8c3a',
   workspace: '#3f9b7a',

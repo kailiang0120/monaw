@@ -305,9 +305,9 @@ def test_gpt6_astra_normalizes_unsupported_reasoning_effort():
     assert LLMSettings(model_name="gpt-6-astra", reasoning_effort="none").reasoning_effort == "low"
     assert LLMSettings(model_name="gpt-6-sol", reasoning_effort="minimal").reasoning_effort == "low"
     assert LLMSettings(model_name="gpt-6-luna", reasoning_effort="none").reasoning_effort == "none"
-    for provider in ("openai", "codex"):
+    for provider, model in (("openai", "gpt-6.1-sol"), ("codex", "gpt-6-sol")):
         migrated = LLMSettings(provider=provider, model_name="gpt-6-sol", reasoning_effort="none")
-        assert migrated.model_name == "gpt-6.1-sol"
+        assert migrated.model_name == model
         assert migrated.reasoning_effort == "low"
 
 
@@ -664,3 +664,78 @@ def test_runtime_namespace_includes_memory_settings():
     assert runtime.memory.retrieval_limit == 10
     assert runtime.memory.max_injected_chars == 4000
     assert runtime.memory.min_relevance_score == 0.25
+
+
+ACCOUNT_CATALOG = {"models": [
+    {"slug": "gpt-6-luna", "display_name": "GPT-6-Luna", "visibility": "list", "priority": 5,
+     "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "max"}]},
+    {"slug": "gpt-6.1-terra", "display_name": "GPT-6.1 Terra", "visibility": "list", "priority": 3,
+     "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}, {"effort": "ultra"}]},
+    {"slug": "codex-auto-review", "display_name": "Codex Auto Review", "visibility": "hide", "priority": 1},
+]}
+
+
+def test_account_models_follow_the_accounts_list_order_and_levels():
+    from app.agent.model_catalog import parse_account_models
+
+    models = parse_account_models(ACCOUNT_CATALOG)
+
+    # Hidden models stay out; "ultra" is not a level Monaw sends.
+    assert [(m.id, m.label, m.reasoning_efforts) for m in models] == [
+        ("gpt-6.1-terra", "GPT-6.1 Terra", ["low", "high"]),
+        ("gpt-6-luna", "GPT-6-Luna", ["low", "medium", "max"]),
+    ]
+    assert parse_account_models({"data": []}) == []
+
+
+def test_model_options_use_the_account_list_and_custom_models(monkeypatch):
+    import app.agent.model_catalog as model_catalog
+
+    monkeypatch.setattr(model_catalog, "_fetch_account_models", lambda: model_catalog.parse_account_models(ACCOUNT_CATALOG))
+    payload = model_catalog.model_options_payload({"openai": ["gpt-6-mini"], "codex": ["gpt-6-luna", "my-model"]})
+    providers = {item["id"]: item for item in payload["providers"]}
+
+    assert providers["codex"]["source"] == "account"
+    assert providers["codex"]["models"] == ["gpt-6.1-terra", "gpt-6-luna", "my-model"]
+    assert providers["codex"]["labels"]["gpt-6.1-terra"] == "GPT-6.1 Terra"
+    assert providers["codex"]["reasoning_efforts"]["gpt-6-luna"] == ["low", "medium", "max"]
+    assert providers["openai"]["source"] == "built_in"
+    assert providers["openai"]["models"][-1] == "gpt-6-mini"
+
+
+def test_model_options_fall_back_and_keep_the_last_good_account_list(monkeypatch):
+    import app.agent.model_catalog as model_catalog
+
+    monkeypatch.setattr(model_catalog, "_fetch_account_models", lambda: model_catalog.parse_account_models(ACCOUNT_CATALOG))
+    assert model_catalog.account_models(refresh=True)
+
+    def offline():
+        raise OSError("offline")
+
+    monkeypatch.setattr(model_catalog, "_fetch_account_models", offline)
+    assert [m.id for m in model_catalog.account_models(refresh=True)] == ["gpt-6.1-terra", "gpt-6-luna"]
+    # Signing out drops the cached list.
+    monkeypatch.setattr(model_catalog, "_fetch_account_models", lambda: None)
+    assert model_catalog.account_models(refresh=True) == []
+    assert model_catalog.account_models() == []
+    codex = next(item for item in model_catalog.model_options_payload()["providers"] if item["id"] == "codex")
+    assert codex["source"] == "built_in"
+
+
+def test_settings_keep_any_valid_model_name_and_clean_custom_models():
+    # The account's list changes, so any name it offered is kept.
+    assert LLMSettings(provider="codex", model_name="gpt-6.1-terra").model_name == "gpt-6.1-terra"
+    # Elsewhere a name must be built in or one the user added.
+    assert LLMSettings(provider="openai", model_name="gpt-6-mini").model_name == "gpt-6-luna"
+    added = LLMSettings(provider="openai", model_name="gpt-6-mini", custom_models={"openai": ["gpt-6-mini"]})
+    assert added.model_name == "gpt-6-mini"
+    # The API retired gpt-6-sol; the ChatGPT account still offers it.
+    assert LLMSettings(provider="openai", model_name="gpt-6-sol").model_name == "gpt-6.1-sol"
+    assert LLMSettings(provider="codex", model_name="gpt-6-sol").model_name == "gpt-6-sol"
+    assert LLMSettings(provider="gemini", model_name="gemini-2.5-pro").model_name == "gemini-pro-latest"
+    assert LLMSettings(provider="openai", model_name="bad name; rm").model_name == "gpt-6-luna"
+
+    cleaned = LLMSettings(custom_models={
+        "openai": [" gpt-6-mini ", "gpt-6-mini", "bad name", ""], "gemini": ["models/gemini-exp"], "other": ["x"],
+    }).custom_models
+    assert cleaned == {"openai": ["gpt-6-mini"], "gemini": ["models/gemini-exp"]}

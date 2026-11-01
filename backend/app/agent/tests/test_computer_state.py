@@ -1,5 +1,7 @@
 from copy import deepcopy
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -241,3 +243,27 @@ def test_focus_activation_cannot_silently_replace_observed_pixels(desktop, monke
     result = json.loads(tools._computer_functions_act(actions=[{"type": "click", "x": 10, "y": 10}], state_id=state_id))
     assert result["reason_code"] == "stale_state"
     assert events == ["focus"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows window styles")
+@pytest.mark.parametrize("window, listed", [
+    ({"title": "Notepad"}, True),
+    ({"title": "Chrome", "minimized": True, "rect": (-32000, -32000, -31840, -31972)}, True),
+    ({"title": "Settings", "cloaked": True}, False),        # Store app kept alive after closing
+    ({"title": "PixPin", "rect": (0, 0, 1, 1)}, False),     # 1-pixel helper
+    ({"title": "Overlay", "tool": True}, False),            # tool window, not on the taskbar
+    ({"title": "Hidden", "visible": False}, False),
+])
+def test_open_window_list_keeps_only_windows_a_person_can_see(monkeypatch, window, listed):
+    import win32con
+
+    from app.skills.computer_use import desktop_runtime, screen_redaction
+
+    fake = SimpleNamespace(
+        IsWindowVisible=lambda hwnd: window.get("visible", True),
+        GetWindowLong=lambda hwnd, index: win32con.WS_EX_TOOLWINDOW if window.get("tool") else 0,
+        IsIconic=lambda hwnd: window.get("minimized", False),
+        GetWindowRect=lambda hwnd: window.get("rect", (0, 0, 800, 600)),
+    )
+    monkeypatch.setattr(screen_redaction, "_is_cloaked", lambda hwnd: window.get("cloaked", False))
+    assert desktop_runtime._is_user_window(fake, 1) is listed

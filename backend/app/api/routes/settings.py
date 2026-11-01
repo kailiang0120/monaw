@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -243,7 +244,8 @@ async def get_settings():
 
 @router.get("/settings/model-options", response_model=ModelOptionsPayload)
 async def get_model_options():
-    return model_options_payload()
+    custom_models = load_agent_settings(settings).llm.custom_models
+    return await asyncio.to_thread(model_options_payload, custom_models)
 
 
 @router.get("/settings/workspace-instructions", response_model=WorkspaceInstructionsPayload)

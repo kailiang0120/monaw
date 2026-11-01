@@ -243,8 +243,14 @@ async def list_conversations(
     limit: int = Query(100, ge=1, le=CONVERSATION_LIST_LIMIT_MAX),
     offset: int = Query(0, ge=0, le=10_000),
 ):
-    conversations = list_conversation_metadata()
-    return conversations[offset:offset + limit]
+    from app.agent.steering import conversation_is_running
+    from app.agent.turn_loop import conversation_turn_running
+
+    conversations = list_conversation_metadata()[offset:offset + limit]
+    return [
+        {**conversation, "running": conversation_is_running(conversation["id"]) or conversation_turn_running(conversation["id"])}
+        for conversation in conversations
+    ]
 
 
 @router.post("/conversations/workspace-validation", response_model=ConversationWorkspace)

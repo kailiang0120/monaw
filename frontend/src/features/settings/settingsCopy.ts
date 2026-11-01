@@ -72,9 +72,10 @@ export const MODEL_COPY = {
   model: 'Bigger models reason better and cost more per message. Smaller "mini"/"flash" models are faster and cheaper.',
   reasoningEffort: 'How long the model is allowed to think before it answers. Higher settings give better results on hard problems but are slower and cost more.',
   vision: 'Screenshots and image attachments go straight to the model you picked above, which reads them natively. No separate vision model is needed.',
+  customModels: 'Add models by name, separated by commas, to choose them next to the built-in ones. A name the provider does not offer fails when you send a message.',
   speechProvider: 'Recordings are sent to the chosen provider using your API key. Automatic follows your chat model, then uses whichever key you have saved.',
   runtimeLimits: 'Safety brakes for a single request. If the agent gets stuck in a loop, these stop it instead of letting it run forever.',
-  maxIterations: 'How many tool calls the agent may make while answering one message.',
+  maxIterations: 'How many model steps the agent may take while answering one chat message. 0 is no limit. Scheduled and Telegram runs stop at 200.',
   maxTurnSeconds: 'The wall-clock budget for answering one message, across all tool calls.',
   maxLlmCallSeconds: 'How long to wait for a single reply from the model before giving up.',
 } as const

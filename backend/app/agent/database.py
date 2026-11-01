@@ -103,7 +103,10 @@ class Database:
             "SELECT id, title, created_at, updated_at, workspace_dir FROM conversations ORDER BY updated_at DESC"
         )
         return [
-            {"id": r["id"], "title": r["title"], "created_at": r["created_at"], "workspace_dir": r["workspace_dir"]}
+            {
+                "id": r["id"], "title": r["title"], "created_at": r["created_at"], "updated_at": r["updated_at"],
+                "workspace_dir": r["workspace_dir"],
+            }
             for r in rows
         ]
 

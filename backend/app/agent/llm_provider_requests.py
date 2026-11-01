@@ -292,7 +292,26 @@ def normalise_messages_for_openai_responses(
     result: list[dict] = []
     for msg in messages:
         item_type = msg.get("type")
-        if item_type in {"function_call", "function_call_output", "reasoning"}:
+        if item_type == "function_call_output":
+            # Monaw marks screenshots on the result with images/ephemeral; the
+            # API accepts only call_id and output, so images go in the output.
+            output = str(msg.get("output") or "")
+            image_payloads = image_payloads_for_message(msg, include_images)
+            if image_payloads:
+                output_parts: list[dict] = [{"type": "input_text", "text": output}]
+                output_parts += [
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{payload['mime_type']};base64,"
+                        f"{base64.b64encode(payload['data']).decode('ascii')}",
+                    }
+                    for payload in image_payloads
+                ]
+                result.append({"type": item_type, "call_id": msg.get("call_id", ""), "output": output_parts})
+            else:
+                result.append({"type": item_type, "call_id": msg.get("call_id", ""), "output": output})
+            continue
+        if item_type in {"function_call", "reasoning"}:
             result.append(dict(msg))
             continue
 

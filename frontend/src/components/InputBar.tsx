@@ -1,5 +1,5 @@
 import { type ClipboardEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
-import { FileText, Loader2, Mic, Paperclip, Send, Shield, Square, Terminal, X } from 'lucide-react'
+import { FileText, ListPlus, Loader2, Mic, Paperclip, Pencil, Send, Shield, Square, Terminal, X } from 'lucide-react'
 import { ContextUsageBar } from './ContextUsageBar'
 import { WorkspacePicker } from './WorkspacePicker'
 import { Dropdown } from './Dropdown'
@@ -8,6 +8,7 @@ import { fetchContextUsage } from '../lib/api/conversations'
 import { transcribeSpeech } from '../lib/api/speechToText'
 import { uploadAttachment } from '../lib/api/uploads'
 import type { AgentSettings, ContextUsage, ModelOptions, UploadedAttachment } from '../lib/api/types'
+import type { QueuedMessage } from '../hooks/useChat'
 
 type ApprovalMode = AgentSettings['permissions']['mode']
 type ModelSelection = Pick<AgentSettings['llm'], 'provider' | 'model_name' | 'reasoning_effort'>
@@ -81,12 +82,62 @@ function ComposerAttachment({ file, onRemove, disabled }: { file: File; onRemove
   )
 }
 
+/** Messages waiting to run as the next turns, above the composer. */
+function QueuedMessages({ items, paused, isStreaming, onEdit, onRemove, onSendNow }: {
+  items: QueuedMessage[]
+  paused: boolean
+  isStreaming: boolean
+  onEdit: (item: QueuedMessage) => void
+  onRemove: (id: string) => void
+  onSendNow: (id: string) => void
+}) {
+  const held = paused && !isStreaming
+  return (
+    <div className="mx-3 mt-3 rounded-xl border border-white/[0.07] bg-white/[0.02] px-2 py-1.5" role="group" aria-label="Queued messages">
+      <p className="px-1 pb-1 text-[10px] uppercase tracking-wide text-neutral-500">
+        {held ? 'Queued · held after Stop' : 'Queued · sends when this reply ends'}
+      </p>
+      <ul className="space-y-0.5">
+        {items.map((item, index) => (
+          <li key={item.id} className="flex items-center gap-2 rounded-lg px-1 py-1 text-xs text-neutral-300 hover:bg-white/[0.03]">
+            <span className="w-4 shrink-0 text-right text-[10px] text-neutral-600">{index + 1}</span>
+            <span className="min-w-0 flex-1 truncate" title={item.text}>{item.text}</span>
+            {item.attachments.length > 0 && (
+              <span className="shrink-0 text-[10px] text-neutral-500">{item.attachments.length} file{item.attachments.length > 1 ? 's' : ''}</span>
+            )}
+            {held && index === 0 && (
+              <button type="button" onClick={() => onSendNow(item.id)} className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-accent-light hover:bg-accent/10">
+                Send now
+              </button>
+            )}
+            {item.attachments.length === 0 && (
+              <button type="button" onClick={() => onEdit(item)} aria-label={`Edit queued message ${index + 1}`} title="Edit"
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-white/[0.06] hover:text-neutral-200">
+                <Pencil size={12} />
+              </button>
+            )}
+            <button type="button" onClick={() => onRemove(item.id)} aria-label={`Remove queued message ${index + 1}`} title="Remove"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-white/[0.06] hover:text-neutral-200">
+              <X size={12} />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 interface Props {
   workspaceDir?: string
   onWorkspaceChange?: (path: string) => Promise<void>
   onSend: (text: string, attachments?: UploadedAttachment[]) => void
   onSteer?: (text: string, attachments?: UploadedAttachment[]) => Promise<void>
   steeringConversationId?: string | null
+  queued?: QueuedMessage[]
+  queuePaused?: boolean
+  onQueue?: (text: string, attachments?: UploadedAttachment[]) => void
+  onRemoveQueued?: (id: string) => void
+  onSendQueuedNow?: (id: string) => void
   onStop: () => void
   isStreaming: boolean
   conversationId: string | null
@@ -112,6 +163,11 @@ export function InputBar({
   onSend,
   onSteer,
   steeringConversationId,
+  queued = [],
+  queuePaused = false,
+  onQueue,
+  onRemoveQueued,
+  onSendQueuedNow,
   onStop,
   isStreaming,
   conversationId,
@@ -163,19 +219,22 @@ export function InputBar({
     .flatMap((provider) =>
       provider.models.map((model) => ({
         value: `${provider.id}:${model}`,
-        label: `${provider.label} · ${model}`,
-        shortLabel: compactModelLabel(provider.id, provider.label, model),
+        label: `${provider.label} · ${provider.labels?.[model] ?? model}`,
+        shortLabel: compactModelLabel(provider.id, provider.label, model, provider.labels?.[model]),
       })),
     )
   const selectedModelAvailable = modelChoices.some(
     (choice) => choice.value === `${modelSelection.provider}:${modelSelection.model_name}`,
   )
-  const effortChoices = reasoningEffortsForProvider(modelSelection.provider, modelSelection.model_name)
+  const effortChoices = reasoningEffortsForProvider(modelSelection.provider, modelSelection.model_name, modelOptions)
   const settingsSaving = modelSelectionDisabled || approvalModeDisabled
   const canSteer = Boolean(isStreaming && onSteer && steeringConversationId)
+  const canQueue = Boolean(isStreaming && onQueue)
   const placeholder = disabled && disabledReason
     ? disabledReason
-    : isStreaming ? 'Enter to steer · Shift+Enter for newline' : 'Enter to send · Shift+Enter for newline'
+    : isStreaming
+      ? canQueue ? 'Enter to steer · Tab to queue · Shift+Enter for newline' : 'Enter to steer · Shift+Enter for newline'
+      : 'Enter to send · Shift+Enter for newline'
   const slashQuery = value.startsWith('/') && !value.includes('\n') && !value.includes(' ')
     ? value.slice(1).toLowerCase()
     : ''
@@ -233,17 +292,20 @@ export function InputBar({
     }
   }, [conversationId, contextRefreshKey, isStreaming, usageRefreshKey])
 
-  const handleSend = async () => {
+  // Queueing holds the message until the running turn ends, instead of steering it.
+  const handleSend = async (queue = false) => {
     const trimmed = value.trim()
     const message = trimmed || (selectedFiles.length ? 'Please review the attached file(s).' : '')
-    if (!message || !selectedModelAvailable || settingsSaving || (isStreaming && !canSteer) || disabled || uploading || recording || transcribing) return
+    const queueing = queue && canQueue
+    if (!message || !selectedModelAvailable || settingsSaving || (isStreaming && !canSteer && !queueing) || disabled || uploading || recording || transcribing) return
     setUploadError('')
     setUploading(true)
     try {
       const attachments = selectedFiles.length
         ? await Promise.all(selectedFiles.map((file) => uploadAttachment(file, isStreaming ? steeringConversationId ?? conversationId : conversationId)))
         : []
-      if (isStreaming && onSteer) await onSteer(message, attachments)
+      if (queueing && onQueue) onQueue(message, attachments)
+      else if (isStreaming && onSteer) await onSteer(message, attachments)
       else onSend(message, attachments)
       setValue('')
       setSelectedFiles([])
@@ -295,7 +357,18 @@ export function InputBar({
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       void handleSend()
+      return
     }
+    if (e.key === 'Tab' && !e.shiftKey && canQueue && (value.trim() || selectedFiles.length)) {
+      e.preventDefault()
+      void handleSend(true)
+    }
+  }
+
+  const editQueued = (item: QueuedMessage) => {
+    onRemoveQueued?.(item.id)
+    setValue((current) => (current.trim() ? `${current.trimEnd()}\n${item.text}` : item.text))
+    focusAndResizeTextarea()
   }
 
   const handleInput = () => {
@@ -622,6 +695,10 @@ export function InputBar({
               ))}
             </div>
           )}
+          {queued.length > 0 && onRemoveQueued && onSendQueuedNow && (
+            <QueuedMessages items={queued} paused={queuePaused} isStreaming={isStreaming}
+              onEdit={editQueued} onRemove={onRemoveQueued} onSendNow={onSendQueuedNow} />
+          )}
           {selectedFiles.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 px-4 pt-3" role="group" aria-label="Attachments">
               {selectedFiles.map((file, index) => (
@@ -773,6 +850,18 @@ export function InputBar({
                   className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-red-500/15 text-red-300 ring-1 ring-red-400/20 hover:bg-red-500/25"
                 >
                   <Square size={12} fill="currentColor" />
+                </button>
+              )}
+              {canQueue && (
+                <button
+                  type="button"
+                  onClick={() => { void handleSend(true) }}
+                  disabled={(!value.trim() && selectedFiles.length === 0) || !selectedModelAvailable || settingsSaving || disabled || uploading || recording || transcribing}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.03] text-neutral-400 outline-none transition-colors hover:border-white/[0.12] hover:text-neutral-100 focus:border-accent/50 disabled:opacity-50"
+                  aria-label="Queue message"
+                  title="Queue: send after this reply ends (Tab)"
+                >
+                  <ListPlus size={12} />
                 </button>
               )}
               <button

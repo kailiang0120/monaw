@@ -681,3 +681,22 @@ def test_openai_tool_results_round_trip_as_responses_function_call_output():
         "output": '{"status":"ok","result":"found"}',
     }
     assert normalised == [message]
+
+
+def test_tool_result_screenshots_go_inside_the_output_not_as_extra_fields(tmp_path):
+    # The API rejected input[n].images: the screenshot belongs in output.
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"\x89PNG fake")
+    message = {
+        "type": "function_call_output", "call_id": "call-1", "output": "took a screenshot",
+        "images": [{"path": str(shot), "mime_type": "image/png"}], "ephemeral": True,
+    }
+
+    with_images = _normalise_messages_for_openai_responses([message], include_images=True)
+    without_images = _normalise_messages_for_openai_responses([message], include_images=False)
+
+    assert with_images == [{"type": "function_call_output", "call_id": "call-1", "output": [
+        {"type": "input_text", "text": "took a screenshot"},
+        {"type": "input_image", "image_url": "data:image/png;base64,iVBORyBmYWtl"},
+    ]}]
+    assert without_images == [{"type": "function_call_output", "call_id": "call-1", "output": "took a screenshot"}]

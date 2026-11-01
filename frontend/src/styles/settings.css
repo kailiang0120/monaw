@@ -513,6 +513,13 @@ input.st-input {
   color: var(--st-text-muted);
 }
 
+/* Next to a row label: no taller than the label's line. */
+.st-info-button-inline {
+  width: 1.125rem;
+  height: 1.125rem;
+  border-radius: 0.25rem;
+}
+
 .st-info-button:hover {
   color: var(--st-text);
   background: var(--st-surface-hover);

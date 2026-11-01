@@ -23,7 +23,10 @@ unauthenticated runtime endpoint.
 | `POST` | `/api/chat/jobs` | `agent:run` | `ChatJobCreateResponse` |
 | `POST` | `/api/chat/jobs/{job_id}/cancel` | `agent:run` | `OkResponse` |
 | `GET` | `/api/chat/jobs/{job_id}/stream` | `agent:run` | `stream/file/none` |
+| `GET` | `/api/chat/runs` | `agent:run` | `list` |
+| `GET` | `/api/chat/runs/{run_id}/events` | `agent:run` | `stream/file/none` |
 | `POST` | `/api/chat/steer` | `agent:run` | `ChatSteerResponse` |
+| `POST` | `/api/chat/stop` | `agent:run` | `OkResponse` |
 | `GET` | `/api/conversations` | `agent:run` | `list` |
 | `POST` | `/api/conversations` | `agent:run` | `ConversationOut` |
 | `POST` | `/api/conversations/workspace-validation` | `agent:run` | `ConversationWorkspace` |

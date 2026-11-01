@@ -47,6 +47,33 @@ TOOL_REPROMPT_MESSAGE = (
 )
 
 
+# Guard stops after which the model still gets one tool-less call to tell the
+# user what happened, instead of the turn ending on a canned line.
+GUARD_WRAP_UP_REASON_CODES = frozenset({
+    "auto_review_limit",
+    "auto_review_retry_blocked",
+    "iteration_budget_exhausted",
+    "iteration_limit_reached_after_tool",
+    "iteration_limit_reached_before_more_tools",
+    "iteration_limit_reached_without_response",
+    "progress_without_tool",
+    "repeated_blocked_tool_result",
+    "repeated_tool_call_blocked",
+    "stalled_repeat_detected",
+})
+
+
+def guard_wrap_up_prompt(reason_code: str, guard_text: str) -> str:
+    return (
+        "The run was stopped by a safety guard and no more tools can be called in this turn.\n\n"
+        f"Reason: `{reason_code}`. {guard_text}\n\n"
+        "Reply to the user now in plain text. Say what you completed, with the results you verified; "
+        "what is still left and what stopped you; and what they can do next, such as sending "
+        "\"continue\", changing a permission, or giving a different instruction. "
+        "Do not claim anything you did not verify with a tool result."
+    )
+
+
 WEB_SEARCH_RESULT_REPROMPT_MESSAGE = (
     "Your final answer did not include the actual web_search results. Use the web_search "
     "tool output above and provide a concrete answer with the result titles, source URLs, "

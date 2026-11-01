@@ -291,3 +291,25 @@ def test_old_render_modes_point_to_devtools_without_fetching(monkeypatch, mode):
     assert result["status"] == "needs_browser_render"
     assert result["reason_code"] == "browser_render_requested"
     assert result["hint"] == BROWSER_RENDER_HINT
+
+
+def test_https_fetch_verifies_against_certifi_and_the_windows_store(monkeypatch):
+    # Python's default context could not build Cloudflare's chain on Windows,
+    # so browser_fetch failed with CERTIFICATE_VERIFY_FAILED on example.com.
+    import ssl
+
+    import certifi
+
+    certifi_only = ssl.create_default_context(cafile=certifi.where())
+    context = browser_tools_module._https_context()
+
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    assert context.cert_store_stats()["x509_ca"] >= certifi_only.cert_store_stats()["x509_ca"]
+
+    handlers = []
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *items: handlers.extend(items) or SimpleNamespace(
+        open=lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("stop"))))
+    with pytest.raises(OSError):
+        browser_tools_module._fetch_http_with_scrapling("https://example.com", timeout_ms=1000)
+    https = [handler for handler in handlers if isinstance(handler, urllib.request.HTTPSHandler)]
+    assert https and https[0]._context.verify_mode == ssl.CERT_REQUIRED

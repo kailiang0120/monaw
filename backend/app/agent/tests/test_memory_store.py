@@ -223,6 +223,15 @@ def test_memory_manager_builds_context_for_the_conversation_workspace(store, rep
     assert manager.build_long_term_memory_context("go ahead", conversation_id="conv-deploy") == ""
 
 
+def test_tests_never_write_conversations_to_the_real_database(tmp_path):
+    # This test once created an empty "Deploy" chat in the developer's own Monaw.
+    from app.agent import database
+    from app.agent.runtime_paths import RUNTIME_DIR
+
+    assert database.get_db()._path == tmp_path / "agent.db"
+    assert database.get_db()._path != RUNTIME_DIR / "agent.db"
+
+
 # ------------------------------------------------------------------ tools
 
 
@@ -244,6 +253,27 @@ def turn(monkeypatch, store, repo):
                 reset(token)
 
     return call
+
+
+def test_continue_after_a_paused_turn_counts_the_request_the_user_already_made(monkeypatch, store):
+    from app.agent.database import get_db
+
+    db = get_db()
+    db.create_conversation("chat", "Memory")
+    db.add_message("chat", "user", "Update my memory: my favourite colour is now blue.")
+    db.add_message("chat", "assistant", "Stopped before final answer. Last tool: memory_search.")
+    db.update_conversation("chat", task_goal="continue")
+    monkeypatch.setattr(memory_tools, "get_memory_store", lambda: store)
+    monkeypatch.setattr(memory_tools, "current_execution_principal", lambda: SimpleNamespace(conversation_id="chat"))
+
+    request = memory_tools._current_user_request()
+    assert "favourite colour is now blue" in request
+    assert memory_tools._write_guard("Favourite colour is blue.") is None
+
+    # A full new request stands alone: earlier messages are not borrowed.
+    db.update_conversation("chat", task_goal="Please summarise the project plan for the launch")
+    assert "blue" not in memory_tools._current_user_request()
+    assert memory_tools._write_guard("Favourite colour is blue.") is not None
 
 
 def test_remember_tool_saves_what_the_user_said_in_the_chosen_scope(turn, store, repo):

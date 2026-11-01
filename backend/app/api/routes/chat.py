@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import uuid
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -8,12 +9,18 @@ from fastapi.responses import StreamingResponse
 from app.agent.job_manager import cancel_job, create_job, get_job, list_jobs, run_job
 from app.agent.response_attachments import runtime_attachment_from_ref
 from app.agent.settings_store import build_runtime_namespace, load_agent_settings
-from app.agent.steering import SteeringInbox, SteeringMessage, get_steering, register_steering, unregister_steering
+from app.agent.steering import (
+    SteeringInbox, SteeringMessage, get_steering, register_steering, running_turns, unregister_steering,
+)
 from app.agent.ui_events import publish_ui_event
 from app.config import settings
 from app.debug_ndjson import dbg_log
-from app.schemas import ChatJobCreateResponse, ChatJobOut, ChatRequest, ChatSteerRequest, ChatSteerResponse, OkResponse
+from app.schemas import (
+    ChatJobCreateResponse, ChatJobOut, ChatRequest, ChatRunOut, ChatSteerRequest, ChatSteerResponse, ChatStopRequest,
+    OkResponse,
+)
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -87,18 +94,23 @@ async def chat(req: ChatRequest, request: Request):
     )
     _prepare_conversation_workspace(req, conv_id)
 
-    async def stream():
-        dbg_log(
-            "routes.py:chat.stream",
-            "sse_stream_start",
-            hypothesis_id="H1",
-            data={"conv_id": conv_id, "msg_len": len(message or ""), "attachments": len(req.attachments)},
-        )
-
-        inbox = SteeringInbox(conv_id, control_session_id)
+    inbox = SteeringInbox(
+        conv_id, control_session_id, **({"run_id": req.run_id} if req.run_id else {}),
+        display_message=req.message, public_attachments=[attachment.model_dump() for attachment in req.attachments],
+    )
+    try:
         register_steering(inbox)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Lets the sidebar mark the chat as running.
+    publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "run_started"})
+
+    async def run_turn() -> None:
+        # The turn runs apart from the HTTP response: closing the window or
+        # switching chats only stops the viewing, and POST /chat/stop ends it.
         try:
-            yield f'event: turn_started\ndata: {json.dumps({"run_id": inbox.run_id, "conversation_id": conv_id})}\n\n'.encode()
+            inbox.stream.publish(
+                f'event: turn_started\ndata: {json.dumps({"run_id": inbox.run_id, "conversation_id": conv_id})}\n\n'.encode())
             merged = build_runtime_namespace(settings, load_agent_settings(settings))
             from app.agent.runtime import run_agent_stream
 
@@ -123,7 +135,12 @@ async def chat(req: ChatRequest, request: Request):
                     )
                     publish_ui_event("usage.changed", {"conversation_id": conv_id})
                     publish_ui_event("observability.changed", {"conversation_id": conv_id})
-                yield f"event: {event_name}\ndata: {event_data}\n\n".encode()
+                inbox.stream.publish(f"event: {event_name}\ndata: {event_data}\n\n".encode())
+        except asyncio.CancelledError:
+            # Stopped on request: the turn saved its partial result. Tell
+            # other views the chat changed, then finish cancelling.
+            publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "messages_changed"})
+            raise
         except Exception as e:
             dbg_log(
                 "routes.py:chat.stream",
@@ -131,12 +148,75 @@ async def chat(req: ChatRequest, request: Request):
                 hypothesis_id="H1",
                 data={"error_type": type(e).__name__, "error_msg": str(e)[:300]},
             )
-            raise
+            logger.exception("Chat turn failed")
         finally:
             unregister_steering(inbox)
+            inbox.stream.close()
+            publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "run_finished"})
+
+    inbox.task = asyncio.create_task(run_turn())
+    events = inbox.stream.subscribe()
+
+    async def stream():
+        dbg_log(
+            "routes.py:chat.stream",
+            "sse_stream_start",
+            hypothesis_id="H1",
+            data={"conv_id": conv_id, "msg_len": len(message or ""), "attachments": len(req.attachments)},
+        )
+        try:
+            while (chunk := await events.get()) is not None:
+                yield chunk
+        finally:
+            inbox.stream.unsubscribe(events)
             dbg_log("routes.py:chat.stream", "sse_stream_generator_finally", hypothesis_id="H1", data={})
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.get("/chat/runs", response_model=list[ChatRunOut])
+async def list_chat_runs(request: Request):
+    """Turns this session started that are still running, so a reopened chat can follow them."""
+    return [
+        {
+            "run_id": inbox.run_id, "conversation_id": inbox.conversation_id, "message": inbox.display_message,
+            "attachments": inbox.public_attachments, "started_at": inbox.started_at,
+        }
+        for inbox in running_turns(request.state.control_session.session_id)
+    ]
+
+
+@router.get("/chat/runs/{run_id}/events")
+async def follow_chat_run(run_id: str, request: Request):
+    """Replay a running turn's events from its start, then stream the rest as they happen."""
+    inbox = get_steering(run_id, request.state.control_session.session_id)
+    if inbox is None:
+        raise HTTPException(status_code=404, detail="This turn is no longer running.")
+    events = inbox.stream.subscribe()
+
+    async def stream():
+        try:
+            while (chunk := await events.get()) is not None:
+                yield chunk
+        finally:
+            inbox.stream.unsubscribe(events)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.post("/chat/stop", response_model=OkResponse)
+async def stop_chat(body: ChatStopRequest, request: Request):
+    """End a running turn; only the session that started it may stop it."""
+    inbox = get_steering(body.run_id, request.state.control_session.session_id)
+    task = inbox.task if inbox is not None else None
+    if task is None or task.done():
+        return {"ok": False}
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=10)
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        pass
+    return {"ok": True}
 
 
 @router.post("/chat/steer", response_model=ChatSteerResponse)

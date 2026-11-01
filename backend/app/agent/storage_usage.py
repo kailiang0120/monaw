@@ -181,8 +181,15 @@ CATEGORIES: tuple[Category, ...] = (
         lambda: [MONAW_HOME_DIR / "memory", RUNTIME_DIR / "memory-index"],
     ),
     Category(
-        "account", "ChatGPT sign-in", "The runtime for signing in with a ChatGPT account. Sign out to remove it.",
-        lambda: [MONAW_HOME_DIR / "codex-account"],
+        "account", "ChatGPT sign-in", "Your ChatGPT sign-in, stored encrypted. Sign out to remove it.",
+        lambda: [MONAW_HOME_DIR / "chatgpt-account"],
+    ),
+    Category(
+        "legacy_codex", "Old ChatGPT sign-in",
+        "The Codex runtime data earlier versions used to sign in with ChatGPT, including its saved sign-in. "
+        "Monaw now signs in directly.",
+        lambda: [MONAW_HOME_DIR / "codex-account"], clean="backend", clean_label="Delete",
+        warning="Only the old sign-in is removed; your current ChatGPT sign-in stays.",
     ),
     Category(
         "workspace", "Workspace", "Files in Monaw's default work folder.",
@@ -199,6 +206,7 @@ _CLEANERS: dict[str, Callable[[], None]] = {
     # Leftovers from earlier versions go entirely, folder and all.
     "legacy_browser": lambda: _remove(MONAW_HOME_DIR / "browser" / "profiles"),
     "legacy_speech": lambda: _remove(MONAW_HOME_DIR / "models" / "faster-whisper"),
+    "legacy_codex": lambda: _remove(MONAW_HOME_DIR / "codex-account"),
 }
 
 

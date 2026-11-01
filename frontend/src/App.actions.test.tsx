@@ -21,7 +21,8 @@ vi.mock('./components/ApprovalToast', () => ({ ApprovalToast: () => null }))
 vi.mock('./components/AccessGrantCard', () => ({ AccessGrantCard: () => null }))
 vi.mock('./hooks/useChat', () => {
   const stable = { messages: [], isStreaming: false, pendingAccessGrant: null, clearMessages: vi.fn(),
-    setPendingAccessGrant: vi.fn(), refreshMessages: vi.fn(), stopStreaming: vi.fn() }
+    setPendingAccessGrant: vi.fn(), refreshMessages: vi.fn(), stopStreaming: vi.fn(),
+    queued: [], queuePaused: false, queueMessage: vi.fn(), removeQueued: vi.fn() }
   return { useChat: () => stable }
 })
 vi.mock('./lib/api/conversations', () => ({ fetchConversations: vi.fn(), deleteConversation: vi.fn(), renameConversation: vi.fn() }))

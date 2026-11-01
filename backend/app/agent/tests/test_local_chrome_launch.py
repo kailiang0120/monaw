@@ -12,14 +12,16 @@ def test_old_default_budgets_are_raised_but_custom_budgets_are_preserved():
     defaults = LLMSettings()
     migrated = _normalize_llm_payload({"max_iterations_per_turn": 40, "max_turn_seconds": 1800,
                                        "max_llm_call_seconds": 300})
-    assert (defaults.max_iterations_per_turn, defaults.max_turn_seconds, defaults.max_llm_call_seconds) == (200, 7200, 600)
-    assert migrated["max_iterations_per_turn"] == 200
+    assert (defaults.max_iterations_per_turn, defaults.max_turn_seconds, defaults.max_llm_call_seconds) == (0, 7200, 600)
+    assert migrated["max_iterations_per_turn"] == 0
     assert migrated["max_turn_seconds"] == 7200
     assert migrated["max_llm_call_seconds"] == 600
     custom = _normalize_llm_payload({"max_iterations_per_turn": 180, "max_turn_seconds": 1800,
                                     "max_llm_call_seconds": 300})
     assert custom["max_iterations_per_turn"] == 180
     assert custom["max_turn_seconds"] == 1800
+    # 200 was the next default; chats now have no limit.
+    assert _normalize_llm_payload({"max_iterations_per_turn": 200})["max_iterations_per_turn"] == 0
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows install locations")

@@ -7,7 +7,7 @@ This document is for contributors and maintainers. The root README is for end us
 - Frontend: Electron, React, Vite, TypeScript, Tailwind CSS.
 - Backend: FastAPI, Uvicorn, Pydantic.
 - Python environment and dependencies: `uv`, `pyproject.toml`, and `uv.lock`.
-- LLM providers: OpenAI SDK with API key, Codex SDK with ChatGPT account sign-in, and Google GenAI SDK.
+- LLM providers: OpenAI SDK with an API key or a Sign in with ChatGPT token (`app/agent/chatgpt_account.py`), and Google GenAI SDK.
 - Storage: SQLite plus local markdown memory files.
 - Automation: the Monaw Chrome extension (`browser-extension/`, a Manifest V3 extension using `chrome.debugger`) with its local server in `backend/app/skills/browser_use/extension/`, Scrapling for `browser_fetch`, MCP, and Windows desktop automation packages.
 

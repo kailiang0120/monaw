@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Clock3, MessageSquare, Moon, RefreshCw, Settings, Sun, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Clock3, Folder, Loader2, MessageSquare, Moon, Plus, RefreshCw, Settings, SquarePen, Sun, Trash2 } from 'lucide-react'
 import type { Conversation, ScheduledTask } from '../lib/api/types'
 import { ScheduledTasksList } from './scheduling/ScheduledTasksList'
 import { InlineConfirm } from './ui/InlineConfirm'
@@ -12,6 +12,8 @@ interface Props {
   activeId: string | null
   collapsed: boolean
   onToggleCollapsed: () => void
+  // Here rather than in the title bar, away from the window buttons.
+  onNewChat: (workspaceDir?: string) => void
   onSelect: (id: string) => void
   onDelete: (id: string) => void
   onRename?: (id: string, title: string) => void | Promise<boolean>
@@ -52,6 +54,53 @@ function groupByDate(conversations: Conversation[]) {
   return groups
 }
 
+const WORKSPACE_GROUP_PREVIEW = 5
+const FOLDED_WORKSPACES_KEY = 'monaw.sidebar.foldedWorkspaces'
+
+interface WorkspaceGroup {
+  dir: string
+  label: string
+  chats: Conversation[]
+}
+
+function workspaceLabel(dir: string): string {
+  if (!dir) return 'Default workspace'
+  const parts = dir.replace(/[\\/]+$/, '').split(/[\\/]/)
+  return parts[parts.length - 1] || dir
+}
+
+/** Chats by working folder, the most recently active folder first. */
+function groupByWorkspace(conversations: Conversation[]): WorkspaceGroup[] {
+  const groups = new Map<string, WorkspaceGroup & { latest: string }>()
+  for (const c of conversations) {
+    const dir = c.workspace_dir || ''
+    const group = groups.get(dir) ?? { dir, label: workspaceLabel(dir), chats: [], latest: '' }
+    group.chats.push(c)
+    const activity = c.updated_at || c.created_at
+    if (activity > group.latest) group.latest = activity
+    groups.set(dir, group)
+  }
+  return [...groups.values()].sort((a, b) => b.latest.localeCompare(a.latest))
+}
+
+// Which groups are folded is a per-window convenience; it may be unavailable.
+function loadFoldedWorkspaces(): Set<string> {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(FOLDED_WORKSPACES_KEY) || '[]')
+    return new Set(Array.isArray(saved) ? saved.filter((item): item is string => typeof item === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function saveFoldedWorkspaces(folded: Set<string>) {
+  try {
+    window.localStorage.setItem(FOLDED_WORKSPACES_KEY, JSON.stringify([...folded]))
+  } catch {
+    // Folding still works for this session.
+  }
+}
+
 function formatTimestamp(dateStr: string): string {
   const date = new Date(dateStr)
   const now = new Date()
@@ -71,6 +120,7 @@ export function Sidebar({
   activeId,
   collapsed,
   onToggleCollapsed,
+  onNewChat,
   onSelect,
   onDelete,
   onRename,
@@ -139,7 +189,122 @@ export function Sidebar({
     element.focus()
   })
 
+  const renderConversation = (c: Conversation) => {
+    const active = c.id === activeId
+    const isEditing = editingId === c.id
+    const feedback = actionFeedback?.[`conversation:${c.id}`]
+    return (
+      <div
+        key={c.id}
+        className={`group relative rounded-lg px-2 py-1.5 transition-colors ${
+          active
+            ? 'border border-accent/20 bg-accent/10 text-neutral-100'
+            : 'border border-transparent text-neutral-500 hover:border-white/[0.06] hover:bg-white/[0.03] hover:text-neutral-200'
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          {isEditing ? (
+            <>
+              <MessageSquare size={12} className={`shrink-0 ${active ? 'text-accent-light' : 'text-neutral-700'}`} />
+              <input
+                ref={editInputRef}
+                value={editValue}
+                disabled={Boolean(feedback?.pending)}
+                aria-label={`Rename ${c.title}`}
+                onChange={(e) => setEditValue(e.target.value)}
+                onBlur={() => commitEdit(c.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); focusAfterRender(c.id, 'row'); void commitEdit(c.id) }
+                  if (e.key === 'Escape') { e.preventDefault(); focusAfterRender(c.id, 'row'); cancelEdit() }
+                }}
+                className="min-w-0 flex-1 rounded bg-white/[0.08] px-1 py-0 text-[11px] leading-snug text-neutral-100 outline-none ring-1 ring-accent/50"
+              />
+            </>
+          ) : (
+            <button
+              ref={(element) => setRowButton(c.id, element)}
+              type="button"
+              aria-current={active ? 'page' : undefined}
+              aria-keyshortcuts={onRename ? 'F2' : undefined}
+              title={onRename ? 'Double-click or press F2 to rename' : undefined}
+              onClick={() => onSelect(c.id)}
+              onDoubleClick={() => startEdit(c)}
+              onKeyDown={(e) => {
+                if (e.key === 'F2' && onRename) { e.preventDefault(); startEdit(c) }
+              }}
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+            >
+              {c.running
+                ? <Loader2 size={12} aria-label="Running" className="shrink-0 animate-spin text-accent-light" />
+                : <MessageSquare size={12} className={`shrink-0 ${active ? 'text-accent-light' : 'text-neutral-700'}`} />}
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[11px] leading-snug">{c.title}</span>
+                <span className="block max-h-0 overflow-hidden text-[10px] leading-none text-neutral-700 transition-[max-height] duration-150 group-hover:max-h-4 group-focus-within:max-h-4">
+                  {formatTimestamp(c.created_at)}
+                </span>
+              </span>
+            </button>
+          )}
+          {!isEditing && (confirmingDeleteId === c.id ? (
+            <InlineConfirm
+              label={`Delete "${c.title}"?`}
+              onConfirm={() => { setConfirmingDeleteId(null); onDelete(c.id) }}
+              onCancel={() => { focusAfterRender(c.id, 'delete'); setConfirmingDeleteId(null) }}
+            />
+          ) : (
+            <div className="flex shrink-0 items-center gap-0.5">
+              {active && onRefreshConversation && (
+                <button
+                  type="button"
+                  onClick={() => onRefreshConversation(c.id)}
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-600 transition-all hover:bg-accent/10 hover:text-accent-light focus:outline-none focus:ring-2 focus:ring-accent/20"
+                  aria-label={`Refresh ${c.title}`}
+                  title="Refresh chat"
+                >
+                  <RefreshCw size={11} />
+                </button>
+              )}
+              <button
+                ref={(element) => setDeleteButton(c.id, element)}
+                type="button"
+                onClick={() => setConfirmingDeleteId(c.id)}
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-700 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/30"
+                aria-label={`Delete ${c.title}`}
+                disabled={Boolean(feedback?.pending)}
+              >
+                <Trash2 size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+        {feedback?.pending && <span role="status" className="block pl-5 text-[10px]">{feedback.pending}…</span>}
+        {feedback?.error && (
+          <div role="alert" className="mt-1 pl-5 text-[10px] text-red-300">
+            {feedback.error}
+            {feedback.retry && <button type="button" onClick={() => feedback.retry?.()} className="ml-1 underline">Retry</button>}
+          </div>
+        )}
+        {feedback?.success && <span role="status" className="block pl-5 text-[10px] text-neutral-500">{feedback.success}</span>}
+      </div>
+    )
+  }
+
   const groups = groupByDate(conversations)
+  // With chats in two or more workspaces, the list groups by workspace instead of by date.
+  const workspaceGroups = groupByWorkspace(conversations)
+  const [foldedWorkspaces, setFoldedWorkspaces] = useState<Set<string>>(loadFoldedWorkspaces)
+  const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(new Set())
+  const toggleFolded = (dir: string) => setFoldedWorkspaces((current) => {
+    const next = new Set(current)
+    if (!next.delete(dir)) next.add(dir)
+    saveFoldedWorkspaces(next)
+    return next
+  })
+  const toggleExpanded = (dir: string) => setExpandedWorkspaces((current) => {
+    const next = new Set(current)
+    if (!next.delete(dir)) next.add(dir)
+    return next
+  })
   const ThemeIcon = theme === 'light' ? Moon : Sun
   const nextThemeLabel = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'
 
@@ -157,6 +322,16 @@ export function Sidebar({
       >
         <button
           type="button"
+          onClick={() => onNewChat()}
+          className="ghost-button mb-1 h-9 w-9 rounded-xl"
+          aria-label="New chat"
+          title="New chat"
+          tabIndex={collapsed ? 0 : -1}
+        >
+          <SquarePen size={15} />
+        </button>
+        <button
+          type="button"
           onClick={onToggleCollapsed}
           className="ghost-button h-9 w-9 rounded-xl"
           aria-label="Scheduled tasks"
@@ -164,7 +339,7 @@ export function Sidebar({
         >
           <Clock3 size={15} />
         </button>
-        <div className="mt-2 flex flex-1 flex-col items-center gap-1 overflow-y-auto">
+        <div className="sidebar-scroll mt-2 flex flex-1 flex-col items-center gap-1 overflow-y-auto">
           {conversations.slice(0, 14).map((c) => {
             const active = c.id === activeId
             return (
@@ -177,10 +352,10 @@ export function Sidebar({
                     ? 'border-accent/20 bg-accent/10 text-accent-light'
                     : 'border-white/[0.06] bg-white/[0.02] text-neutral-600 hover:border-white/[0.1] hover:text-neutral-300'
                 }`}
-                aria-label={c.title}
-                title={c.title}
+                aria-label={c.running ? `${c.title} (running)` : c.title}
+                title={c.running ? `${c.title} · running` : c.title}
               >
-                <MessageSquare size={13} />
+                {c.running ? <Loader2 size={13} className="animate-spin text-accent-light" /> : <MessageSquare size={13} />}
               </button>
             )
           })}
@@ -216,7 +391,20 @@ export function Sidebar({
         }`}
       >
         {/* Scheduled tasks + conversation list */}
-        <div className="flex-1 overflow-y-auto px-2 py-2">
+        <div className="px-2 pt-2">
+          <button
+            type="button"
+            onClick={() => onNewChat()}
+            className="flex w-full items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[13px] font-medium text-neutral-200 transition-colors hover:border-accent/30 hover:bg-accent/10 hover:text-accent-light"
+            aria-label="New chat"
+            tabIndex={collapsed ? -1 : 0}
+          >
+            <SquarePen size={14} />
+            New chat
+          </button>
+        </div>
+        {/* Scheduled stays put; only the chat list below scrolls. */}
+        <div className="sidebar-scroll max-h-[40%] shrink-0 overflow-y-auto px-2 pt-2">
           <ScheduledTasksList
             tasks={scheduledTasks}
             actionFeedback={actionFeedback}
@@ -227,11 +415,64 @@ export function Sidebar({
             onDelete={onDeleteScheduledTask}
             onRunNow={onRunScheduledTask}
           />
+        </div>
+        <div className="sidebar-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-2">
 
           {conversations.length === 0 ? (
             <p className="px-2 py-3 text-[11px] text-neutral-600">
               Conversations will appear here after the first response.
             </p>
+          ) : workspaceGroups.length > 1 ? (
+            workspaceGroups.map((group) => {
+              const folded = foldedWorkspaces.has(group.dir)
+              const showAll = expandedWorkspaces.has(group.dir)
+              // A group shows its newest chats; the open chat and running ones always show.
+              const visible = showAll ? group.chats : group.chats.filter(
+                (c, index) => index < WORKSPACE_GROUP_PREVIEW || c.id === activeId || c.running,
+              )
+              const hidden = group.chats.length - visible.length
+              return (
+                <div key={group.dir || 'default'} className="mb-2">
+                  <div className="group/ws flex items-center gap-1 pr-1">
+                    <button
+                      type="button"
+                      onClick={() => toggleFolded(group.dir)}
+                      aria-expanded={!folded}
+                      title={group.dir || 'The default workspace folder'}
+                      className="flex min-w-0 flex-1 items-center gap-1 rounded-md px-1 py-1 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-neutral-600 hover:text-neutral-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                    >
+                      {folded ? <ChevronRight size={11} className="shrink-0" /> : <ChevronDown size={11} className="shrink-0" />}
+                      {group.chats.some((c) => c.running) ? <Loader2 size={11} className="shrink-0 animate-spin text-accent-light" /> : <Folder size={11} className="shrink-0" />}
+                      <span className="truncate">{group.label}</span>
+                      <span className="shrink-0 font-normal text-neutral-700">{group.chats.length}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onNewChat(group.dir)}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-600 opacity-0 transition-all hover:bg-accent/10 hover:text-accent-light group-hover/ws:opacity-100 focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                      aria-label={`New chat in ${group.label}`}
+                      title={`New chat in ${group.label}`}
+                    >
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                  {!folded && (
+                    <div className="space-y-px">
+                      {visible.map(renderConversation)}
+                      {(hidden > 0 || showAll) && group.chats.length > WORKSPACE_GROUP_PREVIEW && (
+                        <button
+                          type="button"
+                          onClick={() => toggleExpanded(group.dir)}
+                          className="w-full rounded-md px-2 py-1 text-left text-[10px] text-neutral-600 hover:text-neutral-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                        >
+                          {showAll ? 'Show fewer' : `Show ${hidden} more`}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })
           ) : (
             Object.entries(groups).map(([group, convs]) =>
               convs.length === 0 ? null : (
@@ -240,103 +481,7 @@ export function Sidebar({
                     {group}
                   </p>
                   <div className="space-y-px">
-                    {convs.map((c) => {
-                      const active = c.id === activeId
-                      const isEditing = editingId === c.id
-                      const feedback = actionFeedback?.[`conversation:${c.id}`]
-                      return (
-                        <div
-                          key={c.id}
-                          className={`group relative rounded-lg px-2 py-1.5 transition-colors ${
-                            active
-                              ? 'border border-accent/20 bg-accent/10 text-neutral-100'
-                              : 'border border-transparent text-neutral-500 hover:border-white/[0.06] hover:bg-white/[0.03] hover:text-neutral-200'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            {isEditing ? (
-                              <>
-                                <MessageSquare size={12} className={`shrink-0 ${active ? 'text-accent-light' : 'text-neutral-700'}`} />
-                                <input
-                                  ref={editInputRef}
-                                  value={editValue}
-                                  disabled={Boolean(feedback?.pending)}
-                                  aria-label={`Rename ${c.title}`}
-                                  onChange={(e) => setEditValue(e.target.value)}
-                                  onBlur={() => commitEdit(c.id)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') { e.preventDefault(); focusAfterRender(c.id, 'row'); void commitEdit(c.id) }
-                                    if (e.key === 'Escape') { e.preventDefault(); focusAfterRender(c.id, 'row'); cancelEdit() }
-                                  }}
-                                  className="min-w-0 flex-1 rounded bg-white/[0.08] px-1 py-0 text-[11px] leading-snug text-neutral-100 outline-none ring-1 ring-accent/50"
-                                />
-                              </>
-                            ) : (
-                              <button
-                                ref={(element) => setRowButton(c.id, element)}
-                                type="button"
-                                aria-current={active ? 'page' : undefined}
-                                aria-keyshortcuts={onRename ? 'F2' : undefined}
-                                title={onRename ? 'Double-click or press F2 to rename' : undefined}
-                                onClick={() => onSelect(c.id)}
-                                onDoubleClick={() => startEdit(c)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'F2' && onRename) { e.preventDefault(); startEdit(c) }
-                                }}
-                                className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
-                              >
-                                <MessageSquare size={12} className={`shrink-0 ${active ? 'text-accent-light' : 'text-neutral-700'}`} />
-                                <span className="min-w-0 flex-1">
-                                  <span className="block truncate text-[11px] leading-snug">{c.title}</span>
-                                  <span className="block max-h-0 overflow-hidden text-[10px] leading-none text-neutral-700 transition-[max-height] duration-150 group-hover:max-h-4 group-focus-within:max-h-4">
-                                    {formatTimestamp(c.created_at)}
-                                  </span>
-                                </span>
-                              </button>
-                            )}
-                            {!isEditing && (confirmingDeleteId === c.id ? (
-                              <InlineConfirm
-                                label={`Delete "${c.title}"?`}
-                                onConfirm={() => { setConfirmingDeleteId(null); onDelete(c.id) }}
-                                onCancel={() => { focusAfterRender(c.id, 'delete'); setConfirmingDeleteId(null) }}
-                              />
-                            ) : (
-                              <div className="flex shrink-0 items-center gap-0.5">
-                                {active && onRefreshConversation && (
-                                  <button
-                                    type="button"
-                                    onClick={() => onRefreshConversation(c.id)}
-                                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-600 transition-all hover:bg-accent/10 hover:text-accent-light focus:outline-none focus:ring-2 focus:ring-accent/20"
-                                    aria-label={`Refresh ${c.title}`}
-                                    title="Refresh chat"
-                                  >
-                                    <RefreshCw size={11} />
-                                  </button>
-                                )}
-                                <button
-                                  ref={(element) => setDeleteButton(c.id, element)}
-                                  type="button"
-                                  onClick={() => setConfirmingDeleteId(c.id)}
-                                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-700 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/30"
-                                  aria-label={`Delete ${c.title}`}
-                                  disabled={Boolean(feedback?.pending)}
-                                >
-                                  <Trash2 size={11} />
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                          {feedback?.pending && <span role="status" className="block pl-5 text-[10px]">{feedback.pending}…</span>}
-                          {feedback?.error && (
-                            <div role="alert" className="mt-1 pl-5 text-[10px] text-red-300">
-                              {feedback.error}
-                              {feedback.retry && <button type="button" onClick={() => feedback.retry?.()} className="ml-1 underline">Retry</button>}
-                            </div>
-                          )}
-                          {feedback?.success && <span role="status" className="block pl-5 text-[10px] text-neutral-500">{feedback.success}</span>}
-                        </div>
-                      )
-                    })}
+                    {convs.map(renderConversation)}
                   </div>
                 </div>
               ),

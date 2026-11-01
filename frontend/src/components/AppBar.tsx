@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Copy, Minus, PanelLeftClose, PanelLeftOpen, ShieldAlert, ShieldCheck, ShieldHalf, Square, SquarePen, X } from 'lucide-react'
+import { Copy, Minus, PanelLeftClose, PanelLeftOpen, ShieldAlert, ShieldCheck, ShieldHalf, Square, X } from 'lucide-react'
 import type { AgentSettings } from '../lib/api/types'
 import { resolveAgentName } from '../lib/identity'
 import appLogo from '../assets/Logo.png'
@@ -11,7 +11,6 @@ export type AgentStatus = 'starting' | 'ready' | 'working'
 interface Props {
   sidebarCollapsed: boolean
   onToggleSidebar: () => void
-  onNewChat: () => void
   agentName?: string
   conversationTitle?: string
   conversationId?: string | null
@@ -78,7 +77,6 @@ function WindowControls() {
 export function AppBar({
   sidebarCollapsed,
   onToggleSidebar,
-  onNewChat,
   agentName,
   conversationTitle,
   conversationId,
@@ -203,16 +201,6 @@ export function AppBar({
       </div>
 
       <div className="app-bar-actions">
-        <button
-          type="button"
-          onClick={onNewChat}
-          className="no-drag app-bar-new"
-          aria-label="New chat"
-          title="New chat"
-        >
-          <SquarePen size={14} />
-          <span>New chat</span>
-        </button>
         <WindowControls />
       </div>
 

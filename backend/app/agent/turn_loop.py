@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import time
@@ -27,6 +28,7 @@ from app.agent.observability.ports import ObservabilityPort
 from app.agent.response_attachments import collect_response_attachments, public_runtime_attachments
 from app.agent.run_events import RunEventPublisher
 from app.agent.run_context import (
+    current_interactive,
     reset_current_conversation_id,
     set_current_conversation_id,
 )
@@ -61,6 +63,7 @@ from app.agent.tool_observations import (
 )
 from app.agent.turn_text import (
     FINAL_ANSWER_TOOL_NAME,
+    GUARD_WRAP_UP_REASON_CODES,
     TOOL_REPROMPT_MESSAGE,
     WEB_SEARCH_RESULT_REPROMPT_MESSAGE,
     completion_protocol_prompt,
@@ -70,6 +73,7 @@ from app.agent.turn_text import (
     final_answer_attachment_paths,
     final_answer_includes_web_search_results,
     final_answer_text,
+    guard_wrap_up_prompt,
     json_text_as_final_answer,
     plain_text_describes_next_action,
 )
@@ -110,6 +114,13 @@ async def _heartbeat_pump(
 
 class TurnLoop:
     MAX_ITERATIONS = 200
+    # A turn nobody is watching (scheduled task, Telegram) has no Stop button,
+    # so it keeps a limit even when chats have none.
+    UNATTENDED_MAX_ITERATIONS = 200
+    # Guard stops: the turn ends after this many rounds in a row in which every
+    # tool call was blocked or repeated, or after this many guard blocks in all.
+    STUCK_ROUNDS_LIMIT = 3
+    GUARD_BLOCKS_LIMIT = 10
 
     def __init__(
         self,
@@ -126,8 +137,9 @@ class TurnLoop:
         self.llm_client = llm_client
         self.registry = registry
         self.memory = memory
+        # 0 sets no limit for interactive turns.
         self._max_iterations = max_iterations if max_iterations is not None else self.MAX_ITERATIONS
-        seed_budget = budget or IterationBudget(max_iterations=self._max_iterations)
+        seed_budget = budget or IterationBudget(max_iterations=self._max_iterations or None)
         self._turn_budget_max_iterations = seed_budget.max_iterations
         self.max_turn_seconds = max_turn_seconds
         self.max_llm_call_seconds = max_llm_call_seconds
@@ -144,7 +156,10 @@ class TurnLoop:
         return self.executor.run_on_affinity(affinity_group, fn)
 
     def _new_turn_budget(self) -> IterationBudget:
-        return IterationBudget(max_iterations=self._turn_budget_max_iterations)
+        limit = self._turn_budget_max_iterations
+        if limit is None and not current_interactive():
+            limit = self.UNATTENDED_MAX_ITERATIONS
+        return IterationBudget(max_iterations=limit)
 
     async def _execute_tool_result(
         self,
@@ -416,12 +431,15 @@ class TurnLoop:
                 return
             if steering is not None:
                 steering.closed = True
-            steering_messages = [item.message for item in steering.messages] if steering is not None else []
+            # A steering message that arrived too late was never read; the app
+            # queues it as the next turn, so it is not saved with this one.
+            applied_steering = [item for item in steering.messages if item.applied] if steering is not None else []
+            steering_messages = [item.message for item in applied_steering]
             attachment_kwargs = {}
             if attachments:
                 attachment_kwargs["user_attachments"] = public_runtime_attachments(attachments)
-            if steering is not None and any(item.attachments for item in steering.messages):
-                attachment_kwargs["steering_attachments"] = [public_runtime_attachments(item.attachments) for item in steering.messages]
+            if any(item.attachments for item in applied_steering):
+                attachment_kwargs["steering_attachments"] = [public_runtime_attachments(item.attachments) for item in applied_steering]
             _transition(run_state.finalizing)
             response_duration_ms = _response_duration_ms()
             persist_turn = getattr(self.memory, "persist_turn", None)
@@ -435,7 +453,10 @@ class TurnLoop:
                     status=status,
                     response_duration_ms=response_duration_ms,
                     response_attachments=response_attachments or [],
-                    **({"steering_messages": steering_messages} if steering_messages else {}),
+                    **({
+                        "steering_messages": steering_messages,
+                        "steering_tool_call_indexes": [item.tool_call_index for item in applied_steering],
+                    } if steering_messages else {}),
                     **attachment_kwargs,
                 )
                 if isinstance(persisted_ids, list):
@@ -524,6 +545,7 @@ class TurnLoop:
                 nonlocal streamed_answer_text
                 pending = steering.drain() if steering is not None else []
                 for item in pending:
+                    item.tool_call_index = len(persisted_tool_calls)
                     entry = {"role": "user", "content": item.message}
                     images = attachment_image_payloads(item.attachments)
                     if images:
@@ -552,7 +574,19 @@ class TurnLoop:
             policy_repeat_recoveries: set[str] = set()
             browser_repeat_recoveries: set[str] = set()
             blocked_tool_recoveries: set[str] = set()
+            # Guard blocks go back to the model as tool errors; the turn ends
+            # only once it is stuck (see STUCK_ROUNDS_LIMIT, GUARD_BLOCKS_LIMIT).
+            round_guard_blocks = 0
+            guard_blocks = 0
+            stuck_rounds = 0
+            last_guard_code = ""
             stop_requested = False
+            # Tool calls of the latest model response, and which got a result,
+            # so a guard stop can close the unanswered ones before wrapping up.
+            round_tool_calls: list[tuple[str, str]] = []
+            answered_call_ids: set[str] = set()
+            # Pause notices wait until the wrap-up call has had its chance to answer.
+            pause_error_event: dict | None = None
             consecutive_text_only = 0
             force_tool_choice_next = False
             web_search_reprompted = False
@@ -654,6 +688,7 @@ class TurnLoop:
             async def _process_tool_result(prepared: dict, tool_result: ToolCallResult) -> None:
                 """Apply the ordered result guards and publish the call's final result."""
                 nonlocal final_text, stop_requested, terminal_error, incomplete_reason_code
+                nonlocal round_guard_blocks, guard_blocks, last_guard_code
 
                 call_id = str(prepared["call_id"])
                 step_id = str(prepared["step_id"])
@@ -680,6 +715,9 @@ class TurnLoop:
                     blocked_tool_counts[blocked_key] = blocked_tool_counts.get(blocked_key, 0) + 1
                     if blocked_tool_counts[blocked_key] >= 2:
                         status = "error"
+                        round_guard_blocks += 1
+                        guard_blocks += 1
+                        last_guard_code = "repeated_blocked_tool_result"
                         blocked_payload = parse_tool_json(tool_output)
                         if blocked_key not in blocked_tool_recoveries:
                             blocked_tool_recoveries.add(blocked_key)
@@ -725,9 +763,6 @@ class TurnLoop:
                                 metadata={"recovery_required": True},
                             )
                         else:
-                            stop_requested = True
-                            terminal_error = True
-                            incomplete_reason_code = "repeated_blocked_tool_result"
                             tool_output = json.dumps(
                                 {
                                     "status": "error",
@@ -735,19 +770,16 @@ class TurnLoop:
                                     "tool": tool_name,
                                     "arguments": arguments,
                                     "error": (
-                                        "The same tool action was blocked repeatedly after a recovery prompt. "
-                                        "Ask for permission changes or choose a different action before continuing."
+                                        "This exact action was blocked again after a recovery prompt and will stay blocked. "
+                                        "Stop retrying it: choose a different permitted action, or tell the user "
+                                        "what is blocked and what they can change."
                                     ),
                                     "last_result": blocked_payload,
                                 },
                                 ensure_ascii=False,
                             )
-                            final_text = (
-                                "Stopped: the same tool action was blocked repeatedly after a recovery prompt. "
-                                "Adjust the permission settings or choose another action before continuing."
-                            )
                             logger.warning(
-                                "turn_loop stopped: repeated blocked tool result after recovery "
+                                "turn_loop repeated blocked tool result after recovery "
                                 "conversation_id=%s tool=%s arguments=%s",
                                 conversation_id,
                                 tool_name,
@@ -759,7 +791,7 @@ class TurnLoop:
                                 status="error",
                                 tool_name=tool_name,
                                 error_code="repeated_blocked_tool_result",
-                                error_message=final_text,
+                                error_message="Repeated blocked tool result after a recovery prompt.",
                                 input={"arguments": arguments, "call_id": call_id},
                                 output={"last_result": blocked_payload},
                                 metadata={"after_recovery": True},
@@ -771,6 +803,9 @@ class TurnLoop:
                     browser_repeat_counts[repeat_key] = browser_repeat_counts.get(repeat_key, 0) + 1
                     if browser_repeat_counts[repeat_key] >= 2:
                         status = "error"
+                        round_guard_blocks += 1
+                        guard_blocks += 1
+                        last_guard_code = "stalled_repeat_detected"
                         repeated_browser_result = tool_output
                         if repeat_key not in browser_repeat_recoveries:
                             browser_repeat_recoveries.add(repeat_key)
@@ -814,9 +849,6 @@ class TurnLoop:
                                 metadata={"recovery_required": True},
                             )
                         else:
-                            stop_requested = True
-                            terminal_error = True
-                            incomplete_reason_code = "stalled_repeat_detected"
                             tool_output = json.dumps(
                                 {
                                     "status": "error",
@@ -824,19 +856,15 @@ class TurnLoop:
                                     "tool": tool_name,
                                     "arguments": arguments,
                                     "error": (
-                                        "Repeated the same browser action with the same arguments "
-                                        "and unchanged page state after a recovery prompt. "
-                                        "Inspect the browser status/snapshot or adjust the plan before continuing."
+                                        "Repeated the same browser action again after a recovery prompt, and the page "
+                                        "still did not change. Stop repeating it: inspect the page with a snapshot, "
+                                        "change the target, or tell the user what is blocking you."
                                     ),
                                 },
                                 ensure_ascii=False,
                             )
-                            final_text = (
-                                "Stopped: repeated browser action with unchanged page state after a recovery prompt. "
-                                "Inspect the browser status/snapshot or adjust the plan before continuing."
-                            )
                             logger.warning(
-                                "turn_loop stopped: repeated browser action after recovery "
+                                "turn_loop repeated browser action after recovery "
                                 "conversation_id=%s tool=%s arguments=%s",
                                 conversation_id,
                                 tool_name,
@@ -848,7 +876,7 @@ class TurnLoop:
                                 status="error",
                                 tool_name=tool_name,
                                 error_code="stalled_repeat_detected",
-                                error_message=final_text,
+                                error_message="Repeated browser action with unchanged page state after a recovery prompt.",
                                 input={"arguments": arguments, "call_id": call_id},
                                 output={"last_result": repeated_browser_result},
                                 metadata={"after_recovery": True},
@@ -937,6 +965,7 @@ class TurnLoop:
                     message_entry["images"] = image_attachments
                     message_entry["ephemeral"] = True
                 messages.append(message_entry)
+                answered_call_ids.add(call_id)
                 if recovery_prompt:
                     messages.append({"role": "user", "content": recovery_prompt})
 
@@ -955,7 +984,8 @@ class TurnLoop:
                 for prepared, result in zip(calls, results):
                     await _process_tool_result(prepared, result)
 
-            for iteration_index in range(self._max_iterations):
+            rounds = itertools.count() if budget.max_iterations is None else range(self._max_iterations or budget.max_iterations)
+            for iteration_index in rounds:
                 if stop_requested:
                     break
                 if _apply_steering():
@@ -973,7 +1003,7 @@ class TurnLoop:
                         budget.max_iterations,
                         budget.consumed,
                     )
-                    _put({
+                    pause_error_event = {
                         "event": "error",
                         "data": {
                             "code": "iteration_budget_exhausted",
@@ -981,7 +1011,7 @@ class TurnLoop:
                             "limit": budget.max_iterations,
                             "consumed": budget.consumed,
                         },
-                    })
+                    }
                     _obs_event(
                         "guardrail_triggered",
                         level="warning",
@@ -1201,7 +1231,7 @@ class TurnLoop:
                             consecutive_text_only += 1
                             _emit_agent_progress(assistant_content)
                             messages.append({"role": "assistant", "content": assistant_content})
-                            if consecutive_text_only >= 2 or budget.remaining <= 0:
+                            if consecutive_text_only >= 2 or budget.exhausted:
                                 terminal_error = True
                                 incomplete_reason_code = "progress_without_tool"
                                 final_text = (
@@ -1219,7 +1249,7 @@ class TurnLoop:
                             messages.append({"role": "user", "content": TOOL_REPROMPT_MESSAGE})
                             continue
                         if not final_answer_includes_web_search_results(final_text, persisted_tool_calls):
-                            if web_search_reprompted or budget.remaining <= 0:
+                            if web_search_reprompted or budget.exhausted:
                                 terminal_error = True
                                 incomplete_reason_code = "web_search_results_missing"
                                 final_text = "Paused: I could not include the web search results in the answer."
@@ -1253,6 +1283,12 @@ class TurnLoop:
 
                 call_dicts = []
                 final_answer_call = None
+                round_tool_calls = [
+                    (call.call_id or f"tool-{index}", call.tool_name)
+                    for index, call in enumerate(llm_response.tool_calls, start=1)
+                ]
+                answered_call_ids.clear()
+                round_guard_blocks = 0
                 for index, call in enumerate(llm_response.tool_calls, start=1):
                     arguments = call.arguments if isinstance(call.arguments, dict) else {}
                     if call.tool_name == FINAL_ANSWER_TOOL_NAME:
@@ -1271,7 +1307,7 @@ class TurnLoop:
                     final_text = final_answer_text(final_args, llm_response.content)
                     candidate_attachment_paths = final_answer_attachment_paths(final_args)
                     if not final_answer_includes_web_search_results(final_text, persisted_tool_calls):
-                        if web_search_reprompted or budget.remaining <= 0:
+                        if web_search_reprompted or budget.exhausted:
                             terminal_error = True
                             incomplete_reason_code = "web_search_results_missing"
                             final_text = "Paused: I could not include the web search results in the answer."
@@ -1303,7 +1339,7 @@ class TurnLoop:
                         conversation_id,
                         [str(call.get("name") or "") for call in call_dicts],
                     )
-                if budget.remaining <= 0:
+                if budget.exhausted:
                     iteration_limit_hit = True
                     budget_exhausted = True
                     incomplete_reason_code = "iteration_limit_reached_before_more_tools"
@@ -1319,7 +1355,7 @@ class TurnLoop:
                         budget.consumed,
                         [str(call.get("name") or "") for call in call_dicts],
                     )
-                    _put({
+                    pause_error_event = {
                         "event": "error",
                         "data": {
                             "code": incomplete_reason_code,
@@ -1327,7 +1363,7 @@ class TurnLoop:
                             "limit": budget.max_iterations,
                             "consumed": budget.consumed,
                         },
-                    })
+                    }
                     _obs_event(
                         "guardrail_triggered",
                         level="warning",
@@ -1449,6 +1485,7 @@ class TurnLoop:
                                     status="error",
                                 )
                             )
+                            answered_call_ids.add(call_id)
                             continue
 
                         tool_dict = dispatched["tool"]
@@ -1509,6 +1546,7 @@ class TurnLoop:
                                     status="error",
                                 )
                             )
+                            answered_call_ids.add(call_id)
                             if plan_step is not None:
                                 plan_step.status = "failed"
                                 if callable(sync_plan_progress):
@@ -1553,6 +1591,9 @@ class TurnLoop:
                                 metadata={"risk": policy_decision.risk},
                             )
                             if blocked_code == "repeated_tool_call_blocked":
+                                round_guard_blocks += 1
+                                guard_blocks += 1
+                                last_guard_code = blocked_code
                                 signature = str(
                                     policy_decision.metadata.get("signature")
                                     or tool_call_signature(tool_name, arguments)
@@ -1573,31 +1614,26 @@ class TurnLoop:
                                         arguments,
                                     )
                                 else:
-                                    stop_requested = True
-                                    terminal_error = True
-                                    incomplete_reason_code = "repeated_tool_call_blocked"
-                                    final_text = (
-                                        "Stopped: the model repeated a blocked tool call with the same arguments "
-                                        "after a recovery prompt. Use the prior result, inspect the latest state, "
-                                        "or choose a different action before continuing."
+                                    tool_output = json.dumps(
+                                        {
+                                            "status": "error",
+                                            "code": blocked_code,
+                                            "tool": tool_name,
+                                            "arguments": arguments,
+                                            "error": (
+                                                "This exact call was already blocked as a repeat and will stay blocked. "
+                                                "Use the earlier result, choose a different action, "
+                                                "or answer the user."
+                                            ),
+                                        },
+                                        ensure_ascii=False,
                                     )
                                     logger.warning(
-                                        "turn_loop stopped: repeated blocked tool call after recovery "
+                                        "turn_loop repeated blocked tool call after recovery "
                                         "conversation_id=%s tool=%s arguments=%s",
                                         conversation_id,
                                         tool_name,
                                         arguments,
-                                    )
-                                    _obs_event(
-                                        "guardrail_triggered",
-                                        level="warning",
-                                        status="error",
-                                        tool_name=tool_name,
-                                        error_code="repeated_tool_call_blocked",
-                                        error_message=final_text,
-                                        input={"arguments": arguments, "call_id": call_id},
-                                        output={"last_result": last_tool_outputs_by_signature.get(signature)},
-                                        metadata={"after_recovery": True},
                                     )
                             obs_tool_started_at = _obs_tool_start(
                                 tool_name,
@@ -1666,6 +1702,7 @@ class TurnLoop:
                                     status="error",
                                 )
                             )
+                            answered_call_ids.add(call_id)
                             if recovery_prompt:
                                 messages.append({"role": "user", "content": recovery_prompt})
                             if stop_requested:
@@ -1716,6 +1753,34 @@ class TurnLoop:
                     if stop_requested:
                         break
 
+                if call_dicts and not stop_requested:
+                    stuck_rounds = stuck_rounds + 1 if round_guard_blocks >= len(call_dicts) else 0
+                    if stuck_rounds >= self.STUCK_ROUNDS_LIMIT or guard_blocks >= self.GUARD_BLOCKS_LIMIT:
+                        stop_requested = True
+                        terminal_error = True
+                        incomplete_reason_code = last_guard_code
+                        final_text = (
+                            f"Stopped: every tool call in the last {stuck_rounds} rounds was blocked or repeated."
+                            if stuck_rounds >= self.STUCK_ROUNDS_LIMIT
+                            else f"Stopped: {guard_blocks} tool calls in this turn were blocked as repeats."
+                        )
+                        logger.warning(
+                            "turn_loop stopped: stuck on guard blocks conversation_id=%s "
+                            "stuck_rounds=%s guard_blocks=%s code=%s",
+                            conversation_id,
+                            stuck_rounds,
+                            guard_blocks,
+                            last_guard_code,
+                        )
+                        _obs_event(
+                            "guardrail_triggered",
+                            level="warning",
+                            status="error",
+                            error_code=last_guard_code,
+                            error_message=final_text,
+                            metadata={"stuck_rounds": stuck_rounds, "guard_blocks": guard_blocks},
+                        )
+
             if (
                 not completed_normally
                 and not stop_requested
@@ -1747,7 +1812,7 @@ class TurnLoop:
                     budget.consumed,
                     last_tool_name,
                 )
-                _put({
+                pause_error_event = {
                     "event": "error",
                     "data": {
                         "code": incomplete_reason_code,
@@ -1756,7 +1821,7 @@ class TurnLoop:
                         "consumed": budget.consumed,
                         "last_tool": last_tool_name,
                     },
-                })
+                }
                 _obs_event(
                     "guardrail_triggered",
                     level="warning",
@@ -1769,6 +1834,105 @@ class TurnLoop:
                         "last_tool": last_tool_name,
                     },
                 )
+
+            if (
+                not completed_normally
+                and incomplete_reason_code in GUARD_WRAP_UP_REASON_CODES
+                and budget.consumed > 0
+            ):
+                # A guard ended the loop, but the model is healthy: give it one
+                # tool-less call to tell the user what it did and what stopped it.
+                for round_call_id, round_tool_name in round_tool_calls:
+                    if round_call_id not in answered_call_ids:
+                        messages.append(self._build_tool_result_message(
+                            call_id=round_call_id,
+                            tool_name=round_tool_name,
+                            tool_output=json.dumps({
+                                "status": "cancelled",
+                                "reason_code": incomplete_reason_code,
+                                "error": "Not run: the turn stopped first.",
+                            }),
+                            status="error",
+                        ))
+                        answered_call_ids.add(round_call_id)
+                messages.append({"role": "user", "content": guard_wrap_up_prompt(incomplete_reason_code, final_text)})
+                streamed_answer_text = ""
+
+                async def _wrap_up_token_cb(delta: str) -> None:
+                    nonlocal streamed_answer_text
+                    streamed_answer_text += str(delta or "")
+                    _emit_response_token(delta)
+
+                wrap_up_started_at = time.perf_counter()
+                _obs_event(
+                    "llm_call_started",
+                    input={"message_count": len(messages), "tool_count": 0, "tool_choice": "none"},
+                    metadata={"wrap_up": True, "reason_code": incomplete_reason_code},
+                )
+                try:
+                    _transition(run_state.model_call)
+                    current_prompt = _current_system_prompt()
+                    messages, latest_round_start, _ = await fit_live_context(
+                        messages, [], current_prompt, llm_client=self.llm_client,
+                        latest_round_start=latest_round_start, timeout_seconds=self.max_llm_call_seconds,
+                    )
+                    wrap_up_response = await asyncio.wait_for(
+                        self.llm_client.chat_with_tools(
+                            messages,
+                            [],
+                            system_prompt=current_prompt,
+                            stream_callback=_wrap_up_token_cb,
+                        ),
+                        timeout=self.max_llm_call_seconds,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    wrap_up_response = None
+                    logger.warning(
+                        "turn_loop wrap-up call failed conversation_id=%s reason=%s error=%s",
+                        conversation_id,
+                        incomplete_reason_code,
+                        exc,
+                    )
+                    _obs_event(
+                        "llm_call_finished",
+                        level="warning",
+                        status="error",
+                        duration_ms=round((time.perf_counter() - wrap_up_started_at) * 1000),
+                        error_code="wrap_up_failed",
+                        error_message=str(exc),
+                        metadata={"wrap_up": True},
+                    )
+                wrap_up_text = ""
+                if wrap_up_response is not None:
+                    wrap_up_usage = usage_from_any(getattr(wrap_up_response, "usage", None))
+                    obs_usage_total = obs_usage_total.merge(wrap_up_usage)
+                    _obs_event(
+                        "llm_call_finished",
+                        status="ok",
+                        duration_ms=round((time.perf_counter() - wrap_up_started_at) * 1000),
+                        output={"finish_reason": wrap_up_response.finish_reason, "content": wrap_up_response.content},
+                        tokens=wrap_up_usage,
+                        metadata={"wrap_up": True},
+                    )
+                    wrap_up_text = str(wrap_up_response.content or "").strip()
+                    if not wrap_up_text:
+                        for call in wrap_up_response.tool_calls or []:
+                            if call.tool_name == FINAL_ANSWER_TOOL_NAME:
+                                call_args = call.arguments if isinstance(call.arguments, dict) else {}
+                                wrap_up_text = final_answer_text(call_args, "").strip()
+                if wrap_up_text:
+                    final_text = wrap_up_text
+                    pause_error_event = None
+                    if not streamed_answer_text:
+                        await emit_typewriter_tokens(_emit_response_event, final_text)
+                    streamed_answer_text = final_text
+                elif streamed_answer_text:
+                    final_text = streamed_answer_text.strip() or final_text
+                    pause_error_event = None
+            if pause_error_event is not None:
+                _put(pause_error_event)
 
             if steering is not None:
                 steering.closed = True

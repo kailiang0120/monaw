@@ -21,9 +21,20 @@ CHAT_MODELS_BY_PROVIDER = {
 }
 
 
-def normalize_chat_model(provider: str, model_name: str) -> str:
-    """Migrate saved selections within their existing model family."""
-    if provider in {"openai", "codex"}:
+MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$"
+
+
+def normalize_chat_model(provider: str, model_name: str, custom_models: tuple[str, ...] | list[str] = ()) -> str:
+    """Migrate saved selections within their model family. A name the user added
+    as a custom model is kept, and so is any name for a ChatGPT account, whose
+    list comes from the account and changes over time."""
+    model_name = str(model_name or "").strip()
+    if model_name and model_name in custom_models:
+        return model_name
+    if provider == "codex":
+        return model_name or DEFAULT_OPENAI_CHAT_MODEL
+    if provider == "openai":
+        # The API retired gpt-6-sol; a ChatGPT account still lists it.
         model = "gpt-6.1-sol" if model_name == "gpt-6-sol" else model_name
         return model if model in OPENAI_CHAT_MODELS else DEFAULT_OPENAI_CHAT_MODEL
     if provider == "gemini":

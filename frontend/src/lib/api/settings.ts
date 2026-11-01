@@ -36,6 +36,13 @@ export async function fetchModelOptions(signal?: AbortSignal): Promise<ModelOpti
 
 export interface OpenAIAccountStatus {
   connected: boolean
+  // Sign in with ChatGPT: the account, whether it allowed plan use, and how
+  // the last sign-in attempt ended.
+  email?: string
+  plan_usage?: boolean
+  usage_url?: string
+  login_pending?: boolean
+  login_error?: string
   plan: string
   limits: Array<{
     limit_id: string

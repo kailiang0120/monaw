@@ -6,7 +6,11 @@ export interface Conversation {
   id: string
   title: string
   created_at: string
+  /** Last activity. */
+  updated_at?: string
   workspace_dir?: string
+  /** A turn is running in it now. */
+  running?: boolean
 }
 
 export interface OkResponse {
@@ -22,6 +26,15 @@ export interface ChatSteerResponse {
   message_id: string
   conversation_id: string
   status: string
+}
+
+/** A turn still running, with what the user sent to start it. */
+export interface ChatRun {
+  run_id: string
+  conversation_id: string
+  message: string
+  attachments: UploadedAttachment[]
+  started_at: number
 }
 
 export interface TurnStartedEvent {
@@ -553,6 +566,8 @@ export interface AgentSettings {
     max_iterations_per_turn: number
     max_turn_seconds: number
     max_llm_call_seconds: number
+    /** Model names the user added, by provider. */
+    custom_models?: Partial<Record<'openai' | 'gemini' | 'codex', string[]>>
   }
   speech_to_text: {
     provider: SpeechToTextProvider
@@ -647,6 +662,12 @@ export interface ModelOptions {
     id: AgentSettings['llm']['provider']
     label: string
     models: string[]
+    /** Display names by model, where the provider gives them. */
+    labels?: Record<string, string>
+    /** Supported reasoning levels by model, where the provider lists them. */
+    reasoning_efforts?: Record<string, Array<AgentSettings['llm']['reasoning_effort']>>
+    /** "account" when the list came from the signed-in ChatGPT account. */
+    source?: string
   }>
 }
 

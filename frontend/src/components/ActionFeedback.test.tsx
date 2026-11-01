@@ -8,7 +8,7 @@ afterEach(cleanup)
 
 it('keeps a failed rename draft open so it can be corrected or retried', async () => {
   const rename = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
-  render(<AppBar sidebarCollapsed={false} onToggleSidebar={vi.fn()} onNewChat={vi.fn()} conversationTitle="Original"
+  render(<AppBar sidebarCollapsed={false} onToggleSidebar={vi.fn()} conversationTitle="Original"
     onRenameConversation={rename} status="ready" approvalMode="default" renameFeedback={{ error: 'Could not save title' }} />)
   fireEvent.click(screen.getByRole('heading', { name: 'Original' }))
   const input = screen.getByRole('textbox', { name: 'Conversation title' })

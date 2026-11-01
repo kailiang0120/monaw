@@ -35,6 +35,33 @@ describe('InputBar model picker', () => {
     expect(screen.getByRole('option', { name: /Google · gemini-pro-latest/ })).toBeInTheDocument()
   })
 
+  it('shows a ChatGPT account\'s own models with their names and reasoning levels', () => {
+    const modelOptions = {
+      providers: [
+        ...FALLBACK_MODEL_OPTIONS.providers.filter((provider) => provider.id !== 'codex'),
+        {
+          id: 'codex' as const, label: 'OpenAI account', source: 'account',
+          models: ['gpt-6.1-terra', 'gpt-6-luna', 'my-model'],
+          labels: { 'gpt-6.1-terra': 'GPT-6.1 Terra', 'gpt-6-luna': 'GPT-6-Luna' },
+          reasoning_efforts: { 'gpt-6.1-terra': ['low' as const, 'high' as const] },
+        },
+      ],
+    }
+    render(<InputBar
+      onSend={vi.fn()} onStop={vi.fn()} isStreaming={false} conversationId={null} contextRefreshKey={0}
+      approvalMode="default" onApprovalModeChange={vi.fn()} modelOptions={modelOptions} onModelSelectionChange={vi.fn()}
+      modelSelection={{ provider: 'codex', model_name: 'gpt-6.1-terra', reasoning_effort: 'low' }}
+    />)
+    expect(screen.getByRole('button', { name: 'Model' })).toHaveTextContent('ChatGPT · GPT-6.1 Terra')
+    fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['Low', 'High'])
+    fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    expect(screen.getByRole('option', { name: /OpenAI account · GPT-6-Luna/ })).toBeInTheDocument()
+    // A custom model has no display name, so its own name shows.
+    expect(screen.getByRole('option', { name: /OpenAI account · my-model/ })).toBeInTheDocument()
+  })
+
   it('blocks a previously selected Google model when its key is removed', () => {
     const onSend = vi.fn()
     render(<InputBar
@@ -137,7 +164,9 @@ describe('InputBar model picker', () => {
     rerender(<InputBar {...common} modelSelection={{
       provider: 'codex', model_name: 'gpt-6-astra', reasoning_effort: 'high',
     }} />)
-    expect(screen.getByRole('option', { name: 'Ultra' })).toBeInTheDocument()
+    // A ChatGPT sign-in uses the API's effort levels; Ultra was Codex-only.
+    expect(screen.queryByRole('option', { name: 'Ultra' })).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Max' })).toBeInTheDocument()
 
     rerender(<InputBar {...common} modelSelection={{
       provider: 'openai', model_name: 'gpt-6.1-sol', reasoning_effort: 'low',
@@ -210,6 +239,42 @@ describe('InputBar clipboard attachments', () => {
     expect(composer).toHaveValue('Keep it short')
     fireEvent.click(screen.getByRole('button', { name: 'Stop response' }))
     expect(props.onStop).toHaveBeenCalledTimes(1)
+  })
+
+  it('queues with Tab while a reply runs, and edits or removes queued messages', async () => {
+    const onQueue = vi.fn()
+    const onSteer = vi.fn()
+    const onRemoveQueued = vi.fn()
+    const onSendQueuedNow = vi.fn()
+    const queued = [
+      { id: 'q1', text: 'Then write tests', attachments: [], conversationId: 'running-chat' },
+      { id: 'q2', text: 'And update the README', attachments: [], conversationId: 'running-chat' },
+    ]
+    const { rerender } = render(<InputBar {...props} isStreaming onSteer={onSteer} steeringConversationId="running-chat"
+      onQueue={onQueue} queued={queued} onRemoveQueued={onRemoveQueued} onSendQueuedNow={onSendQueuedNow} />)
+    const composer = screen.getByRole('textbox', { name: 'Message' })
+    expect(composer).toHaveAttribute('placeholder', expect.stringContaining('Tab to queue'))
+    fireEvent.change(composer, { target: { value: 'Also check the logs' } })
+    fireEvent.keyDown(composer, { key: 'Tab' })
+    await waitFor(() => expect(composer).toHaveValue(''))
+    expect(onQueue).toHaveBeenCalledWith('Also check the logs', [])
+    expect(onSteer).not.toHaveBeenCalled()
+
+    const list = screen.getByRole('group', { name: 'Queued messages' })
+    expect(list).toHaveTextContent('sends when this reply ends')
+    expect(screen.queryByRole('button', { name: 'Send now' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit queued message 1' }))
+    expect(onRemoveQueued).toHaveBeenCalledWith('q1')
+    expect(composer).toHaveValue('Then write tests')
+    fireEvent.click(screen.getByRole('button', { name: 'Remove queued message 2' }))
+    expect(onRemoveQueued).toHaveBeenCalledWith('q2')
+
+    // After Stop the queue waits; the first item can be sent by hand.
+    rerender(<InputBar {...props} onQueue={onQueue} queued={queued} queuePaused onRemoveQueued={onRemoveQueued} onSendQueuedNow={onSendQueuedNow} />)
+    expect(screen.getByRole('group', { name: 'Queued messages' })).toHaveTextContent('held after Stop')
+    fireEvent.click(screen.getByRole('button', { name: 'Send now' }))
+    expect(onSendQueuedNow).toHaveBeenCalledWith('q1')
+    expect(screen.queryByRole('button', { name: 'Queue message' })).not.toBeInTheDocument()
   })
 
   it.each(['files', 'items'] as const)('pastes images and documents from clipboard %s and sends them once', async (source) => {

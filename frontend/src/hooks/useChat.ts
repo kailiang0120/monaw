@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { chatStream } from '../lib/api/chatStream'
-import { sendSteeringMessage } from '../lib/api/steering'
+import { ApiError } from '../lib/api/client'
+import { fetchChatRuns, newRunId, sendSteeringMessage, stopChatRun } from '../lib/api/steering'
 import { fetchMessages } from '../lib/api/conversations'
 import {
   type ApprovalEvent,
@@ -10,7 +11,7 @@ import {
   type AccessGrantRequiredEvent,
   type SavedMessage,
 } from '../lib/api/types'
-import type { UploadedAttachment } from '../lib/api/types'
+import type { ChatRun, UploadedAttachment } from '../lib/api/types'
 
 /** After this many ms with no transport activity while streaming, auto-stop. */
 const IDLE_TIMEOUT_MS = 600_000
@@ -76,7 +77,15 @@ export interface Message {
   responseStartedAtMs?: number
   responseDurationMs?: number
   contentRevision?: number
-  steeringStatus?: 'queued' | 'applied' | 'unapplied'
+  steeringStatus?: 'queued' | 'applied'
+}
+
+/** A message waiting to be sent as the next turn once the current one ends. */
+export interface QueuedMessage {
+  id: string
+  text: string
+  attachments: UploadedAttachment[]
+  conversationId: string | null
 }
 
 interface StreamDonePayload {
@@ -126,7 +135,21 @@ export function useChat(conversationId: string | null) {
   const [hasMoreHistory, setHasMoreHistory] = useState(false)
   const [pendingAccessGrant, setPendingAccessGrant] = useState<AccessGrantNotice | null>(null)
   const [refreshNonce, setRefreshNonce] = useState(0)
+  const [queued, setQueued] = useState<QueuedMessage[]>([])
+  // Stop holds the queue until the user sends again.
+  const [queuePaused, setQueuePaused] = useState(false)
+  // Steering messages delivered to the running turn but not yet read by it.
+  const pendingSteeringRef = useRef<Map<string, QueuedMessage>>(new Map())
+  // The applied event can beat the steer request's own reply.
+  const appliedSteeringIdsRef = useRef<Set<string>>(new Set())
   const abortRef = useRef<(() => void) | null>(null)
+  // The turn being watched. Closing its stream only stops watching; this ID ends it.
+  const runIdRef = useRef<string | null>(null)
+  const endRun = useCallback(() => {
+    const runId = runIdRef.current
+    runIdRef.current = null
+    if (runId) void stopChatRun(runId).catch(() => {})
+  }, [])
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const typewriterCleanupRef = useRef<(() => void) | null>(null)
   const conversationIdRef = useRef<string | null>(conversationId)
@@ -135,6 +158,7 @@ export function useChat(conversationId: string | null) {
   const skipCompletedTurnReloadRef = useRef<string | null>(null)
   const preserveUnboundTurnRef = useRef(false)
   const displayedConversationIdRef = useRef<string | null>(null)
+  const followRunRef = useRef<((run: ChatRun) => void) | null>(null)
 
   useEffect(() => {
     conversationIdRef.current = conversationId
@@ -179,6 +203,14 @@ export function useChat(conversationId: string | null) {
         historyCursorRef.current = Number.isFinite(nextCursor) ? nextCursor : null
         setMessages(loaded)
         setHasMoreHistory(res.has_more && historyCursorRef.current !== null && loaded.length > 0)
+        // A turn may still be running here: left for another chat, or the window reloaded.
+        Promise.resolve()
+          .then(() => fetchChatRuns(controller.signal))
+          .then((runs) => {
+            const run = runs?.find((item) => item.conversation_id === conversationId)
+            if (run && !cancelled) followRunRef.current?.(run)
+          })
+          .catch(() => {})
       })
       .catch((err) => {
         if (err instanceof DOMException && err.name === 'AbortError') return
@@ -235,29 +267,79 @@ export function useChat(conversationId: string | null) {
     setRefreshNonce((value) => value + 1)
   }, [conversationId, isStreaming])
 
-  const steerMessage = useCallback(async (text: string, attachments: UploadedAttachment[] = []) => {
-    const target = steeringTargetRef.current
-    if (!target || !abortRef.current) throw new Error('The turn has finished. Send your message as a new turn.')
-    const messageId = crypto.randomUUID()
-    const response = await sendSteeringMessage(target.runId, messageId, text, attachments)
-    if (steeringTargetRef.current !== target) throw new Error('The task changed before delivery was confirmed. Your draft has been kept.')
-    setMessages((current) => {
-      if (current.some((item) => item.id === messageId)) return current
-      const index = current.findIndex((item) => item.id === target.assistantId)
-      if (index < 0) return current
-      const steeringMessage: Message = {
-        id: messageId, role: 'user', content: text, attachments,
-        steeringStatus: response.status === 'applied' ? 'applied' : abortRef.current ? 'queued' : 'unapplied',
-      }
-      return [...current.slice(0, index), steeringMessage, ...current.slice(index)]
-    })
+  const queueMessage = useCallback((text: string, attachments: UploadedAttachment[] = []) => {
+    const conversation = steeringTargetRef.current?.conversationId ?? conversationIdRef.current
+    setQueued((current) => [...current, { id: crypto.randomUUID(), text, attachments, conversationId: conversation }])
   }, [])
 
+  const removeQueued = useCallback((id: string) => {
+    setQueued((current) => current.filter((item) => item.id !== id))
+  }, [])
+
+  const resumeQueue = useCallback(() => setQueuePaused(false), [])
+
+  // Steering messages the agent never read run as the next turn instead.
+  const requeueLateSteering = useCallback(() => {
+    const late = [...pendingSteeringRef.current.values()]
+    pendingSteeringRef.current.clear()
+    if (!late.length) return
+    const lateIds = new Set(late.map((item) => item.id))
+    setMessages((prev) => prev.filter((m) => !lateIds.has(m.id)))
+    setQueued((current) => [...late, ...current.filter((item) => !lateIds.has(item.id))])
+  }, [])
+
+  const steerMessage = useCallback(async (text: string, attachments: UploadedAttachment[] = []) => {
+    const target = steeringTargetRef.current
+    if (!target || !abortRef.current) {
+      queueMessage(text, attachments)
+      return
+    }
+    const messageId = crypto.randomUUID()
+    let response
+    try {
+      response = await sendSteeringMessage(target.runId, messageId, text, attachments)
+    } catch (error) {
+      // The turn closed before the message arrived: it runs as the next turn.
+      if (error instanceof ApiError && error.status === 409) {
+        queueMessage(text, attachments)
+        return
+      }
+      throw error
+    }
+    if (!abortRef.current) {
+      if (response.status !== 'applied') queueMessage(text, attachments)
+      return
+    }
+    if (steeringTargetRef.current !== target) throw new Error('The task changed before delivery was confirmed. Your draft has been kept.')
+    const applied = response.status === 'applied' || appliedSteeringIdsRef.current.has(messageId)
+    if (!applied) pendingSteeringRef.current.set(messageId, { id: messageId, text, attachments, conversationId: target.conversationId })
+    // It goes below the reply so far; once the agent reads it, the reply continues under it.
+    setMessages((current) => {
+      if (current.some((item) => item.id === messageId)) return current
+      if (!current.some((item) => item.id === target.assistantId)) return current
+      const steeringMessage: Message = {
+        id: messageId, role: 'user', content: text, attachments,
+        steeringStatus: applied ? 'applied' : 'queued',
+      }
+      return [...current, steeringMessage]
+    })
+  }, [queueMessage])
+
   const sendMessage = useCallback(
-    (text: string, attachments: UploadedAttachment[], onConversationCreated: (id: string) => void, workspaceDir?: string) => {
+    (
+      text: string,
+      attachments: UploadedAttachment[],
+      onConversationCreated: (id: string) => void,
+      workspaceDir?: string,
+      // Watch this turn that is already running (a chat reopened mid-turn) instead of starting one.
+      follow?: ChatRun,
+    ) => {
       if (!text.trim() || isStreaming) return
       steeringTargetRef.current = null
       setSteeringConversationId(null)
+      pendingSteeringRef.current.clear()
+      appliedSteeringIdsRef.current.clear()
+      setQueuePaused(false)
 
       const userMsg: Message = {
         id: crypto.randomUUID(),
@@ -266,11 +348,13 @@ export function useChat(conversationId: string | null) {
         attachments,
       }
 
-      const assistantId = crypto.randomUUID()
+      // Each applied steering message starts a new assistant message (see onSteeringApplied).
+      let assistantId = crypto.randomUUID()
       streamConversationIdRef.current = conversationId
       preserveUnboundTurnRef.current = conversationId === null
-      const requestStartedAt = performance.now()
-      const requestStartedAtMs = Date.now()
+      const runAgeMs = follow ? Math.max(0, Date.now() - follow.started_at * 1000) : 0
+      const requestStartedAt = performance.now() - runAgeMs
+      const requestStartedAtMs = Date.now() - runAgeMs
       const assistantMsg: Message = {
         id: assistantId,
         role: 'assistant',
@@ -352,9 +436,10 @@ export function useChat(conversationId: string | null) {
                   responseDurationMs:
                     done.response_duration_ms ?? currentResponseDurationMs() ?? m.responseDurationMs,
                 }
-              : m.steeringStatus === 'queued' ? { ...m, steeringStatus: 'unapplied' } : m
+              : m
           )
         )
+        requeueLateSteering()
         const convId = done.conversation_id ?? ''
         if (convId) {
           onConversationCreated(convId)
@@ -399,6 +484,7 @@ export function useChat(conversationId: string | null) {
         if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
         idleTimerRef.current = setTimeout(() => {
           cleanupTypewriter()
+          endRun()
           abortRef.current?.()
           abortRef.current = null
           skipCompletedTurnReloadRef.current = conversationId
@@ -411,9 +497,10 @@ export function useChat(conversationId: string | null) {
             )
           )
           setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, runStatus: 'error' }
-              : m.steeringStatus === 'queued' ? { ...m, steeringStatus: 'unapplied' } : m))
+            prev.map((m) => (m.id === assistantId ? { ...m, runStatus: 'error' } : m))
           )
+          requeueLateSteering()
+          setQueuePaused(true)
         }, IDLE_TIMEOUT_MS)
       }
 
@@ -525,6 +612,8 @@ export function useChat(conversationId: string | null) {
         })
       }
 
+      const runId = follow?.run_id ?? newRunId()
+      runIdRef.current = runId
       const abort = chatStream(
         text,
         conversationId,
@@ -606,6 +695,14 @@ export function useChat(conversationId: string | null) {
           cleanupTypewriter()
           clearIdleTimer()
           abortRef.current = null
+          if (follow && data?.code === 'not_found') {
+            // The turn ended before this chat reconnected; its saved history has the result.
+            runIdRef.current = null
+            setIsStreaming(false)
+            setMessages((prev) => prev.filter((m) => m.id !== userMsg.id && m.id !== assistantId))
+            setRefreshNonce((value) => value + 1)
+            return
+          }
           skipCompletedTurnReloadRef.current = conversationId
           setIsStreaming(false)
           const isPause = data?.code?.startsWith('iteration_limit_')
@@ -622,9 +719,12 @@ export function useChat(conversationId: string | null) {
                     runStatus: isPause ? 'paused' : 'error',
                     responseDurationMs: currentResponseDurationMs() ?? m.responseDurationMs,
                   }
-                : m.steeringStatus === 'queued' ? { ...m, steeringStatus: 'unapplied' } : m
+                : m
             )
           )
+          requeueLateSteering()
+          // A failed turn holds the queue rather than sending into the same failure.
+          if (!isPause) setQueuePaused(true)
         },
         // onApprovalRequired
         (data) => addApprovalNotice(data, 'required'),
@@ -679,35 +779,59 @@ export function useChat(conversationId: string | null) {
         (data) => {
           if (typewriter.stopped) return
           resetIdleTimer()
+          pendingSteeringRef.current.delete(data.message_id)
+          appliedSteeringIdsRef.current.add(data.message_id)
           if (data.reset_response) {
             clearTypewriterTimer()
             typewriter.queue = ''
           }
+          // Show the instruction where the agent read it: the work so far stays
+          // above it and the rest of the reply continues in a new message below.
+          // It is still one task, so the timer moves down and keeps counting.
+          const previousId = assistantId
+          const nextId = crypto.randomUUID()
+          assistantId = nextId
+          // Updated in place: a steer awaiting its reply checks the target by identity.
+          if (steeringTargetRef.current?.assistantId === previousId) steeringTargetRef.current.assistantId = nextId
           setMessages((current) => {
-            const existing = current.some((item) => item.id === data.message_id)
-            const updated = current.map((item) => item.id === data.message_id
-              ? { ...item, steeringStatus: 'applied' as const }
-              : item.id === assistantId && data.reset_response
-                ? { ...item, content: '', contentRevision: (item.contentRevision ?? 0) + 1 }
-                : item)
-            if (existing) return updated
-            const index = updated.findIndex((item) => item.id === assistantId)
-            if (index < 0) return updated
-            return [...updated.slice(0, index), {
-              id: data.message_id, role: 'user' as const, content: data.message,
-              attachments: data.attachments, steeringStatus: 'applied' as const,
-            }, ...updated.slice(index)]
+            const existing = current.find((item) => item.id === data.message_id)
+            const steer: Message = {
+              ...(existing ?? { id: data.message_id, role: 'user' as const, content: data.message, attachments: data.attachments }),
+              steeringStatus: 'applied',
+            }
+            const rest = current.filter((item) => item.id !== data.message_id)
+            const index = rest.findIndex((item) => item.id === previousId)
+            if (index < 0) return current
+            const previous = rest[index]
+            const kept = data.reset_response ? { ...previous, content: '' } : previous
+            // A segment with nothing in it yet (two steers read together) is replaced, not kept.
+            const empty = !kept.content && !kept.toolCalls?.length && !kept.activityItems?.length && !kept.approvals?.length
+            const next: Message = {
+              id: nextId, role: 'assistant', content: '', toolCalls: [], streaming: true, runStatus: 'streaming',
+              responseStartedAtMs: previous.responseStartedAtMs,
+            }
+            const done: Message[] = empty ? [] : [{
+              ...kept, streaming: false, runStatus: 'complete', responseStartedAtMs: undefined, responseDurationMs: undefined,
+              contentRevision: (kept.contentRevision ?? 0) + 1,
+            }]
+            return [...rest.slice(0, index), ...done, steer, next, ...rest.slice(index + 1)]
           })
         },
         workspaceDir,
+        runId,
+        follow?.run_id,
       )
 
       abortRef.current = abort
     },
-    [conversationId, isStreaming]
+    [conversationId, isStreaming, requeueLateSteering]
   )
 
+  followRunRef.current = (run: ChatRun) =>
+    sendMessage(run.message.trim() || 'Please review the attached file(s).', run.attachments, () => {}, undefined, run)
+
   const stopStreaming = useCallback(() => {
+    endRun()
     steeringTargetRef.current = null
     setSteeringConversationId(null)
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
@@ -718,12 +842,15 @@ export function useChat(conversationId: string | null) {
       ? conversationIdRef.current : null
     setIsStreaming(false)
     setMessages((prev) =>
-      prev.map((m) => (m.streaming ? { ...m, streaming: false, runStatus: 'paused' }
-        : m.steeringStatus === 'queued' ? { ...m, steeringStatus: 'unapplied' } : m))
+      prev.map((m) => (m.streaming ? { ...m, streaming: false, runStatus: 'paused' } : m))
     )
-  }, [])
+    requeueLateSteering()
+    setQueuePaused(true)
+  }, [requeueLateSteering])
 
   const clearMessages = useCallback(() => {
+    // New chat: the running turn keeps going in the background.
+    runIdRef.current = null
     steeringTargetRef.current = null
     setSteeringConversationId(null)
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
@@ -731,6 +858,7 @@ export function useChat(conversationId: string | null) {
     abortRef.current?.()
     abortRef.current = null
     skipCompletedTurnReloadRef.current = null
+    pendingSteeringRef.current.clear()
     preserveUnboundTurnRef.current = false
     displayedConversationIdRef.current = null
     setMessages([])
@@ -742,10 +870,22 @@ export function useChat(conversationId: string | null) {
 
   useEffect(() => {
     if (abortRef.current && streamConversationIdRef.current !== conversationId) {
-      stopStreaming()
+      // Opening another chat stops watching this turn, not the turn itself:
+      // it finishes in the background and its chat reloads when it does.
+      runIdRef.current = null
+      steeringTargetRef.current = null
+      setSteeringConversationId(null)
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
+      typewriterCleanupRef.current?.()
+      abortRef.current?.()
+      abortRef.current = null
+      skipCompletedTurnReloadRef.current = null
+      // The turn may still read these in the background; its saved history shows which.
+      pendingSteeringRef.current.clear()
+      setIsStreaming(false)
       setPendingAccessGrant(null)
     }
-  }, [conversationId, stopStreaming])
+  }, [conversationId])
 
   useEffect(() => () => {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
@@ -757,6 +897,11 @@ export function useChat(conversationId: string | null) {
   return {
     steerMessage,
     steeringConversationId,
+    queued,
+    queuePaused,
+    queueMessage,
+    removeQueued,
+    resumeQueue,
     messages,
     isStreaming,
     isLoadingHistory,

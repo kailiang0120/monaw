@@ -13,6 +13,32 @@ import { Info, type LucideIcon } from 'lucide-react'
  * components carry no per-theme logic.
  */
 
+/** Descriptions longer than this sit behind an info button instead of under the label. */
+const INLINE_DESCRIPTION_MAX = 90
+
+/** A row or card label with its description, or an info button when the description is long. */
+function RowText({ label, description, heading, keepVisible }: {
+  label?: string
+  description?: string
+  heading?: boolean
+  /** The description is a live status, not help text, so it always shows. */
+  keepVisible?: boolean
+}) {
+  const behindInfo = Boolean(label && description && !keepVisible && description.length > INLINE_DESCRIPTION_MAX)
+  const Label = heading ? 'h4' : 'p'
+  return (
+    <div className="min-w-0">
+      {label && (
+        <div className="flex items-center gap-1">
+          <Label className="st-label">{label}</Label>
+          {behindInfo && <InfoTip label={`About ${label}`} description={description!} inline />}
+        </div>
+      )}
+      {description && !behindInfo && <p className="st-desc mt-1">{description}</p>}
+    </div>
+  )
+}
+
 /** A bordered group of related settings, with an optional title and blurb. */
 export function SettingsCard({
   title,
@@ -31,10 +57,7 @@ export function SettingsCard({
     <section className="st-card">
       {(title || action) && (
         <header className="st-card-head flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            {title && <h4 className="st-label">{title}</h4>}
-            {description && <p className="st-desc mt-1">{description}</p>}
-          </div>
+          <RowText label={title} description={description} heading />
           {action && <div className="shrink-0">{action}</div>}
         </header>
       )}
@@ -50,19 +73,19 @@ export function SettingRow({
   description,
   children,
   wide,
+  statusDescription,
 }: {
   label: string
   description?: string
   children: ReactNode
   /** Give the control more room, for wide inputs like paths. */
   wide?: boolean
+  /** The description reports state, so it stays visible however long it is. */
+  statusDescription?: boolean
 }) {
   return (
     <div className="st-row">
-      <div className="min-w-0">
-        <p className="st-label">{label}</p>
-        {description && <p className="st-desc mt-1">{description}</p>}
-      </div>
+      <RowText label={label} description={description} keepVisible={statusDescription} />
       <div className={wide ? 'st-row-control-auto w-1/2 min-w-0' : 'st-row-control'}>{children}</div>
     </div>
   )
@@ -83,10 +106,7 @@ export function StackedRow({
   return (
     <div className="st-row-stacked">
       <div className="mb-2 flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <p className="st-label">{label}</p>
-          {description && <p className="st-desc mt-1">{description}</p>}
-        </div>
+        <RowText label={label} description={description} />
         {action && <div className="shrink-0">{action}</div>}
       </div>
       {children}
@@ -143,10 +163,7 @@ export function SwitchRow({
 }) {
   return (
     <div className="st-row">
-      <div className="min-w-0">
-        <p className="st-label">{label}</p>
-        {description && <p className="st-desc mt-1">{description}</p>}
-      </div>
+      <RowText label={label} description={description} />
       <div className="st-row-control-auto pt-0.5">
         <Switch label={label} checked={checked} onChange={onChange} disabled={disabled} />
       </div>
@@ -176,10 +193,7 @@ export function NumberRow({
 }) {
   return (
     <div className="st-row">
-      <div className="min-w-0">
-        <p className="st-label">{label}</p>
-        {description && <p className="st-desc mt-1">{description}</p>}
-      </div>
+      <RowText label={label} description={description} />
       <div className="st-row-control-auto flex items-center gap-2">
         <input
           type="number"
@@ -279,8 +293,12 @@ export function ChoiceCard({
   )
 }
 
-/** A separate help button so reading a choice's details never selects it. */
-function InfoTip({ label, description }: { label: string; description: string }) {
+/**
+ * A help button that shows a longer explanation on hover, focus or click. On a
+ * choice card it sits apart so reading the details never selects the choice;
+ * `inline` places it next to a row's label instead.
+ */
+function InfoTip({ label, description, inline }: { label: string; description: string; inline?: boolean }) {
   const id = useId()
   const triggerRef = useRef<HTMLButtonElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
@@ -331,7 +349,7 @@ function InfoTip({ label, description }: { label: string; description: string })
   const container = triggerRef.current?.closest('.theme-dark, .theme-light') ?? document.body
   return (
     <span
-      className="absolute right-2 top-2"
+      className={inline ? 'inline-flex shrink-0' : 'absolute right-2 top-2'}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
     >
@@ -343,7 +361,7 @@ function InfoTip({ label, description }: { label: string; description: string })
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
         onClick={() => setOpen(true)}
-        className="st-info-button"
+        className={inline ? 'st-info-button st-info-button-inline' : 'st-info-button'}
       >
         <Info size={14} aria-hidden="true" />
       </button>

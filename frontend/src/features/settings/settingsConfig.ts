@@ -60,10 +60,16 @@ const COMPACT_PROVIDER_LABELS: Record<string, string> = {
 }
 
 /** Short "provider · model" text for the composer's model control, e.g. "ChatGPT · gpt-6-luna". */
-export function compactModelLabel(provider: string, label: string, model: string): string {
+export function compactModelLabel(provider: string, label: string, model: string, displayName?: string): string {
   const name = COMPACT_PROVIDER_LABELS[provider] ?? label
-  const shortModel = provider === 'gemini' ? model.replace(/^gemini-/, '').replace(/-latest$/, '') : model
+  const shortModel = displayName
+    || (provider === 'gemini' ? model.replace(/^gemini-/, '').replace(/-latest$/, '') : model)
   return `${name} · ${shortModel}`
+}
+
+/** Comma- or newline-separated model names, trimmed and without repeats. */
+export function parseModelNames(text: string): string[] {
+  return [...new Set(text.split(/[,\n]/).map((name) => name.trim()).filter(Boolean))]
 }
 
 export function providerLabel(
@@ -88,7 +94,11 @@ export function modelsForProvider(
 export function reasoningEffortsForProvider(
   provider: AgentSettings['llm']['provider'],
   modelName = '',
+  catalog?: ModelOptionsCatalog,
 ): Array<AgentSettings['llm']['reasoning_effort']> {
+  // A ChatGPT account lists the levels each of its models supports.
+  const listed = catalog?.providers.find((item) => item.id === provider)?.reasoning_efforts?.[modelName]
+  if (listed?.length) return listed
   if (provider === 'gemini') {
     if (modelName === 'gemini-flash-lite-latest') return GEMINI_FLASH_REASONING_EFFORTS
     if (modelName === 'gemini-pro-latest' || modelName === 'gemini-flash-latest') return GEMINI_PRO_REASONING_EFFORTS
@@ -97,9 +107,6 @@ export function reasoningEffortsForProvider(
     if (modelName.startsWith('gemini-2.5') && modelName.includes('pro')) return GEMINI_25_PRO_REASONING_EFFORTS
     return GEMINI_25_FLASH_REASONING_EFFORTS
   }
-  if (provider === 'codex') return modelName === 'gpt-6-luna'
-    ? OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none')
-    : [...OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none'), 'ultra']
   return modelName === 'gpt-6-astra' || modelName === 'gpt-6.1-sol'
     ? OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none')
     : OPENAI_REASONING_EFFORTS
@@ -323,7 +330,7 @@ export function normalizeDraft(
   const provider = providers.includes(settings.llm.provider) ? settings.llm.provider : 'openai'
   const modelOptions = modelsForProvider(provider, catalog)
   const modelName = modelOptions.includes(settings.llm.model_name) ? settings.llm.model_name : modelOptions[0]
-  const reasoningOptions = reasoningEffortsForProvider(provider, modelName)
+  const reasoningOptions = reasoningEffortsForProvider(provider, modelName, catalog)
   const reasoningEffort = reasoningOptions.includes(settings.llm.reasoning_effort)
     ? settings.llm.reasoning_effort
     : reasoningOptions[0]
@@ -398,9 +405,14 @@ export function normalizeDraft(
       provider,
       model_name: modelName,
       reasoning_effort: reasoningEffort,
-      max_iterations_per_turn: clampInteger(settings.llm.max_iterations_per_turn, 200, 1, 500),
+      max_iterations_per_turn: clampInteger(settings.llm.max_iterations_per_turn, 0, 0, 500),
       max_turn_seconds: clampInteger(settings.llm.max_turn_seconds, 7200, 30, 14400),
       max_llm_call_seconds: clampInteger(settings.llm.max_llm_call_seconds, 600, 30, 1800),
+      custom_models: {
+        openai: settings.llm.custom_models?.openai ?? [],
+        codex: settings.llm.custom_models?.codex ?? [],
+        gemini: settings.llm.custom_models?.gemini ?? [],
+      },
     },
     permissions: settings.permissions.mode === 'custom'
       ? {

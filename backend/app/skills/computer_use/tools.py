@@ -25,7 +25,7 @@ from app.agent.settings_store import load_agent_settings
 from app.skills.computer_use import desktop_runtime, window_ops
 from app.skills.computer_use.screen_geometry import get_window_rect
 from app.skills.computer_use.session import get_state, store_state, consume_state, invalidate_window, ComputerWindowState
-from app.skills.computer_use.input_safety import text_entry_error, MAX_TYPED_TEXT_CHARS
+from app.skills.computer_use.input_safety import MAX_TYPED_TEXT_CHARS, mentions_credential, text_entry_error
 from app.skills.computer_use.observation import window_changed, uia_fingerprint, image_sample, image_changed
 
 _audit = AuditLogger()
@@ -880,8 +880,7 @@ def _computer_functions_clipboard(action: str = "read", text: str = "") -> str:
             ensure_ascii=False,
         )
     if action in {"write", "clear"}:
-        lowered = str(text or "").lower()
-        if any(hint in lowered for hint in _CREDENTIAL_TEXT_HINTS):
+        if mentions_credential(text):
             return json.dumps(
                 {
                     "status": "blocked",

@@ -1,9 +1,10 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { ApiError } from '../lib/api/client'
 import { fetchMessages } from '../lib/api/conversations'
 import { chatStream } from '../lib/api/chatStream'
-import { sendSteeringMessage } from '../lib/api/steering'
+import { fetchChatRuns, newRunId, sendSteeringMessage, stopChatRun } from '../lib/api/steering'
 import { useChat } from './useChat'
 
 vi.mock('../lib/api/chatStream', () => ({
@@ -14,7 +15,12 @@ vi.mock('../lib/api/conversations', () => ({
   fetchMessages: vi.fn(),
 }))
 
-vi.mock('../lib/api/steering', () => ({ sendSteeringMessage: vi.fn() }))
+vi.mock('../lib/api/steering', () => ({
+  sendSteeringMessage: vi.fn(),
+  fetchChatRuns: vi.fn(),
+  stopChatRun: vi.fn().mockResolvedValue(true),
+  newRunId: vi.fn(() => 'run-fixed'),
+}))
 
 function savedMessage(id: number) {
   return {
@@ -158,6 +164,138 @@ describe('useChat answer handoff', () => {
     expect(result.current.messages[2]).toMatchObject({ content: 'Here is the table', runStatus: 'complete' })
   })
 
+  it('shows a steer where the agent read it, with the reply continuing below', async () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    const { result } = renderHook(() => useChat(null))
+    act(() => result.current.sendMessage('Write the notes', [], vi.fn()))
+    const streamCall = vi.mocked(chatStream).mock.calls[0]
+    act(() => {
+      streamCall[23]?.({ run_id: 'run-s', conversation_id: 'chat-s' })
+      streamCall[4]({ tool: 'fs_write', input: { path: 'note-01.txt' }, call_id: 'w1' })
+      streamCall[5]({ output: 'ok', call_id: 'w1', status: 'ok' })
+    })
+    vi.mocked(sendSteeringMessage).mockImplementation(async (_runId, messageId) => (
+      { message_id: messageId, conversation_id: 'chat-s', status: 'queued' }
+    ))
+    await act(async () => { await result.current.steerMessage('Add cubes too') })
+    // Not read yet: it waits below the reply so far.
+    expect(result.current.messages.map((m) => [m.role, m.content || m.toolCalls?.[0]?.tool || ''])).toEqual([
+      ['user', 'Write the notes'], ['assistant', 'fs_write'], ['user', 'Add cubes too'],
+    ])
+    const steerId = result.current.messages[2].id
+    const turnStartedAtMs = result.current.messages[1].responseStartedAtMs
+
+    act(() => {
+      streamCall[24]?.({ message_id: steerId, message: 'Add cubes too', attachments: [], reset_response: true })
+      streamCall[4]({ tool: 'fs_write', input: { path: 'note-02.txt' }, call_id: 'w2' })
+      streamCall[3]('Done, with cubes.')
+      streamCall[6]({ conversation_id: 'chat-s', status: 'complete' })
+    })
+    const [, before, steer, after] = result.current.messages
+    expect(result.current.messages).toHaveLength(4)
+    expect(before).toMatchObject({ role: 'assistant', streaming: false, runStatus: 'complete' })
+    expect(before.toolCalls?.map((call) => call.id)).toEqual(['w1'])
+    expect(steer).toMatchObject({ role: 'user', content: 'Add cubes too', steeringStatus: 'applied' })
+    expect(after).toMatchObject({ role: 'assistant', content: 'Done, with cubes.', runStatus: 'complete' })
+    expect(after.toolCalls?.map((call) => call.id)).toEqual(['w2'])
+    // One task: the timer moves below the steer and keeps counting from the start.
+    expect(before.responseStartedAtMs).toBeUndefined()
+    expect(before.responseDurationMs).toBeUndefined()
+    expect(after.responseStartedAtMs).toBe(turnStartedAtMs)
+  })
+
+  it('moves a steer the turn never read into the queue when the turn ends', async () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    vi.mocked(fetchMessages).mockResolvedValue({ messages: [], has_more: false, next_before_id: null } as any)
+    const { result } = renderHook(() => useChat('chat-q'))
+    await waitFor(() => expect(result.current.isLoadingHistory).toBe(false))
+    act(() => result.current.sendMessage('Summarize', [], vi.fn()))
+    const streamCall = vi.mocked(chatStream).mock.calls[0]
+    act(() => { streamCall[23]?.({ run_id: 'run-q', conversation_id: 'chat-q' }) })
+    vi.mocked(sendSteeringMessage).mockImplementation(async (_runId, messageId) => (
+      { message_id: messageId, conversation_id: 'chat-q', status: 'queued' }
+    ))
+    await act(async () => { await result.current.steerMessage('Add a chart') })
+    expect(result.current.messages.some((m) => m.content === 'Add a chart' && m.steeringStatus === 'queued')).toBe(true)
+
+    act(() => { streamCall[6]({ conversation_id: 'chat-q', status: 'complete' }) })
+    expect(result.current.messages.some((m) => m.content === 'Add a chart')).toBe(false)
+    expect(result.current.queued).toEqual([expect.objectContaining({ text: 'Add a chart', conversationId: 'chat-q' })])
+    expect(result.current.queuePaused).toBe(false)
+  })
+
+  it('queues a message for after the turn, and Stop holds the queue until the next send', async () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    vi.mocked(fetchMessages).mockResolvedValue({ messages: [], has_more: false, next_before_id: null } as any)
+    const { result } = renderHook(() => useChat('chat-hold'))
+    await waitFor(() => expect(result.current.isLoadingHistory).toBe(false))
+    act(() => result.current.sendMessage('Long task', [], vi.fn()))
+    vi.mocked(stopChatRun).mockResolvedValue(true)
+    act(() => result.current.queueMessage('Then write tests'))
+    expect(result.current.queued).toEqual([expect.objectContaining({ text: 'Then write tests', conversationId: 'chat-hold' })])
+
+    act(() => result.current.stopStreaming())
+    expect(result.current.queuePaused).toBe(true)
+    act(() => result.current.removeQueued(result.current.queued[0].id))
+    act(() => result.current.sendMessage('Something else', [], vi.fn()))
+    expect(result.current.queuePaused).toBe(false)
+    expect(result.current.queued).toEqual([])
+  })
+
+  it('follows a turn still running when its chat is opened, and can stop it', async () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    vi.mocked(stopChatRun).mockResolvedValue(true)
+    vi.mocked(fetchMessages).mockResolvedValue({ messages: [savedMessage(20)], has_more: false, next_before_id: null } as any)
+    vi.mocked(fetchChatRuns).mockResolvedValue([
+      { run_id: 'run-other', conversation_id: 'chat-other', message: 'Elsewhere', attachments: [], started_at: Date.now() / 1000 },
+      { run_id: 'run-bg', conversation_id: 'chat-bg', message: 'Build the report', attachments: [], started_at: Date.now() / 1000 - 30 },
+    ])
+    const { result } = renderHook(() => useChat('chat-bg'))
+    await waitFor(() => expect(result.current.isStreaming).toBe(true))
+    const streamCall = vi.mocked(chatStream).mock.calls[0]
+    expect(streamCall[26]).toBe('run-bg')
+    expect(streamCall[27]).toBe('run-bg')
+    expect(result.current.messages.map((m) => m.content)).toEqual(['message 20', 'Build the report', ''])
+    expect(result.current.messages[2].responseStartedAtMs).toBeLessThan(Date.now() - 25_000)
+
+    // Replayed events fill in the reply; Stop ends the followed run.
+    act(() => {
+      streamCall[23]?.({ run_id: 'run-bg', conversation_id: 'chat-bg' })
+      streamCall[3]('Halfway there')
+    })
+    expect(result.current.steeringConversationId).toBe('chat-bg')
+    act(() => result.current.stopStreaming())
+    expect(stopChatRun).toHaveBeenCalledWith('run-bg')
+  })
+
+  it('reloads history when the followed turn ended before it reconnected', async () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    vi.mocked(fetchMessages).mockResolvedValue({ messages: [savedMessage(20)], has_more: false, next_before_id: null } as any)
+    vi.mocked(fetchChatRuns).mockResolvedValueOnce([
+      { run_id: 'run-gone', conversation_id: 'chat-gone', message: 'Done already', attachments: [], started_at: Date.now() / 1000 },
+    ]).mockResolvedValue([])
+    const { result } = renderHook(() => useChat('chat-gone'))
+    await waitFor(() => expect(result.current.isStreaming).toBe(true))
+    const streamCall = vi.mocked(chatStream).mock.calls[0]
+    act(() => streamCall[7]('This turn is no longer running.', { code: 'not_found' }))
+    await waitFor(() => expect(fetchMessages).toHaveBeenCalledTimes(2))
+    expect(result.current.isStreaming).toBe(false)
+    expect(result.current.messages.map((m) => m.content)).toEqual(['message 20'])
+  })
+
+  it('queues a steer that reaches a turn that already closed', async () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    vi.mocked(fetchMessages).mockResolvedValue({ messages: [], has_more: false, next_before_id: null } as any)
+    const { result } = renderHook(() => useChat('chat-closed'))
+    await waitFor(() => expect(result.current.isLoadingHistory).toBe(false))
+    act(() => result.current.sendMessage('Summarize', [], vi.fn()))
+    const streamCall = vi.mocked(chatStream).mock.calls[0]
+    act(() => { streamCall[23]?.({ run_id: 'run-c', conversation_id: 'chat-closed' }) })
+    vi.mocked(sendSteeringMessage).mockRejectedValue(new ApiError(new Response(null, { status: 409 }), { code: 'conflict', message: '', request_id: '', details: {} }, 'This turn is no longer running.'))
+    await act(async () => { await result.current.steerMessage('One more thing') })
+    expect(result.current.queued).toEqual([expect.objectContaining({ text: 'One more thing' })])
+  })
+
   it('cancels an old turn when starting a new chat and ignores late completion', () => {
     const abort = vi.fn()
     const onConversationCreated = vi.fn()
@@ -167,6 +305,8 @@ describe('useChat answer handoff', () => {
     const streamCall = vi.mocked(chatStream).mock.calls[0]
     act(() => result.current.clearMessages())
     expect(abort).toHaveBeenCalledTimes(1)
+    // New chat stops watching; the old turn keeps running on the backend.
+    expect(stopChatRun).not.toHaveBeenCalled()
 
     act(() => {
       streamCall[3]('Late token')
@@ -193,11 +333,27 @@ describe('useChat answer handoff', () => {
     rerender({ id: 'chat-b' })
     await waitFor(() => expect(result.current.isStreaming).toBe(false))
     expect(abort).toHaveBeenCalledTimes(1)
+    expect(stopChatRun).not.toHaveBeenCalled()
     await waitFor(() => expect(result.current.messages.map((message) => message.id)).toEqual(['20']))
     expect(fetchMessages).toHaveBeenLastCalledWith('chat-b', 5, undefined, expect.any(AbortSignal))
     act(() => result.current.sendMessage('Continue here', [], vi.fn()))
     unmount()
     expect(abort).toHaveBeenCalledTimes(2)
+  })
+
+  it('sends a run id with the turn and stops that run when Stop is pressed', () => {
+    const abort = vi.fn()
+    vi.mocked(chatStream).mockReturnValue(abort)
+    vi.mocked(newRunId).mockReturnValue('run-fixed')
+    vi.mocked(stopChatRun).mockResolvedValue(true)
+    const { result } = renderHook(() => useChat(null))
+    act(() => result.current.sendMessage('Hello', [], vi.fn()))
+    const streamCall = vi.mocked(chatStream).mock.calls[0]
+    expect(streamCall[26]).toBe('run-fixed')
+    expect(streamCall[27]).toBeUndefined()
+    act(() => result.current.stopStreaming())
+    expect(stopChatRun).toHaveBeenCalledWith('run-fixed')
+    expect(abort).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the partial answer and error status after an interrupted stream', () => {

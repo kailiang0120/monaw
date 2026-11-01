@@ -126,7 +126,8 @@ class AgentRuntime:
         self.memory.set_memory_store(self.memory_store)
 
         llm_cfg = getattr(settings, "llm", None)
-        max_iterations = getattr(llm_cfg, "max_iterations_per_turn", None) or 200
+        # 0 is no limit for chats; unattended runs still stop at 200.
+        max_iterations = getattr(llm_cfg, "max_iterations_per_turn", None) or 0
         max_turn_seconds = float(getattr(llm_cfg, "max_turn_seconds", None) or 7200)
         max_llm_call_seconds = float(getattr(llm_cfg, "max_llm_call_seconds", None) or 600)
 

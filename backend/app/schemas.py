@@ -14,17 +14,23 @@ _CONV_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
+    # Chosen by the client so it can stop the turn before turn_started arrives.
+    run_id: Optional[str] = None
     workspace_dir: str | None = Field(default=None, max_length=4096)
     attachments: list["AttachmentRef"] = Field(default_factory=list)
 
-    @field_validator("conversation_id")
+    @field_validator("conversation_id", "run_id")
     @classmethod
     def validate_conversation_id(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and not _CONV_ID_RE.match(v):
             raise ValueError(
-                "conversation_id must be 1-64 alphanumeric characters, hyphens, or underscores"
+                "conversation_id and run_id must be 1-64 alphanumeric characters, hyphens, or underscores"
             )
         return v
+
+
+class ChatStopRequest(BaseModel):
+    run_id: str = Field(..., min_length=1, max_length=64)
 
 
 class AttachmentRef(BaseModel):
@@ -51,6 +57,14 @@ class ChatSteerRequest(BaseModel):
         if not value.strip():
             raise ValueError("A steering message must contain text")
         return value.strip()
+
+
+class ChatRunOut(BaseModel):
+    run_id: str
+    conversation_id: str
+    message: str
+    attachments: list[dict] = Field(default_factory=list)
+    started_at: float
 
 
 class ChatSteerResponse(BaseModel):
@@ -114,7 +128,11 @@ class ConversationOut(BaseModel):
     id: str
     title: str
     created_at: str
+    # Last activity, so the sidebar can put the most recent project first.
+    updated_at: str = ""
     workspace_dir: str = ""
+    # A turn is running in it now (a chat, scheduled task or Telegram message).
+    running: bool = False
 
 
 class ContextUsageBreakdownItemPayload(BaseModel):
@@ -231,7 +249,8 @@ class LLMSettingsPayload(BaseModel):
     provider: str = Field("openai", pattern="^(openai|gemini|codex)$")
     model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: str = Field("medium", pattern="^(none|minimal|low|medium|high|xhigh|max)$")
-    max_iterations_per_turn: int = Field(200, ge=1, le=500)
+    max_iterations_per_turn: int = Field(0, ge=0, le=500)
+    custom_models: dict[str, list[str]] = Field(default_factory=dict)
     max_turn_seconds: int = Field(7200, ge=30, le=14400)
     max_llm_call_seconds: int = Field(600, ge=30, le=1800)
 
@@ -405,6 +424,11 @@ class ModelProviderOptionPayload(BaseModel):
     id: str
     label: str
     models: list[str] = Field(default_factory=list)
+    # Display names and supported reasoning levels, where the provider lists them.
+    labels: dict[str, str] = Field(default_factory=dict)
+    reasoning_efforts: dict[str, list[str]] = Field(default_factory=dict)
+    # "account" when the list came from the signed-in ChatGPT account.
+    source: str = "built_in"
 
 
 class ModelOptionsPayload(BaseModel):

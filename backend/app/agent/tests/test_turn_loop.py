@@ -903,8 +903,8 @@ class RepeatBlockedToolLLM:
 
     async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
         self.calls += 1
-        if self.calls > 3:
-            return final_answer_response("Should not be reached.")
+        if not tools:
+            return final_answer_response("The target stayed blocked, so I stopped.")
         return LLMResponse(
             content="",
             tool_calls=[
@@ -1050,6 +1050,33 @@ def test_turn_loop_applies_steering_before_dispatching_a_stale_model_response():
     assert any(event["event"] == "steering_applied" for event in events)
     assert memory.added_messages == [("user", "Summarize the report"), ("user", instruction), ("assistant", "Here is the table.")]
     assert inbox.closed
+
+
+def test_turn_loop_does_not_save_a_steering_message_that_arrived_too_late():
+    inbox = SteeringInbox("conv-steer-late", "session-a")
+
+    class SteeredDuringWrapUpLLM:
+        async def chat_with_tools(self, messages, tools, **kwargs):  # noqa: ARG002
+            if tools:
+                return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                    call_id="echo-1", tool_name="echo_tool", arguments={"text": "one"},
+                )], finish_reason="tool_calls")
+            # The limit stopped the turn; nothing reads a message sent during the wrap-up.
+            inbox.enqueue(SteeringMessage("steer-late", "Also add a chart"))
+            return LLMResponse(content="I echoed once.", tool_calls=[], finish_reason="stop")
+
+    memory = FakeMemory()
+    loop = TurnLoop(llm_client=SteeredDuringWrapUpLLM(), registry=_echo_registry(), memory=memory,
+                    observability=FakeObservability(), max_iterations=1)
+
+    async def collect():
+        return [event async for event in loop.run("Echo", inbox.conversation_id, system_prompt="system", steering=inbox)]
+
+    events = asyncio.run(collect())
+    assert events[-1]["data"]["summary"] == "I echoed once."
+    assert not any(event["event"] == "steering_applied" for event in events)
+    # The app queues it as the next turn, which saves it then.
+    assert memory.added_messages == [("user", "Echo"), ("assistant", "I echoed once.")]
 
 
 def test_turn_loop_keeps_completed_tool_work_when_steered_during_execution():
@@ -1800,8 +1827,9 @@ def test_turn_loop_pauses_after_repeated_progress_without_tool():
     done_event = next(event for event in events if event["event"] == "done")
     progress_events = [event for event in events if event["event"] == "progress"]
 
-    assert llm.calls == 2
-    assert llm.tool_choices == [None, "required"]
+    # The third call is the tool-less wrap-up after the guard stops the loop.
+    assert llm.calls == 3
+    assert llm.tool_choices == [None, "required", None]
     assert len(progress_events) == 2
     assert done_event["data"]["status"] == "paused"
     assert done_event["data"]["incomplete"] is True
@@ -1883,8 +1911,8 @@ def test_turn_loop_bounds_progress_without_a_tool_call():
     progress_events = [event for event in events if event["event"] == "progress"]
     error_events = [event for event in events if event["event"] == "error"]
 
-    assert llm.calls == 2
-    assert llm.tool_choices == [None, "required"]
+    assert llm.calls == 3
+    assert llm.tool_choices == [None, "required", None]
     assert len(progress_events) == 2
     assert error_events == []
     assert events[-1]["event"] == "done"
@@ -2041,8 +2069,8 @@ def test_turn_loop_bounds_post_tool_progress_without_action():
     done_event = next(event for event in events if event["event"] == "done")
     progress_events = [event for event in events if event["event"] == "progress"]
 
-    assert llm.calls == 3
-    assert llm.tool_choices == [None, None, "required"]
+    assert llm.calls == 4
+    assert llm.tool_choices == [None, None, "required", None]
     assert len(progress_events) == 2
     assert done_event["data"]["status"] == "paused"
     assert done_event["data"]["incomplete"] is True
@@ -2897,11 +2925,15 @@ def test_turn_loop_stops_on_repeated_policy_blocked_tool_call_after_recovery(mon
     ]
     blocked_output = json.loads(tool_end_outputs[-1])
 
-    assert llm.calls == 4
+    # Calls 1-2 run, 3-5 are blocked and go back to the model as errors, and the
+    # third stuck round ends the turn. The sixth call is the wrap-up; it returned
+    # no text, so the guard's line stays.
+    assert llm.calls == 6
     assert blocked_output["code"] == "repeated_tool_call_blocked"
+    assert "will stay blocked" in blocked_output["error"]
     assert events[-1]["data"]["status"] == "paused"
     assert events[-1]["data"]["reason_code"] == "repeated_tool_call_blocked"
-    assert "after a recovery prompt" in events[-1]["data"]["summary"]
+    assert "last 3 rounds" in events[-1]["data"]["summary"]
     assert any(
         item.get("event_type") == "guardrail_triggered"
         and item.get("error_code") == "repeated_tool_call_blocked"
@@ -3007,13 +3039,207 @@ def test_turn_loop_stops_on_repeated_tool_level_blocked_result():
         if event["event"] == "tool_end"
     ]
 
-    assert llm.calls == 3
+    assert llm.calls == 5
     assert tool_end_outputs[0]["status"] == "blocked"
     assert tool_end_outputs[1]["code"] == "repeated_blocked_tool_result"
     assert tool_end_outputs[1]["recovery_required"] is True
     assert tool_end_outputs[2]["code"] == "repeated_tool_call_blocked"
+    assert tool_end_outputs[3]["code"] == "repeated_tool_call_blocked"
     assert events[-1]["data"]["status"] == "paused"
     assert events[-1]["data"]["reason_code"] == "repeated_tool_call_blocked"
+    assert events[-1]["data"]["summary"] == "The target stayed blocked, so I stopped."
+
+
+class RepeatThenReportLLM:
+    """Repeats one tool call while tools are offered; reports in text once they are not."""
+
+    provider = "openai"
+
+    def __init__(self, calls_per_round: int = 1, fail_wrap_up: bool = False) -> None:
+        self.calls = 0
+        self.calls_per_round = calls_per_round
+        self.fail_wrap_up = fail_wrap_up
+        self.wrap_up_messages: list[dict] = []
+
+    async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None, tool_choice=None):  # noqa: ARG002
+        self.calls += 1
+        if not tools:
+            self.wrap_up_messages = list(messages)
+            if self.fail_wrap_up:
+                raise RuntimeError("provider down")
+            text = "I listed the files, but the same step kept repeating, so I stopped. Say continue to retry."
+            if stream_callback is not None:
+                await stream_callback(text)
+            return LLMResponse(content=text, tool_calls=[], finish_reason="stop")
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(call_id=f"round-{self.calls}-{index}", tool_name="echo_tool", arguments={"text": "same"})
+                for index in range(self.calls_per_round)
+            ],
+            finish_reason="tool_calls",
+        )
+
+
+def _echo_registry() -> ToolRegistry:
+    return ToolRegistry(
+        [
+            {
+                "name": "echo_tool",
+                "description": "Echo text",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+                "callable": lambda text: f"echo:{text}",
+                "domain": "general",
+                "execution_mode": "sync_stateless",
+                "affinity_group": None,
+            }
+        ]
+    )
+
+
+def test_turn_loop_lets_the_model_report_after_a_repeat_guard_stop():
+    llm = RepeatThenReportLLM()
+    loop = TurnLoop(llm_client=llm, registry=_echo_registry(), memory=FakeMemory())
+
+    async def collect():
+        return [event async for event in loop.run("list files", "conv-repeat-report", system_prompt="system")]
+
+    events = asyncio.run(collect())
+    done = events[-1]["data"]
+    streamed = "".join(event["data"]["content"] for event in events if event["event"] == "token")
+
+    assert done["status"] == "paused"
+    assert done["incomplete"] is True
+    assert done["reason_code"] == "repeated_tool_call_blocked"
+    assert done["summary"].startswith("I listed the files")
+    assert streamed == done["summary"]
+    assert not [event for event in events if event["event"] == "error"]
+    last_prompt = llm.wrap_up_messages[-1]
+    assert last_prompt["role"] == "user"
+    assert "repeated_tool_call_blocked" in last_prompt["content"]
+    assert "no more tools" in last_prompt["content"]
+
+
+def test_turn_loop_closes_unanswered_calls_before_the_wrap_up():
+    llm = RepeatThenReportLLM(calls_per_round=2)
+    loop = TurnLoop(llm_client=llm, registry=_echo_registry(), memory=FakeMemory(), max_iterations=2)
+
+    async def collect():
+        return [event async for event in loop.run("echo twice", "conv-limit-report", system_prompt="system")]
+
+    events = asyncio.run(collect())
+    done = events[-1]["data"]
+    answered = {
+        str(item.get("tool_call_id") or item.get("call_id") or "")
+        for item in llm.wrap_up_messages
+        if item.get("role") == "tool" or item.get("type") == "function_call_output"
+    }
+
+    assert done["reason_code"] == "iteration_limit_reached_before_more_tools"
+    assert done["summary"].startswith("I listed the files")
+    # The second round's calls never ran; each still gets a result so the
+    # provider accepts the history.
+    assert {"round-2-0", "round-2-1"} <= answered
+
+
+def test_turn_loop_keeps_the_pause_notice_when_the_wrap_up_fails():
+    llm = RepeatThenReportLLM(fail_wrap_up=True)
+    loop = TurnLoop(llm_client=llm, registry=_echo_registry(), memory=FakeMemory(), max_iterations=2)
+
+    async def collect():
+        return [event async for event in loop.run("echo", "conv-limit-wrap-fail", system_prompt="system")]
+
+    events = asyncio.run(collect())
+    error_events = [event for event in events if event["event"] == "error"]
+
+    assert error_events[-1]["data"]["code"] == "iteration_limit_reached_before_more_tools"
+    assert events[-1]["data"]["status"] == "paused"
+    assert "iteration limit" in events[-1]["data"]["summary"]
+
+
+class ScriptedEchoLLM:
+    """Sends one echo call per round from a script of texts, then answers."""
+
+    def __init__(self, texts: list[str], answer: str = "All done.") -> None:
+        self.texts = texts
+        self.answer = answer
+        self.calls = 0
+
+    async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None, tool_choice=None):  # noqa: ARG002
+        self.calls += 1
+        if self.calls > len(self.texts) or not tools:
+            return LLMResponse(content=self.answer, tool_calls=[], finish_reason="stop")
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCallRequest(call_id=f"echo-{self.calls}", tool_name="echo_tool", arguments={"text": self.texts[self.calls - 1]})],
+            finish_reason="tool_calls",
+        )
+
+
+def _run_turn(loop: TurnLoop, conversation_id: str) -> list[dict]:
+    async def collect():
+        return [event async for event in loop.run("go", conversation_id, system_prompt="system")]
+
+    return asyncio.run(collect())
+
+
+def test_turn_loop_keeps_going_when_the_model_moves_on_after_repeat_blocks():
+    # Two blocked repeats go back to the model as errors; it then changes course.
+    llm = ScriptedEchoLLM(["same", "same", "same", "same", "other"])
+    events = _run_turn(TurnLoop(llm_client=llm, registry=_echo_registry(), memory=FakeMemory()), "conv-repeat-recover")
+    codes = [json.loads(event["data"]["output"]).get("code") for event in events if event["event"] == "tool_end" and event["data"]["output"].startswith("{")]
+
+    assert codes == ["repeated_tool_call_blocked", "repeated_tool_call_blocked"]
+    assert events[-1]["data"]["status"] == "complete"
+    assert events[-1]["data"]["summary"] == "All done."
+
+
+def test_turn_loop_stops_after_too_many_guard_blocks_in_one_turn():
+    # Every other round makes progress, so no three rounds in a row are stuck,
+    # but the blocked repeats still add up.
+    texts = ["same", "same"] + [text for index in range(12) for text in ("same", f"new-{index}")]
+    llm = ScriptedEchoLLM(texts, answer="I kept repeating one step, so I stopped.")
+    loop = TurnLoop(llm_client=llm, registry=_echo_registry(), memory=FakeMemory())
+    events = _run_turn(loop, "conv-guard-total")
+    done = events[-1]["data"]
+
+    assert done["status"] == "paused"
+    assert done["reason_code"] == "repeated_tool_call_blocked"
+    assert done["summary"] == "I kept repeating one step, so I stopped."
+    blocked = [event for event in events if event["event"] == "tool_end" and "repeated_tool_call_blocked" in event["data"]["output"]]
+    assert len(blocked) == TurnLoop.GUARD_BLOCKS_LIMIT
+
+
+def test_turn_loop_has_no_model_call_limit_for_chats():
+    llm = ScriptedEchoLLM([f"step-{index}" for index in range(205)])
+    events = _run_turn(TurnLoop(llm_client=llm, registry=_echo_registry(), memory=FakeMemory(), max_iterations=0), "conv-no-limit")
+
+    assert llm.calls == 206
+    assert events[-1]["data"]["status"] == "complete"
+
+
+def test_turn_loop_keeps_a_limit_for_unattended_runs(monkeypatch):
+    from app.agent.run_context import reset_current_interactive, set_current_interactive
+
+    monkeypatch.setattr(TurnLoop, "UNATTENDED_MAX_ITERATIONS", 3)
+    llm = ScriptedEchoLLM([f"step-{index}" for index in range(10)], answer="I did three steps.")
+    loop = TurnLoop(llm_client=llm, registry=_echo_registry(), memory=FakeMemory(), max_iterations=0)
+    token = set_current_interactive(False)
+    try:
+        events = _run_turn(loop, "conv-unattended-limit")
+    finally:
+        reset_current_interactive(token)
+    done = events[-1]["data"]
+
+    assert done["status"] == "paused"
+    assert done["reason_code"].startswith("iteration_")
+    # Three steps, then the tool-less wrap-up.
+    assert llm.calls == 4
+    assert done["summary"] == "I did three steps."
 
 
 def test_turn_loop_browser_tool_timeout_returns_structured_error():

@@ -10,6 +10,10 @@ MAX_TYPED_TEXT_CHARS = 4000
 _CREDENTIAL_LABEL = re.compile(r"password|passcode|otp|2fa|mfa|secret|token|api[ _-]?key", re.IGNORECASE)
 
 
+def mentions_credential(text: str) -> bool:
+    return bool(_CREDENTIAL_LABEL.search(str(text or "")))
+
+
 def text_entry_error(text: str, metadata: dict[str, Any] | None = None) -> dict | None:
     metadata = metadata or {}
     if len(text) > MAX_TYPED_TEXT_CHARS:

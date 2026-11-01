@@ -162,7 +162,10 @@ app.add_middleware(
     allow_origin_regex=settings.cors_allow_origin_regex or None,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    # Idempotency-Key (scheduled Run now) and Last-Event-ID (resuming the event
+    # stream) are sent by the app; a header missing here fails the preflight and
+    # the browser reports "Failed to fetch".
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "Last-Event-ID"],
 )
 app.add_middleware(RequestSizeLimitMiddleware)
 

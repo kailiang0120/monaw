@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import hashlib
 import uuid
 import tempfile
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.agent.llm_constants import (
     CHAT_MODELS_BY_PROVIDER,
     DEFAULT_OPENAI_CHAT_MODEL,
+    MODEL_NAME_PATTERN,
     normalize_chat_model,
 )
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
@@ -109,19 +111,35 @@ class LLMSettings(BaseModel):
     provider: Literal["openai", "gemini", "codex"] = "openai"
     model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] = "medium"
-    max_iterations_per_turn: int = Field(200, ge=1, le=500)
+    # Model calls per chat message; 0 is no limit. Unattended runs stop at 200.
+    max_iterations_per_turn: int = Field(0, ge=0, le=500)
     max_turn_seconds: int = Field(7200, ge=30, le=14400)
     max_llm_call_seconds: int = Field(600, ge=30, le=1800)
+    # Model names the user added per provider, offered beside the built-in ones.
+    custom_models: dict[str, list[str]] = Field(default_factory=dict)
+
+    @field_validator("custom_models")
+    @classmethod
+    def clean_custom_models(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        cleaned: dict[str, list[str]] = {}
+        for provider, names in (value or {}).items():
+            if provider not in CHAT_MODELS_BY_PROVIDER:
+                continue
+            kept = [name.strip() for name in names if re.match(MODEL_NAME_PATTERN, name.strip())]
+            if kept:
+                cleaned[provider] = list(dict.fromkeys(kept))[:20]
+        return cleaned
 
     @model_validator(mode="after")
     def normalize_provider_models(self) -> "LLMSettings":
-        self.model_name = normalize_chat_model(self.provider, self.model_name)
+        self.model_name = normalize_chat_model(self.provider, self.model_name, self.custom_models.get(self.provider, []))
+        if not re.match(MODEL_NAME_PATTERN, self.model_name):
+            self.model_name = normalize_chat_model(self.provider, "")
         if self.provider in {"openai", "codex"} and self.model_name.startswith("gpt-6"):
-            if self.reasoning_effort == "minimal" or (self.model_name in {"gpt-6-astra", "gpt-6.1-sol"} and self.reasoning_effort == "none"):
+            if self.reasoning_effort == "minimal" or (self.model_name in {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol"} and self.reasoning_effort == "none"):
                 self.reasoning_effort = "low"
-        if self.provider == "codex" and self.reasoning_effort == "none":
-            self.reasoning_effort = "low"
-        if self.reasoning_effort == "ultra" and (self.provider != "codex" or self.model_name == "gpt-6-luna"):
+        # "ultra" was a Codex-only level; a ChatGPT sign-in now uses the API's levels.
+        if self.reasoning_effort == "ultra":
             self.reasoning_effort = "max"
         if self.provider == "gemini" and self.reasoning_effort in {"none", "minimal"}:
             self.reasoning_effort = "minimal" if self.model_name == "gemini-flash-lite-latest" else "low"
@@ -521,7 +539,11 @@ def _normalize_llm_payload(raw_llm: Any) -> Any:
     # Raise the former default limits while preserving explicitly tuned budgets.
     old_limits = {"max_iterations_per_turn": 40, "max_turn_seconds": 1800, "max_llm_call_seconds": 300}
     if all(llm.get(key, value) == value for key, value in old_limits.items()):
-        llm.update(max_iterations_per_turn=200, max_turn_seconds=7200, max_llm_call_seconds=600)
+        llm.update(max_iterations_per_turn=0, max_turn_seconds=7200, max_llm_call_seconds=600)
+    # Chats once stopped at 40, then 200, model calls; Settings never showed the
+    # field, so a stored 40 or 200 is an old default rather than a choice.
+    if llm.get("max_iterations_per_turn") in (40, 200):
+        llm["max_iterations_per_turn"] = 0
     provider = str(llm.get("provider") or "").strip().lower()
     if provider not in CHAT_MODELS_BY_PROVIDER:
         llm["provider"] = "openai"

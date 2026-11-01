@@ -691,13 +691,37 @@ def list_windows() -> str:
     windows: list[dict[str, Any]] = []
 
     def _enum_cb(hwnd, _results):
-        if win32gui.IsWindowVisible(hwnd):
+        if _is_user_window(win32gui, hwnd):
             meta = _window_meta(win32gui, win32process, hwnd)
             if meta["title"].strip():
                 _results.append(meta)
 
     win32gui.EnumWindows(_enum_cb, windows)
     return json.dumps(windows[:30], ensure_ascii=False)
+
+
+_MIN_USER_WINDOW_SIDE = 40
+
+
+def _is_user_window(win32gui: Any, hwnd: int) -> bool:
+    """A window a person can see and switch to, as the taskbar would show it.
+
+    IsWindowVisible alone also reports cloaked windows (Settings and other
+    Store apps stay alive invisibly after closing), tool windows such as tray
+    helpers and overlays, and 1-pixel windows.
+    """
+    import win32con
+
+    from app.skills.computer_use.screen_redaction import _is_cloaked
+
+    if not win32gui.IsWindowVisible(hwnd) or _is_cloaked(hwnd):
+        return False
+    if win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) & win32con.WS_EX_TOOLWINDOW:
+        return False
+    if win32gui.IsIconic(hwnd):
+        return True
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    return right - left >= _MIN_USER_WINDOW_SIDE and bottom - top >= _MIN_USER_WINDOW_SIDE
 
 
 def focus_window(title: str = "", hwnd: int = 0, *, _bypass_gate: bool = False) -> str:

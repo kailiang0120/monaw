@@ -360,7 +360,10 @@ describe('SettingsModal', () => {
     expect(screen.queryByRole('checkbox', { name: "Auto-approve Chrome's connection prompt" })).not.toBeInTheDocument()
     expect(screen.queryByText(/remote debugging/i)).not.toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Navigation target domains' })).toBeInTheDocument()
-    expect(screen.getByText(/Does not restrict existing tabs, snapshots, screenshots, clicks, popups, or Chrome redirects/)).toBeInTheDocument()
+    // The long explanation sits behind the row's info button until it is opened.
+    expect(screen.queryByText(/Does not restrict existing tabs/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'About Navigation target domains' }))
+    expect(screen.getByRole('tooltip')).toHaveTextContent(/Does not restrict existing tabs, snapshots, screenshots, clicks, popups, or Chrome redirects/)
     expect(screen.getByRole('textbox', { name: 'Screenshots folder' })).toHaveValue('C:/runtime/browser/screenshots')
     expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument()
     for (const removed of [
@@ -618,12 +621,50 @@ describe('SettingsModal', () => {
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
     render(<SettingsModal onClose={() => {}} />)
     fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
-    expect(await screen.findByText('OpenAI account')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
+    expect(await screen.findByRole('heading', { name: 'OpenAI account' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue with ChatGPT' }))
     await waitFor(() => expect(startOpenAIAccountLogin).toHaveBeenCalledOnce())
     expect(openSpy).toHaveBeenCalledWith('https://auth.openai.com/example', '_blank', 'noopener,noreferrer')
     expect(screen.getByText('Open sign-in page')).toHaveAttribute('href', 'https://auth.openai.com/example')
     openSpy.mockRestore()
+  })
+
+  it('stops waiting and shows why when the ChatGPT sign-in fails', async () => {
+    vi.mocked(startOpenAIAccountLogin).mockResolvedValue({ auth_url: 'https://auth.openai.com/example', login_id: 'login-1' })
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
+    vi.mocked(fetchOpenAIAccountStatus).mockResolvedValue({
+      connected: false, plan: '', limits: [], usage_error: '', login_pending: false, login_error: 'Sign-in was cancelled.',
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue with ChatGPT' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Sign-in was cancelled.')
+    expect(screen.getByRole('button', { name: 'Continue with ChatGPT' })).toBeEnabled()
+    openSpy.mockRestore()
+  })
+
+  it('shows the signed-in ChatGPT account and where to manage plan usage', async () => {
+    vi.mocked(fetchOpenAIAccountStatus).mockResolvedValue({
+      connected: true, email: 'kai@example.com', plan_usage: true, usage_url: 'https://chatgpt.com/#settings',
+      plan: '', limits: [], usage_error: '',
+    })
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
+    expect(await screen.findByText('Connected · kai@example.com')).toBeInTheDocument()
+    expect(screen.getByText('Manage usage')).toHaveAttribute('href', 'https://chatgpt.com/#settings')
+    expect(screen.getByText(/Requests use your ChatGPT plan/)).toBeInTheDocument()
+  })
+
+  it('asks to sign in again when ChatGPT plan use was not allowed', async () => {
+    vi.mocked(fetchOpenAIAccountStatus).mockResolvedValue({
+      connected: true, email: 'kai@example.com', plan_usage: false, plan: '', limits: [],
+      usage_error: "ChatGPT plan use isn't enabled for Monaw. Sign in again and allow it.",
+    })
+    render(<SettingsModal onClose={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Connections/i }))
+    expect(await screen.findByRole('button', { name: 'Continue with ChatGPT' })).toBeEnabled()
+    expect(screen.getByText(/plan use isn't enabled/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument()
   })
 
   it('shows account usage remaining and reset times when connected', async () => {

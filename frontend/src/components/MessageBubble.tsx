@@ -96,8 +96,7 @@ export const MessageBubble = memo(function MessageBubble({
           <AttachmentStrip attachments={message.attachments} compact onPreview={setPreviewAttachment} />
           {message.steeringStatus && (
             <p className="mt-1 text-[10px] text-white/70">
-              {message.steeringStatus === 'applied' ? 'Applied to the running task'
-                : message.steeringStatus === 'queued' ? 'Waiting for the next step' : 'Saved for the next turn'}
+              {message.steeringStatus === 'applied' ? 'Applied to the running task' : 'Waiting for the next step'}
             </p>
           )}
         </div>

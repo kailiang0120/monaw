@@ -302,6 +302,17 @@
     height: 3px;
   }
 
+  /* The sidebar chat list: a thin bar that shows while the list is hovered. */
+  .sidebar-scroll::-webkit-scrollbar {
+    width: 4px;
+  }
+  .sidebar-scroll::-webkit-scrollbar-thumb {
+    background: transparent;
+  }
+  .sidebar-scroll:hover::-webkit-scrollbar-thumb {
+    background: var(--st-scrollbar, rgba(255, 255, 255, 0.16));
+  }
+
   .settings-sidebar-scroll {
     scrollbar-width: none;
     -ms-overflow-style: none;
@@ -662,7 +673,6 @@
   }
 
   .app-bar-icon-button:focus-visible,
-  .app-bar-new:focus-visible,
   .app-bar-mode:focus-visible {
     outline: none;
     box-shadow: 0 0 0 3px var(--st-focus);
@@ -811,20 +821,6 @@
     padding: 0 0.75rem 0 0.25rem;
   }
 
-  .app-bar-new {
-    display: inline-flex;
-    height: 30px;
-    align-items: center;
-    gap: 0.4375rem;
-    padding: 0 0.75rem;
-    border: 1px solid var(--st-border);
-    border-radius: 9px;
-    background: var(--st-surface);
-    color: var(--st-text-muted);
-    font-size: 12px;
-    font-weight: 600;
-    transition: background-color 150ms, border-color 150ms, color 150ms;
-  }
 
   .app-bar-window-controls {
     display: flex;
@@ -840,11 +836,6 @@
     color: var(--st-danger);
   }
 
-  .app-bar-new:hover {
-    border-color: var(--st-accent-border);
-    background: var(--st-accent-soft);
-    color: var(--st-accent-text);
-  }
 
   /* Hairline under the bar separating it from the content. */
   .app-bar::after {
@@ -876,16 +867,6 @@
     }
   }
 
-  @media (max-width: 900px) {
-    .app-bar-new span {
-      display: none;
-    }
-    .app-bar-new {
-      width: 30px;
-      justify-content: center;
-      padding: 0;
-    }
-  }
 }
 
 @layer utilities {

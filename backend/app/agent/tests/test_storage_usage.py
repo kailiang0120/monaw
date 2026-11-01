@@ -42,7 +42,7 @@ def test_usage_adds_up_by_category(home):
     _write(runtime / "backend.log", 400)
     _write(runtime / "exec" / "run-1" / "out.txt", 500)
     _write(runtime / "electron" / "Cache" / "data_1", 600)
-    _write(home / "codex-account" / "cache" / "a", 700)
+    _write(home / "chatgpt-account" / "credentials.dat", 700)
     _write(runtime / "settings.json", 50)
 
     usage = storage.storage_usage()
@@ -108,6 +108,18 @@ def test_old_voice_model_is_listed_only_while_it_exists(home):
     storage.clean_storage("legacy_speech")
     assert not any(item["id"] == "legacy_speech" for item in storage.storage_usage()["categories"])
     assert other.exists()
+
+
+def test_old_codex_sign_in_is_a_leftover_and_the_current_sign_in_stays(home):
+    _write(home / "codex-account" / "auth.json", 900)
+    current = _write(home / "chatgpt-account" / "credentials.dat", 40)
+
+    listed = _category(storage.storage_usage(), "legacy_codex")
+    assert (listed["cleanable_bytes"], listed["clean"]) == (900, "backend")
+    storage.clean_storage("legacy_codex")
+    assert not (home / "codex-account").exists()
+    assert not any(item["id"] == "legacy_codex" for item in storage.storage_usage()["categories"])
+    assert current.exists() and _category(storage.storage_usage(), "account")["clean"] is None
 
 
 def test_chats_are_not_deleted_during_a_reply(home, monkeypatch):

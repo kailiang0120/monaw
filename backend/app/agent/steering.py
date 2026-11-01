@@ -2,8 +2,45 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass, field
+from typing import Any
 import uuid
+
+
+class RunStream:
+    """Every SSE chunk a turn has sent, so a reopened chat can replay it and follow along."""
+
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self.closed = False
+        self._subscribers: set[asyncio.Queue[bytes | None]] = set()
+
+    def publish(self, chunk: bytes) -> None:
+        self.chunks.append(chunk)
+        for queue in self._subscribers:
+            queue.put_nowait(chunk)
+
+    def close(self) -> None:
+        self.closed = True
+        for queue in self._subscribers:
+            queue.put_nowait(None)
+        self._subscribers.clear()
+
+    def subscribe(self) -> asyncio.Queue[bytes | None]:
+        """A queue holding everything sent so far, then each new chunk; None marks the end."""
+        queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        for chunk in self.chunks:
+            queue.put_nowait(chunk)
+        if self.closed:
+            queue.put_nowait(None)
+        else:
+            self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[bytes | None]) -> None:
+        self._subscribers.discard(queue)
 
 
 @dataclass
@@ -14,6 +51,9 @@ class SteeringMessage:
     display_message: str = ""
     public_attachments: list[dict] = field(default_factory=list)
     applied: bool = False
+    # How many of the turn's tool calls had run when the agent read it, so the
+    # saved turn shows it at that point.
+    tool_call_index: int = 0
 
 
 @dataclass
@@ -23,6 +63,13 @@ class SteeringInbox:
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     messages: list[SteeringMessage] = field(default_factory=list)
     closed: bool = False
+    # The task running the turn, so an explicit Stop can cancel it.
+    task: Any = field(default=None, repr=False, compare=False)
+    # What the user sent, for a chat reopened while the turn runs.
+    display_message: str = ""
+    public_attachments: list[dict] = field(default_factory=list)
+    started_at: float = field(default_factory=time.time)
+    stream: RunStream = field(default_factory=RunStream, repr=False, compare=False)
 
     @property
     def pending(self) -> bool:
@@ -53,6 +100,8 @@ _inboxes: dict[str, SteeringInbox] = {}
 
 
 def register_steering(inbox: SteeringInbox) -> None:
+    if inbox.run_id in _inboxes:
+        raise ValueError("A turn with this run ID is already running.")
     _inboxes[inbox.run_id] = inbox
 
 
@@ -68,3 +117,7 @@ def unregister_steering(inbox: SteeringInbox) -> None:
 
 def conversation_is_running(conversation_id: str) -> bool:
     return any(inbox.conversation_id == conversation_id for inbox in _inboxes.values())
+
+
+def running_turns(control_session_id: str) -> list[SteeringInbox]:
+    return [inbox for inbox in _inboxes.values() if inbox.control_session_id == control_session_id]

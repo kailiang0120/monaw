@@ -25,7 +25,7 @@ binaries = []
 hiddenimports = collect_submodules("app", filter=lambda name: ".tests" not in name)
 # Packages that load data files, plugins or native libraries at runtime.
 # mcp.cli is the MCP command-line tool, which needs typer and is not used here.
-for package in ("tiktoken", "tiktoken_ext", "scrapling", "openai_codex", "mcp", "uvicorn"):
+for package in ("tiktoken", "tiktoken_ext", "scrapling", "mcp", "uvicorn"):
     package_datas, package_binaries, package_hidden = collect_all(
         package, filter_submodules=lambda name: not name.startswith("mcp.cli")
     )

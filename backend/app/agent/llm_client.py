@@ -50,6 +50,31 @@ class LLMResponse:
     usage: UsageStats = field(default_factory=UsageStats)
 
 
+class ResponseFailedError(RuntimeError):
+    """A streamed Responses API call that ended with response.failed."""
+
+    def __init__(self, message: str, *, code: str = "", param: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.param = param
+
+
+def _stateless_input(items: list[dict]) -> list[dict]:
+    """Responses input for store=false: nothing can be looked up by id.
+
+    Reasoning saved without encrypted content (from the OpenAI API provider)
+    cannot be replayed, so it is dropped; other items are sent without ids.
+    """
+    result = []
+    for item in items:
+        if item.get("type") == "reasoning" and not item.get("encrypted_content"):
+            continue
+        if item.get("type") in {"reasoning", "function_call"}:
+            item = {key: value for key, value in item.items() if key not in {"id", "status"}}
+        result.append(item)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Retry helper — delegates to the centralized retry module
 # ---------------------------------------------------------------------------
@@ -384,35 +409,7 @@ def _normalise_messages_for_openai_responses(
     messages: list[dict],
     include_images: bool = False,
 ) -> list[dict]:
-    result: list[dict] = []
-    for msg in messages:
-        item_type = msg.get("type")
-        if item_type in {"function_call", "function_call_output", "reasoning"}:
-            result.append(dict(msg))
-            continue
-
-        role = msg.get("role", "user")
-        if role == "model":
-            role = "assistant"
-        if role == "system":
-            continue
-
-        content = msg.get("content", "")
-        image_payloads = _image_payloads_for_message(msg, include_images and role == "user")
-        if image_payloads:
-            content_parts: list[dict] = [{"type": "input_text", "text": str(content)}]
-            for payload in image_payloads:
-                encoded = base64.b64encode(payload["data"]).decode("ascii")
-                content_parts.append(
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{payload['mime_type']};base64,{encoded}",
-                    }
-                )
-            result.append({"role": role, "content": content_parts})
-        else:
-            result.append({"role": role, "content": str(content)})
-    return result
+    return provider_requests.normalise_messages_for_openai_responses(messages, include_images)
 
 
 def _extract_gemini_model_parts(response) -> list:
@@ -500,7 +497,8 @@ class LLMClient:
             from openai import AsyncOpenAI
             self._openai_client = AsyncOpenAI(api_key=api_key)
         elif self.provider == "codex":
-            pass
+            # Created per access token in _codex_chat; the token rotates hourly.
+            self._chatgpt_token = ""
         else:
             raise ValueError(f"Unsupported provider: {provider!r}.")
         self.provider_adapter = create_llm_provider_adapter(self.provider, self)
@@ -569,43 +567,56 @@ class LLMClient:
         tool_choice: str | dict | None = None,
         reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        # Codex has no tool_choice; the turn loop's text-only reprompts cover it.
-        from app.agent.codex_account import codex_account
+        # The ChatGPT account ("codex" provider) calls the Responses API with
+        # the account's token. That route needs store=false and streaming, so
+        # reasoning travels as encrypted content and items are sent without ids.
+        import openai
 
-        result = await codex_account.model_call(
-            model=self.model_name,
-            effort=self.reasoning_effort,
+        from app.agent.chatgpt_account import chatgpt_account, plan_error_from_response
+
+        kwargs = provider_requests.openai_responses_kwargs(
+            model_name=self.model_name,
             messages=messages,
             tools=tools,
             system_prompt=system_prompt,
-            stream_callback=stream_callback,
-            reasoning_callback=reasoning_callback,
+            reasoning_effort="max" if self.reasoning_effort == "ultra" else self.reasoning_effort,
+            include_images=self._supports_vision,
+            tool_choice=tool_choice,
         )
-        calls = [
-            ToolCallRequest(call_id=call.call_id, tool_name=call.name, arguments=call.arguments)
-            for call in result.tool_calls
-        ]
-        # Same Responses items as the OpenAI API path, so history replays natively.
-        provider_messages: list[dict] = []
-        if calls and result.content:
-            provider_messages.append({"role": "assistant", "content": result.content})
-        provider_messages += [
-            {
-                "type": "function_call",
-                "call_id": call.call_id,
-                "name": call.tool_name,
-                "arguments": json.dumps(call.arguments, ensure_ascii=False),
-            }
-            for call in calls
-        ]
-        return LLMResponse(
-            content=result.content,
-            tool_calls=calls,
-            finish_reason="tool_calls" if calls else "stop",
-            reasoning_content=result.reasoning,
-            provider_messages=provider_messages,
-            usage=UsageStats(**result.usage, source="codex_account"),
-        )
+        kwargs["store"] = False
+        kwargs["include"] = ["reasoning.encrypted_content"]
+        kwargs["input"] = _stateless_input(kwargs["input"])
+
+        for attempt in range(2):
+            token = await asyncio.to_thread(chatgpt_account.access_token, force_refresh=attempt > 0)
+            if self._openai_client is None or token != self._chatgpt_token:
+                from openai import AsyncOpenAI
+
+                # Retries stay with _with_retry, which knows which plan errors are final.
+                self._openai_client = AsyncOpenAI(api_key=token, max_retries=0)
+                self._chatgpt_token = token
+            try:
+                response = await self._openai_responses_stream(kwargs, stream_callback, reasoning_callback)
+                response.usage.source = "chatgpt_account"
+                return response
+            except ResponseFailedError as exc:
+                mapped = plan_error_from_response(0, exc.code, str(exc), exc.param)
+                if mapped is None:
+                    raise
+                raise mapped from exc
+            except openai.APIStatusError as exc:
+                body = exc.body if isinstance(exc.body, dict) else {}
+                error = body.get("error") if isinstance(body.get("error"), dict) else body
+                code = str(error.get("code") or "")
+                message = str(error.get("message") or error.get("detail") or "")
+                if exc.status_code == 401 and attempt == 0:
+                    # Renew once before asking the user to sign in again.
+                    continue
+                mapped = plan_error_from_response(exc.status_code, code, message, str(error.get("param") or ""))
+                if mapped is None:
+                    raise
+                raise mapped from exc
+        raise RuntimeError("unreachable")
 
     async def _gemini_chat(
         self,
@@ -802,6 +813,7 @@ class LLMClient:
         collected_reasoning_content = ""
         final_response = None
         tool_call_buffers: dict[int, dict] = {}
+        completed_items: list[Any] = []
 
         async for event in stream:
             event_type = str(_obj_get(event, "type", "") or "")
@@ -841,14 +853,31 @@ class LLMClient:
                 )
                 buf["name"] = str(_obj_get(event, "name", "") or buf["name"])
                 buf["arguments_buf"] = str(_obj_get(event, "arguments", "") or buf["arguments_buf"])
+            elif event_type == "response.output_item.done":
+                item = _obj_get(event, "item", None)
+                if item is not None:
+                    completed_items.append(item)
             elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
                 final_response = _obj_get(event, "response", None)
+
+        if final_response is not None and completed_items and not _openai_response_output_items(final_response):
+            # The ChatGPT plan route (store=false) streams each item but sends
+            # response.completed with an empty output; read the items instead.
+            final_response = {
+                "output": completed_items,
+                **{key: _obj_get(final_response, key, None)
+                   for key in ("status", "error", "incomplete_details", "usage")},
+            }
 
         if final_response is not None:
             status = str(_obj_get(final_response, "status", "") or "")
             if status == "failed":
                 error = _obj_get(final_response, "error", None)
-                raise RuntimeError(str(_obj_get(error, "message", "") or "OpenAI response failed."))
+                raise ResponseFailedError(
+                    str(_obj_get(error, "message", "") or "OpenAI response failed."),
+                    code=str(_obj_get(error, "code", "") or ""),
+                    param=str(_obj_get(error, "param", "") or ""),
+                )
             final_content, final_reasoning = _openai_response_text_and_reasoning(final_response)
             final_tool_calls = _extract_openai_response_tool_calls(final_response)
             incomplete_details = _obj_get(final_response, "incomplete_details", None)

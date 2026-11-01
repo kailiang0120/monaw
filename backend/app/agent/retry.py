@@ -93,6 +93,11 @@ def _default_retryable(exc: Exception) -> bool:
     Checks exception types first (authoritative), then falls back to message
     substring matching as a catch-all for provider SDK exceptions.
     """
+    # An error that says whether it is transient (ChatGPTAccountError) decides.
+    retryable = getattr(exc, "retryable", None)
+    if isinstance(retryable, bool):
+        return retryable
+
     # H2: Type-based checks are authoritative; avoids false positives from
     # incidental keyword matches in unrelated error messages.
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, ConnectionResetError, ConnectionRefusedError)):

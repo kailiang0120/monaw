@@ -11,6 +11,7 @@ import asyncio
 import html
 import json
 import re
+import ssl
 import urllib.error
 import urllib.request
 from html.parser import HTMLParser
@@ -282,6 +283,20 @@ class _ValidatingRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _https_context() -> ssl.SSLContext:
+    """Trust the certifi bundle and the Windows certificate store.
+
+    Python's default context alone could not build common chains (for
+    example Cloudflare's) on Windows; the system store keeps roots that an
+    organisation installs, such as a TLS-inspecting proxy's.
+    """
+    import certifi
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    context.load_default_certs()
+    return context
+
+
 def _fetch_http_with_scrapling(
     url: str,
     *,
@@ -299,7 +314,10 @@ def _fetch_http_with_scrapling(
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
         },
     )
-    opener = urllib.request.build_opener(_ValidatingRedirectHandler(url, list(allowed_domains or [])))
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_https_context()),
+        _ValidatingRedirectHandler(url, list(allowed_domains or [])),
+    )
     try:
         with opener.open(request, timeout=timeout / 1000) as response:
             body = response.read()

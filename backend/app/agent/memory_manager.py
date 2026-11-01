@@ -633,9 +633,19 @@ class MemoryManager:
         steering_messages: list[str] | None = None,
         user_attachments: list[dict] | None = None,
         steering_attachments: list[list[dict]] | None = None,
+        steering_tool_call_indexes: list[int] | None = None,
     ) -> list[int]:
         user_message_ids = [self._add_message_record(conversation_id, "user", user_message, response_attachments=user_attachments)]
+        # Each steering message sits where the agent read it: the tool calls made
+        # before it go in an assistant message above it, the rest in the reply below.
+        tool_calls_saved = 0
         for index, steering_message in enumerate(steering_messages or []):
+            if steering_tool_call_indexes and index < len(steering_tool_call_indexes):
+                cut = min(max(steering_tool_call_indexes[index], tool_calls_saved), len(tool_calls))
+                if cut > tool_calls_saved:
+                    segment_id = self._add_message_record(conversation_id, "assistant", "", status="complete")
+                    self._save_tool_calls(conversation_id, segment_id, tool_calls[tool_calls_saved:cut])
+                    tool_calls_saved = cut
             attached = steering_attachments[index] if steering_attachments and index < len(steering_attachments) else []
             user_message_ids.append(self._add_message_record(conversation_id, "user", steering_message, response_attachments=attached))
         if self.memory_store is not None:
@@ -653,20 +663,23 @@ class MemoryManager:
             response_duration_ms=response_duration_ms,
             response_attachments=response_attachments,
         )
+        self._save_tool_calls(conversation_id, assistant_message_id, tool_calls[tool_calls_saved:])
+
+        state = self.get_or_create(conversation_id)
+        if len(state.recent_messages) > self.MAX_RECENT_MESSAGES:
+            await self._summarize(conversation_id)
+        return user_message_ids
+
+    def _save_tool_calls(self, conversation_id: str, message_id: int, tool_calls: list[dict]) -> None:
         for tool_call in tool_calls:
             self._db.add_tool_call(
-                message_id=assistant_message_id,
+                message_id=message_id,
                 conv_id=conversation_id,
                 tool_name=str(tool_call.get("tool_name", "")),
                 tool_input=str(tool_call.get("input", "")),
                 tool_output=str(tool_call.get("output", "")),
                 status=str(tool_call.get("status", "complete")),
             )
-
-        state = self.get_or_create(conversation_id)
-        if len(state.recent_messages) > self.MAX_RECENT_MESSAGES:
-            await self._summarize(conversation_id)
-        return user_message_ids
 
     def schedule_memory_learning_with_refs(self, *, user_message: str, workspace: str, conversation_id: str, message_ids: list[int]) -> None:
         if self.memory_store is not None:

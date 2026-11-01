@@ -66,7 +66,9 @@ function sameConversations(a: Conversation[], b: Conversation[]): boolean {
       && item.id === other.id
       && item.title === other.title
       && item.created_at === other.created_at
+      && item.updated_at === other.updated_at
       && item.workspace_dir === other.workspace_dir
+      && Boolean(item.running) === Boolean(other.running)
   })
 }
 
@@ -134,6 +136,10 @@ export default function App() {
     sendMessage,
     steerMessage,
     steeringConversationId,
+    queued,
+    queuePaused,
+    queueMessage,
+    removeQueued,
     refreshMessages,
     stopStreaming,
     clearMessages,
@@ -195,11 +201,16 @@ export default function App() {
     await loadVisibleSettings()
   }
 
-  useEffect(() => {
-    const controller = new AbortController()
-    void fetchModelOptions(controller.signal).then(setModelOptions).catch(() => {})
-    return () => controller.abort()
+  const loadModelOptions = useCallback(() => {
+    void fetchModelOptions().then(setModelOptions).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    loadModelOptions()
+    // A ChatGPT sign-in finishes in the browser; coming back picks up its models.
+    window.addEventListener('focus', loadModelOptions)
+    return () => window.removeEventListener('focus', loadModelOptions)
+  }, [loadModelOptions])
 
   const loadPendingAccessGrant = useCallback(async () => {
     try {
@@ -291,6 +302,7 @@ export default function App() {
       }
       if (event.event === 'settings.changed') {
         void loadVisibleSettings()
+        loadModelOptions()
         setDiagnosticsRefreshKey((value) => value + 1)
         return
       }
@@ -305,6 +317,7 @@ export default function App() {
     })
   }, [
     loadConversations,
+    loadModelOptions,
     loadPendingAccessGrant,
     loadScheduledTasks,
     loadVisibleSettings,
@@ -354,7 +367,7 @@ export default function App() {
   const handleModelSelectionChange = async (next: ModelSelection) => {
     if (savingModelSelection) return
     const previous = modelSelection
-    const supportedEfforts = reasoningEffortsForProvider(next.provider, next.model_name)
+    const supportedEfforts = reasoningEffortsForProvider(next.provider, next.model_name, modelOptions)
     const normalized = {
       ...next,
       reasoning_effort: supportedEfforts.includes(next.reasoning_effort)
@@ -423,6 +436,25 @@ export default function App() {
     }, activeConvId ? undefined : draftWorkspaceDir || undefined)
   }
 
+  // A new chat gets its id from the server while its first reply runs.
+  const chatQueue = queued.filter((item) => item.conversationId === null || item.conversationId === activeConvId
+    || item.conversationId === steeringConversationId)
+  const sendQueuedNow = (id: string) => {
+    const item = chatQueue.find((entry) => entry.id === id)
+    if (!item || isStreaming) return
+    removeQueued(id)
+    handleSend(item.text, item.attachments)
+  }
+
+  // Queued messages run one at a time, each once the turn before it ends.
+  const nextQueuedId = chatQueue[0]?.id
+  useEffect(() => {
+    if (!nextQueuedId || isStreaming || queuePaused || savingWorkspace || !isBackendReady) return
+    sendQueuedNow(nextQueuedId)
+    // sendQueuedNow is rebuilt each render; the guards above are what matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nextQueuedId, isStreaming, queuePaused, savingWorkspace, isBackendReady])
+
   const handleWorkspaceChange = async (path: string) => {
     const targetId = activeConvId
     const generation = workspaceGenerationRef.current
@@ -454,10 +486,11 @@ export default function App() {
     loadConversations()
   }
 
-  const handleNewChat = () => {
+  // From a workspace group in the sidebar, the new chat starts in that folder.
+  const handleNewChat = (workspaceDir = '') => {
     workspaceGenerationRef.current += 1
     activeConvIdRef.current = null
-    setDraftWorkspaceDir('')
+    setDraftWorkspaceDir(workspaceDir)
     setActiveConvId(null)
     clearMessages()
   }
@@ -537,7 +570,6 @@ export default function App() {
       <AppBar
         sidebarCollapsed={isSidebarCollapsed}
         onToggleSidebar={() => setIsSidebarCollapsed((value) => !value)}
-        onNewChat={handleNewChat}
         agentName={agentName}
         conversationTitle={activeConversation?.title}
         conversationId={activeConvId}
@@ -553,6 +585,7 @@ export default function App() {
           activeId={activeConvId}
           collapsed={isSidebarCollapsed}
           onToggleCollapsed={() => setIsSidebarCollapsed((value) => !value)}
+          onNewChat={handleNewChat}
           onSelect={handleSelectConversation}
           onDelete={handleDeleteConversation}
           onRename={(id, title) => handleRenameConversation(id, title)}
@@ -612,6 +645,11 @@ export default function App() {
               onSend={handleSend}
               onSteer={steerMessage}
               steeringConversationId={steeringConversationId}
+              queued={chatQueue}
+              queuePaused={queuePaused}
+              onQueue={queueMessage}
+              onRemoveQueued={removeQueued}
+              onSendQueuedNow={sendQueuedNow}
               onStop={stopStreaming}
               isStreaming={isStreaming}
               conversationId={activeConvId}

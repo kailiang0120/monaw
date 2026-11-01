@@ -68,7 +68,7 @@ export function MemoryRetrieval({ memory, onChange, keys, chatProvider }: {
     finally { if (!controller.signal.aborted) { setBusy(false); pending.current = null } }
   }
   return <>
-    <SettingRow label="Memory search" description={searchSummary(choice, provider)}>
+    <SettingRow label="Memory search" description={searchSummary(choice, provider)} statusDescription>
       <Dropdown<SemanticSearch>
         ariaLabel="Memory search"
         value={choice}

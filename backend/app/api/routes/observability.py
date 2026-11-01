@@ -105,7 +105,7 @@ async def observability_backend_log(request: Request, tail: int = 400):
 
 
 @router.post("/observability/runs/{run_id}/replay", response_model=ObservabilityReplayResultOut)
-async def replay_observability_run(run_id: str):
+async def replay_observability_run(run_id: str, request: Request):
     recorder = get_observability_recorder()
     source_run = recorder.get_run(run_id, include_sensitive=True)
     if source_run is None:

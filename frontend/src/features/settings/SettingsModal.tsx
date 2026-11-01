@@ -94,9 +94,37 @@ import {
   FALLBACK_MODEL_OPTIONS,
   formatUnavailableReason,
   normalizeDraft,
+  parseModelNames,
   permissionProfileFromPermissions,
+  providerLabel,
   type ModelOptionsCatalog,
 } from './settingsConfig'
+
+/** Model names for one provider, typed as a comma-separated list. */
+function CustomModelsRow({ label, hint, names, onChange }: {
+  label: string
+  hint: string
+  names: string[]
+  onChange: (names: string[]) => void
+}) {
+  // Kept as typed, so a trailing comma or space survives until the next name.
+  const [text, setText] = useState(names.join(', '))
+  return (
+    <StackedRow label={label} description={hint || undefined}>
+      <input
+        value={text}
+        aria-label={`Extra ${label} models`}
+        onChange={(event) => {
+          setText(event.target.value)
+          onChange(parseModelNames(event.target.value))
+        }}
+        onBlur={() => setText(names.join(', '))}
+        placeholder="model-name, another-model"
+        className="st-input"
+      />
+    </StackedRow>
+  )
+}
 
 interface Props {
   onClose: () => void
@@ -217,7 +245,11 @@ export function SettingsModal({
         const status = await fetchOpenAIAccountStatus(controller.signal)
         if (!controller.signal.aborted) {
           setOpenaiAccount(status)
-          if (status.connected) setOpenaiAccountAuthUrl('')
+          if (status.connected && !status.login_pending) setOpenaiAccountAuthUrl('')
+          if (openaiAccountAuthUrl && status.login_error && !status.login_pending) {
+            setOpenaiAccountAuthUrl('')
+            setOpenaiAccountError(status.login_error)
+          }
         }
       } catch (error) {
         if (!controller.signal.aborted) setOpenaiAccountError(error instanceof Error ? error.message : 'Account status unavailable.')
@@ -254,8 +286,10 @@ export function SettingsModal({
     setOpenaiAccountBusy(true)
     setOpenaiAccountError('')
     try {
-      setOpenaiAccount(await logoutOpenAIAccount())
+      const status = await logoutOpenAIAccount()
+      setOpenaiAccount(status)
       setOpenaiAccountAuthUrl('')
+      if (status.login_error) setOpenaiAccountError(status.login_error)
     } catch (error) {
       setOpenaiAccountError(error instanceof Error ? error.message : 'Could not sign out.')
     } finally {
@@ -796,28 +830,41 @@ export function SettingsModal({
                   <div className="space-y-4">
                     <SettingsCard
                       title="OpenAI account"
-                      description="Sign in with ChatGPT."
+                      description="Use your ChatGPT plan for Monaw's model requests, instead of an API key."
                       action={
-                        <Badge tone={openaiAccount?.connected ? 'ok' : 'warn'}>
-                          {openaiAccount?.connected ? `Connected${openaiAccount.plan ? ` · ${openaiAccount.plan}` : ''}` : 'Not connected'}
+                        <Badge tone={openaiAccount?.connected && openaiAccount.plan_usage !== false ? 'ok' : 'warn'}>
+                          {openaiAccount?.connected
+                            ? `Connected${openaiAccount.email ? ` · ${openaiAccount.email}` : openaiAccount.plan ? ` · ${openaiAccount.plan}` : ''}`
+                            : 'Not connected'}
                         </Badge>
                       }
                     >
                       <div className="flex flex-wrap items-center gap-3 p-4">
-                        {openaiAccount?.connected ? (
+                        {openaiAccount?.connected && openaiAccount.plan_usage !== false ? (
                           <>
                             <button type="button" className="st-btn st-btn-secondary" disabled={openaiAccountBusy} onClick={() => void signOutOpenAIAccount()}>
                               Sign out
                             </button>
-                            <button type="button" className="st-btn st-btn-ghost" disabled={refreshingOpenAIUsage} onClick={() => void refreshOpenAIUsage()}>
-                              <RotateCcw size={13} className={refreshingOpenAIUsage ? 'animate-spin' : ''} />
-                              Refresh usage
-                            </button>
+                            {openaiAccount.limits?.length ? (
+                              <button type="button" className="st-btn st-btn-ghost" disabled={refreshingOpenAIUsage} onClick={() => void refreshOpenAIUsage()}>
+                                <RotateCcw size={13} className={refreshingOpenAIUsage ? 'animate-spin' : ''} />
+                                Refresh usage
+                              </button>
+                            ) : openaiAccount.usage_url ? (
+                              <a href={openaiAccount.usage_url} target="_blank" rel="noopener noreferrer">Manage usage</a>
+                            ) : null}
                           </>
                         ) : (
-                          <button type="button" className="st-btn st-btn-primary" disabled={openaiAccountBusy || !!openaiAccountAuthUrl} onClick={() => void signInOpenAIAccount()}>
-                            {openaiAccountBusy ? 'Opening sign-in…' : openaiAccountAuthUrl ? 'Waiting for sign-in…' : 'Sign in with ChatGPT'}
-                          </button>
+                          <>
+                            <button type="button" className="st-btn st-btn-primary" disabled={openaiAccountBusy || !!openaiAccountAuthUrl} onClick={() => void signInOpenAIAccount()}>
+                              {openaiAccountBusy ? 'Opening sign-in…' : openaiAccountAuthUrl ? 'Waiting for sign-in…' : 'Continue with ChatGPT'}
+                            </button>
+                            {openaiAccount?.connected && (
+                              <button type="button" className="st-btn st-btn-ghost" disabled={openaiAccountBusy} onClick={() => void signOutOpenAIAccount()}>
+                                Sign out
+                              </button>
+                            )}
+                          </>
                         )}
                         {openaiAccountAuthUrl && !openaiAccount?.connected && (
                           <a href={openaiAccountAuthUrl} target="_blank" rel="noopener noreferrer">Open sign-in page</a>
@@ -854,7 +901,7 @@ export function SettingsModal({
                               })}
                             </div>
                           ) : (
-                            <p className="st-hint">{openaiAccount.usage_error || 'Usage limits are not available for this account.'}</p>
+                            <p className="st-hint">{openaiAccount.usage_error || 'Requests use your ChatGPT plan. Usage is shown in ChatGPT under Settings > Usage.'}</p>
                           )}
                         </div>
                       )}
@@ -915,6 +962,27 @@ export function SettingsModal({
                         </StackedRow>
                       </SettingsCard>
                     )}
+
+                    <SettingsCard title="Extra models" description={MODEL_COPY.customModels}>
+                      {(['codex', 'openai', 'gemini'] as const).map((provider) => {
+                        const catalog = modelOptions.providers.find((item) => item.id === provider)
+                        const fromAccount = provider === 'codex' && catalog?.source === 'account'
+                        return (
+                          <CustomModelsRow
+                            key={provider}
+                            label={providerLabel(provider, modelOptions)}
+                            hint={fromAccount
+                              ? `${catalog.models.length - (draft.llm.custom_models?.codex?.length ?? 0)} models loaded from your ChatGPT account.`
+                              : provider === 'codex' ? 'Sign in to load the models your ChatGPT plan offers.' : ''}
+                            names={draft.llm.custom_models?.[provider] ?? []}
+                            onChange={(names) => updateDraft((current) => ({
+                              ...current,
+                              llm: { ...current.llm, custom_models: { ...current.llm.custom_models, [provider]: names } },
+                            }))}
+                          />
+                        )
+                      })}
+                    </SettingsCard>
                   </div>
                 </>
               )}

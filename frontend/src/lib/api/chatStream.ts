@@ -246,6 +246,9 @@ export function chatStream(
   onTurnStarted?: (data: TurnStartedEvent) => void,
   onSteeringApplied?: (data: SteeringAppliedEvent) => void,
   workspaceDir?: string,
+  runId?: string,
+  // Follow this already-running turn (replayed from its start) instead of starting one.
+  followRunId?: string,
 ): () => void {
   const controller = new AbortController()
 
@@ -282,12 +285,14 @@ export function chatStream(
     }
 
     try {
-      const res = await apiFetch(`${BASE}/api/chat`, {
-        method: 'POST',
-        headers: JSON_HEADERS,
-        body: JSON.stringify({ message, conversation_id: conversationId, attachments, workspace_dir: workspaceDir }),
-        signal: controller.signal,
-      })
+      const res = followRunId
+        ? await apiFetch(`${BASE}/api/chat/runs/${encodeURIComponent(followRunId)}/events`, { signal: controller.signal })
+        : await apiFetch(`${BASE}/api/chat`, {
+          method: 'POST',
+          headers: JSON_HEADERS,
+          body: JSON.stringify({ message, conversation_id: conversationId, run_id: runId, attachments, workspace_dir: workspaceDir }),
+          signal: controller.signal,
+        })
       if (controller.signal.aborted) return
 
       sendDebugEvent('fetch_response', 'H2', {
