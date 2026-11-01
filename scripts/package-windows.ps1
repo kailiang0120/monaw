@@ -29,6 +29,18 @@ if (-not (Test-Path $frozenBackend)) {
     throw "Frozen backend not found at $frozenBackend. Run without -SkipBackend."
 }
 
+# frontend\build\THIRD_PARTY_NOTICES.txt, which the installer ships.
+Push-Location (Join-Path $repoRoot "backend")
+try {
+    uv run --locked --group packaging python ../scripts/generate-third-party-notices.py
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
 Push-Location (Join-Path $repoRoot "frontend")
 try {
     if ($Unpacked) {

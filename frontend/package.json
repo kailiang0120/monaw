@@ -78,6 +78,16 @@
         "to": "browser-extension"
       }
     ],
+    "extraFiles": [
+      {
+        "from": "../LICENSE",
+        "to": "LICENSE.monaw.txt"
+      },
+      {
+        "from": "build/THIRD_PARTY_NOTICES.txt",
+        "to": "THIRD_PARTY_NOTICES.txt"
+      }
+    ],
     "win": {
       "target": [
         {

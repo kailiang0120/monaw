@@ -1,0 +1,14 @@
+The Windows lxml extension modules (lxml/*.pyd) are statically linked with:
+
+- libxml2 and libxslt, under the MIT-style licenses in the "libxml2 and libxslt"
+  section of this file.
+- zlib, under the zlib license (see the zlib section of the Python runtime).
+- GNU libiconv, copyright Free Software Foundation, Inc., under the GNU Lesser
+  General Public License version 2.1 or later. The LGPL 2.1 text is included with
+  the tld package in this file.
+
+The libraries are built by https://github.com/lxml/libxml2-win-binaries; libiconv
+source is at https://ftp.gnu.org/pub/gnu/libiconv/ and lxml source at
+https://github.com/lxml/lxml. The lxml modules are separate files under
+resources/backend/_internal/lxml and can be replaced with a build of lxml linked
+against a modified libiconv.

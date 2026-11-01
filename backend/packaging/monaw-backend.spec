@@ -41,6 +41,9 @@ a = Analysis(
     hiddenimports=hiddenimports,
     excludes=["pytest", "_pytest", "tkinter", "mcp.cli"],
     noarchive=False,
+    # python-telegram-bot is LGPL-3.0: ship it as plain .py files outside the
+    # archive so it can be replaced. See THIRD_PARTY_NOTICES.txt.
+    module_collection_mode={"telegram": "py"},
 )
 pyz = PYZ(a.pure)
 exe = EXE(

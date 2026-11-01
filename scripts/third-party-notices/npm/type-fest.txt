@@ -1,0 +1,2 @@
+type-fest is offered under MIT or CC0-1.0; Monaw uses it under CC0-1.0, which
+requires no notice. Source: https://github.com/sindresorhus/type-fest

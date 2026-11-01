@@ -1,0 +1,2 @@
+tld is offered under GPL 2.0, LGPL 2.1 or MPL 1.1; Monaw uses it under MPL 1.1.
+Source: https://github.com/barseghyanartur/tld

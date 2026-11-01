@@ -1,0 +1,9 @@
+The Python runtime also includes these libraries, which need no license text:
+
+- SQLite (sqlite3.dll), dedicated to the public domain. See https://sqlite.org/copyright.html.
+- liblzma from XZ Utils (the lzma module), under the BSD Zero Clause License (0BSD).
+- Microsoft Visual C++ runtime (vcruntime140.dll, vcruntime140_1.dll), Microsoft
+  Distributable Code redistributed under the conditions in the Python LICENSE.txt above.
+
+OpenSSL (libcrypto-3-x64.dll, libssl-3-x64.dll) is under the Apache License 2.0;
+the text is in the OpenSSL section above.

@@ -25,6 +25,8 @@ The installer is per-user by default, lets the user choose the folder, and keeps
 
 ```text
 Monaw.exe                          Electron
+THIRD_PARTY_NOTICES.txt            Third-party licenses (see "Third-party licenses")
+LICENSE.monaw.txt                  Monaw's license
 resources/app.asar                 Built renderer, Electron main and preload
 resources/backend/monaw-backend.exe  Frozen backend
 resources/backend/_internal/       Python runtime, libraries, and the app package as plain files
@@ -89,9 +91,23 @@ Signing in with ChatGPT then moved to a direct sign-in, and `codex.exe` and `rg.
 
 The PyInstaller spec leaves out `mcp.cli`, the MCP command-line tool, which needs `typer`; `typer` arrived only through `huggingface_hub`.
 
-## Licensing to resolve before publishing
+## Third-party licenses
 
-The GPLv3 ffmpeg build that `imageio-ffmpeg` used to bundle is gone with local speech-to-text. Other bundled native packages checked (`pywin32`) use permissive licenses. A complete third-party notice file has not been produced.
+`package-windows.ps1` runs `scripts/generate-third-party-notices.py`, which writes `frontend/build/THIRD_PARTY_NOTICES.txt`. The installer puts it next to `Monaw.exe` with Monaw's own license as `LICENSE.monaw.txt`. electron-builder adds `LICENSE.electron.txt` and `LICENSES.chromium.html` itself.
+
+The file lists the Python runtime, the PyInstaller bootloader, every runtime package in `uv.lock` (no dev dependencies), the npm packages in `app.asar` and those the renderer imports, with each license text taken from the package's own files. The build fails if a shipped package has no license text. Texts a package leaves out, and notes on statically linked libraries, live in `scripts/third-party-notices/`: add one there when a new dependency trips the check. The npm list follows the imports in `frontend/src` and `frontend/electron`, so it can include a package the bundler drops, but not miss one.
+
+Nearly everything is MIT, BSD, Apache-2.0, ISC or PSF. The rest:
+
+| Component | License | How it is handled |
+| --- | --- | --- |
+| `python-telegram-bot` | LGPL-3.0 | Shipped unmodified as plain `.py` files under `_internal/telegram` (`module_collection_mode` in the spec), so it can be replaced. |
+| GNU libiconv, statically linked into `lxml` on Windows | LGPL-2.1-or-later | The `lxml` modules are separate files that can be rebuilt and replaced; the notice points to the sources. |
+| `certifi`, `orjson`, `tqdm` | MPL-2.0 (in part) | Unmodified; license text included. |
+| `tld` | GPL-2.0, LGPL-2.1 or MPL-1.1 | Used under MPL-1.1. |
+| `type-fest` | MIT or CC0-1.0 | Used under CC0-1.0. |
+
+The GPLv3 ffmpeg build that `imageio-ffmpeg` used to bundle is gone with local speech-to-text.
 
 ## Not yet verified
 

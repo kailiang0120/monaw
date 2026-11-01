@@ -1,0 +1,5 @@
+python-telegram-bot is under the GNU Lesser General Public License version 3
+(LICENSE.lesser, with the GPL text it builds on in LICENSE). Monaw ships it
+unmodified, as plain .py files under resources/backend/_internal/telegram, so it
+can be replaced with another version. Source:
+https://github.com/python-telegram-bot/python-telegram-bot

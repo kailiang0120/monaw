@@ -1,0 +1,3 @@
+The cryptography extension module (cryptography/hazmat/bindings/_rust.pyd) is
+statically linked with OpenSSL, copyright The OpenSSL Project Authors, under the
+Apache License 2.0 (the LICENSE.APACHE text above). Source: https://www.openssl.org/source/
