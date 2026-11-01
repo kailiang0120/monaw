@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.steering import _inboxes, conversation_is_running
+from app.agent.steering import RunStream, _inboxes, conversation_is_running, sse_chunk
 from app.api.routes import chat as chat_routes
 from app.schemas import ChatRequest, ChatStopRequest
 
@@ -115,6 +115,66 @@ def test_a_reopened_chat_replays_the_running_turn_and_follows_it(turn):
             await chat_routes.follow_chat_run("run-f", _request())
 
     asyncio.run(scenario())
+
+
+def _drain(subscription) -> list[bytes]:
+    async def collect():
+        chunks = []
+        while not subscription._queue.empty():
+            chunks.append(await subscription.get())
+        return chunks
+
+    return asyncio.run(collect())
+
+
+def test_the_replay_merges_text_deltas_into_one_event():
+    stream = RunStream()
+    stream.publish("turn_started", {"run_id": "r"})
+    for piece in ("Hel", "lo", " there"):
+        stream.publish("token", {"content": piece})
+    stream.publish("tool_start", {"tool": "read_file", "call_id": "c1"})
+    stream.publish("token", {"content": "Done"})
+    stream.close()
+
+    chunks = _drain(stream.subscribe())
+    assert chunks == [
+        sse_chunk("turn_started", {"run_id": "r"}),
+        sse_chunk("token", {"content": "Hello there"}),
+        sse_chunk("tool_start", {"tool": "read_file", "call_id": "c1"}),
+        sse_chunk("token", {"content": "Done"}),
+        None,
+    ]
+
+
+def test_the_replay_keeps_the_start_and_the_newest_events_within_its_limit():
+    stream = RunStream(max_replay_bytes=600)
+    stream.publish("turn_started", {"run_id": "r"})
+    for index in range(40):
+        stream.publish("tool_end", {"call_id": f"c{index}", "output": "x" * 50})
+
+    assert stream.replay_bytes <= 600
+    assert stream.dropped_events > 0
+    chunks = _drain(stream.subscribe())
+    assert chunks[0] == sse_chunk("turn_started", {"run_id": "r"})
+    assert b"Earlier steps of this task are not shown" in chunks[1]
+    assert b'"c39"' in chunks[-1]
+    assert not any(b'"c0"' in chunk for chunk in chunks)
+
+
+def test_a_viewer_that_falls_behind_is_disconnected_with_an_error():
+    stream = RunStream(max_replay_bytes=10_000, max_backlog_bytes=500)
+    stream.publish("turn_started", {"run_id": "r"})
+    slow = stream.subscribe()
+    for index in range(20):
+        stream.publish("tool_end", {"call_id": f"c{index}", "output": "x" * 50})
+
+    chunks = _drain(slow)
+    assert chunks[-1] is None
+    assert b"stream_lagging" in chunks[-2]
+    assert len(chunks) == 2
+    # The turn keeps going and a new viewer gets the replay.
+    fresh = stream.subscribe()
+    assert fresh.pending_bytes > 500
 
 
 def test_a_run_id_already_in_use_is_refused(turn):

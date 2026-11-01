@@ -109,8 +109,7 @@ async def chat(req: ChatRequest, request: Request):
         # The turn runs apart from the HTTP response: closing the window or
         # switching chats only stops the viewing, and POST /chat/stop ends it.
         try:
-            inbox.stream.publish(
-                f'event: turn_started\ndata: {json.dumps({"run_id": inbox.run_id, "conversation_id": conv_id})}\n\n'.encode())
+            inbox.stream.publish("turn_started", {"run_id": inbox.run_id, "conversation_id": conv_id})
             merged = build_runtime_namespace(settings, load_agent_settings(settings))
             from app.agent.runtime import run_agent_stream
 
@@ -127,7 +126,6 @@ async def chat(req: ChatRequest, request: Request):
                 steering=inbox,
             ):
                 event_name = event_dict.get("event", "message")
-                event_data = json.dumps(event_dict.get("data", {}))
                 if event_name == "done":
                     publish_ui_event(
                         "conversation.changed",
@@ -135,7 +133,7 @@ async def chat(req: ChatRequest, request: Request):
                     )
                     publish_ui_event("usage.changed", {"conversation_id": conv_id})
                     publish_ui_event("observability.changed", {"conversation_id": conv_id})
-                inbox.stream.publish(f"event: {event_name}\ndata: {event_data}\n\n".encode())
+                inbox.stream.publish(event_name, event_dict.get("data", {}))
         except asyncio.CancelledError:
             # Stopped on request: the turn saved its partial result. Tell
             # other views the chat changed, then finish cancelling.
