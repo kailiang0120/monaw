@@ -7,21 +7,21 @@ import json
 
 import pytest
 
-from app.agent.harness.tool_batch import ToolBatchLedger
+from app.agent.harness.tool_batch import ToolBatchLedger, TrackedToolCall
 from app.agent.harness.tool_protocol import ToolCallResult
 
 
-def _prepared(ledger: ToolBatchLedger, call_id: str, tool_name: str = "tool") -> dict:
+def _prepared(ledger: ToolBatchLedger, call_id: str, tool_name: str = "tool") -> TrackedToolCall:
     key = ledger.register(call_id=call_id, tool_name=tool_name, arguments={"n": call_id}, obs_started_at=1.0)
-    return {"active_key": key, "call_id": call_id, "tool_name": tool_name}
+    return TrackedToolCall(key, call_id, tool_name)
 
 
-def _ok(prepared: dict, output: str = "done") -> ToolCallResult:
-    return ToolCallResult.from_output(call_id=prepared["call_id"], name=prepared["tool_name"], output=output)
+def _ok(prepared: TrackedToolCall, output: str = "done") -> ToolCallResult:
+    return ToolCallResult.from_output(call_id=prepared.call_id, name=prepared.tool_name, output=output)
 
 
-def _no_escapes(prepared: dict, exc: BaseException) -> None:
-    raise AssertionError(f"unexpected escaped error for {prepared['call_id']}: {exc!r}")
+def _no_escapes(prepared: TrackedToolCall, exc: BaseException) -> None:
+    raise AssertionError(f"unexpected escaped error for {prepared.call_id}: {exc!r}")
 
 
 def test_registered_call_persists_as_stopped_until_a_result_arrives():
@@ -54,7 +54,7 @@ def test_pending_gate_result_is_not_treated_as_completed():
         call_id="gated", name="tool", output=json.dumps({"status": "pending_approval"})
     )
 
-    ledger.record_result(prepared["active_key"], pending)
+    ledger.record_result(prepared.active_key, pending)
     ledger.mark_cancelled(worker_state="stopped", observe=lambda *args: None)
 
     [call] = ledger.persistable_calls()
@@ -66,10 +66,10 @@ def test_parallel_batch_returns_results_in_model_order():
     ledger = ToolBatchLedger()
     calls = [_prepared(ledger, "slow"), _prepared(ledger, "fast")]
 
-    async def invoke(prepared: dict) -> ToolCallResult:
-        await asyncio.sleep(0.02 if prepared["call_id"] == "slow" else 0)
-        result = _ok(prepared, prepared["call_id"])
-        ledger.record_result(prepared["active_key"], result)
+    async def invoke(prepared: TrackedToolCall) -> ToolCallResult:
+        await asyncio.sleep(0.02 if prepared.call_id == "slow" else 0)
+        result = _ok(prepared, prepared.call_id)
+        ledger.record_result(prepared.active_key, result)
         return result
 
     results = asyncio.run(ledger.run(calls, invoke, parallel=True, report_escaped_error=_no_escapes))
@@ -83,8 +83,8 @@ def test_escaped_error_is_isolated_from_its_sibling():
     calls = [_prepared(ledger, "boom"), _prepared(ledger, "fine")]
     reported: list[tuple[str, str]] = []
 
-    async def invoke(prepared: dict) -> ToolCallResult:
-        if prepared["call_id"] == "boom":
+    async def invoke(prepared: TrackedToolCall) -> ToolCallResult:
+        if prepared.call_id == "boom":
             raise RuntimeError("escaped")
         return _ok(prepared)
 
@@ -93,7 +93,7 @@ def test_escaped_error_is_isolated_from_its_sibling():
             calls,
             invoke,
             parallel=True,
-            report_escaped_error=lambda prepared, exc: reported.append((prepared["call_id"], str(exc))),
+            report_escaped_error=lambda prepared, exc: reported.append((prepared.call_id, str(exc))),
         )
     )
 
@@ -109,11 +109,11 @@ def test_cancellation_keeps_a_completed_sibling_and_observes_each_call_once():
     finished, blocked = _prepared(ledger, "finished"), _prepared(ledger, "blocked")
     observed: list[tuple[str, str, str, int | None]] = []
 
-    async def invoke(prepared: dict) -> ToolCallResult:
-        if prepared["call_id"] == "blocked":
+    async def invoke(prepared: TrackedToolCall) -> ToolCallResult:
+        if prepared.call_id == "blocked":
             await asyncio.Event().wait()
         result = _ok(prepared, "kept")
-        ledger.record_result(prepared["active_key"], result)
+        ledger.record_result(prepared.active_key, result)
         return result
 
     async def scenario() -> None:
@@ -150,7 +150,7 @@ def test_cancel_tasks_drains_a_serial_barrier():
     prepared = _prepared(ledger, "serial")
     cancelled: list[bool] = []
 
-    async def invoke(_prepared: dict) -> ToolCallResult:
+    async def invoke(_prepared: TrackedToolCall) -> ToolCallResult:
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:

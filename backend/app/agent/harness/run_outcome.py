@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from app.agent.observability.ports import ObservabilityPort
 from app.agent.observability.recorder import UsageStats
@@ -20,7 +20,7 @@ def turn_status(
     iteration_limit_hit: bool,
     budget_exhausted: bool,
     terminal_error: bool,
-) -> str:
+) -> Literal["paused", "complete"]:
     """A turn that ended for any reason other than a final answer is paused, so it can resume."""
     if stop_requested or iteration_limit_hit or budget_exhausted or terminal_error:
         return "paused"

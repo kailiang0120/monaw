@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import json
 import logging
-import time
 import uuid
 from collections import defaultdict
 from typing import AsyncIterator, Callable
 
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.iteration_budget import IterationBudget
-from app.agent.llm_client import LLMClient, build_tool_result_message
+from app.agent.llm_client import LLMClient
 from app.agent.conversation_workspace import selected_workspace_dir
 from app.agent.memory_manager import MemoryManager
 from app.agent.observability.recorder import (
@@ -22,7 +20,6 @@ from app.agent.observability.recorder import (
     infer_source,
     reset_current_run_id,
     set_current_run_id,
-    usage_from_any,
 )
 from app.agent.observability.ports import ObservabilityPort
 from app.agent.response_attachments import collect_response_attachments, public_runtime_attachments
@@ -32,84 +29,42 @@ from app.agent.run_context import (
     reset_current_conversation_id,
     set_current_conversation_id,
 )
-from app.agent.run_state_machine import AgentRunStateMachine
-from app.agent.state import ExecutionPlan, PlanStep
 from app.agent.steering import SteeringInbox
 from app.agent.harness.tool_executor import ToolExecutor
-from app.agent.harness.tool_batch import ActiveToolCall, ToolBatchLedger
-from app.agent.harness.run_outcome import done_payload, finish_observed_run, turn_status
-from app.agent.harness.context_budget import ContextBudgetExceeded, fit_live_context
-from app.agent.harness.tool_policy import ToolPolicy, tool_call_signature
-from app.agent.approval_review import AutoReviewState
-from app.agent.harness.tool_protocol import ToolCallRequest as HarnessToolCallRequest
-from app.agent.harness.tool_protocol import ToolCallResult
-from app.agent.tool_registry import ToolRegistry, can_parallelize
+from app.agent.harness.run_outcome import turn_status
+from app.agent.harness import turn_lifecycle
+from app.agent.harness.turn_lifecycle import (
+    TurnLifecycle, TurnOutcome, TurnStopReason, drain_task,
+)
+from app.agent.tool_registry import ToolRegistry
 from app.agent.tool_cancellation import set_tool_scope, reset_tool_scope
 from app.agent.harness.workers import unfinished_workers
-from app.agent.tool_observations import (
-    DEVTOOLS_PREFIX,
-    DEVTOOLS_STEP_DESCRIPTIONS,
-    attachment_image_payloads,
-    blocked_tool_key,
-    browser_repeat_key,
-    build_repeat_recovery_prompt,
-    compact_tool_observation,
-    extract_image_attachments,
-    is_browser_observation_action,
-    is_browser_repeat_guarded,
-    is_devtools_tool,
-    parse_tool_json,
-    tool_error_code,
-)
+from app.agent.tool_observations import attachment_image_payloads
+from app.agent.harness.tool_runner import ToolBatchRunner
+from app.agent.harness.model_request import ModelRequestRunner, ModelRequestError
+from app.agent.harness.turn_transcript import TurnTranscript
+from app.agent.harness.turn_observer import TurnObserver
+from app.agent.harness.response_policy import TurnResponsePolicy
 from app.agent.turn_text import (
     FINAL_ANSWER_TOOL_NAME,
     GUARD_WRAP_UP_REASON_CODES,
-    TOOL_REPROMPT_MESSAGE,
-    WEB_SEARCH_RESULT_REPROMPT_MESSAGE,
     completion_protocol_prompt,
     conversation_title_from_prompt,
     emit_progress_message,
     emit_typewriter_tokens,
-    final_answer_attachment_paths,
-    final_answer_includes_web_search_results,
     final_answer_text,
     guard_wrap_up_prompt,
-    json_text_as_final_answer,
-    plain_text_describes_next_action,
 )
 
 logger = logging.getLogger(__name__)
 
 _SESSION_LOCKS: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+HEARTBEAT_INTERVAL_S = turn_lifecycle.HEARTBEAT_INTERVAL_S
 
 
 def conversation_turn_running(conversation_id: str) -> bool:
     lock = _SESSION_LOCKS.get(conversation_id)
     return lock is not None and lock.locked()
-
-
-HEARTBEAT_INTERVAL_S = 10.0
-
-
-async def _heartbeat_pump(
-    publisher: RunEventPublisher,
-    stop_event: asyncio.Event,
-) -> None:
-    """Push a heartbeat event whenever no real event has been flushed for HEARTBEAT_INTERVAL_S."""
-    # H4: Use asyncio.wait_for instead of sleep(1) polling so teardown is immediate.
-    loop = asyncio.get_running_loop()
-    while not stop_event.is_set():
-        deadline = publisher.last_flush[0] + HEARTBEAT_INTERVAL_S
-        timeout = max(0.01, deadline - loop.time())
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=timeout)
-            break  # stop_event was set
-        except asyncio.TimeoutError:
-            pass
-        if stop_event.is_set():
-            break
-        if loop.time() - publisher.last_flush[0] >= HEARTBEAT_INTERVAL_S:
-            await publisher.heartbeat(phase="idle")
 
 
 class TurnLoop:
@@ -166,88 +121,7 @@ class TurnLoop:
             limit = self.UNATTENDED_MAX_ITERATIONS
         return IterationBudget(max_iterations=limit)
 
-    async def _execute_tool_result(
-        self,
-        budget: IterationBudget,
-        tool_dict: dict,
-        arguments: dict,
-        *,
-        call_id: str = "",
-    ) -> ToolCallResult:
-        return await self.executor.execute(
-            tool_dict=tool_dict,
-            arguments=arguments,
-            budget=budget,
-            call_id=call_id,
-        )
-
-    def _build_tool_result_message(
-        self,
-        *,
-        call_id: str,
-        tool_name: str,
-        tool_output: str,
-        status: str = "ok",
-    ) -> dict:
-        result = ToolCallResult.from_output(
-            call_id=call_id,
-            name=tool_name,
-            output=tool_output,
-            fallback_status=status,
-        )
-        return build_tool_result_message(
-            result,
-            provider=str(getattr(self.llm_client, "provider", "") or ""),
-        )
-
-    @staticmethod
-    def _describe_tool_step(tool_name: str, arguments: dict) -> str:
-        if is_devtools_tool(tool_name):
-            short_name = tool_name[len(DEVTOOLS_PREFIX):]
-            if short_name == "navigate_page":
-                direction = str(arguments.get("type") or "url").strip().lower()
-                if direction in {"back", "forward"}:
-                    return f"Go {direction} in the browser page"
-                if direction == "reload":
-                    return "Reload the browser page"
-                return "Open the requested browser page"
-            return DEVTOOLS_STEP_DESCRIPTIONS.get(short_name, f"Run browser action `{short_name}`")
-        if tool_name == "browser_fetch":
-            return "Fetch the requested web page"
-        return f"Run `{tool_name}`"
-
-    @classmethod
-    def _build_execution_plan(cls, message: str, tool_calls: list[dict]) -> ExecutionPlan:
-        steps: list[PlanStep] = []
-        for index, call in enumerate(tool_calls, start=1):
-            tool_name = str(call.get("name", "tool"))
-            arguments = call.get("arguments", {})
-            if not isinstance(arguments, dict):
-                arguments = {}
-            steps.append(
-                PlanStep(
-                    step_id=f"tool-{index}",
-                    description=cls._describe_tool_step(tool_name, arguments),
-                    tool_hints=[tool_name],
-                    success_criteria=f"`{tool_name}` returns a successful result or a clear recoverable error.",
-                )
-            )
-        return ExecutionPlan(original_message=message, steps=steps)
-
-    @staticmethod
-    def _tool_output_status(tool_output: str, fallback: str = "ok") -> str:
-        try:
-            payload = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
-        except (json.JSONDecodeError, TypeError):
-            return fallback
-        if not isinstance(payload, dict):
-            return fallback
-        status = str(payload.get("status") or "").lower()
-        if status == "cancelled":
-            return "cancelled"
-        if status in {"error", "blocked", "denied", "failed"}:
-            return "error"
-        return fallback
+    _describe_tool_step = staticmethod(ToolBatchRunner._describe_tool_step)
 
     async def _react_worker(
         self,
@@ -257,134 +131,51 @@ class TurnLoop:
         publisher: RunEventPublisher,
         attachments: list[dict] | None = None,
         steering: SteeringInbox | None = None,
+        *,
+        lifecycle: TurnLifecycle,
     ) -> None:
         """Run the react loop, pushing all events into the queue. Caller is responsible for the None sentinel."""
         context_token = set_current_conversation_id(conversation_id)
         tool_scope_token = set_tool_scope(uuid.uuid4().hex)
-        policy = ToolPolicy(max_identical_calls=self.max_identical_calls)
         obs_run_id = ""
         obs_context_token = None
-        turn_started_at = time.perf_counter()
-        run_state = AgentRunStateMachine()
+        run_state = lifecycle.state
 
         def _put(event: dict) -> None:
             publisher.publish_nowait(event)
 
-        def _emit_run_transition(transition) -> None:
-            _put(
-                {
-                    "event": "run_state",
-                    "data": {
-                        "from_state": transition.from_state.value,
-                        "state": transition.to_state.value,
-                        "reason": transition.reason,
-                    },
-                }
-            )
-
-        def _transition(method, *args):
-            transition = method(*args)
-            _emit_run_transition(transition)
-            return transition
+        _transition = lifecycle.transition
 
         final_text = ""
         final_attachment_paths: list[str] = []
         streamed_answer_text = ""
-        persisted_tool_calls: list[dict] = []
-        last_tool_name = ""
         latest_progress_text = ""
         turn_thinking_parts: list[str] = []
-        tool_batch = ToolBatchLedger()
-        turn_persisted = False
         persisted_user_ids: list[int] = []
         obs_usage_total = UsageStats()
 
-        def _obs_event(event_type: str, **kwargs) -> None:
-            if not obs_run_id:
-                return
-            try:
-                self.observability.log_event(
-                    run_id=obs_run_id,
-                    conversation_id=conversation_id,
-                    event_type=event_type,
-                    source=infer_source(conversation_id),
-                    model=str(getattr(self.llm_client, "model_name", "") or ""),
-                    provider=str(getattr(self.llm_client, "provider", "") or ""),
-                    **kwargs,
-                )
-            except Exception:
-                logger.debug("observability event failed event_type=%s", event_type, exc_info=True)
+        budget = self._new_turn_budget()
+        observer = TurnObserver(self.observability, conversation_id=conversation_id, client=self.llm_client)
+        _obs_event, _obs_error = observer.event, observer.error
+        transcript = TurnTranscript(provider=str(getattr(self.llm_client, "provider", "") or ""))
+        response_policy = TurnResponsePolicy()
 
-        def _obs_error(message_text: str, *, error_type: str = "", metadata: dict | None = None) -> None:
-            try:
-                self.observability.log_error(
-                    run_id=obs_run_id,
-                    conversation_id=conversation_id,
-                    message=message_text,
-                    error_type=error_type,
-                    metadata=metadata or {},
-                )
-            except Exception:
-                logger.debug("observability error capture failed", exc_info=True)
+        def _current_user_request() -> str:
+            applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
+            return "\n\n".join([message, *applied])
 
-        def _obs_tool_start(tool_name: str, arguments: dict, call_id: str, risk: str = "") -> float:
-            started = time.perf_counter()
-            _obs_event(
-                "tool_call_started",
-                tool_name=tool_name,
-                input={"arguments": arguments, "call_id": call_id, "risk": risk},
-            )
-            return started
-
-        def _obs_tool_end(
-            tool_name: str,
-            output: str,
-            status: str,
-            call_id: str,
-            started: float,
-            *,
-            risk: str = "",
-            error_code: str = "",
-            metadata: dict | None = None,
-            duration_ms: int | None = None,
-        ) -> None:
-            _obs_event(
-                "tool_call_finished",
-                tool_name=tool_name,
-                status=status,
-                error_code=error_code,
-                error_message=output if status not in {"ok", "complete", "success"} else "",
-                duration_ms=(
-                    duration_ms
-                    if duration_ms is not None
-                    else round((time.perf_counter() - started) * 1000)
-                ),
-                output={"output": output, "call_id": call_id, "risk": risk},
-                metadata=metadata or {},
-            )
-
-        def _observe_cancelled_call(
-            call: ActiveToolCall,
-            status: str,
-            output: str,
-            error_code: str,
-            duration_ms: int | None,
-        ) -> None:
-            _obs_tool_end(
-                call.tool_name or "tool",
-                output,
-                status,
-                call.call_id,
-                call.obs_started_at or time.perf_counter(),
-                error_code=error_code,
-                duration_ms=duration_ms,
-            )
-
-        def _mark_active_tool_calls_cancelled() -> None:
-            tool_batch.mark_cancelled(
-                worker_state="stopping" if unfinished_workers(conversation_id) else "stopped",
-                observe=_observe_cancelled_call,
-            )
+        tool_runner = ToolBatchRunner(
+            registry=self.registry, executor=self.executor, execution_gate=self.execution_gate,
+            memory=self.memory, client=self.llm_client, budget=budget, transcript=transcript,
+            lifecycle=lifecycle, observer=observer, steering=steering,
+            user_request=_current_user_request, progress=lambda: latest_progress_text,
+            max_parallel=self.max_parallel_tool_calls, max_identical_calls=self.max_identical_calls,
+            stuck_rounds_limit=self.STUCK_ROUNDS_LIMIT, guard_blocks_limit=self.GUARD_BLOCKS_LIMIT,
+        )
+        model_runner = ModelRequestRunner(
+            self.llm_client, timeout_seconds=self.max_llm_call_seconds, observer=observer, emit=_put,
+            on_request=lambda: _transition(run_state.model_call),
+        )
 
         def _emit_agent_progress(text: str) -> None:
             nonlocal latest_progress_text
@@ -396,21 +187,19 @@ class TurnLoop:
         def _assistant_message_on_cancel() -> str:
             if final_text.strip():
                 return final_text.strip()
-            if streamed_answer_text.strip():
-                return streamed_answer_text.strip()
+            partial_answer = streamed_answer_text or model_runner.answer_text
+            if partial_answer.strip():
+                return partial_answer.strip()
             if latest_progress_text.strip():
                 return (
                     "Stopped before final answer.\n\n"
                     f"Last progress: {latest_progress_text.strip()}"
                 )
-            if last_tool_name:
-                return f"Stopped before final answer. Last tool: {last_tool_name}."
+            if tool_runner.last_tool_name:
+                return f"Stopped before final answer. Last tool: {tool_runner.last_tool_name}."
             return "Stopped before final answer."
 
-        def _tool_calls_for_persist() -> list[dict]:
-            tool_calls = [dict(tool_call) for tool_call in persisted_tool_calls]
-            tool_calls.extend(tool_batch.persistable_calls())
-            return tool_calls
+        _tool_calls_for_persist = tool_runner.persistable_calls
 
         def _emit_response_token(content: str) -> None:
             _put({"event": "token", "data": {"content": content}})
@@ -423,17 +212,10 @@ class TurnLoop:
             _put(event)
 
         def _response_duration_ms() -> int:
-            return max(0, round((time.perf_counter() - turn_started_at) * 1000))
+            return lifecycle.duration_ms()
 
-        async def _persist_turn_once(
-            assistant_message: str,
-            *,
-            status: str,
-            response_attachments: list[dict] | None = None,
-        ) -> None:
-            nonlocal turn_persisted, persisted_user_ids
-            if turn_persisted:
-                return
+        async def _persist_turn(outcome: TurnOutcome) -> None:
+            nonlocal persisted_user_ids
             if steering is not None:
                 steering.closed = True
             # A steering message that arrived too late was never read; the app
@@ -445,19 +227,19 @@ class TurnLoop:
                 attachment_kwargs["user_attachments"] = public_runtime_attachments(attachments)
             if any(item.attachments for item in applied_steering):
                 attachment_kwargs["steering_attachments"] = [public_runtime_attachments(item.attachments) for item in applied_steering]
-            _transition(run_state.finalizing)
             response_duration_ms = _response_duration_ms()
             persist_turn = getattr(self.memory, "persist_turn", None)
             if callable(persist_turn):
                 persisted_ids = await persist_turn(
                     conversation_id,
                     message,
-                    assistant_message,
+                    outcome.summary,
+                    turn_id=lifecycle.turn_id,
                     tool_calls=_tool_calls_for_persist(),
                     thinking="\n\n".join(turn_thinking_parts),
-                    status=status,
+                    status=outcome.status,
                     response_duration_ms=response_duration_ms,
-                    response_attachments=response_attachments or [],
+                    response_attachments=outcome.attachments,
                     **({
                         "steering_messages": steering_messages,
                         "steering_tool_call_indexes": [item.tool_call_index for item in applied_steering],
@@ -473,9 +255,8 @@ class TurnLoop:
                 for steering_message in steering_messages:
                     await self.memory.add_message_and_maybe_summarize(conversation_id, "user", steering_message)
                 await self.memory.add_message_and_maybe_summarize(
-                    conversation_id, "assistant", assistant_message
+                    conversation_id, "assistant", outcome.summary
                 )
-            turn_persisted = True
 
         try:
             obs_run_id = self.observability.start_run(
@@ -486,9 +267,8 @@ class TurnLoop:
                 provider=str(getattr(self.llm_client, "provider", "") or ""),
                 metadata={"attachment_count": len(attachments or [])},
             )
+            lifecycle.run_id = observer.run_id = obs_run_id
             obs_context_token = set_current_run_id(obs_run_id)
-            budget = self._new_turn_budget()
-            policy.begin_turn()
             self.memory.get_or_create(
                 conversation_id, title=conversation_title_from_prompt(message)
             )
@@ -496,15 +276,10 @@ class TurnLoop:
             self.memory.set_active_task(conversation_id, None)
             if unfinished_workers(conversation_id):
                 final_text = "Paused: a previous tool is still stopping. Wait for it to finish, then continue and verify its last action."
-                await _persist_turn_once(final_text, status="paused")
                 _put({"event": "error", "data": {"code": "tool_still_running", "message": final_text}})
-                _put({"event": "done", "data": done_payload(conversation_id, final_text, "paused")})
-                finish_observed_run(
-                    self.observability,
-                    run_id=obs_run_id,
-                    status="paused",
-                    final_output=final_text,
-                    failure_reason="tool_still_running",
+                await lifecycle.finalize(
+                    TurnOutcome(final_text, "paused", "tool_still_running"),
+                    persist=_persist_turn, usage=obs_usage_total, tool_calls=_tool_calls_for_persist(),
                 )
                 return
             build_long_term_context = getattr(self.memory, "build_long_term_memory_context", None)
@@ -514,16 +289,14 @@ class TurnLoop:
             else:
                 long_term_context = (build_long_term_context(message, conversation_id=conversation_id, workspace=selected_workspace_dir()) if callable(build_long_term_context) else "")
 
-            review_state = AutoReviewState()
-            build_review_context = getattr(self.memory, "build_approval_review_context", None)
-            review_history = build_review_context(conversation_id) if callable(build_review_context) else {}
+            tool_runner.initialize_review_history()
 
             def _current_system_prompt() -> str:
                 base_prompt = system_prompt() if callable(system_prompt) else system_prompt
                 if long_term_context:
                     base_prompt = f"{base_prompt}\n\n{long_term_context}" if base_prompt else long_term_context
-                if review_state.denials:
-                    base_prompt = f"{base_prompt}\n\n{review_state.instructions()}"
+                if tool_runner.review_state.denials:
+                    base_prompt = f"{base_prompt}\n\n{tool_runner.review_state.instructions()}"
                 return completion_protocol_prompt(base_prompt)
 
             initial_visible_tools = self.registry.get_all_tools(visible_only=True)
@@ -533,29 +306,25 @@ class TurnLoop:
                 tools=initial_visible_tools,
                 current_user_message=message,
             )
-            messages = self.memory.build_llm_messages(conversation_id)
+            transcript.messages = self.memory.build_llm_messages(conversation_id)
             initial_message = {"role": "user", "content": message}
             initial_images = attachment_image_payloads(attachments)
             if initial_images:
                 initial_message["images"] = initial_images
                 initial_message["ephemeral"] = True
-            messages.append(initial_message)
-            latest_round_start = len(messages) - 1
-
-            def _current_user_request() -> str:
-                applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
-                return "\n\n".join([message, *applied])
+            transcript.messages.append(initial_message)
+            transcript.latest_round_start = len(transcript.messages) - 1
 
             def _apply_steering() -> bool:
                 nonlocal streamed_answer_text
                 pending = steering.drain() if steering is not None else []
                 for item in pending:
-                    item.tool_call_index = len(persisted_tool_calls)
+                    item.tool_call_index = len(tool_runner.history)
                     entry = {"role": "user", "content": item.message}
                     images = attachment_image_payloads(item.attachments)
                     if images:
                         entry.update({"images": images, "ephemeral": True})
-                    messages.append(entry)
+                    transcript.steer(entry)
                     _put({"event": "steering_applied", "data": {
                         "message_id": item.id,
                         "message": item.display_message or item.message,
@@ -565,6 +334,7 @@ class TurnLoop:
                     _obs_event("steering_applied", input={"message": item.message}, metadata={"message_id": item.id})
                 if pending:
                     streamed_answer_text = ""
+                    model_runner.answer_text = ""
                     self.memory.set_task_goal(conversation_id, _current_user_request())
                 return bool(pending)
 
@@ -573,430 +343,16 @@ class TurnLoop:
             iteration_limit_hit = False
             terminal_error = False
             incomplete_reason_code = ""
-            last_tool_outputs_by_signature: dict[str, str] = {}
-            browser_repeat_counts: dict[str, int] = {}
-            blocked_tool_counts: dict[str, int] = {}
-            policy_repeat_recoveries: set[str] = set()
-            browser_repeat_recoveries: set[str] = set()
-            blocked_tool_recoveries: set[str] = set()
-            # Guard blocks go back to the model as tool errors; the turn ends
-            # only once it is stuck (see STUCK_ROUNDS_LIMIT, GUARD_BLOCKS_LIMIT).
-            round_guard_blocks = 0
-            guard_blocks = 0
-            stuck_rounds = 0
-            last_guard_code = ""
             stop_requested = False
-            # Tool calls of the latest model response, and which got a result,
-            # so a guard stop can close the unanswered ones before wrapping up.
-            round_tool_calls: list[tuple[str, str]] = []
-            answered_call_ids: set[str] = set()
             # Pause notices wait until the wrap-up call has had its chance to answer.
             pause_error_event: dict | None = None
             token_warning_sent = False
-            consecutive_text_only = 0
-            force_tool_choice_next = False
-            web_search_reprompted = False
-            parallel_semaphore = asyncio.Semaphore(self.max_parallel_tool_calls)
-            # The UI shows one permission prompt at a time, so parallel calls
-            # take turns waiting on their gates.
-            gate_lock = asyncio.Lock()
-
-            def _record_call_result(prepared: dict, result: ToolCallResult, *, timed: bool = True) -> None:
-                tool_batch.record_result(prepared["active_key"], result, timed=timed)
-
-            def _emit_gate_event(event: dict) -> None:
-                if event.get("event") in {"approval_required", "access_grant_required"}:
-                    _transition(run_state.waiting_for, str(event["event"]))
-                _put(event)
-
-            async def _invoke_prepared_tool(prepared: dict) -> ToolCallResult:
-                """Invoke one preflighted tool and wait on any gate it raises.
-
-                Waiting here instead of after the whole batch shows the prompt
-                as soon as this call needs it, while sibling calls keep running.
-                """
-                tool_name = str(prepared["tool_name"])
-                call_id = str(prepared["call_id"])
-
-                async def _execute(tool_dict: dict, arguments: dict) -> ToolCallResult:
-                    async with parallel_semaphore:
-                        blocked = review_state.blocked_output(tool_name, arguments)
-                        if blocked:
-                            return ToolCallResult.from_output(call_id=call_id, name=tool_name, output=blocked)
-                        if steering is not None and steering.pending:
-                            return ToolCallResult.from_output(
-                                call_id=call_id, name=tool_name,
-                                output=json.dumps({"status": "cancelled", "reason_code": "user_steered", "error": "Skipped so the agent can read the new user instruction."}),
-                            )
-                        _transition(run_state.tool_execution)
-                        return await self._execute_tool_result(budget, tool_dict, arguments, call_id=call_id)
-
-                async def _rerun_after_grant(_budget: IterationBudget, tool_dict: dict, arguments: dict) -> str:
-                    # Keep the original call_id so Stop and timeouts still reach the re-run.
-                    return (await _execute(tool_dict, arguments)).output
-
-                try:
-                    result = await _execute(prepared["tool_dict"], prepared["arguments"])
-                    _record_call_result(prepared, result)
-                    if ExecutionGateService.check_pending_status(result.output) is None:
-                        return result
-                    async with gate_lock:
-                        output = await self.execution_gate.resolve_pending_output(
-                            tool_output=result.output,
-                            tool_dict=prepared["tool_dict"],
-                            arguments=prepared["arguments"],
-                            budget=budget,
-                            execute_tool=_rerun_after_grant,
-                            emit=_emit_gate_event,
-                            review_client=self.llm_client,
-                            user_request=_current_user_request(),
-                            review_context={**review_history, "progress": latest_progress_text,
-                                            "tool_evidence": persisted_tool_calls},
-                            review_state=review_state,
-                            review_is_current=lambda: steering is None or not steering.pending,
-                            call_id=call_id,
-                        )
-                    result = ToolCallResult.from_output(call_id=call_id, name=tool_name, output=output)
-                    _record_call_result(prepared, result, timed=False)
-                    return result
-                except asyncio.CancelledError as exc:
-                    stopped_output = getattr(exc, "tool_output", None)
-                    if stopped_output:
-                        _record_call_result(prepared, ToolCallResult.from_output(
-                            call_id=call_id, name=tool_name, output=stopped_output), timed=False)
-                    raise
-                except Exception as exc:
-                    _obs_error(
-                        str(exc),
-                        error_type=type(exc).__name__,
-                        metadata={"phase": "tool_call", "tool": tool_name, "call_id": call_id},
-                    )
-                    result = ToolCallResult.from_output(
-                        call_id=call_id,
-                        name=tool_name,
-                        output=json.dumps({"status": "error", "error": str(exc)}),
-                        fallback_status="error",
-                    )
-                    _record_call_result(prepared, result)
-                    return result
-
-            def _report_escaped_tool_error(prepared: dict, exc: BaseException) -> None:
-                _obs_error(
-                    str(exc),
-                    error_type=type(exc).__name__,
-                    metadata={
-                        "phase": "tool_call",
-                        "tool": str(prepared["tool_name"]),
-                        "call_id": str(prepared["call_id"]),
-                    },
-                )
-
-            async def _process_tool_result(prepared: dict, tool_result: ToolCallResult) -> None:
-                """Apply the ordered result guards and publish the call's final result."""
-                nonlocal final_text, stop_requested, terminal_error, incomplete_reason_code
-                nonlocal round_guard_blocks, guard_blocks, last_guard_code
-
-                call_id = str(prepared["call_id"])
-                step_id = str(prepared["step_id"])
-                plan_step = prepared["plan_step"]
-                tool_name = str(prepared["tool_name"])
-                arguments = prepared["arguments"]
-                policy_decision = prepared["policy_decision"]
-                status = "ok" if tool_result.status == "ok" else "error"
-                tool_output = tool_result.output
-
-                status = self._tool_output_status(tool_output, status)
-                recovery_prompt = ""
-                review_result = parse_tool_json(tool_output)
-                review_code = str(review_result.get("reason_code") or "")
-                if review_code in {"auto_review_retry_blocked", "auto_review_limit"}:
-                    stop_requested = True
-                    terminal_error = True
-                    incomplete_reason_code = review_code
-                    final_text = "Paused: " + str(review_result.get("reason") or "Auto Review blocked this action.")
-                blocked_key = blocked_tool_key(tool_name, arguments, tool_output)
-                if review_code.startswith("auto_review_"):
-                    blocked_key = None
-                if blocked_key is not None:
-                    blocked_tool_counts[blocked_key] = blocked_tool_counts.get(blocked_key, 0) + 1
-                    if blocked_tool_counts[blocked_key] >= 2:
-                        status = "error"
-                        round_guard_blocks += 1
-                        guard_blocks += 1
-                        last_guard_code = "repeated_blocked_tool_result"
-                        blocked_payload = parse_tool_json(tool_output)
-                        if blocked_key not in blocked_tool_recoveries:
-                            blocked_tool_recoveries.add(blocked_key)
-                            policy_repeat_recoveries.add(tool_call_signature(tool_name, arguments))
-                            tool_output = json.dumps(
-                                {
-                                    "status": "error",
-                                    "code": "repeated_blocked_tool_result",
-                                    "tool": tool_name,
-                                    "arguments": arguments,
-                                    "recovery_required": True,
-                                    "error": (
-                                        "The same tool action was blocked repeatedly. "
-                                        "Use a different permitted action, ask for permission changes, "
-                                        "or report the blocker."
-                                    ),
-                                    "last_result": blocked_payload,
-                                },
-                                ensure_ascii=False,
-                            )
-                            recovery_prompt = build_repeat_recovery_prompt(
-                                reason_code="repeated_blocked_tool_result",
-                                tool_name=tool_name,
-                                arguments=arguments,
-                                last_result=blocked_payload,
-                            )
-                            logger.info(
-                                "turn_loop prompted recovery after repeated blocked tool result "
-                                "conversation_id=%s tool=%s arguments=%s",
-                                conversation_id,
-                                tool_name,
-                                arguments,
-                            )
-                            _obs_event(
-                                "guardrail_triggered",
-                                level="warning",
-                                status="error",
-                                tool_name=tool_name,
-                                error_code="repeated_blocked_tool_result",
-                                error_message="Repeated blocked tool result; recovery prompt inserted.",
-                                input={"arguments": arguments, "call_id": call_id},
-                                output={"last_result": blocked_payload},
-                                metadata={"recovery_required": True},
-                            )
-                        else:
-                            tool_output = json.dumps(
-                                {
-                                    "status": "error",
-                                    "code": "repeated_blocked_tool_result",
-                                    "tool": tool_name,
-                                    "arguments": arguments,
-                                    "error": (
-                                        "This exact action was blocked again after a recovery prompt and will stay blocked. "
-                                        "Stop retrying it: choose a different permitted action, or tell the user "
-                                        "what is blocked and what they can change."
-                                    ),
-                                    "last_result": blocked_payload,
-                                },
-                                ensure_ascii=False,
-                            )
-                            logger.warning(
-                                "turn_loop repeated blocked tool result after recovery "
-                                "conversation_id=%s tool=%s arguments=%s",
-                                conversation_id,
-                                tool_name,
-                                arguments,
-                            )
-                            _obs_event(
-                                "guardrail_triggered",
-                                level="warning",
-                                status="error",
-                                tool_name=tool_name,
-                                error_code="repeated_blocked_tool_result",
-                                error_message="Repeated blocked tool result after a recovery prompt.",
-                                input={"arguments": arguments, "call_id": call_id},
-                                output={"last_result": blocked_payload},
-                                metadata={"after_recovery": True},
-                            )
-                if is_browser_observation_action(tool_name, arguments) and status == "ok":
-                    browser_repeat_counts.clear()
-                if is_browser_repeat_guarded(tool_name, arguments) and status == "ok":
-                    repeat_key = browser_repeat_key(tool_name, arguments, tool_output)
-                    browser_repeat_counts[repeat_key] = browser_repeat_counts.get(repeat_key, 0) + 1
-                    if browser_repeat_counts[repeat_key] >= 2:
-                        status = "error"
-                        round_guard_blocks += 1
-                        guard_blocks += 1
-                        last_guard_code = "stalled_repeat_detected"
-                        repeated_browser_result = tool_output
-                        if repeat_key not in browser_repeat_recoveries:
-                            browser_repeat_recoveries.add(repeat_key)
-                            policy_repeat_recoveries.add(tool_call_signature(tool_name, arguments))
-                            tool_output = json.dumps(
-                                {
-                                    "status": "error",
-                                    "code": "stalled_repeat_detected",
-                                    "tool": tool_name,
-                                    "arguments": arguments,
-                                    "recovery_required": True,
-                                    "error": (
-                                        "Repeated the same browser action with the same arguments "
-                                        "and unchanged page state. Inspect status/tabs/snapshot or report the blocker."
-                                    ),
-                                },
-                                ensure_ascii=False,
-                            )
-                            recovery_prompt = build_repeat_recovery_prompt(
-                                reason_code="stalled_repeat_detected",
-                                tool_name=tool_name,
-                                arguments=arguments,
-                                last_result=repeated_browser_result,
-                            )
-                            logger.info(
-                                "turn_loop prompted recovery after repeated browser action "
-                                "conversation_id=%s tool=%s arguments=%s",
-                                conversation_id,
-                                tool_name,
-                                arguments,
-                            )
-                            _obs_event(
-                                "guardrail_triggered",
-                                level="warning",
-                                status="error",
-                                tool_name=tool_name,
-                                error_code="stalled_repeat_detected",
-                                error_message="Repeated browser action with unchanged page state; recovery prompt inserted.",
-                                input={"arguments": arguments, "call_id": call_id},
-                                output={"last_result": repeated_browser_result},
-                                metadata={"recovery_required": True},
-                            )
-                        else:
-                            tool_output = json.dumps(
-                                {
-                                    "status": "error",
-                                    "code": "stalled_repeat_detected",
-                                    "tool": tool_name,
-                                    "arguments": arguments,
-                                    "error": (
-                                        "Repeated the same browser action again after a recovery prompt, and the page "
-                                        "still did not change. Stop repeating it: inspect the page with a snapshot, "
-                                        "change the target, or tell the user what is blocking you."
-                                    ),
-                                },
-                                ensure_ascii=False,
-                            )
-                            logger.warning(
-                                "turn_loop repeated browser action after recovery "
-                                "conversation_id=%s tool=%s arguments=%s",
-                                conversation_id,
-                                tool_name,
-                                arguments,
-                            )
-                            _obs_event(
-                                "guardrail_triggered",
-                                level="warning",
-                                status="error",
-                                tool_name=tool_name,
-                                error_code="stalled_repeat_detected",
-                                error_message="Repeated browser action with unchanged page state after a recovery prompt.",
-                                input={"arguments": arguments, "call_id": call_id},
-                                output={"last_result": repeated_browser_result},
-                                metadata={"after_recovery": True},
-                            )
-
-                raw_tool_output = tool_output
-                result_payload = parse_tool_json(raw_tool_output)
-                if result_payload.get("worker_state") == "stopping":
-                    stop_requested = True
-                    incomplete_reason_code = "tool_still_running"
-                    final_text = "Paused: a tool is still stopping after cancellation or timeout. Wait for it to finish, then continue and verify its last action."
-                tool_batch.record_output(prepared["active_key"], raw_tool_output, status)
-                active_call = tool_batch.get(prepared["active_key"])
-                image_attachments = extract_image_attachments(tool_name, raw_tool_output)
-                tool_result = ToolCallResult.from_output(
-                    call_id=call_id,
-                    name=tool_name,
-                    output=raw_tool_output,
-                    fallback_status="ok" if status == "ok" else "error",
-                    metadata={"policy": policy_decision.metadata},
-                )
-                result_signature = str(
-                    policy_decision.metadata.get("signature")
-                    or tool_call_signature(tool_name, arguments)
-                )
-                last_tool_outputs_by_signature[result_signature] = raw_tool_output
-
-                _put({
-                    "event": "tool_end",
-                    "data": {
-                        "tool": tool_name,
-                        "output": raw_tool_output,
-                        "status": status,
-                        "call_id": call_id,
-                        "risk": policy_decision.risk,
-                    },
-                })
-                _obs_tool_end(
-                    tool_name,
-                    raw_tool_output,
-                    status,
-                    call_id,
-                    prepared["obs_tool_started_at"],
-                    risk=policy_decision.risk,
-                    error_code=tool_error_code(raw_tool_output) if status != "ok" else "",
-                    duration_ms=active_call.duration_ms if active_call is not None else None,
-                )
-                if active_call is not None:
-                    active_call.observability_finished = True
-                if plan_step is not None:
-                    verified = status == "ok"
-                    plan_step.status = "done" if verified else "failed"
-                    if callable(sync_plan_progress):
-                        sync_plan_progress(conversation_id, execution_plan)
-                    _put({
-                        "event": "observation",
-                        "data": {
-                            "step_id": step_id,
-                            "verified": verified,
-                            "detail": compact_tool_observation(tool_name, raw_tool_output) if verified else raw_tool_output,
-                        },
-                    })
-                    _put({
-                        "event": "step_complete",
-                        "data": {
-                            "step_id": step_id,
-                            "status": "done" if verified else "failed",
-                        },
-                    })
-
-                self.memory.add_tool_outcome(conversation_id, tool_name, raw_tool_output)
-                persisted_tool_calls.append(
-                    {
-                        "tool_name": tool_name,
-                        "input": json.dumps(arguments, ensure_ascii=False),
-                        "output": raw_tool_output,
-                        "status": "complete" if status == "ok" else status,
-                    }
-                )
-                tool_batch.finish(prepared["active_key"])
-                message_entry = build_tool_result_message(
-                    tool_result,
-                    provider=str(getattr(self.llm_client, "provider", "") or ""),
-                )
-                if image_attachments:
-                    message_entry["images"] = image_attachments
-                    message_entry["ephemeral"] = True
-                messages.append(message_entry)
-                answered_call_ids.add(call_id)
-                if recovery_prompt:
-                    messages.append({"role": "user", "content": recovery_prompt})
-
-            async def _flush_prepared_tool_calls(prepared_calls: list[dict]) -> None:
-                """Invoke and process the calls collected before a serial barrier."""
-                if not prepared_calls:
-                    return
-                calls = list(prepared_calls)
-                prepared_calls.clear()
-                results = await tool_batch.run(
-                    calls,
-                    _invoke_prepared_tool,
-                    parallel=len(calls) > 1,
-                    report_escaped_error=_report_escaped_tool_error,
-                )
-                for prepared, result in zip(calls, results):
-                    await _process_tool_result(prepared, result)
-
             rounds = itertools.count() if budget.max_iterations is None else range(self._max_iterations or budget.max_iterations)
             for iteration_index in rounds:
                 if stop_requested:
                     break
                 if _apply_steering():
-                    consecutive_text_only = 0
-                    force_tool_choice_next = False
+                    response_policy.steered()
                 token_limit = self.max_tokens_per_turn
                 tokens_used = obs_usage_total.total_tokens
                 if token_limit and tokens_used >= token_limit:
@@ -1068,162 +424,30 @@ class TurnLoop:
                     break
 
                 streamed_answer_text = ""
-                streamed_reasoning_content = ""
-
-                async def _answer_token_cb(delta: str, _put=_put) -> None:
-                    nonlocal streamed_answer_text
-                    streamed_answer_text += str(delta or "")
-                    _emit_response_token(delta)
-
-                async def _reasoning_cb(delta: str) -> None:
-                    nonlocal streamed_reasoning_content
-                    streamed_reasoning_content += delta
-                    _put({"event": "thinking", "data": {"content": delta}})
-
-                llm_call_started_at = time.perf_counter()
                 try:
-                    _transition(run_state.model_call)
                     visible_tools = self.registry.get_all_tools(visible_only=True)
-                    model_tools = visible_tools
-                    current_prompt = _current_system_prompt()
-                    messages, latest_round_start, compaction_info = await fit_live_context(
-                        messages, model_tools, current_prompt, llm_client=self.llm_client,
-                        latest_round_start=latest_round_start, timeout_seconds=self.max_llm_call_seconds,
-                    )
-                    if compaction_info:
-                        _obs_event("live_context_compacted", metadata=compaction_info)
-                        _put({"event": "context_compacted", "data": compaction_info})
-                    # When tools are available, wait for the full model response
-                    # before deciding whether its text is progress or the answer.
-                    stream_callback = None if visible_tools else _answer_token_cb
-                    reasoning_kwargs = (
-                        {"reasoning_callback": _reasoning_cb}
-                        if isinstance(self.llm_client, LLMClient)
-                        else {}
-                    )
-                    _obs_event(
-                        "llm_call_started",
-                        input={
-                            "message_count": len(messages),
-                            "tool_count": len(model_tools),
-                            "tool_choice": "required" if force_tool_choice_next else "auto",
-                        },
+                    tool_choice = response_policy.take_tool_choice()
+                    model_result = await model_runner.request(transcript.snapshot(
+                        tools=visible_tools, system_prompt=_current_system_prompt(), tool_choice=tool_choice,
                         metadata={"iteration": iteration_index + 1, "consumed": budget.consumed},
-                    )
-                    if force_tool_choice_next:
-                        logger.info(
-                            "turn_loop forcing tool_choice after repeated text-only responses "
-                            "conversation_id=%s consecutive_text_only=%s consumed=%s",
-                            conversation_id,
-                            consecutive_text_only,
-                            budget.consumed,
-                        )
-                        llm_call = self.llm_client.chat_with_tools(
-                            messages,
-                            model_tools,
-                            system_prompt=current_prompt,
-                            stream_callback=stream_callback,
-                            tool_choice="required",
-                            **reasoning_kwargs,
-                        )
-                    else:
-                        llm_call = self.llm_client.chat_with_tools(
-                            messages,
-                            model_tools,
-                            system_prompt=current_prompt,
-                            stream_callback=stream_callback,
-                            **reasoning_kwargs,
-                        )
-                    force_tool_choice_next = False
-                    llm_response = await asyncio.wait_for(
-                        llm_call,
-                        timeout=self.max_llm_call_seconds,
-                    )
-                    llm_usage = usage_from_any(getattr(llm_response, "usage", None))
-                    obs_usage_total = obs_usage_total.merge(llm_usage)
-                    _obs_event(
-                        "llm_call_finished",
-                        status="ok",
-                        duration_ms=round((time.perf_counter() - llm_call_started_at) * 1000),
-                        output={
-                            "finish_reason": llm_response.finish_reason,
-                            "content": llm_response.content,
-                            "tool_calls": [
-                                {
-                                    "call_id": call.call_id,
-                                    "tool_name": call.tool_name,
-                                    "arguments": call.arguments,
-                                }
-                                for call in llm_response.tool_calls
-                            ],
-                        },
-                        tokens=llm_usage,
-                        metadata={"iteration": iteration_index + 1},
-                    )
-                except ContextBudgetExceeded as exc:
+                    ))
+                    obs_usage_total = obs_usage_total.merge(model_result.usage)
+                except ModelRequestError as exc:
                     final_text = str(exc)
                     terminal_error = True
                     incomplete_reason_code = exc.reason_code
                     _put({"event": "error", "data": {"code": exc.reason_code, "message": final_text}})
-                    _obs_error(final_text, error_type=exc.reason_code)
-                    break
-                except asyncio.TimeoutError:
-                    final_text = f"Timed out: LLM call exceeded {self.max_llm_call_seconds}s limit."
-                    terminal_error = True
-                    incomplete_reason_code = "llm_timeout"
-                    logger.warning(
-                        "turn_loop paused: llm call timed out conversation_id=%s timeout_s=%s consumed=%s",
-                        conversation_id,
-                        self.max_llm_call_seconds,
-                        budget.consumed,
-                    )
-                    _put({
-                        "event": "error",
-                        "data": {"code": "llm_timeout", "message": final_text},
-                    })
-                    _obs_event(
-                        "llm_call_finished",
-                        level="warning",
-                        status="error",
-                        duration_ms=round((time.perf_counter() - llm_call_started_at) * 1000),
-                        error_code="llm_timeout",
-                        error_message=final_text,
-                        metadata={"timeout_s": self.max_llm_call_seconds, "iteration": iteration_index + 1},
-                    )
-                    break
-                except Exception as exc:
-                    final_text = f"Provider error: {exc}"
-                    terminal_error = True
-                    incomplete_reason_code = "provider_error"
-                    logger.exception("turn_loop provider call failed conversation_id=%s", conversation_id)
-                    _obs_error(
-                        str(exc),
-                        error_type=type(exc).__name__,
-                        metadata={"phase": "llm_call", "iteration": iteration_index + 1},
-                    )
-                    _obs_event(
-                        "llm_call_finished",
-                        level="error",
-                        status="error",
-                        duration_ms=round((time.perf_counter() - llm_call_started_at) * 1000),
-                        error_code="provider_error",
-                        error_message=str(exc),
-                        metadata={"iteration": iteration_index + 1},
-                    )
-                    _put({
-                        "event": "error",
-                        "data": {"code": "provider_error", "message": final_text},
-                    })
                     break
 
-                # A response produced before a new instruction arrived must not
-                # dispatch stale tool actions or finish the turn.
-                if _apply_steering():
-                    consecutive_text_only = 0
-                    force_tool_choice_next = False
+                # Usage belongs to the turn even when steering makes a response stale.
+                # Its fitted history and tool actions only belong to its original revision.
+                if _apply_steering() or not transcript.accept(model_result):
+                    response_policy.steered()
                     continue
+                llm_response = model_result.response
+                streamed_answer_text = model_result.answer_text
+                streamed_reasoning_content = model_result.reasoning_text
 
-                assistant_content = llm_response.content or ""
                 reasoning_content = str(getattr(llm_response, "reasoning_content", "") or "")
                 if reasoning_content:
                     turn_thinking_parts.append(reasoning_content)
@@ -1236,154 +460,34 @@ class TurnLoop:
                     if remaining_reasoning:
                         _put({"event": "thinking", "data": {"content": remaining_reasoning}})
 
-                if not llm_response.tool_calls:
-                    final_text = assistant_content.strip() or "Done."
-                    if llm_response.finish_reason == "length":
-                        terminal_error = True
-                        incomplete_reason_code = "model_output_truncated"
-                        if final_text == "Done.":
-                            final_text = (
-                                "Paused: the model output was truncated before a final answer. "
-                                "Continue to resume from the current state."
-                            )
-                        logger.warning(
-                            "turn_loop paused: model output truncated conversation_id=%s consumed=%s",
-                            conversation_id,
-                            budget.consumed,
-                        )
-                        _put({
-                            "event": "error",
-                            "data": {
-                                "code": incomplete_reason_code,
-                                "message": final_text,
-                                "limit": budget.max_iterations,
-                                "consumed": budget.consumed,
-                            },
-                        })
-                        _obs_event(
-                            "guardrail_triggered",
-                            level="warning",
-                            status="error",
-                            error_code=incomplete_reason_code,
-                            error_message=final_text,
-                            metadata={"limit": budget.max_iterations, "consumed": budget.consumed},
-                        )
-                    else:
-                        json_final_text = json_text_as_final_answer(assistant_content)
-                        if json_final_text is not None:
-                            final_text = json_final_text
-                        elif visible_tools and plain_text_describes_next_action(assistant_content):
-                            consecutive_text_only += 1
-                            _emit_agent_progress(assistant_content)
-                            messages.append({"role": "assistant", "content": assistant_content})
-                            if consecutive_text_only >= 2 or budget.exhausted:
-                                terminal_error = True
-                                incomplete_reason_code = "progress_without_tool"
-                                final_text = (
-                                    "Paused: the model described a next action but did not call a tool. "
-                                    "Continue to retry the task."
-                                )
-                                logger.warning(
-                                    "turn_loop paused after repeated progress without tool "
-                                    "conversation_id=%s consumed=%s",
-                                    conversation_id,
-                                    budget.consumed,
-                                )
-                                break
-                            force_tool_choice_next = True
-                            messages.append({"role": "user", "content": TOOL_REPROMPT_MESSAGE})
-                            continue
-                        if not final_answer_includes_web_search_results(final_text, persisted_tool_calls):
-                            if web_search_reprompted or budget.exhausted:
-                                terminal_error = True
-                                incomplete_reason_code = "web_search_results_missing"
-                                final_text = "Paused: I could not include the web search results in the answer."
-                                break
-                            web_search_reprompted = True
-                            messages.append({"role": "assistant", "content": assistant_content})
-                            messages.append({"role": "user", "content": WEB_SEARCH_RESULT_REPROMPT_MESSAGE})
-                            continue
-                        if assistant_content:
-                            messages.append({"role": "assistant", "content": assistant_content})
-                        completed_normally = True
-                        logger.info(
-                            "turn_loop completed from assistant answer conversation_id=%s "
-                            "consumed=%s tool_calls=%s finish_reason=%s",
-                            conversation_id,
-                            budget.consumed,
-                            len(persisted_tool_calls),
-                            llm_response.finish_reason,
-                        )
+                if llm_response.tool_calls:
+                    transcript.begin_tool_round(llm_response)
+                decision = response_policy.decide(
+                    llm_response, tools_available=bool(visible_tools), history=tool_runner.history,
+                    budget_exhausted=budget.exhausted,
+                )
+                if decision.progress:
+                    _emit_agent_progress(decision.progress)
+                if decision.action == "reprompt":
+                    transcript.close_unanswered_calls(
+                        "response_reprompted", explanation="The final answer needs revision before completion.",
+                    )
+                transcript.messages.extend(decision.messages)
+                if decision.action == "reprompt":
+                    continue
+                if decision.action in {"final", "pause"}:
+                    final_text = decision.text
+                    final_attachment_paths = decision.attachment_paths
+                    completed_normally = decision.action == "final"
+                    terminal_error = decision.action == "pause"
+                    incomplete_reason_code = decision.reason_code
+                    if decision.emit_error:
+                        _put({"event": "error", "data": {
+                            "code": incomplete_reason_code, "message": final_text,
+                            "limit": budget.max_iterations, "consumed": budget.consumed,
+                        }})
                     break
-
-                consecutive_text_only = 0
-                if assistant_content:
-                    _emit_agent_progress(assistant_content)
-                provider_messages = list(getattr(llm_response, "provider_messages", []) or [])
-                latest_round_start = len(messages)
-                if provider_messages:
-                    messages.extend(provider_messages)
-                elif assistant_content:
-                    messages.append({"role": "assistant", "content": assistant_content})
-
-                call_dicts = []
-                final_answer_call = None
-                round_tool_calls = [
-                    (call.call_id or f"tool-{index}", call.tool_name)
-                    for index, call in enumerate(llm_response.tool_calls, start=1)
-                ]
-                answered_call_ids.clear()
-                round_guard_blocks = 0
-                for index, call in enumerate(llm_response.tool_calls, start=1):
-                    arguments = call.arguments if isinstance(call.arguments, dict) else {}
-                    if call.tool_name == FINAL_ANSWER_TOOL_NAME:
-                        final_answer_call = call
-                        continue
-                    call_dicts.append(
-                        {
-                            "call_id": call.call_id or f"tool-{index}",
-                            "name": call.tool_name,
-                            "arguments": arguments,
-                            "step_id": f"tool-{index}",
-                        }
-                    )
-                if final_answer_call is not None and not call_dicts:
-                    final_args = final_answer_call.arguments if isinstance(final_answer_call.arguments, dict) else {}
-                    final_text = final_answer_text(final_args, llm_response.content)
-                    candidate_attachment_paths = final_answer_attachment_paths(final_args)
-                    if not final_answer_includes_web_search_results(final_text, persisted_tool_calls):
-                        if web_search_reprompted or budget.exhausted:
-                            terminal_error = True
-                            incomplete_reason_code = "web_search_results_missing"
-                            final_text = "Paused: I could not include the web search results in the answer."
-                            break
-                        web_search_reprompted = True
-                        logger.info(
-                            "turn_loop reprompting generic web_search final answer "
-                            "conversation_id=%s consumed=%s remaining=%s",
-                            conversation_id,
-                            budget.consumed,
-                            budget.remaining,
-                        )
-                        messages.append({"role": "user", "content": WEB_SEARCH_RESULT_REPROMPT_MESSAGE})
-                        final_text = ""
-                        final_attachment_paths = []
-                        continue
-                    final_attachment_paths = candidate_attachment_paths
-                    completed_normally = True
-                    logger.info(
-                        "turn_loop completed via final_answer conversation_id=%s consumed=%s tool_calls=%s",
-                        conversation_id,
-                        budget.consumed,
-                        len(persisted_tool_calls),
-                    )
-                    break
-                if final_answer_call is not None:
-                    logger.info(
-                        "turn_loop ignored final_answer because real tools were also requested conversation_id=%s tools=%s",
-                        conversation_id,
-                        [str(call.get("name") or "") for call in call_dicts],
-                    )
+                call_dicts = decision.calls
                 if budget.exhausted:
                     iteration_limit_hit = True
                     budget_exhausted = True
@@ -1422,409 +526,16 @@ class TurnLoop:
                         },
                     )
                     break
-                execution_plan = self._build_execution_plan(_current_user_request(), call_dicts)
-                plan_by_step_id = {step.step_id: step for step in execution_plan.steps}
-                _put({"event": "plan", "data": execution_plan.to_dict()})
-                sync_plan_progress = getattr(self.memory, "sync_plan_progress", None)
-                if callable(sync_plan_progress):
-                    sync_plan_progress(conversation_id, execution_plan)
-
-                for batch in can_parallelize(call_dicts, self.registry.get_tool):
-                    prepared_tool_calls: list[dict] = []
-                    for tool_call in batch:
-                        if stop_requested:
-                            break
-                        step_id = str(tool_call.get("step_id") or "")
-                        call_id = str(tool_call.get("call_id") or step_id or tool_call.get("name") or "tool-call")
-                        plan_step = plan_by_step_id.get(step_id)
-                        if plan_step is not None:
-                            plan_step.status = "active"
-                            if callable(sync_plan_progress):
-                                sync_plan_progress(conversation_id, execution_plan)
-                            _put({
-                                "event": "step_start",
-                                "data": {
-                                    "step_id": step_id,
-                                    "description": plan_step.description,
-                                },
-                            })
-
-                        raw_request = HarnessToolCallRequest(
-                            call_id=call_id,
-                            name=str(tool_call["name"]),
-                            arguments=tool_call["arguments"],
-                            step_id=step_id or None,
-                        )
-                        last_tool_name = raw_request.name
-                        dispatched = self.registry.dispatch(raw_request.name, raw_request.arguments)
-                        if dispatched is None:
-                            await _flush_prepared_tool_calls(prepared_tool_calls)
-                            if stop_requested:
-                                break
-                            policy_decision = policy.decide(
-                                request=raw_request,
-                                registry=self.registry,
-                                arguments=raw_request.arguments,
-                            )
-                            tool_output = json.dumps(
-                                {
-                                    "status": "error",
-                                    "code": policy_decision.metadata.get("code", "unknown_tool"),
-                                    "error": policy_decision.reason or f"Unknown tool '{raw_request.name}'",
-                                }
-                            )
-                            obs_tool_started_at = _obs_tool_start(
-                                raw_request.name,
-                                raw_request.arguments,
-                                call_id,
-                                policy_decision.risk,
-                            )
-                            _put({
-                                "event": "tool_start",
-                                "data": {
-                                    "tool": raw_request.name,
-                                    "input": raw_request.arguments,
-                                    "call_id": call_id,
-                                    "risk": policy_decision.risk,
-                                },
-                            })
-                            _put({
-                                "event": "tool_end",
-                                "data": {
-                                    "tool": raw_request.name,
-                                    "output": tool_output,
-                                    "status": "error",
-                                    "call_id": call_id,
-                                },
-                            })
-                            _obs_tool_end(
-                                raw_request.name,
-                                tool_output,
-                                "error",
-                                call_id,
-                                obs_tool_started_at,
-                                risk=policy_decision.risk,
-                                error_code=policy_decision.metadata.get("code", "unknown_tool"),
-                            )
-                            if plan_step is not None:
-                                plan_step.status = "failed"
-                                if callable(sync_plan_progress):
-                                    sync_plan_progress(conversation_id, execution_plan)
-                                _put({
-                                    "event": "observation",
-                                    "data": {
-                                        "step_id": step_id,
-                                        "verified": False,
-                                        "detail": tool_output,
-                                    },
-                                })
-                                _put({
-                                    "event": "step_complete",
-                                    "data": {"step_id": step_id, "status": "failed"},
-                                })
-                            messages.append(
-                                self._build_tool_result_message(
-                                    call_id=call_id,
-                                    tool_name=raw_request.name,
-                                    tool_output=tool_output,
-                                    status="error",
-                                )
-                            )
-                            answered_call_ids.add(call_id)
-                            continue
-
-                        tool_dict = dispatched["tool"]
-                        arguments = dispatched["arguments"]
-                        validation_errors = dispatched.get("validation_errors") or []
-                        tool_name = str(tool_dict["name"])
-                        last_tool_name = tool_name
-                        if validation_errors:
-                            await _flush_prepared_tool_calls(prepared_tool_calls)
-                            if stop_requested:
-                                break
-                            tool_output = json.dumps(
-                                {
-                                    "status": "error",
-                                    "reason_code": "invalid_tool_arguments",
-                                    "error": "; ".join(validation_errors),
-                                    "expected_schema": tool_dict.get("parameters", {}),
-                                }
-                            )
-                            obs_tool_started_at = _obs_tool_start(
-                                tool_name,
-                                arguments,
-                                call_id,
-                                "low",
-                            )
-                            _put({
-                                "event": "tool_start",
-                                "data": {
-                                    "tool": tool_name,
-                                    "input": arguments,
-                                    "call_id": call_id,
-                                    "risk": "low",
-                                },
-                            })
-                            _put({
-                                "event": "tool_end",
-                                "data": {
-                                    "tool": tool_name,
-                                    "output": tool_output,
-                                    "status": "error",
-                                    "call_id": call_id,
-                                },
-                            })
-                            _obs_tool_end(
-                                tool_name,
-                                tool_output,
-                                "error",
-                                call_id,
-                                obs_tool_started_at,
-                                risk="low",
-                                error_code="invalid_tool_arguments",
-                            )
-                            messages.append(
-                                self._build_tool_result_message(
-                                    call_id=call_id,
-                                    tool_name=tool_name,
-                                    tool_output=tool_output,
-                                    status="error",
-                                )
-                            )
-                            answered_call_ids.add(call_id)
-                            if plan_step is not None:
-                                plan_step.status = "failed"
-                                if callable(sync_plan_progress):
-                                    sync_plan_progress(conversation_id, execution_plan)
-                                _put({"event": "step_complete", "data": {"step_id": step_id, "status": "failed"}})
-                            continue
-                        request = HarnessToolCallRequest(
-                            call_id=call_id,
-                            name=tool_name,
-                            arguments=arguments,
-                            step_id=step_id or None,
-                        )
-                        policy_decision = policy.decide(
-                            request=request,
-                            registry=self.registry,
-                            arguments=arguments,
-                        )
-                        if not policy_decision.allowed:
-                            await _flush_prepared_tool_calls(prepared_tool_calls)
-                            if stop_requested:
-                                break
-                            blocked_code = policy_decision.metadata.get("code", "tool_policy_blocked")
-                            recovery_prompt = ""
-                            tool_output = json.dumps(
-                                {
-                                    "status": "error",
-                                    "code": blocked_code,
-                                    "tool": tool_name,
-                                    "arguments": arguments,
-                                    "error": policy_decision.reason,
-                                },
-                                ensure_ascii=False,
-                            )
-                            _obs_event(
-                                "guardrail_triggered",
-                                level="warning",
-                                status="error",
-                                tool_name=tool_name,
-                                error_code=blocked_code,
-                                error_message=policy_decision.reason,
-                                input={"arguments": arguments, "call_id": call_id},
-                                metadata={"risk": policy_decision.risk},
-                            )
-                            if blocked_code == "repeated_tool_call_blocked":
-                                round_guard_blocks += 1
-                                guard_blocks += 1
-                                last_guard_code = blocked_code
-                                signature = str(
-                                    policy_decision.metadata.get("signature")
-                                    or tool_call_signature(tool_name, arguments)
-                                )
-                                if signature not in policy_repeat_recoveries:
-                                    policy_repeat_recoveries.add(signature)
-                                    recovery_prompt = build_repeat_recovery_prompt(
-                                        reason_code="repeated_tool_call_blocked",
-                                        tool_name=tool_name,
-                                        arguments=arguments,
-                                        last_result=last_tool_outputs_by_signature.get(signature),
-                                    )
-                                    logger.info(
-                                        "turn_loop prompted recovery after repeated blocked tool call "
-                                        "conversation_id=%s tool=%s arguments=%s",
-                                        conversation_id,
-                                        tool_name,
-                                        arguments,
-                                    )
-                                else:
-                                    tool_output = json.dumps(
-                                        {
-                                            "status": "error",
-                                            "code": blocked_code,
-                                            "tool": tool_name,
-                                            "arguments": arguments,
-                                            "error": (
-                                                "This exact call was already blocked as a repeat and will stay blocked. "
-                                                "Use the earlier result, choose a different action, "
-                                                "or answer the user."
-                                            ),
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    logger.warning(
-                                        "turn_loop repeated blocked tool call after recovery "
-                                        "conversation_id=%s tool=%s arguments=%s",
-                                        conversation_id,
-                                        tool_name,
-                                        arguments,
-                                    )
-                            obs_tool_started_at = _obs_tool_start(
-                                tool_name,
-                                arguments,
-                                call_id,
-                                policy_decision.risk,
-                            )
-                            _put({
-                                "event": "tool_start",
-                                "data": {
-                                    "tool": tool_name,
-                                    "input": arguments,
-                                    "call_id": call_id,
-                                    "risk": policy_decision.risk,
-                                },
-                            })
-                            _put({
-                                "event": "tool_end",
-                                "data": {
-                                    "tool": tool_name,
-                                    "output": tool_output,
-                                    "status": "error",
-                                    "call_id": call_id,
-                                    "risk": policy_decision.risk,
-                                },
-                            })
-                            _obs_tool_end(
-                                tool_name,
-                                tool_output,
-                                "error",
-                                call_id,
-                                obs_tool_started_at,
-                                risk=policy_decision.risk,
-                                error_code=blocked_code,
-                            )
-                            if plan_step is not None:
-                                plan_step.status = "failed"
-                                if callable(sync_plan_progress):
-                                    sync_plan_progress(conversation_id, execution_plan)
-                                _put({
-                                    "event": "observation",
-                                    "data": {
-                                        "step_id": step_id,
-                                        "verified": False,
-                                        "detail": tool_output,
-                                    },
-                                })
-                                _put({
-                                    "event": "step_complete",
-                                    "data": {"step_id": step_id, "status": "failed"},
-                                })
-                            self.memory.add_tool_outcome(conversation_id, tool_name, tool_output)
-                            persisted_tool_calls.append(
-                                {
-                                    "tool_name": tool_name,
-                                    "input": json.dumps(arguments, ensure_ascii=False),
-                                    "output": tool_output,
-                                    "status": "error",
-                                }
-                            )
-                            messages.append(
-                                self._build_tool_result_message(
-                                    call_id=call_id,
-                                    tool_name=tool_name,
-                                    tool_output=tool_output,
-                                    status="error",
-                                )
-                            )
-                            answered_call_ids.add(call_id)
-                            if recovery_prompt:
-                                messages.append({"role": "user", "content": recovery_prompt})
-                            if stop_requested:
-                                break
-                            continue
-
-                        obs_tool_started_at = _obs_tool_start(
-                            tool_name,
-                            arguments,
-                            call_id,
-                            policy_decision.risk,
-                        )
-                        _put({
-                            "event": "tool_start",
-                            "data": {
-                                "tool": tool_name,
-                                "input": arguments,
-                                "call_id": call_id,
-                                "risk": policy_decision.risk,
-                            },
-                        })
-                        active_key = tool_batch.register(
-                            call_id=call_id,
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            obs_started_at=obs_tool_started_at,
-                        )
-                        prepared_tool_calls.append(
-                            {
-                                "active_key": active_key,
-                                "call_id": call_id,
-                                "step_id": step_id,
-                                "plan_step": plan_step,
-                                "tool_name": tool_name,
-                                "arguments": arguments,
-                                "tool_dict": tool_dict,
-                                "policy_decision": policy_decision,
-                                "obs_tool_started_at": obs_tool_started_at,
-                            }
-                        )
-                        # Invocation and result handling happen after all
-                        # calls in this contiguous batch have passed the
-                        # preflight checks, allowing safe calls to overlap.
-                        continue
-
-                    if prepared_tool_calls:
-                        await _flush_prepared_tool_calls(prepared_tool_calls)
-                    if stop_requested:
-                        break
-
-                if call_dicts and not stop_requested:
-                    stuck_rounds = stuck_rounds + 1 if round_guard_blocks >= len(call_dicts) else 0
-                    if stuck_rounds >= self.STUCK_ROUNDS_LIMIT or guard_blocks >= self.GUARD_BLOCKS_LIMIT:
-                        stop_requested = True
-                        terminal_error = True
-                        incomplete_reason_code = last_guard_code
-                        final_text = (
-                            f"Stopped: every tool call in the last {stuck_rounds} rounds was blocked or repeated."
-                            if stuck_rounds >= self.STUCK_ROUNDS_LIMIT
-                            else f"Stopped: {guard_blocks} tool calls in this turn were blocked as repeats."
-                        )
-                        logger.warning(
-                            "turn_loop stopped: stuck on guard blocks conversation_id=%s "
-                            "stuck_rounds=%s guard_blocks=%s code=%s",
-                            conversation_id,
-                            stuck_rounds,
-                            guard_blocks,
-                            last_guard_code,
-                        )
-                        _obs_event(
-                            "guardrail_triggered",
-                            level="warning",
-                            status="error",
-                            error_code=last_guard_code,
-                            error_message=final_text,
-                            metadata={"stuck_rounds": stuck_rounds, "guard_blocks": guard_blocks},
-                        )
+                batch_outcome = await tool_runner.execute(call_dicts)
+                if batch_outcome.pause is not None:
+                    stop_requested = True
+                    terminal_error = True
+                    incomplete_reason_code = batch_outcome.pause.reason_code
+                    final_text = batch_outcome.pause.summary
+                transcript.close_unanswered_calls(
+                    incomplete_reason_code or "final_answer_deferred",
+                    explanation="Not run: the turn stopped first." if incomplete_reason_code else "The final answer was deferred while requested tools ran.",
+                )
 
             if (
                 not completed_normally
@@ -1835,9 +546,9 @@ class TurnLoop:
             ):
                 iteration_limit_hit = True
                 budget_exhausted = True
-                if persisted_tool_calls:
-                    last_tool_name = str(persisted_tool_calls[-1].get("tool_name") or last_tool_name)
-                if last_tool_name:
+                if tool_runner.history:
+                    tool_runner.last_tool_name = str(tool_runner.history[-1].get("tool_name") or tool_runner.last_tool_name)
+                if tool_runner.last_tool_name:
                     incomplete_reason_code = "iteration_limit_reached_after_tool"
                     final_text = (
                         "Paused: iteration limit reached after the last tool result. "
@@ -1855,7 +566,7 @@ class TurnLoop:
                     conversation_id,
                     budget.max_iterations,
                     budget.consumed,
-                    last_tool_name,
+                    tool_runner.last_tool_name,
                 )
                 pause_error_event = {
                     "event": "error",
@@ -1864,7 +575,7 @@ class TurnLoop:
                         "message": final_text,
                         "limit": budget.max_iterations,
                         "consumed": budget.consumed,
-                        "last_tool": last_tool_name,
+                        "last_tool": tool_runner.last_tool_name,
                     },
                 }
                 _obs_event(
@@ -1876,7 +587,7 @@ class TurnLoop:
                     metadata={
                         "limit": budget.max_iterations,
                         "consumed": budget.consumed,
-                        "last_tool": last_tool_name,
+                        "last_tool": tool_runner.last_tool_name,
                     },
                 )
 
@@ -1887,80 +598,23 @@ class TurnLoop:
             ):
                 # A guard ended the loop, but the model is healthy: give it one
                 # tool-less call to tell the user what it did and what stopped it.
-                for round_call_id, round_tool_name in round_tool_calls:
-                    if round_call_id not in answered_call_ids:
-                        messages.append(self._build_tool_result_message(
-                            call_id=round_call_id,
-                            tool_name=round_tool_name,
-                            tool_output=json.dumps({
-                                "status": "cancelled",
-                                "reason_code": incomplete_reason_code,
-                                "error": "Not run: the turn stopped first.",
-                            }),
-                            status="error",
-                        ))
-                        answered_call_ids.add(round_call_id)
-                messages.append({"role": "user", "content": guard_wrap_up_prompt(incomplete_reason_code, final_text)})
+                transcript.close_unanswered_calls(incomplete_reason_code)
+                transcript.messages.append({"role": "user", "content": guard_wrap_up_prompt(incomplete_reason_code, final_text)})
                 streamed_answer_text = ""
 
-                async def _wrap_up_token_cb(delta: str) -> None:
-                    nonlocal streamed_answer_text
-                    streamed_answer_text += str(delta or "")
-                    _emit_response_token(delta)
-
-                wrap_up_started_at = time.perf_counter()
-                _obs_event(
-                    "llm_call_started",
-                    input={"message_count": len(messages), "tool_count": 0, "tool_choice": "none"},
-                    metadata={"wrap_up": True, "reason_code": incomplete_reason_code},
-                )
                 try:
-                    _transition(run_state.model_call)
-                    current_prompt = _current_system_prompt()
-                    messages, latest_round_start, _ = await fit_live_context(
-                        messages, [], current_prompt, llm_client=self.llm_client,
-                        latest_round_start=latest_round_start, timeout_seconds=self.max_llm_call_seconds,
-                    )
-                    wrap_up_response = await asyncio.wait_for(
-                        self.llm_client.chat_with_tools(
-                            messages,
-                            [],
-                            system_prompt=current_prompt,
-                            stream_callback=_wrap_up_token_cb,
-                        ),
-                        timeout=self.max_llm_call_seconds,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
+                    wrap_up_result = await model_runner.request(transcript.snapshot(
+                        tools=[], system_prompt=_current_system_prompt(), tool_choice="none", stream_reasoning=False,
+                        metadata={"wrap_up": True, "reason_code": incomplete_reason_code},
+                    ))
+                    transcript.accept(wrap_up_result)
+                    wrap_up_response = wrap_up_result.response
+                    obs_usage_total = obs_usage_total.merge(wrap_up_result.usage)
+                except ModelRequestError:
                     wrap_up_response = None
-                    logger.warning(
-                        "turn_loop wrap-up call failed conversation_id=%s reason=%s error=%s",
-                        conversation_id,
-                        incomplete_reason_code,
-                        exc,
-                    )
-                    _obs_event(
-                        "llm_call_finished",
-                        level="warning",
-                        status="error",
-                        duration_ms=round((time.perf_counter() - wrap_up_started_at) * 1000),
-                        error_code="wrap_up_failed",
-                        error_message=str(exc),
-                        metadata={"wrap_up": True},
-                    )
+                streamed_answer_text = model_runner.answer_text
                 wrap_up_text = ""
                 if wrap_up_response is not None:
-                    wrap_up_usage = usage_from_any(getattr(wrap_up_response, "usage", None))
-                    obs_usage_total = obs_usage_total.merge(wrap_up_usage)
-                    _obs_event(
-                        "llm_call_finished",
-                        status="ok",
-                        duration_ms=round((time.perf_counter() - wrap_up_started_at) * 1000),
-                        output={"finish_reason": wrap_up_response.finish_reason, "content": wrap_up_response.content},
-                        tokens=wrap_up_usage,
-                        metadata={"wrap_up": True},
-                    )
                     wrap_up_text = str(wrap_up_response.content or "").strip()
                     if not wrap_up_text:
                         for call in wrap_up_response.tool_calls or []:
@@ -1997,56 +651,23 @@ class TurnLoop:
                 await emit_typewriter_tokens(_emit_response_event, final_text)
                 streamed_answer_text = final_text
 
-            response_duration_ms = _response_duration_ms()
             response_attachments = collect_response_attachments(
                 content=final_text,
                 explicit_paths=final_attachment_paths,
-                tool_calls=persisted_tool_calls,
+                tool_calls=tool_runner.history,
             )
-            await _persist_turn_once(
-                final_text,
-                status=run_status,
-                response_attachments=response_attachments,
-            )
-            if completed_normally and not iteration_limit_hit and not budget_exhausted:
-                self.memory.clear_task_progress(conversation_id)
-            finish_observed_run(
-                self.observability,
-                run_id=obs_run_id,
-                status=run_status,
-                final_output=final_text or "Done.",
-                failure_reason=incomplete_reason_code if run_status != "complete" else "",
-                duration_ms=response_duration_ms,
+            await lifecycle.finalize(
+                TurnOutcome(final_text or "Done.", run_status, incomplete_reason_code, response_attachments),
+                persist=_persist_turn,
                 usage=obs_usage_total,
-                tool_calls=persisted_tool_calls,
+                tool_calls=_tool_calls_for_persist(),
                 metadata={
                     "completed_normally": completed_normally,
                     "budget_consumed": budget.consumed,
                     "budget_limit": budget.max_iterations,
                 },
+                clear_progress=lambda: self.memory.clear_task_progress(conversation_id),
             )
-
-            incomplete = run_status != "complete"
-            done_data = done_payload(
-                conversation_id,
-                final_text or "Done.",
-                run_status,
-                attachments=response_attachments,
-                duration_ms=response_duration_ms,
-                incomplete=incomplete,
-                reason_code=incomplete_reason_code,
-            )
-            if incomplete:
-                if stop_requested:
-                    _transition(run_state.cancel, incomplete_reason_code or "cancelled")
-                else:
-                    _transition(run_state.fail, incomplete_reason_code or "incomplete")
-            else:
-                _transition(run_state.complete)
-            _put({
-                "event": "done",
-                "data": done_data,
-            })
 
             # Memory learning reads only the user's words (including steering sent
             # mid-turn) and runs as a background task after the user-visible `done`,
@@ -2062,75 +683,40 @@ class TurnLoop:
                 except Exception:
                     logger.exception("schedule_memory_learning failed")
         except asyncio.CancelledError:
-            await tool_batch.cancel_tasks()
-            _mark_active_tool_calls_cancelled()
-            _transition(run_state.cancel, "cancelled")
-            partial_text = _assistant_message_on_cancel()
+            reason = lifecycle.stop_reason or TurnStopReason.CANCELLED
+            await tool_runner.cancel("turn_timeout" if reason == TurnStopReason.TIMEOUT else "user_stopped")
+            if reason == TurnStopReason.TIMEOUT:
+                partial_text = "Paused: task timed out."
+                progress = _assistant_message_on_cancel()
+                if progress != "Stopped before final answer.":
+                    partial_text += f"\n\n{progress}"
+                _put({"event": "error", "data": {
+                    "code": reason.value,
+                    "message": f"Turn exceeded {self.max_turn_seconds}s limit.",
+                }})
+                _obs_error(f"Turn exceeded {self.max_turn_seconds}s limit.", error_type=reason.value)
+            else:
+                partial_text = _assistant_message_on_cancel()
             if unfinished_workers(conversation_id):
                 partial_text += "\n\nA tool is still stopping. Further actions are blocked until it finishes; verify its last action before retrying."
-            try:
-                await _persist_turn_once(partial_text, status="paused")
-                finish_observed_run(
-                    self.observability,
-                    run_id=obs_run_id,
-                    status="paused",
-                    final_output=partial_text,
-                    failure_reason="cancelled",
-                    duration_ms=_response_duration_ms(),
-                    usage=obs_usage_total,
-                    tool_calls=_tool_calls_for_persist(),
-                )
-                logger.info(
-                    "turn_loop persisted cancelled turn conversation_id=%s tool_calls=%s last_tool=%s",
-                    conversation_id,
-                    len(_tool_calls_for_persist()),
-                    last_tool_name,
-                )
-            except Exception:
-                logger.exception(
-                    "turn_loop failed to persist cancelled turn conversation_id=%s",
-                    conversation_id,
-                )
+            await lifecycle.finalize(
+                TurnOutcome(partial_text, "paused", reason.value),
+                persist=_persist_turn, usage=obs_usage_total, tool_calls=_tool_calls_for_persist(),
+            )
             raise
         except Exception as exc:
-            await tool_batch.cancel_tasks()
-            _mark_active_tool_calls_cancelled()
-            _transition(run_state.fail, "internal_error")
+            await tool_runner.cancel()
             logger.exception("react_worker error: %s", exc)
-            _obs_error(
-                str(exc),
-                error_type=type(exc).__name__,
-                metadata={"phase": "turn_loop"},
-            )
+            _obs_error(str(exc), error_type=type(exc).__name__, metadata={"phase": "turn_loop"})
             failure_text = "Paused after an internal error. The saved tool results can be used to continue."
             partial_text = final_text.strip() or streamed_answer_text.strip() or latest_progress_text.strip()
             if partial_text:
                 failure_text += f"\n\nLast response: {partial_text}"
-            try:
-                await _persist_turn_once(failure_text, status="error")
-            except Exception:
-                logger.exception("Unable to checkpoint failed turn conversation_id=%s", conversation_id)
-            finish_observed_run(
-                self.observability,
-                run_id=obs_run_id,
-                status="error",
-                final_output=final_text or "Error.",
-                failure_reason="internal_error",
-                duration_ms=_response_duration_ms(),
-                usage=obs_usage_total,
-                tool_calls=_tool_calls_for_persist(),
+            _put({"event": "error", "data": {"code": "internal_error", "message": str(exc)}})
+            await lifecycle.finalize(
+                TurnOutcome(failure_text, "error", "internal_error"),
+                persist=_persist_turn, usage=obs_usage_total, tool_calls=_tool_calls_for_persist(),
             )
-            try:
-                _put({
-                    "event": "error",
-                    "data": {"code": "internal_error", "message": str(exc)},
-                })
-                _put({
-                    "event": "done",
-                    "data": done_payload(conversation_id, failure_text, "error"),
-                })
-            except Exception:
-                pass
         finally:
             memory_store = getattr(self.memory, "memory_store", None)
             if memory_store is not None and obs_run_id:
@@ -2139,8 +725,6 @@ class TurnLoop:
             if obs_context_token is not None:
                 reset_current_run_id(obs_context_token)
             reset_current_conversation_id(context_token)
-        # Note: the None sentinel is placed by _run_worker_with_timeout, not here,
-        # so timeout-injected error events arrive before the sentinel.
 
     async def run(
         self,
@@ -2156,53 +740,14 @@ class TurnLoop:
             loop = asyncio.get_running_loop()
             last_flush: list[float] = [loop.time()]
             publisher = RunEventPublisher(queue, last_flush, loop=loop)
-            stop_event = asyncio.Event()
-
-            pump_task = asyncio.create_task(
-                _heartbeat_pump(publisher, stop_event)
-            )
-
-            async def _run_worker_with_timeout():
-                try:
-                    await asyncio.wait_for(
-                        self._react_worker(
-                            message,
-                            conversation_id,
-                            system_prompt,
-                            publisher,
-                            attachments,
-                            **({"steering": steering} if steering is not None else {}),
-                        ),
-                        timeout=self.max_turn_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    timeout_summary = "Paused: task timed out."
-                    if unfinished_workers(conversation_id):
-                        timeout_summary += " A tool is still stopping; wait for it to finish and verify its last action before continuing."
-                    self.observability.log_error(
-                        conversation_id=conversation_id,
-                        message=f"Turn exceeded {self.max_turn_seconds}s limit.",
-                        error_type="turn_timeout",
-                        metadata={"timeout_s": self.max_turn_seconds},
-                    )
-                    self.observability.finish_open_run_for_conversation(
-                        conversation_id=conversation_id,
-                        status="paused",
-                        failure_reason="turn_timeout",
-                        final_output=timeout_summary,
-                    )
-                    publisher.publish_nowait({
-                        "event": "error",
-                        "data": {"code": "turn_timeout", "message": f"Turn exceeded {self.max_turn_seconds}s limit."},
-                    })
-                    publisher.publish_nowait({
-                        "event": "done",
-                        "data": {"conversation_id": conversation_id, "summary": timeout_summary, "status": "paused", "incomplete_reason_code": "turn_timeout"},
-                    })
-                finally:
-                    await queue.put(None)  # sentinel always placed here
-
-            worker_task = asyncio.create_task(_run_worker_with_timeout())
+            lifecycle = TurnLifecycle(conversation_id, publisher, self.observability)
+            worker_task = asyncio.create_task(lifecycle.drive(
+                self._react_worker(
+                    message, conversation_id, system_prompt, publisher, attachments,
+                    steering=steering, lifecycle=lifecycle,
+                ),
+                timeout_seconds=self.max_turn_seconds,
+            ))
 
             try:
                 while True:
@@ -2212,13 +757,6 @@ class TurnLoop:
                     last_flush[0] = loop.time()
                     yield event
             finally:
-                # C4: Signal stop before cancelling so pump exits cleanly via wait_for.
-                stop_event.set()
-                pump_task.cancel()
-                worker_task.cancel()
-                try:
-                    await asyncio.gather(pump_task, worker_task, return_exceptions=True)
-                except BaseException:
-                    # CancelledError is BaseException in Python 3.8+; swallow here
-                    # so teardown always completes even if this coroutine is cancelled.
-                    pass
+                if not worker_task.done():
+                    worker_task.cancel()
+                await drain_task(worker_task)

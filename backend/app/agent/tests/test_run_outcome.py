@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from app.agent.harness.run_outcome import done_payload, finish_observed_run, tool_error_count, turn_status
+from app.agent.harness.turn_lifecycle import TurnLifecycle, TurnOutcome
 from app.agent.observability.recorder import UsageStats
+from app.agent.run_events import RunEventPublisher
 
 
 class _RecordingObservability:
@@ -93,3 +99,37 @@ def test_finish_observed_run_reports_tool_counts_only_when_known():
         "final_output": "Waiting.",
         "failure_reason": "",
     }
+
+
+def test_cancelling_a_finalizer_waiter_does_not_duplicate_or_replace_the_commit():
+    async def scenario():
+        queue = asyncio.Queue()
+        publisher = RunEventPublisher(queue, [asyncio.get_running_loop().time()])
+        observability = _RecordingObservability()
+        lifecycle = TurnLifecycle("c1", publisher, observability)
+        saving = asyncio.Event()
+        release = asyncio.Event()
+        persisted = []
+
+        async def persist(outcome):
+            saving.set()
+            await release.wait()
+            persisted.append(outcome)
+
+        kwargs = dict(persist=persist, usage=UsageStats(), tool_calls=[])
+        task = asyncio.create_task(lifecycle.finalize(TurnOutcome("Saved."), **kwargs))
+        await saving.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        await lifecycle.finalize(TurnOutcome("Stopped.", "paused", "cancelled"), **kwargs)
+        assert persisted == [TurnOutcome("Saved.")]
+        assert len(observability.calls) == 1
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        assert [event["data"]["summary"] for event in events if event["event"] == "done"] == ["Saved."]
+        assert [event["data"]["state"] for event in events if event["event"] == "run_state"] == ["finalizing", "completed"]
+
+    asyncio.run(scenario())

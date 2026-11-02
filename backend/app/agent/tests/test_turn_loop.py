@@ -268,6 +268,7 @@ class PersistingFakeMemory(FakeMemory):
         status: str = "complete",
         response_duration_ms: int | None = None,
         response_attachments: list[dict] | None = None,
+        turn_id: str | None = None,
     ) -> None:
         self.persisted_turns.append(
             {
@@ -1097,6 +1098,10 @@ def test_turn_loop_applies_steering_before_dispatching_a_stale_model_response():
         async def chat_with_tools(self, messages, tools, **kwargs):
             calls.append([dict(item) for item in messages])
             if len(calls) == 1:
+                # A provider works on its request snapshot; even a stale
+                # request's in-place changes must not replace the live history.
+                messages.clear()
+                messages.append({"role": "assistant", "content": "Discard this stale context"})
                 inbox.enqueue(SteeringMessage("steer-1", instruction))
                 return LLMResponse(content="", tool_calls=[ToolCallRequest(
                     call_id="stale-call", tool_name="echo_tool", arguments={"text": "stale"},
@@ -1117,6 +1122,8 @@ def test_turn_loop_applies_steering_before_dispatching_a_stale_model_response():
     events = asyncio.run(collect())
     assert executed == []
     assert calls[1][-1] == {"role": "user", "content": instruction}
+    assert calls[1][0] == {"role": "user", "content": "Summarize the report"}
+    assert not any(item.get("content") == "Discard this stale context" for item in calls[1])
     assert any(event["event"] == "steering_applied" for event in events)
     assert memory.added_messages == [("user", "Summarize the report"), ("user", instruction), ("assistant", "Here is the table.")]
     assert inbox.closed
@@ -1441,6 +1448,63 @@ def test_turn_loop_prompts_for_access_while_siblings_run_and_reruns_with_call_id
     assert gated_call_ids[0].endswith(":gated")
     assert [event["data"]["call_id"] for event in tool_end_events] == ["gated", "sibling"]
     assert json.loads(tool_end_events[0]["data"]["output"])["value"] == "granted"
+
+
+def test_parallel_tool_does_not_replace_an_outstanding_permission_phase():
+    async def scenario():
+        sibling_finished = asyncio.Event()
+        release_gate = asyncio.Event()
+
+        async def gated():
+            return json.dumps({"status": "pending_access_grant", "ticket_id": "phase-grant"})
+
+        async def sibling():
+            sibling_finished.set()
+            return "ok"
+
+        class Model:
+            calls = 0
+
+            async def chat_with_tools(self, messages, tools, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return LLMResponse(content="", tool_calls=[
+                        ToolCallRequest("gated", "gated", {}), ToolCallRequest("sibling", "sibling", {}),
+                    ])
+                return LLMResponse(content="Finished.")
+
+        loop = TurnLoop(
+            llm_client=Model(), memory=PersistingFakeMemory(), observability=FakeObservability(),
+            max_parallel_tool_calls=1,
+            registry=ToolRegistry([{
+                "name": name, "callable": fn, "execution_mode": "async",
+                "parameters": {"type": "object", "properties": {}},
+                "metadata": {"parallel_safe": True, "resource_locks": []},
+            } for name, fn in [("gated", gated), ("sibling", sibling)]]),
+        )
+
+        async def wait_for_gate(*, emit, **kwargs):
+            emit({"event": "access_grant_required", "data": {"ticket_id": "phase-grant"}})
+            await sibling_finished.wait()
+            emit({"event": "progress", "data": {"content": "Sibling finished; permission still pending."}})
+            await release_gate.wait()
+            return '{"status":"ok"}'
+
+        loop.execution_gate.resolve_pending_output = wait_for_gate
+        phase = ""
+        try:
+            async for event in loop.run("Run both", "parallel-permission-phase", system_prompt=""):
+                if event["event"] == "run_state":
+                    phase = event["data"]["state"]
+                if event["event"] == "progress" and event["data"]["content"].startswith("Sibling finished"):
+                    assert phase == "waiting_access"
+                    release_gate.set()
+        finally:
+            release_gate.set()
+            loop.shutdown()
+        assert sibling_finished.is_set()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=3))
 
 
 def test_turn_loop_orders_invalid_safe_call_between_valid_results():
@@ -3458,13 +3522,15 @@ def test_turn_loop_llm_timeout_emits_error_and_done():
 def test_turn_loop_turn_timeout_emits_error_and_done():
     """When total turn exceeds max_turn_seconds, error + done events are emitted."""
     registry = ToolRegistry([])
-    memory = FakeMemory()
+    memory = PersistingFakeMemory()
+    observability = FakeObservability()
     loop_obj = TurnLoop(
         llm_client=SlowLLM(),
         registry=registry,
         memory=memory,
         max_turn_seconds=0.1,
         max_llm_call_seconds=999,
+        observability=observability,
     )
 
     async def collect():
@@ -3476,6 +3542,109 @@ def test_turn_loop_turn_timeout_emits_error_and_done():
     error_evt = next(e for e in events if e["event"] == "error")
     assert error_evt["data"]["code"] == "turn_timeout"
     assert "done" in event_names
+    done = [event["data"] for event in events if event["event"] == "done"]
+    assert len(done) == 1
+    assert done[0]["reason_code"] == "turn_timeout"
+    assert done[0]["status"] == "paused"
+    assert len(memory.persisted_turns) == 1
+    assert memory.persisted_turns[0]["assistant_message"] == done[0]["summary"]
+    finished = [event for event in observability.events if event["method"] == "finish_run"]
+    assert len(finished) == 1
+    assert finished[0]["failure_reason"] == "turn_timeout"
+    assert finished[0]["final_output"] == done[0]["summary"]
+    states = [event["data"]["state"] for event in events if event["event"] == "run_state"]
+    assert states[-2:] == ["finalizing", "failed"]
+
+
+def test_repeated_stop_drains_tools_and_finishes_the_turn_once():
+    async def scenario():
+        started = asyncio.Event()
+        stopping = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_tool(text):
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                stopping.set()
+                await release.wait()
+
+        memory = PersistingFakeMemory()
+        observability = FakeObservability()
+        loop = TurnLoop(
+            llm_client=SlowToolCallLLM(), memory=memory, observability=observability,
+            registry=ToolRegistry([{
+                "name": "slow_tool", "callable": slow_tool, "execution_mode": "async",
+                "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+            }]),
+        )
+        events = []
+
+        async def consume():
+            async for event in loop.run("work", "repeated-stop", system_prompt=""):
+                events.append(event)
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=2)
+            task.cancel()
+            await asyncio.wait_for(stopping.wait(), timeout=2)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert not memory.persisted_turns
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            loop.shutdown()
+        assert len(memory.persisted_turns) == 1
+        assert memory.persisted_turns[0]["tool_calls"][0]["status"] == "cancelled"
+        finished = [event for event in observability.events if event["method"] == "finish_run"]
+        assert len(finished) == 1
+        assert finished[0]["failure_reason"] == "cancelled"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["persistence", "observability"])
+def test_finalization_reports_its_outcome_once_when_a_sink_fails(failure):
+    class Memory(PersistingFakeMemory):
+        async def persist_turn(self, *args, **kwargs):
+            if failure == "persistence":
+                raise RuntimeError("disk unavailable")
+            return await super().persist_turn(*args, **kwargs)
+
+    class Observability(FakeObservability):
+        def finish_run(self, **kwargs):
+            super().finish_run(**kwargs)
+            if failure == "observability":
+                raise RuntimeError("recorder unavailable")
+
+    memory = Memory()
+    observability = Observability()
+    loop = TurnLoop(llm_client=FakeLLM(), registry=ToolRegistry([]), memory=memory, observability=observability)
+
+    async def collect():
+        return [event async for event in loop.run("hello", "sink-failure", system_prompt="")]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    done = [event["data"] for event in events if event["event"] == "done"]
+    assert len(done) == 1
+    assert len([event for event in observability.events if event["method"] == "finish_run"]) == 1
+    if failure == "persistence":
+        assert done[0]["reason_code"] == "persistence_failed"
+        assert done[0]["status"] == "error"
+        assert not memory.persisted_turns
+    else:
+        assert done[0]["status"] == "complete"
+        assert len(memory.persisted_turns) == 1
 
 
 def test_turn_loop_resets_budget_between_runs():

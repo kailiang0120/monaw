@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,14 +24,7 @@ import app.api.routes.conversations as routes_mod
 from app.agent.database import Database
 from app.agent.memory_manager import MemoryManager
 from app.agent.skill_loader import SkillSpec
-from app.agent.state import (
-    ConversationState,
-    ExecutionPlan,
-    IntentResult,
-    PlanStep,
-    StepResult,
-    TaskState,
-)
+from app.agent.state import ConversationState
 from app.main import app
 
 
@@ -210,6 +204,63 @@ def test_failed_turn_restores_bounded_tool_evidence_for_continuation():
     assert len(checkpoint) < 3000
     assistant = manager._db.get_messages("failed-tool-evidence")[-1]
     assert manager._db.get_tool_calls_for_message(assistant["id"])[0]["output"] == raw_result
+
+
+def test_turn_checkpoint_rolls_back_and_retries_without_duplicate_history(isolated_memory_db):
+    db = isolated_memory_db
+    manager = MemoryManager(RecordingLLM())
+    state = manager.get_or_create("atomic-turn")
+    # Fail after the user and assistant rows have been inserted, at the tool write.
+    db.execute("""CREATE TRIGGER fail_turn_tool BEFORE INSERT ON tool_calls
+                  BEGIN SELECT RAISE(ABORT, 'disk write failed'); END""")
+    db.commit()
+    kwargs = dict(
+        turn_id="stable-turn-id", status="paused", steering_messages=["Keep it short"],
+        tool_calls=[{"tool_name": "write", "input": "{}", "output": "saved", "status": "complete"}],
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="disk write failed"):
+        asyncio.run(manager.persist_turn("atomic-turn", "Write report", "Paused", **kwargs))
+    assert db.get_messages("atomic-turn") == []
+    assert not state.recent_messages
+    assert db.fetchone("SELECT COUNT(*) FROM turn_checkpoints")[0] == 0
+    db.execute("DROP TRIGGER fail_turn_tool")
+    db.commit()
+    user_ids = asyncio.run(manager.persist_turn("atomic-turn", "Write report", "Paused", **kwargs))
+    original_history = db.get_messages("atomic-turn")
+    assert [row["role"] for row in original_history] == ["user", "user", "assistant"]
+    assert len(state.recent_messages) == 3
+
+    # Open a fresh database connection and memory manager, as after a restart.
+    reopened_db = Database(db._path)
+    reopened_db.init_db()
+    reopened = MemoryManager(RecordingLLM())
+    reopened._db = reopened_db
+    try:
+        assert asyncio.run(reopened.persist_turn("atomic-turn", "Write report", "Paused", **kwargs)) == user_ids
+        assert reopened_db.get_messages("atomic-turn") == original_history
+        assert len(reopened_db.get_tool_calls_for_message(original_history[-1]["id"])) == 1
+        assert "saved" in reopened.build_llm_messages("atomic-turn")[-1]["content"]
+        reopened_db.delete_conversation("atomic-turn")
+        assert reopened_db.fetchone("SELECT COUNT(*) FROM turn_checkpoints")[0] == 0
+    finally:
+        reopened_db.close()
+
+
+def test_deferred_summary_preserves_older_history_after_reopening():
+    manager = MemoryManager(RecordingLLM())
+    for index in range(13):
+        asyncio.run(manager.persist_turn("pending-summary", f"Request {index}", f"Reply {index}", tool_calls=[]))
+    assert not manager.llm_client.calls  # History commits do not wait on the model.
+    llm = RecordingLLM(reply="The earlier requests are preserved.")
+    reopened = MemoryManager(llm)
+    asyncio.run(reopened.ensure_context_fits("pending-summary"))
+    assert len(llm.calls) == 1
+    assert "Request 0" in str(llm.calls[0]["messages"])
+    assert "Reply 12" in str(llm.calls[0]["messages"])
+    history = reopened.build_llm_messages("pending-summary")
+    assert "The earlier requests are preserved." in history[0]["content"]
+    asyncio.run(reopened.ensure_context_fits("pending-summary"))
+    assert len(llm.calls) == 1
 
 
 def test_memory_manager_builds_structured_context_and_history(monkeypatch, tmp_path):

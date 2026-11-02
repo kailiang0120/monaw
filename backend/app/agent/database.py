@@ -692,6 +692,59 @@ class Database:
 
     # Message CRUD
 
+    def persist_turn_messages(self, turn_id: str, conv_id: str, messages: list[dict]) -> tuple[list[int], bool]:
+        """Commit all turn messages and tool results together; the first commit wins.
+
+        The checkpoint survives process restarts, so retrying an uncertain commit
+        returns its original user IDs without inserting duplicate history.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            conn = self.conn
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    "SELECT conversation_id, user_message_ids FROM turn_checkpoints WHERE turn_id = ?",
+                    (turn_id,),
+                ).fetchone()
+                if existing is not None:
+                    if existing["conversation_id"] != conv_id:
+                        raise ValueError("Turn ID belongs to another conversation")
+                    conn.commit()
+                    return json.loads(existing["user_message_ids"]), False
+                user_ids: list[int] = []
+                for message in messages:
+                    cursor = conn.execute(
+                        """INSERT INTO messages (
+                            conversation_id, role, content, thinking, status,
+                            response_duration_ms, attachments_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (conv_id, message["role"], message["content"], message.get("thinking", ""),
+                         message.get("status", "complete"), message.get("response_duration_ms"),
+                         json.dumps(message["attachments"], ensure_ascii=False) if message.get("attachments") else "", now),
+                    )
+                    message_id = cursor.lastrowid
+                    if message["role"] == "user":
+                        user_ids.append(message_id)
+                    for call in message.get("tool_calls", []):
+                        conn.execute(
+                            """INSERT INTO tool_calls (
+                                message_id, conversation_id, tool_name, input, output, status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (message_id, conv_id, str(call.get("tool_name", "")), str(call.get("input", "")),
+                             str(call.get("output", "")), str(call.get("status", "complete")), now),
+                        )
+                conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conv_id))
+                conn.execute(
+                    "INSERT INTO turn_checkpoints (turn_id, conversation_id, user_message_ids) VALUES (?, ?, ?)",
+                    (turn_id, conv_id, json.dumps(user_ids)),
+                )
+                conn.commit()
+                return user_ids, True
+            except BaseException:
+                conn.rollback()
+                raise
+
     def add_message(
         self,
         conv_id: str,

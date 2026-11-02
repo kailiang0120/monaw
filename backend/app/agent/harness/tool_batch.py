@@ -7,7 +7,7 @@ import itertools
 import json
 import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, TypeVar
 
 from app.agent.harness.tool_protocol import ToolCallResult
 
@@ -33,8 +33,16 @@ class ActiveToolCall:
         return {"tool_name": self.tool_name, "input": self.input, "output": self.output, "status": self.status}
 
 
-InvokePrepared = Callable[[dict], Awaitable[ToolCallResult]]
-ReportEscapedError = Callable[[dict, BaseException], None]
+@dataclass
+class TrackedToolCall:
+    active_key: str
+    call_id: str
+    tool_name: str
+
+
+PreparedT = TypeVar("PreparedT", bound=TrackedToolCall)
+InvokePrepared = Callable[[PreparedT], Awaitable[ToolCallResult]]
+ReportEscapedError = Callable[[PreparedT, BaseException], None]
 ObserveCancelled = Callable[[ActiveToolCall, str, str, str, "int | None"], None]
 
 
@@ -104,30 +112,30 @@ class ToolBatchLedger:
 
     async def run(
         self,
-        prepared_calls: list[dict],
-        invoke: InvokePrepared,
+        prepared_calls: list[PreparedT],
+        invoke: InvokePrepared[PreparedT],
         *,
         parallel: bool,
-        report_escaped_error: ReportEscapedError,
+        report_escaped_error: ReportEscapedError[PreparedT],
     ) -> list[ToolCallResult]:
         """Run a prepared batch while retaining task ownership for cancellation."""
         tasks: list[asyncio.Task] = []
         for prepared in prepared_calls:
-            task = asyncio.create_task(invoke(prepared), name=f"turn-tool-{prepared['call_id']}")
-            self._tasks[prepared["active_key"]] = task
+            task = asyncio.create_task(invoke(prepared), name=f"turn-tool-{prepared.call_id}")
+            self._tasks[prepared.active_key] = task
             tasks.append(task)
 
         if not parallel:
             # A serial barrier still uses a tracked task so a turn
             # cancellation can drain it through the same path.
             result = await tasks[0]
-            self._tasks.pop(prepared_calls[0]["active_key"], None)
+            self._tasks.pop(prepared_calls[0].active_key, None)
             return [result]
 
         values = await asyncio.gather(*tasks, return_exceptions=True)
         results: list[ToolCallResult] = []
         for prepared, value in zip(prepared_calls, values):
-            self._tasks.pop(prepared["active_key"], None)
+            self._tasks.pop(prepared.active_key, None)
             if isinstance(value, asyncio.CancelledError):
                 raise value
             if isinstance(value, BaseException):
@@ -136,12 +144,12 @@ class ToolBatchLedger:
                 # that boundary.
                 report_escaped_error(prepared, value)
                 value = ToolCallResult.from_output(
-                    call_id=str(prepared["call_id"]),
-                    name=str(prepared["tool_name"]),
+                    call_id=str(prepared.call_id),
+                    name=str(prepared.tool_name),
                     output=json.dumps({"status": "error", "error": str(value)}),
                     fallback_status="error",
                 )
-                self.record_result(prepared["active_key"], value)
+                self.record_result(prepared.active_key, value)
             results.append(value)
         return results
 
@@ -155,7 +163,7 @@ class ToolBatchLedger:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
 
-    def mark_cancelled(self, *, worker_state: str, observe: ObserveCancelled) -> None:
+    def mark_cancelled(self, *, worker_state: str, observe: ObserveCancelled, reason_code: str = "user_stopped") -> None:
         """Mark unfinished calls cancelled and report each unobserved call once.
 
         ``observe`` receives the call, its observed status, output, error code
@@ -164,7 +172,7 @@ class ToolBatchLedger:
         cancelled_output = json.dumps(
             {
                 "status": "cancelled",
-                "reason_code": "user_stopped",
+                "reason_code": reason_code,
                 "error": "Cancellation requested while the tool was running. Verify its last action before retrying.",
                 "worker_state": worker_state,
             },
