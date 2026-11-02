@@ -720,7 +720,13 @@ class MemoryManager:
                 break
             result = await self.compact_conversation(conversation_id)
             if result.get("status") != "compacted":
-                raise RuntimeError("Could not summarize older history before preparing the next model request.")
+                # A failed summary must not block the turn: answer from the
+                # recent history and try compacting again on the next turn.
+                logger.warning(
+                    "Could not summarize older history; continuing with recent messages conversation_id=%s status=%s",
+                    conversation_id, result.get("status"),
+                )
+                return
         while True:
             before = self.estimate_context_tokens(
                 conversation_id,

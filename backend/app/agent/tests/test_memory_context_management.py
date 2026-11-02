@@ -263,6 +263,23 @@ def test_deferred_summary_preserves_older_history_after_reopening():
     assert len(llm.calls) == 1
 
 
+def test_failed_deferred_summary_does_not_block_the_turn():
+    manager = MemoryManager(RecordingLLM())
+    for index in range(13):
+        asyncio.run(manager.persist_turn("failed-summary", f"Request {index}", f"Reply {index}", tool_calls=[]))
+    failing = FailingCompactionLLM()
+    reopened = MemoryManager(failing)
+    asyncio.run(reopened.ensure_context_fits("failed-summary"))
+    assert len(failing.calls) == 1
+    history = reopened.build_llm_messages("failed-summary")
+    assert "Reply 12" in str(history)
+    retried = RecordingLLM(reply="Summary after the provider recovered.")
+    recovered = MemoryManager(retried)
+    asyncio.run(recovered.ensure_context_fits("failed-summary"))
+    assert len(retried.calls) == 1
+    assert "Summary after the provider recovered." in recovered.build_llm_messages("failed-summary")[0]["content"]
+
+
 def test_memory_manager_builds_structured_context_and_history(monkeypatch, tmp_path):
     _patch_memory_dirs(monkeypatch, tmp_path)
     llm = RecordingLLM()
