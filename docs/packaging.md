@@ -2,7 +2,7 @@
 
 Monaw can be built as a Windows installer that runs without Python, uv, Node, npm, Vite or Git on the user's machine. The packaged app runs a frozen backend built with PyInstaller instead of the source backend.
 
-This is the first packaging candidate: unsigned, x64 only, and not yet tested on a clean machine or through an upgrade. See "Not yet verified".
+The installer is unsigned and supports Windows x64. Build measurements, packaged-app checks, and upgrade-check results are recorded below; see "Not yet verified" for remaining verification limits.
 
 ## Build
 

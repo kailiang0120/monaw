@@ -1,63 +1,91 @@
-# Monaw Agent
-
 <p align="center">
   <img src="frontend/src/assets/Logo.png" alt="Monaw Agent logo" width="128" />
 </p>
 
-**An open-source AI desktop assistant for Windows, built with Electron, React, and Python.**
+<h1 align="center">Monaw Agent</h1>
 
-Monaw connects a chat interface to an agent that can work with project files, run commands, automate Chrome and Windows apps, and use MCP tools. It supports OpenAI API keys, ChatGPT account sign-in through the Codex SDK, and Google Gemini API keys.
+<p align="center">
+  <strong>Your AI assistant for files, browsers, and Windows apps.</strong><br />
+  Work with your projects, automate everyday tasks, and connect your tools through one desktop chat.<br />
+  Open source. Local storage. Your choice of model.
+</p>
 
-The application runs on your PC. Chat history, settings, memory, and artifacts are stored locally; model requests go to your selected provider. Windows 10 and 11 are supported; macOS has not been tested.
+<p align="center">
+  <a href="docs/installation.md"><img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square" alt="Platform: Windows 10 and 11" /></a>
+  <a href="#technology-stack"><img src="https://img.shields.io/badge/Electron-47848F?style=flat-square&amp;logo=electron&amp;logoColor=white" alt="Built with Electron" /></a>
+  <a href="#technology-stack"><img src="https://img.shields.io/badge/React-20232A?style=flat-square&amp;logo=react&amp;logoColor=61DAFB" alt="Built with React" /></a>
+  <a href="backend/.python-version"><img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-689F38?style=flat-square" alt="License: Apache 2.0" /></a>
+</p>
 
-## Setup and Start
+<p align="center">
+  <a href="https://github.com/kailiang0120/monaw/releases/latest"><strong>Download for Windows (.exe)</strong></a> &middot;
+  <a href="#getting-started">Getting started</a> &middot;
+  <a href="#documentation">Documentation</a> &middot;
+  <a href="#development">Development</a> &middot;
+  <a href="https://github.com/kailiang0120/monaw/issues">Report an issue</a>
+</p>
 
-To use Monaw without Python, Node.js or Git, build or download the Windows installer instead; see [Installing the Windows build](docs/installation.md). The steps below run Monaw from source.
+<p align="center">
+  <img src="docs/assets/use-cases/desktop-automation.png" alt="Illustration of the Monaw mascot connecting files, a browser, and a terminal" width="960" />
+  <br />
+  <sub>From project files to browser tasks and desktop workflows. Illustration of Monaw's capabilities.</sub>
+</p>
 
-You need **Git**, an internet connection for installation and model access, and Windows 10 or 11. The setup script can install missing **uv** and **Node.js LTS** through Windows Package Manager (`winget`). Supported Node release lines are **20.x starting at 20.19**, **22.x starting at 22.13**, and **24.x**, with npm. Setup and launch check the executable found on PATH against the policy in `frontend/package.json`; other major versions and prereleases are rejected. Python **3.11** is pinned in `backend/.python-version` and installed by uv. Required Windows backend checks use 3.11; a separate runtime compatibility job checks 3.12.
+## What you can do
 
-Google Chrome **125+** is needed for browser automation, through the Monaw extension you set up from Settings > Browser. Docker Desktop is optional for isolated shell execution.
+| Capability | What it means for you |
+| --- | --- |
+| **Work with files and code** | Read and edit project files, run shell commands, and give each conversation its own workspace and `AGENTS.md` instructions. |
+| **Use your browser and desktop** | Automate Chrome through the Monaw extension and interact with Windows apps. [Browser automation](docs/browser-automation.md) · [Computer use](docs/computer-use.md) |
+| **Choose your model** | Connect an OpenAI API key, sign in with your ChatGPT account, or use a Google Gemini API key. Switch providers and models from the chat composer. |
+| **Keep context across tasks** | Save global preferences and workspace memory, and steer or stop an active task. [Memory guide](docs/memory.md) |
+| **Connect and automate** | Add MCP tools, schedule tasks, and optionally send tasks through Telegram. [MCP](docs/mcp.md) · [Scheduling](docs/scheduling.md) · [Telegram](docs/telegram.md) |
+| **Control how actions run** | Choose Default, Full Access, Auto Review, or Custom permissions, with separate sandbox settings. [Permissions](docs/permissions.md) · [Sandboxing](docs/sandboxing.md) |
 
-### 1. Clone the repository
+Monaw runs on your PC. Chat history, settings, memory, and artifacts are stored locally; model requests go to your selected provider. The desktop app is available for Windows 10 and 11 (x64).
 
-```powershell
-git clone https://github.com/kailiang0120/monaw.git
-cd monaw
-```
+---
 
-### 2. Run setup.bat
+## Install for Windows
 
-Double-click [setup.bat](setup.bat), or run it from PowerShell in the repository folder:
+**[Download the latest Windows installer](https://github.com/kailiang0120/monaw/releases/latest)** — no Python, Node.js, Git, or source checkout required.
 
-```powershell
-.\setup.bat
-```
+1. Open the latest release and download `Monaw-Setup-<version>-x64.exe` from **Assets**.
+2. Check its SHA-256 checksum against the release notes, then run the installer. See the [installation guide](docs/installation.md#install) for the command and unsigned-installer instructions.
+3. Open **Monaw** from the Windows Start menu and follow [Getting started](#getting-started) below.
 
-Setup closes any running Monaw processes from this checkout, installs missing prerequisites, installs the pinned Python runtime, syncs `backend/.venv` from `uv.lock`, and runs `npm ci` in `frontend`. If another application owns a required port, setup stops and identifies it. When setup reports success, you can close its window.
+You need Windows 10 or 11 (64-bit), an internet connection for model access, and a supported model connection. Google Chrome **125+** is needed for browser automation; Docker Desktop is optional for isolated shell execution.
 
-Run setup for the first installation, or again when dependencies change. If `winget` is unavailable, install uv and Node.js manually before retrying.
+The installer is currently unsigned. Updates are installed manually: download the new installer, close Monaw, and install it over the existing version. See the [installation guide](docs/installation.md) for upgrades, backups, and uninstalling. macOS and Linux builds are not available.
 
-### 3. Run start.bat
+## Getting started
 
-Double-click [start.bat](start.bat), or run:
+### 1. Connect a model
 
-```powershell
-.\start.bat
-```
+Open **Settings > Connections** and choose how you want to connect. Then select the provider, model, and reasoning effort in the chat composer.
 
-The launcher starts the Vite renderer server and opens Electron. Electron starts the FastAPI backend on `127.0.0.1:8435`; the launcher exits once startup succeeds. Use `start.bat` each time you want to open Monaw.
+| Connection | Setup |
+| --- | --- |
+| **ChatGPT account** | Choose **Continue with ChatGPT** and complete sign-in. Uses your ChatGPT plan, separately from API-key billing. |
+| **OpenAI API** | Save your OpenAI API key. Uses your OpenAI API account. |
+| **Google Gemini API** | Save your Google API key. Uses your Google API account. |
 
-### 4. Connect a model
+Configure connections in the app; no `.env` editing is required. Voice input needs an OpenAI or Google API key, even when chat uses a ChatGPT account.
 
-Open **Settings > Connections**, choose a connection below, then select the provider, model, and reasoning effort in the chat composer. Normal desktop setup uses the app settings; no `.env` editing is required.
+### 2. Choose a workspace and permissions
 
-| Connection | How to configure it | Implementation |
-| --- | --- | --- |
-| **OpenAI API** | Save your OpenAI API key. | OpenAI Python SDK using the Responses API. |
-| **ChatGPT account** | Choose **Continue with ChatGPT**, sign in and allow plan use. | OpenAI's [Sign in with ChatGPT](https://developers.openai.com/siwc) flow for open-source apps: requests go to the Responses API with the account's token and use the ChatGPT plan, not API credits. Separate from API-key access. |
-| **Google Gemini API** | Save your Google API key. | Google GenAI Python SDK. |
+Click **Default workspace** above the message box to choose the folder Monaw should work in. Choose **Default**, **Full Access**, **Auto Review**, or **Custom** permissions in Settings or the composer. See [permissions](docs/permissions.md) for how approvals work; sandbox settings are configured separately.
 
-Optional connections can be configured as needed:
+### 3. Try a first task
+
+Use **Get started** in a new chat to check your connection, workspace, and permissions. Try a request such as:
+
+> Look through this workspace and summarize what the project does without changing any files.
+
+You can steer or stop Monaw while it works. For browser tasks, set up the Monaw Chrome extension under **Settings > Browser**.
+
+### Optional integrations
 
 | Service | Used for | Configuration |
 | --- | --- | --- |
@@ -65,13 +93,87 @@ Optional connections can be configured as needed:
 | **Telegram Bot API** | Remote task input and results. | Bot token and allowed users/chats in Settings. |
 | **MCP servers** | Additional local or remote tools. | Settings > Tools > MCP; supports stdio and Streamable HTTP. |
 
-Choose a permission mode in Settings or the composer: **Default**, **Full Access**, **Auto Review**, or **Custom**. Browser profiles and allowed domains are configured under **Settings > Browser**; sandbox options are configured separately.
+Browser profiles and allowed domains are configured under **Settings > Browser**. See the [documentation](#documentation) for memory, scheduling, Telegram, and other workflows.
 
-## Capabilities
+## Workspaces, Memory, and Local Data
 
-- **Local work:** read and edit files, run shell commands, and control Windows apps and Chrome.
-- **Conversation context:** choose a workspace per chat, load its `AGENTS.md` instructions, retain memory, and steer or stop an active task.
-- **Automation and integrations:** schedule tasks, connect MCP servers, and optionally send tasks through Telegram.
+Each conversation can use its own project folder. That workspace determines relative file paths, command locations, and project `AGENTS.md` instructions. Change it while the agent is idle, or reset it to the default workspace.
+
+Memory has two scopes: **global** for your preferences and **workspace** for project context. Manage it under **Settings > Identity**. See the [memory guide](docs/memory.md).
+
+Your data lives under `%USERPROFILE%\.monaw` by default, separately from the installed app. This includes conversations, settings, memory, logs, and artifacts. Saved provider keys and the Telegram token are encrypted using Windows data protection. Your Chrome profile stays in Chrome's own folder.
+
+Use **Settings > Storage** to inspect and manage local data. See [operations](docs/operations.md) for backups, data-folder overrides, retention, and security details.
+
+## Troubleshooting
+
+| Problem | What to do |
+| --- | --- |
+| Windows warns about the installer | The installer is unsigned. Check the release checksum and follow the [installation guide](docs/installation.md#install). |
+| The installed app does not start | Check `%USERPROFILE%\.monaw\runtime\backend.log` and the [startup troubleshooting guide](docs/installation.md#if-monaw-does-not-start). |
+| Browser automation cannot connect | Check the extension status in **Settings > Browser** and that it is enabled at `chrome://extensions`. See [browser automation](docs/browser-automation.md). |
+| You need to report a problem | Prepare a report under **Settings > Observability > Support report**, review it, and attach it to a [GitHub issue](https://github.com/kailiang0120/monaw/issues). |
+
+For source setup and launcher errors, see [development troubleshooting](#development-troubleshooting).
+
+<a id="setup-and-start"></a>
+
+## Development
+
+Run from source to change Monaw or try work that has not shipped in a release. The installed Windows app opens directly from the Start menu; the batch files below belong to a source checkout.
+
+### Set up the source checkout
+
+You need Windows 10 or 11, **Git**, and an internet connection. [setup.bat](setup.bat) can install missing **uv** and a supported **Node.js LTS** through Windows Package Manager (`winget`); uv installs the pinned **Python 3.11** runtime. If `winget` is unavailable, install uv and Node.js manually first.
+
+```powershell
+git clone https://github.com/kailiang0120/monaw.git
+cd monaw
+.\setup.bat
+```
+
+When setup completes, launch the development app:
+
+```powershell
+.\start.bat
+```
+
+| Script | When to use it | What it does |
+| --- | --- | --- |
+| [setup.bat](setup.bat) | First setup, or after dependencies change. | Closes running Monaw processes from this checkout, syncs `backend/.venv` from `uv.lock`, and runs `npm ci` in `frontend`. |
+| [start.bat](start.bat) | Each time you run the source checkout. | Starts Vite and Electron, waits for the local backend to be ready, and exits after successful startup. |
+
+Supported Node.js versions are **20.19+ within 20.x**, **22.13+ within 22.x**, and **24.x**, with npm. Setup and launch enforce the policy in [frontend/package.json](frontend/package.json).
+
+### Checks and packaging
+
+Run backend and frontend checks together from the repository root:
+
+```powershell
+.\scripts\verify.ps1
+```
+
+Build the Windows installer:
+
+```powershell
+.\scripts\package-windows.ps1
+```
+
+The installer is written to `frontend/release/Monaw-Setup-<version>-x64.exe`. See [packaging](docs/packaging.md) for build options and release checks.
+
+For separate frontend and backend commands, manual dependency setup, and the module map, see the [development guide](docs/development.md).
+
+### Development troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| Setup fails | `%USERPROFILE%\.monaw\runtime\setup\setup.log`; confirm Git and winget are available, or install uv and Node.js manually. |
+| Source app does not open | Run `setup.bat` again if dependencies changed; check `runtime\launcher\vite.log` and `runtime\launcher\electron.log` under the Monaw data folder. |
+| Backend dependencies are missing | Run `uv sync --locked` inside `backend`; check `runtime\backend.log` under the Monaw data folder. |
+| Node engine or frontend dependency errors | Install a supported Node.js version, then run `npm ci` inside `frontend`. |
+| A development port is occupied | Check Vite port `5275` and backend port `8435`; the launcher reports conflicts. |
+
+For a custom uv installation, set `AGENT_UV_PATH` to the full path of `uv.exe` before launching from source.
 
 ## Technology Stack
 
@@ -90,6 +192,9 @@ Choose a permission mode in Settings or the composer: **Default**, **Full Access
 ## Architecture
 
 Monaw has an Electron desktop frontend and a local Python backend. Electron manages the backend process, session authentication, and encrypted credentials. The React UI sends HTTP requests to FastAPI and receives progress, tool activity, and responses through Server-Sent Events (SSE).
+
+<details>
+<summary>Explore the system architecture and agent runtime</summary>
 
 ### System Architecture
 
@@ -192,61 +297,7 @@ The agent repeats **update context → fit context → call model → authorize 
 
 See [docs/development.md](docs/development.md) for the module map and implementation details.
 
-## Workspaces, Memory, and Local Data
-
-Click **Default workspace** above the message box to choose a project folder for a conversation. That folder determines relative file paths, command locations, and project `AGENTS.md` instructions. Change it while the agent is idle, or reset it to the default workspace.
-
-Memory has two scopes: **global** for information about you, and **workspace** for information specific to a folder. Rules and preferences are included in their scope's prompts; relevant facts are retrieved for the current request. Explicit memory tools and background learning save information from your own words. The Memory switch is under **Settings > Identity**. See [the memory guide](docs/memory.md).
-
-By default, Monaw stores its data under `%USERPROFILE%\.monaw`:
-
-```text
-.monaw/
-  runtime/                 settings, SQLite databases, logs, Electron store
-  workspace/               default agent working folder
-  browser/                 browser screenshots and artifacts
-  memory/
-    global.md              global rules, preferences, and facts
-    workspaces/*.md        memory for each project folder
-```
-
-Your Chrome profile remains in Chrome's own folder. Override the main data folder with `MONAW_HOME` or `AGENT_HOME`; use `AGENT_RUNTIME_DIR`, `AGENT_WORKSPACE_DIR`, or `AGENT_MEMORY_DIR` to override individual locations.
-
-The backend is a privileged local API: `/api` requests require an Electron-issued session, and the server binds to loopback by default. Keep it local. Saved API keys are encrypted in Electron main and cannot be read back by renderer JavaScript. See [operations](docs/operations.md) for security, backup, and retention details.
-
-## Development
-
-For manual setup, install uv and a supported Node.js version, then run from the repository root:
-
-```powershell
-cd backend
-uv sync --locked
-cd ..\frontend
-npm ci
-cd ..
-.\start.bat
-```
-
-Run backend and frontend checks together:
-
-```powershell
-.\scripts\verify.ps1
-```
-
-Use `npm run dev` inside `frontend` to run Vite and Electron directly. Electron still starts the backend. Backend-only development, authentication, the module map, and packaging notes are in [the development guide](docs/development.md).
-
-## Troubleshooting
-
-| Problem | What to check |
-| --- | --- |
-| Setup fails | `%USERPROFILE%\.monaw\runtime\setup\setup.log`; confirm Git and winget are available, or install uv and Node.js manually. |
-| App does not open | Run `setup.bat` again, then check `runtime\launcher\vite.log` and `runtime\launcher\electron.log` under the Monaw data folder. |
-| Backend cannot start | Check `runtime\backend.log`; run `uv sync --locked` inside `backend`. |
-| Node engine or frontend dependency errors | Upgrade to a supported Node.js version, then run `npm ci` inside `frontend`. |
-| A port is occupied | Check Vite port `5275` and backend port `8435`; the launcher reports conflicts. |
-| Browser automation cannot connect | Check the Monaw extension status in Settings > Browser and that the extension is on at `chrome://extensions`, then see the [browser automation guide](docs/browser-automation.md). |
-
-For a custom uv installation, set `AGENT_UV_PATH` to the full path of `uv.exe` before starting Monaw.
+</details>
 
 ## Documentation
 

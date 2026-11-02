@@ -1,8 +1,8 @@
 # Installing the Windows build
 
-The Windows installer runs Monaw without Python, uv, Node.js or Git. To run Monaw from source instead, see the [README](../README.md#setup-and-start). To build the installer, see [packaging](packaging.md).
+The Windows installer runs Monaw without Python, uv, Node.js or Git. [Download the latest release](https://github.com/kailiang0120/monaw/releases/latest). To run Monaw from source instead, see [Development in the README](../README.md#development). To build the installer, see [packaging](packaging.md).
 
-The installer is published with each [release](https://github.com/kailiang0120/monaw/releases) together with its SHA-256 checksum. It is unsigned and has not yet been checked on a clean machine or through an upgrade. See [What is not verified yet](#what-is-not-verified-yet).
+The installer is published with each [release](https://github.com/kailiang0120/monaw/releases) together with its SHA-256 checksum. It is unsigned. See [What is not verified yet](#what-is-not-verified-yet) for the remaining verification limits.
 
 ## Requirements
 
