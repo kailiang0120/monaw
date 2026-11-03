@@ -43,6 +43,7 @@ TEST_GROUPS = {
         "test_tool_batch.py",
         "test_run_outcome.py",
         "test_durable_journal.py",
+        "test_durable_recovery.py",
         "test_live_context_budget.py",
         "test_tool_registry_enhanced.py",
         "test_builtin_mcp.py",
@@ -172,13 +173,19 @@ def isolate_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     conversations, such as an empty chat, to the app the developer uses.
     """
     import app.agent.database as database
+    import app.agent.durable.recovery as durable_recovery
 
     database.reset_db()
     monkeypatch.setattr(database, "_RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(database, "_DB_PATH", tmp_path / "agent.db")
     # The legacy JSON import moves files it finds here into a backup folder.
     monkeypatch.setattr(database, "_JSON_CONVERSATIONS_DIR", tmp_path / "conversations")
+    durable_recovery._PROCESS_IDENTITY.close()
+    process_identity = durable_recovery.OwnerProcessIdentity(tmp_path / "owner_locks")
+    monkeypatch.setattr(durable_recovery, "_OWNER_LOCK_DIR", tmp_path / "owner_locks")
+    monkeypatch.setattr(durable_recovery, "_PROCESS_IDENTITY", process_identity)
     yield
+    process_identity.close()
     database.reset_db()
 
 

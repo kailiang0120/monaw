@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import asyncio
 import threading
 from typing import AsyncIterator
 
@@ -15,9 +16,11 @@ from app.agent.memory_store import get_memory_store
 from app.agent.memory_manager import MemoryManager
 from app.agent.skill_loader import load_tools
 from app.agent.skill_prompt import build_skill_prompt
-from app.agent.turn_loop import TurnLoop
+from app.agent.turn_loop import TurnLoop, conversation_lock
+from app.agent.turn_text import conversation_title_from_prompt
 from app.agent.steering import SteeringInbox
 from app.agent.database import get_db
+from app.agent.durable.turn_run import CONTINUATION_PROMPT, create_durable_run, resume_run
 from app.agent.conversation_workspace import set_workspace_dir, reset_workspace_dir
 from app.agent.workspace_instructions import (
     build_workspace_instruction_prompt,
@@ -177,39 +180,96 @@ class AgentRuntime:
         conversation_id: str,
         attachments: list[dict] | None = None,
         steering: SteeringInbox | None = None,
+        durable_run=None,
+        durable_run_factory=None,
     ) -> AsyncIterator[dict]:
         global _active_run_count
         conversation = get_db().get_conversation(conversation_id) or {}
+        if durable_run is not None:
+            saved_scope = durable_run.journal.load_run_internal(durable_run.run_id)
+            if (
+                saved_scope is None
+                or str(saved_scope.get("workspace_dir") or "")
+                != str(conversation.get("workspace_dir") or "")
+            ):
+                raise RuntimeError("Conversation workspace changed after the durable run was claimed.")
         workspace_token = set_workspace_dir(conversation.get("workspace_dir", ""))
         self._active_runs += 1
         with _active_run_lock:
             _active_run_count += 1
         try:
             if _is_compact_command(message):
-                if steering is not None:
-                    steering.closed = True
-                result = await self.memory.compact_conversation(conversation_id)
-                reply = _format_compact_reply(result)
-                await self.memory.persist_turn(
-                    conversation_id,
-                    str(message or "").strip() or "/compact",
-                    reply,
-                    tool_calls=[],
-                )
-                if result.get("status") in {"compacted", "unchanged"} and str(result.get("summary") or "").strip():
-                    record_compaction = getattr(self.memory, "record_compaction", None)
-                    if callable(record_compaction):
-                        record_compaction(conversation_id, result)
-                yield {"event": "token", "data": {"content": reply}}
-                yield {
-                    "event": "done",
-                    "data": {
-                        "conversation_id": conversation_id,
-                        "summary": reply,
-                        "status": "complete",
-                        "attachments": [],
-                    },
-                }
+                compact_lock = conversation_lock(conversation_id)
+                await compact_lock.acquire()
+                lease_stop = asyncio.Event()
+                lease_task = None
+                try:
+                    if steering is not None:
+                        steering.closed = True
+                    if durable_run is None and callable(durable_run_factory):
+                        durable_run = durable_run_factory()
+                    if durable_run is not None:
+                        async def _renew_compact_lease() -> None:
+                            while not lease_stop.is_set():
+                                try:
+                                    await asyncio.wait_for(lease_stop.wait(), timeout=10.0)
+                                    return
+                                except asyncio.TimeoutError:
+                                    durable_run.renew_lease()
+                        lease_task = asyncio.create_task(_renew_compact_lease())
+                    try:
+                        result = await self.memory.compact_conversation(conversation_id)
+                        reply = _format_compact_reply(result)
+                        await self.memory.persist_turn(
+                            conversation_id,
+                            str(message or "").strip() or "/compact",
+                            reply,
+                            tool_calls=[],
+                            **({"turn_id": durable_run.turn_id} if durable_run is not None else {}),
+                        )
+                        if result.get("status") in {"compacted", "unchanged"} and str(result.get("summary") or "").strip():
+                            record_compaction = getattr(self.memory, "record_compaction", None)
+                            if callable(record_compaction):
+                                record_compaction(conversation_id, result)
+                        if durable_run is not None:
+                            if lease_task is not None and lease_task.done() and lease_task.exception() is not None:
+                                raise lease_task.exception()
+                            if not durable_run.finalize("complete"):
+                                raise RuntimeError("durable compact run was not committed")
+                        yield {"event": "token", "data": {"content": reply}}
+                        yield {
+                            "event": "done",
+                            "data": {
+                                "conversation_id": conversation_id,
+                                "summary": reply,
+                                "status": "complete",
+                                "attachments": [],
+                            },
+                        }
+                    except Exception as exc:
+                        logger.exception("Durable compact turn failed conversation_id=%s", conversation_id)
+                        if durable_run is not None:
+                            try:
+                                durable_run.finalize("error", "persistence_failed")
+                            except Exception:
+                                logger.exception("Unable to finalize failed compact run run_id=%s", durable_run.run_id)
+                        yield {"event": "error", "data": {
+                            "code": "durable_run_failed",
+                            "message": str(exc),
+                        }}
+                        yield {"event": "done", "data": {
+                            "conversation_id": conversation_id,
+                            "summary": "The compact operation could not be safely committed.",
+                            "status": "error",
+                            "incomplete": True,
+                            "reason_code": "durable_run_failed",
+                        }}
+                finally:
+                    lease_stop.set()
+                    if lease_task is not None:
+                        lease_task.cancel()
+                        await asyncio.gather(lease_task, return_exceptions=True)
+                    compact_lock.release()
                 return
             async for event in self.turn_loop.run(
                 message,
@@ -217,6 +277,8 @@ class AgentRuntime:
                 system_prompt=self.current_system_prompt,
                 attachments=attachments,
                 **({"steering": steering} if steering is not None else {}),
+                **({"durable_run": durable_run} if durable_run is not None else {}),
+                **({"durable_run_factory": durable_run_factory} if durable_run is None and callable(durable_run_factory) else {}),
             ):
                 yield event
         finally:
@@ -361,6 +423,8 @@ async def run_agent_stream(
     permission_profile_id: str = "",
     interactive: bool = True,
     steering: SteeringInbox | None = None,
+    durable_run_id: str | None = None,
+    durable_run=None,
 ):
     session_token = set_current_control_session_id(control_session_id)
     source_token = set_current_execution_source(execution_source)
@@ -369,14 +433,138 @@ async def run_agent_stream(
     interactive_token = set_current_interactive(interactive)
     try:
         runtime = get_runtime(settings)
-        async for event in runtime.run(
-            message, conversation_id, attachments=attachments,
-            **({"steering": steering} if steering is not None else {}),
-        ):
-            yield event
+        try:
+            database = get_db()
+            conversation = database.get_conversation(conversation_id)
+            if conversation is None:
+                database.create_conversation(
+                    conversation_id,
+                    conversation_title_from_prompt(message),
+                    "",
+                )
+                conversation = database.get_conversation(conversation_id) or {}
+            stable_id = durable_run_id or (getattr(steering, "run_id", "") if steering is not None else "")
+            workspace_dir = str(conversation.get("workspace_dir") or "")
+
+            def durable_run_factory():
+                latest_conversation = database.get_conversation(conversation_id) or {}
+                if str(latest_conversation.get("workspace_dir") or "") != workspace_dir:
+                    raise RuntimeError("Conversation workspace changed before the turn acquired ownership.")
+                return create_durable_run(
+                    run_id=stable_id or None,
+                    conversation_id=conversation_id,
+                    execution_source=execution_source,
+                    principal_id=principal_id or control_session_id,
+                    control_session_id=control_session_id,
+                    workspace_dir=workspace_dir,
+                )
+            async for event in runtime.run(
+                message, conversation_id, attachments=attachments,
+                durable_run=durable_run,
+                **({"durable_run_factory": durable_run_factory} if durable_run is None else {}),
+                **({"steering": steering} if steering is not None else {}),
+            ):
+                yield event
+        except Exception:
+            logger.exception("Unable to start durable turn conversation_id=%s", conversation_id)
+            if durable_run is not None:
+                try:
+                    durable_run.finalize("error", "persistence_failed")
+                except Exception:
+                    logger.exception("Unable to finalize failed durable turn run_id=%s", durable_run.run_id)
+            yield {"event": "error", "data": {
+                "code": "durable_run_unavailable",
+                "message": "The run could not be safely started or finalized.",
+            }}
+            yield {"event": "done", "data": {
+                "conversation_id": conversation_id,
+                "summary": "The run could not be safely started or finalized.",
+                "status": "error",
+                "incomplete": True,
+                "reason_code": "durable_run_unavailable",
+            }}
     finally:
         reset_current_interactive(interactive_token)
         reset_current_permission_profile_id(profile_token)
         reset_current_principal_id(principal_token)
         reset_current_execution_source(source_token)
         reset_current_control_session_id(session_token)
+
+
+async def resume_agent_stream(
+    run_id: str,
+    settings,
+    *,
+    execution_source: str,
+    control_session_id: str,
+    principal_id: str,
+    permission_profile_id: str = "",
+    interactive: bool = False,
+):
+    """Claim a validated paused run and continue from its committed history."""
+    if execution_source not in {"desktop", "desktop_job", "desktop_stream"}:
+        yield {"event": "error", "data": {
+            "code": "resume_unavailable",
+            "message": "This execution source cannot resume a saved run.",
+        }}
+        yield {"event": "done", "data": {
+            "conversation_id": "",
+            "summary": "This execution source cannot resume a saved run.",
+            "status": "error",
+            "incomplete": True,
+            "reason_code": "resume_unavailable",
+        }}
+        return
+    conversation = get_db().fetchone(
+        """SELECT r.conversation_id, c.workspace_dir
+           FROM agent_runs AS r JOIN conversations AS c ON c.id = r.conversation_id
+           WHERE r.run_id = ?""",
+        (run_id,),
+    )
+    if conversation is None:
+        yield {"event": "error", "data": {"code": "run_not_found", "message": "The run is not available to resume."}}
+        yield {"event": "done", "data": {
+            "conversation_id": "",
+            "summary": "The run is not available to resume.",
+            "status": "error",
+            "incomplete": True,
+            "reason_code": "run_not_found",
+        }}
+        return
+    conversation_id = str(conversation["conversation_id"])
+    try:
+        durable_run, _checkpoint = resume_run(
+            run_id,
+            execution_source=execution_source,
+            principal_id=principal_id,
+            control_session_id=control_session_id,
+            workspace_dir=str(conversation["workspace_dir"] or ""),
+        )
+    except Exception:
+        logger.exception("Unable to claim durable run for resume run_id=%s", run_id)
+        yield {"event": "error", "data": {
+            "code": "resume_unavailable",
+            "message": "The saved run cannot be resumed safely from its current checkpoint.",
+        }}
+        yield {"event": "done", "data": {
+            "conversation_id": conversation_id,
+            "summary": "The saved run cannot be resumed safely.",
+            "status": "error",
+            "incomplete": True,
+            "reason_code": "resume_unavailable",
+        }}
+        return
+
+    async for event in run_agent_stream(
+        message=CONTINUATION_PROMPT,
+        conversation_id=conversation_id,
+        settings=settings,
+        attachments=None,
+        control_session_id=control_session_id,
+        execution_source=execution_source,
+        principal_id=principal_id,
+        permission_profile_id=permission_profile_id,
+        interactive=interactive,
+        durable_run=durable_run,
+    ):
+        yield event

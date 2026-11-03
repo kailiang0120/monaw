@@ -21,11 +21,21 @@ def test_split_csv_setting_drops_empty_cors_entries():
 def test_lifespan_only_prepares_screenshots_folder(monkeypatch):
     runtime_calls: list[str] = []
     scheduler_events: list[str] = []
+    from app.agent.durable import recovery as recovery_module
 
     monkeypatch.setattr(main_module, "configured_screenshots_dir", lambda: runtime_calls.append("dirs"))
     monkeypatch.setattr(main_module.settings, "telegram_bot_token", "")
     # Startup moves the secret out of os.environ; restore it for later tests.
     monkeypatch.setenv("MONAW_CONTROL_SECRET", os.environ["MONAW_CONTROL_SECRET"])
+    owner_id = "owner-v1-" + "a" * 32
+    monkeypatch.setattr(recovery_module, "get_owner_instance_id", lambda: owner_id)
+
+    def recover(**kwargs):
+        assert kwargs["recovery_owner_instance_id"] == owner_id
+        scheduler_events.append("recover")
+        return {"scanned": 0, "recovered": 0}
+
+    monkeypatch.setattr(recovery_module, "recover_startup_runs", recover)
 
     class FakeScheduledTaskService:
         def __init__(self, *, settings_factory):
@@ -46,7 +56,7 @@ def test_lifespan_only_prepares_screenshots_folder(monkeypatch):
     asyncio.run(run())
 
     assert runtime_calls == ["dirs"]
-    assert scheduler_events == ["start", "stop"]
+    assert scheduler_events == ["recover", "start", "stop"]
 
 
 def test_mcp_background_startup_preserves_actual_error(monkeypatch):

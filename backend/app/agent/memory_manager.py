@@ -510,6 +510,7 @@ class MemoryManager:
         steering_attachments: list[list[dict]] | None = None,
         steering_tool_call_indexes: list[int] | None = None,
         turn_id: str | None = None,
+        persist_user_message: bool = True,
     ) -> list[int]:
         """Atomically checkpoint history without waiting on model summarization.
 
@@ -517,7 +518,10 @@ class MemoryManager:
         ID makes retries safe even after the original process has exited.
         """
         state = self.get_or_create(conversation_id)
-        records = [{"role": "user", "content": user_message, "attachments": user_attachments}]
+        records = (
+            [{"role": "user", "content": user_message, "attachments": user_attachments}]
+            if persist_user_message else []
+        )
         # Each steering message sits where the agent read it: the tool calls made
         # before it go in an assistant message above it, the rest in the reply below.
         tool_calls_saved = 0

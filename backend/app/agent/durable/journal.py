@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from app.agent.database import Database
@@ -36,6 +38,7 @@ from app.agent.durable.models import (
     sanitize_event_payload,
     sanitize_public_evidence,
 )
+from app.agent.runtime_paths import WORKSPACE_DIR
 
 _ACTIVE_RUN_STATUSES = frozenset({"running", "waiting_approval", "pausing"})
 _LEASE_RENEWABLE_STATUSES = _ACTIVE_RUN_STATUSES | frozenset({"interrupted", "needs_review"})
@@ -70,7 +73,18 @@ _UNRESOLVED_WRITE_STATUSES = frozenset(
     {"prepared", "authorized", "executing", "uncertain", "needs_review"}
 )
 _EXECUTION_SOURCES = frozenset(
-    {"desktop", "desktop_job", "desktop_stream", "scheduled", "scheduler", "telegram", "api", "test", "other"}
+    {
+        "desktop",
+        "desktop_job",
+        "desktop_stream",
+        "scheduled",
+        "scheduler",
+        "telegram",
+        "api",
+        "replay",
+        "test",
+        "other",
+    }
 )
 _SAFE_TOOL_NAMES = frozenset(
     {
@@ -140,6 +154,15 @@ def _decode_json(value: object) -> dict[str, bool | int | str]:
     return sanitize_evidence(raw)
 
 
+def _workspace_key(value: object) -> str:
+    raw = str(value or "").strip() or str(WORKSPACE_DIR)
+    try:
+        path = str(Path(raw).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError):
+        path = os.path.abspath(os.path.normpath(raw))
+    return os.path.normcase(os.path.normpath(path))
+
+
 class Journal:
     """Read and mutate Run/Operation state using atomic SQLite transactions.
 
@@ -207,6 +230,23 @@ class Journal:
             ).fetchone() is not None:
                 raise IdempotencyConflictError("turn_id already has a committed checkpoint")
 
+            active_statuses = tuple(_ACTIVE_RUN_STATUSES | {"interrupted", "needs_review"})
+            placeholders = ",".join("?" for _ in active_statuses)
+            active_runs = conn.execute(
+                f"""SELECT run_id, conversation_id, workspace_dir, owner_instance_id, status
+                    FROM agent_runs WHERE status IN ({placeholders})""",
+                active_statuses,
+            ).fetchall()
+            new_workspace = _workspace_key(workspace_dir)
+            for active in active_runs:
+                if str(active["conversation_id"] or "") == conversation_id:
+                    raise LeaseConflictError("conversation already has an active durable run")
+                if (
+                    str(active["owner_instance_id"] or "") != owner_instance_id
+                    and _workspace_key(active["workspace_dir"]) == new_workspace
+                ):
+                    raise LeaseConflictError("workspace has an active durable run in another process")
+
             conn.execute(
                 """INSERT INTO agent_runs (
                        run_id, conversation_id, workspace_dir, execution_source,
@@ -249,6 +289,48 @@ class Journal:
             row = conn.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
             return self._run_dto(conn, row) if row is not None else None
 
+    def load_run_internal(self, run_id: str) -> dict[str, Any] | None:
+        """Load private run scope and owner fields for recovery/dispatch guards."""
+        with self.db.transaction(immediate=False) as conn:
+            row = conn.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                return None
+            return {
+                "run_id": str(row["run_id"]),
+                "conversation_id": str(row["conversation_id"]),
+                "workspace_dir": str(row["workspace_dir"] or ""),
+                "execution_source": str(row["execution_source"]),
+                "owner_principal_id": str(row["owner_principal_id"] or ""),
+                "control_session_id": str(row["control_session_id"] or ""),
+                "owner_instance_id": str(row["owner_instance_id"] or ""),
+                "lease_expires_at": str(row["lease_expires_at"] or ""),
+                "attempt": int(row["attempt"]),
+                "revision": int(row["revision"]),
+                "status": str(row["status"]),
+                "reason_code": _reason_code(row["reason_code"]),
+                "turn_id": str(row["turn_id"] or ""),
+                "recovery_input_ref": str(row["recovery_input_ref"] or ""),
+            }
+
+    def list_recovery_runs(self, *, after_run_id: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        """Page active, owned runs for startup recovery without exposing them publicly."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        limit = min(limit, 500)
+        statuses = ("running", "waiting_approval", "pausing", "interrupted", "needs_review")
+        placeholders = ",".join("?" for _ in statuses)
+        with self.db.transaction(immediate=False) as conn:
+            rows = conn.execute(
+                f"""SELECT run_id, conversation_id, workspace_dir, execution_source,
+                           owner_principal_id, control_session_id, owner_instance_id,
+                           lease_expires_at, attempt, revision, status
+                    FROM agent_runs
+                    WHERE run_id > ? AND status IN ({placeholders})
+                    ORDER BY run_id ASC LIMIT ?""",
+                (after_run_id, *statuses, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def snapshot(self, run_id: str) -> RunDTO | None:
         """Return a public snapshot and event cursor from one read transaction."""
         return self.load_run(run_id)
@@ -279,6 +361,8 @@ class Journal:
                 raise LeaseConflictError("paused run still has an owner")
             if not self._has_recovery_input(conn, row):
                 raise InvalidTransitionError("run has no committed recovery input")
+            if not self._has_safe_resume_input(conn, row):
+                raise InvalidTransitionError("run has no safe committed recovery input")
             if conn.execute(
                 "SELECT 1 FROM turn_checkpoints WHERE turn_id = ?", (turn_id,)
             ).fetchone() is not None:
@@ -361,10 +445,16 @@ class Journal:
         expected_attempt: int,
         expected_revision: int,
         safe_to_release: bool,
+        owner_proven_dead: bool,
         reason_code: str | None = "worker_lost",
         lease_seconds: int = 30,
     ) -> RunDTO:
-        """Release an expired owner only after the recovery caller checked safety."""
+        """Release an owner after recovery supplied a safety proof.
+
+        The recovery caller must supply a recognized process-death proof.
+        Lease expiry alone is never sufficient; proof of process death permits
+        immediate handoff even while the lease is fresh.
+        """
         run_id = _required_id(run_id, name="run_id")
         expected_owner_instance_id = _required_id(
             expected_owner_instance_id, name="expected_owner_instance_id"
@@ -374,6 +464,8 @@ class Journal:
         )
         if safe_to_release is not True:
             raise LeaseConflictError("recovery caller did not confirm safe release")
+        if owner_proven_dead is not True:
+            raise LeaseConflictError("recovery caller did not prove the owner process is dead")
         if recovery_owner_instance_id == expected_owner_instance_id:
             raise LeaseConflictError("recovery release requires a distinct caller")
         lease_seconds = _lease_seconds(lease_seconds)
@@ -390,14 +482,9 @@ class Journal:
                 raise LeaseConflictError("run is not in an expirable state")
             expires_text = row["lease_expires_at"]
             try:
-                expires_at = datetime.fromisoformat(str(expires_text))
-                if expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                datetime.fromisoformat(str(expires_text))
             except (TypeError, ValueError) as exc:
                 raise LeaseConflictError("stored lease expiry is invalid") from exc
-            if expires_at > now_dt:
-                raise LeaseConflictError("owner lease has not expired")
-
             previous_revision = self._reconcile_interrupted_operations(conn, run_id, now)
             revision = previous_revision + 1
             safe_reason = _reason_code(reason_code) or "worker_lost"
@@ -891,7 +978,7 @@ class Journal:
             actions = ["stop"]
         elif status == "paused":
             actions = []
-            if self._has_recovery_input(conn, row):
+            if self._has_safe_resume_input(conn, row):
                 actions.append("resume")
         elif status == "interrupted":
             actions = ["inspect", "stop"]
@@ -978,6 +1065,85 @@ class Journal:
     ) -> bool:
         ref = recovery_input_ref if recovery_input_ref is not None else run_row["recovery_input_ref"]
         return bool(ref) or self._has_committed_checkpoint(conn, run_row)
+
+    def _has_safe_resume_input(self, conn: sqlite3.Connection, run_row: sqlite3.Row) -> bool:
+        """Only advertise resume when input and all effect evidence are safe."""
+        conversation = conn.execute(
+            "SELECT workspace_dir, updated_at FROM conversations WHERE id = ?",
+            (run_row["conversation_id"],),
+        ).fetchone()
+        if conversation is None or str(conversation["workspace_dir"] or "") != str(run_row["workspace_dir"] or ""):
+            return False
+        try:
+            run_updated = datetime.fromisoformat(str(run_row["updated_at"]))
+            conversation_updated = datetime.fromisoformat(str(conversation["updated_at"]))
+            if run_updated.tzinfo is None:
+                run_updated = run_updated.replace(tzinfo=timezone.utc)
+            if conversation_updated.tzinfo is None:
+                conversation_updated = conversation_updated.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return False
+        if conversation_updated > run_updated:
+            return False
+
+        ref = str(run_row["recovery_input_ref"] or "")
+        checkpoint_turn_id = (
+            ref.removeprefix("turn_checkpoint:")
+            if ref.startswith("turn_checkpoint:")
+            else str(run_row["turn_id"] or "")
+        )
+        checkpoint = conn.execute(
+            """SELECT user_message_ids FROM turn_checkpoints
+               WHERE turn_id = ? AND conversation_id = ?""",
+            (checkpoint_turn_id, run_row["conversation_id"]),
+        ).fetchone()
+        if checkpoint is None:
+            return False
+        try:
+            user_ids = json.loads(checkpoint["user_message_ids"])
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if not isinstance(user_ids, list) or not user_ids or any(
+            isinstance(item, bool) or not isinstance(item, int) for item in user_ids
+        ):
+            return False
+        placeholders = ",".join("?" for _ in user_ids)
+        user_rows = conn.execute(
+            f"""SELECT id, role, attachments_json FROM messages
+                WHERE conversation_id = ? AND id IN ({placeholders})""",
+            (run_row["conversation_id"], *user_ids),
+        ).fetchall()
+        by_id = {int(item["id"]): item for item in user_rows}
+        if any(
+            message_id not in by_id
+            or by_id[message_id]["role"] != "user"
+            or str(by_id[message_id]["attachments_json"] or "").strip()
+            for message_id in user_ids
+        ):
+            return False
+        latest_checkpoint_user_id = max(user_ids)
+        if conn.execute(
+            """SELECT 1 FROM messages WHERE conversation_id = ? AND role = 'user'
+               AND id > ? LIMIT 1""",
+            (run_row["conversation_id"], latest_checkpoint_user_id),
+        ).fetchone() is not None:
+            return False
+
+        operations = conn.execute(
+            """SELECT effect_class, status, evidence_json FROM run_operations
+               WHERE run_id = ? ORDER BY sequence_no""",
+            (run_row["run_id"],),
+        ).fetchall()
+        for operation in operations:
+            effect = str(operation["effect_class"])
+            status = str(operation["status"])
+            evidence = _decode_json(operation["evidence_json"])
+            if effect == "opaque_effect" and status != "cancelled":
+                return False
+            if effect != "read_only" and status not in {"verified", "cancelled"}:
+                if not (status == "failed" and evidence.get("verification_result") == "unchanged"):
+                    return False
+        return True
 
     def _ensure_no_unresolved_writes(self, conn: sqlite3.Connection, run_id: str) -> None:
         row = conn.execute(

@@ -164,11 +164,12 @@ def test_run_now_creates_conversation_and_records_success(tmp_path, monkeypatch)
             runner=fake_runner,
             tick_interval=999,
         )
-        result = await service.run_now(task["id"])
+        result = await service.run_now(task["id"], operation_key="stable-occurrence", requester="test")
         await asyncio.wait_for(service._inflight[task["id"]][0], timeout=2)
-        return result
+        retry = await service.run_now(task["id"], operation_key="stable-occurrence", requester="test")
+        return result, retry
 
-    result = asyncio.run(run())
+    result, retry = asyncio.run(run())
     runs = db.list_scheduled_task_runs("task-1")
     updated = db.get_scheduled_task("task-1")
 
@@ -178,6 +179,9 @@ def test_run_now_creates_conversation_and_records_success(tmp_path, monkeypatch)
     assert updated is not None
     assert updated["last_run_status"] == "ok"
     assert calls[0]["execution_source"] == "scheduled"
+    assert calls[0]["durable_run_id"] == f"scheduled-{result['run_id']}"
+    assert retry == result
+    assert len(calls) == 1
     assert calls[0]["control_session_id"] == "scheduler"
     assert calls[0]["principal_id"] == "scheduled-task:task-1"
     assert calls[0]["permission_profile_id"] == "scheduled-task:task-1:restricted"

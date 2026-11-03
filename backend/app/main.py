@@ -70,6 +70,16 @@ async def _start_mcp_runtime(app: FastAPI) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_startup_security()
+    # Recovery must establish process ownership and hand off provably dead
+    # durable runs before any background worker can dispatch new work.
+    from app.agent.durable.recovery import get_owner_instance_id, recover_startup_runs
+
+    owner_instance_id = get_owner_instance_id()
+    app.state.durable_recovery_status = {
+        "state": "complete",
+        "owner_instance_id": owner_instance_id,
+        "report": recover_startup_runs(recovery_owner_instance_id=owner_instance_id),
+    }
     ensure_workspace_instruction_file()
     try:
         configured_screenshots_dir()

@@ -124,6 +124,7 @@ async def chat(req: ChatRequest, request: Request):
                 permission_profile_id="desktop-current",
                 interactive=True,
                 steering=inbox,
+                durable_run_id=inbox.run_id,
             ):
                 event_name = event_dict.get("event", "message")
                 if event_name == "done":
@@ -260,7 +261,7 @@ async def create_chat_job(req: ChatRequest, request: Request):
             merged,
             attachments=runtime_attachments,
             control_session_id=control_session_id,
-            execution_source="desktop",
+            execution_source="desktop_job",
             principal_id=control_session_id,
             permission_profile_id="desktop-current",
             interactive=True,

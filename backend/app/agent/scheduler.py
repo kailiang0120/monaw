@@ -133,7 +133,7 @@ class ScheduledTaskService:
         if self._task is not None and not self._task.done():
             return
         self._stop.clear()
-        get_db().recover_expired_scheduled_task_runs(_iso_utc(_utc_now()))
+        self._retire_expired_scheduler_rows(_iso_utc(_utc_now()))
         self._task = asyncio.create_task(self._tick_loop(), name="scheduled-task-service")
         set_scheduled_task_service(self)
         logger.info("scheduled-tasks: service started")
@@ -213,7 +213,7 @@ class ScheduledTaskService:
 
     async def _fire_due_tasks(self) -> None:
         now_iso = _iso_utc(_utc_now())
-        get_db().recover_expired_scheduled_task_runs(now_iso)
+        self._retire_expired_scheduler_rows(now_iso)
         get_db().repair_scheduled_intent(now_iso, lambda row: self._next_iso(row, _utc_now()))
         self._cancel_requested_runs()
         self._drain_pending()
@@ -224,6 +224,17 @@ class ScheduledTaskService:
                 self._drain_pending()
             except KeyError:
                 pass  # Deleted between the due-list read and acceptance.
+
+    @staticmethod
+    def _retire_expired_scheduler_rows(now_iso: str) -> int:
+        """Retire queue history independently from durable effect recovery.
+
+        The unique occurrence key and stable ``scheduled-{run_id}`` durable
+        identity prevent the abandoned occurrence from being dispatched again.
+        Any uncertain effect remains in the durable journal and its workspace
+        dispatch guard until it is inspected.
+        """
+        return get_db().recover_expired_scheduled_task_runs(now_iso)
 
     def _stopping_resources(self) -> tuple[set[str], int]:
         conversations = unfinished_conversation_ids()
@@ -395,6 +406,7 @@ class ScheduledTaskService:
                     else f"scheduled-task:{task_id}:restricted"
                 ),
                 interactive=False,
+                durable_run_id=f"scheduled-{run_id}",
             ):
                 event_name = str(event.get("event") or "")
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}

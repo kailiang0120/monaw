@@ -120,6 +120,146 @@ def test_turn_loop_checks_live_tool_context_and_preserves_full_history(monkeypat
     assert memory.persisted_turns[0]["tool_calls"][0]["output"] == output
 
 
+def test_cooperative_pause_during_model_wait_stops_before_tool_dispatch():
+    from app.agent.durable.turn_run import pause_run
+
+    model_started = asyncio.Event()
+    release_model = asyncio.Event()
+    invoked: list[str] = []
+
+    class WaitingLLM:
+        async def chat_with_tools(self, messages, tools, **kwargs):  # noqa: ARG002
+            model_started.set()
+            await release_model.wait()
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(call_id="paused-call", tool_name="change", arguments={})],
+                finish_reason="tool_calls",
+            )
+
+    class PauseHandle:
+        run_id = "cooperative-pause-test"
+        turn_id = "cooperative-pause-turn"
+        lease_lost = False
+        pause_requested = False
+
+        def begin_pause(self):
+            self.pause_requested = True
+
+        def renew_lease(self):
+            return None
+
+        def finalize(self, outcome_status, reason_code=""):
+            self.finalized = (outcome_status, reason_code)
+            return True
+
+    handle = PauseHandle()
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(
+        llm_client=WaitingLLM(),
+        registry=ToolRegistry([{
+            "name": "change",
+            "callable": lambda: invoked.append("change") or "done",
+            "parameters": {"type": "object", "properties": {}},
+        }]),
+        memory=memory,
+        observability=FakeObservability(),
+    )
+
+    async def collect():
+        task = asyncio.create_task(_collect_events(loop, handle))
+        await asyncio.wait_for(model_started.wait(), timeout=2)
+        assert await pause_run(handle.run_id)
+        release_model.set()
+        return await asyncio.wait_for(task, timeout=2)
+
+    async def _collect_events(turn_loop, durable_run):
+        return [event async for event in turn_loop.run(
+            "inspect safely", "pause-boundary", system_prompt="", durable_run=durable_run,
+        )]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+
+    assert invoked == []
+    assert handle.finalized == ("paused", "user_pause")
+    assert events[-1]["event"] == "done"
+    assert events[-1]["data"]["status"] == "paused"
+    assert memory.persisted_turns[0]["status"] == "paused"
+
+
+def test_durable_run_factory_waits_for_conversation_lock():
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    created: list[str] = []
+
+    class SerialLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, **kwargs):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                first_started.set()
+                await release_first.wait()
+                return final_answer_response("First finished")
+            return final_answer_response("Second finished")
+
+    class Handle:
+        lease_lost = False
+        pause_requested = False
+
+        def __init__(self, run_id):
+            self.run_id = run_id
+            self.turn_id = f"turn-{run_id}"
+
+        def renew_lease(self):
+            return None
+
+        def finalize(self, outcome_status, reason_code=""):
+            return True
+
+    loop = TurnLoop(
+        llm_client=SerialLLM(),
+        registry=ToolRegistry(),
+        memory=PersistingFakeMemory(),
+        observability=FakeObservability(),
+    )
+
+    def factory(run_id):
+        def create():
+            created.append(run_id)
+            return Handle(run_id)
+        return create
+
+    async def collect(run_id):
+        return [event async for event in loop.run(
+            run_id,
+            "same-conversation",
+            system_prompt="",
+            durable_run_factory=factory(run_id),
+        )]
+
+    async def scenario():
+        first = asyncio.create_task(collect("first-run"))
+        await asyncio.wait_for(first_started.wait(), timeout=2)
+        second = asyncio.create_task(collect("second-run"))
+        await asyncio.sleep(0.05)
+        assert created == ["first-run"]
+        release_first.set()
+        return await asyncio.gather(first, second)
+
+    try:
+        results = asyncio.run(scenario())
+    finally:
+        loop.shutdown()
+
+    assert created == ["first-run", "second-run"]
+    assert [result[-1]["data"]["summary"] for result in results] == ["First finished", "Second finished"]
+    assert all(result[-1]["data"]["status"] == "complete" for result in results)
+
+
 def test_turn_warns_then_pauses_at_its_token_limit():
     from app.agent.observability.recorder import UsageStats
 

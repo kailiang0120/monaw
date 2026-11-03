@@ -24,13 +24,23 @@ def _new_database(path, *, conversation_id="journal-chat"):
 
 
 def _create_run(journal: Journal, *, run_id="run-journal", owner="owner-a", conversation_id="journal-chat"):
-    return journal.create_run(
+    turn_id = f"turn-{run_id}-1"
+    created = journal.create_run(
         run_id=run_id,
         conversation_id=conversation_id,
         execution_source="desktop",
         owner_instance_id=owner,
-        turn_id=f"turn-{run_id}-1",
+        turn_id=turn_id,
         workspace_dir="C:/work",
+    )
+    return {**created, "turn_id": turn_id}
+
+
+def _commit_resume_input(db: Database, created):
+    db.persist_turn_messages(
+        created["turn_id"],
+        created["conversation_id"],
+        [{"role": "user", "content": "original request"}, {"role": "assistant", "content": "checkpoint"}],
     )
 
 
@@ -107,6 +117,7 @@ def test_claim_race_across_database_objects_has_one_winner(tmp_path):
     db_a = _new_database(tmp_path / "agent.db")
     journal_a = Journal(db_a)
     created = _create_run(journal_a)
+    _commit_resume_input(db_a, created)
     pausing = journal_a.transition_run(
         "run-journal",
         to_status="pausing",
@@ -120,7 +131,7 @@ def test_claim_race_across_database_objects_has_one_winner(tmp_path):
         owner_instance_id="owner-a",
         attempt=created["attempt"],
         expected_revision=pausing["revision"],
-        recovery_input_ref="recovery-input-ref",
+        recovery_input_ref=f"turn_checkpoint:{created['turn_id']}",
     )
 
     db_b = Database(db_a._path)
@@ -189,6 +200,7 @@ def test_expired_owner_recovery_classifies_in_flight_operations_and_handoffs_saf
     db = _new_database(tmp_path / "agent.db")
     journal = Journal(db)
     created = _create_run(journal)
+    _commit_resume_input(db, created)
 
     executing = journal.prepare_operation(
         "run-journal",
@@ -231,6 +243,16 @@ def test_expired_owner_recovery_classifies_in_flight_operations_and_handoffs_saf
         ("2000-01-01T00:00:00+00:00", "run-journal"),
     )
     db.commit()
+    with pytest.raises(JournalConflictError, match="prove the owner process is dead"):
+        journal.release_expired_run(
+            "run-journal",
+            expected_owner_instance_id="owner-a",
+            recovery_owner_instance_id="recovery-b",
+            expected_attempt=created["attempt"],
+            expected_revision=before_release["revision"],
+            safe_to_release=True,
+            owner_proven_dead=False,
+        )
     interrupted = journal.release_expired_run(
         "run-journal",
         expected_owner_instance_id="owner-a",
@@ -238,6 +260,7 @@ def test_expired_owner_recovery_classifies_in_flight_operations_and_handoffs_saf
         expected_attempt=created["attempt"],
         expected_revision=before_release["revision"],
         safe_to_release=True,
+        owner_proven_dead=True,
     )
 
     assert interrupted["status"] == "interrupted"
@@ -279,6 +302,7 @@ def test_expired_owner_recovery_classifies_in_flight_operations_and_handoffs_saf
         expected_attempt=created["attempt"],
         expected_revision=needs_review["revision"],
         safe_to_release=True,
+        owner_proven_dead=True,
     )
     assert handed_off["status"] == "needs_review"
     assert db.fetchone("SELECT owner_instance_id FROM agent_runs WHERE run_id = 'run-journal'")[0] == "recovery-c"
@@ -311,7 +335,7 @@ def test_expired_owner_recovery_classifies_in_flight_operations_and_handoffs_saf
         owner_instance_id="recovery-c",
         attempt=created["attempt"],
         expected_revision=review_resolved["revision"],
-        recovery_input_ref="recovery-input-ref",
+        recovery_input_ref=f"turn_checkpoint:{created['turn_id']}",
     )
     assert paused["status"] == "paused"
     assert db.fetchone("SELECT owner_instance_id FROM agent_runs WHERE run_id = 'run-journal'")[0] is None

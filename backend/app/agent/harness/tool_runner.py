@@ -10,6 +10,7 @@ from typing import Callable
 
 from app.agent.approval_review import AutoReviewState
 from app.agent.execution_gate import ExecutionGateService
+from app.agent.durable.operation_execution import prepare_tool_operation
 from app.agent.harness.tool_batch import ActiveToolCall, ToolBatchLedger, TrackedToolCall
 from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.harness.tool_policy import ToolPolicy, ToolPolicyDecision
@@ -172,6 +173,10 @@ class ToolBatchRunner:
     def _emit_gate_event(self, event: dict, key: str) -> None:
         kind = str(event.get("event"))
         if kind in {"approval_required", "access_grant_required"}:
+            durable_run = getattr(self.lifecycle, "durable_run", None)
+            wait_for_approval = getattr(durable_run, "wait_for_approval", None)
+            if callable(wait_for_approval):
+                wait_for_approval()
             self._call_states[key] = kind
         elif kind in {"approval_resolved", "tool_resumed"}:
             self._call_states[key] = "running"
@@ -187,12 +192,26 @@ class ToolBatchRunner:
         """
         tool_name = str(prepared.tool_name)
         call_id = str(prepared.call_id)
+        operation_execution = None
+        operation_prepared = False
+        settlement_attempted = False
 
         async def _execute(tool_dict: dict, arguments: dict) -> ToolCallResult:
+            nonlocal operation_execution, operation_prepared
             async with self._parallel_semaphore:
                 blocked = self.review_state.blocked_output(tool_name, arguments)
                 if blocked:
                     return ToolCallResult.from_output(call_id=call_id, name=tool_name, output=blocked)
+                if self.lifecycle.pause_requested:
+                    return ToolCallResult.from_output(
+                        call_id=call_id,
+                        name=tool_name,
+                        output=json.dumps({
+                            "status": "cancelled",
+                            "reason_code": "pause_requested",
+                            "error": "The run is pausing before the next tool action.",
+                        }),
+                    )
                 if self.steering is not None and self.steering.pending:
                     return ToolCallResult.from_output(
                         call_id=call_id, name=tool_name,
@@ -200,7 +219,22 @@ class ToolBatchRunner:
                     )
                 self._call_states[prepared.active_key] = "running"
                 self._refresh_phase()
-                return await self.executor.execute(budget=self.budget, tool_dict=tool_dict, arguments=arguments, call_id=call_id)
+                if not operation_prepared:
+                    metadata = tool_dict.get("metadata") if isinstance(tool_dict.get("metadata"), dict) else {}
+                    operation_execution = prepare_tool_operation(
+                        getattr(self.lifecycle, "durable_run", None),
+                        tool_name=tool_name,
+                        trusted_builtin=metadata.get("durable_builtin") is True,
+                        lifecycle=self.lifecycle,
+                    )
+                    operation_prepared = True
+                return await self.executor.execute(
+                    budget=self.budget,
+                    tool_dict=tool_dict,
+                    arguments=arguments,
+                    call_id=call_id,
+                    operation_execution=operation_execution,
+                )
 
         async def _rerun_after_grant(_budget: IterationBudget, tool_dict: dict, arguments: dict) -> str:
             # Keep the original call_id so Stop and timeouts still reach the re-run.
@@ -210,6 +244,9 @@ class ToolBatchRunner:
             result = await _execute(prepared.tool_dict, prepared.arguments)
             self._record_call_result(prepared, result)
             if ExecutionGateService.check_pending_status(result.output) is None:
+                if operation_execution is not None:
+                    settlement_attempted = True
+                    operation_execution.settle(result.output)
                 return result
             async with self._gate_lock:
                 output = await self.execution_gate.resolve_pending_output(
@@ -224,17 +261,34 @@ class ToolBatchRunner:
                     review_context={**self.review_history, "progress": self.progress(),
                                     "tool_evidence": self.history},
                     review_state=self.review_state,
-                    review_is_current=lambda: self.steering is None or not self.steering.pending,
+                    review_is_current=lambda: (
+                        (self.steering is None or not self.steering.pending)
+                        and not self.lifecycle.pause_requested
+                    ),
                     call_id=call_id,
+                    operation_execution=operation_execution,
+                    pause_requested=lambda: self.lifecycle.pause_requested,
                 )
             result = ToolCallResult.from_output(call_id=call_id, name=tool_name, output=output)
             self._record_call_result(prepared, result, timed=False)
+            if operation_execution is not None and not settlement_attempted:
+                settlement_attempted = True
+                operation_execution.settle(result.output)
             return result
         except asyncio.CancelledError as exc:
             stopped_output = getattr(exc, "tool_output", None)
             if stopped_output:
                 self._record_call_result(prepared, ToolCallResult.from_output(
                     call_id=call_id, name=tool_name, output=stopped_output), timed=False)
+            if operation_execution is not None and not settlement_attempted:
+                settlement_attempted = True
+                try:
+                    operation_execution.settle(
+                        stopped_output,
+                        cancelled=not bool(stopped_output),
+                    )
+                except Exception:
+                    pass
             raise
         except Exception as exc:
             self.observer.error(
@@ -248,6 +302,12 @@ class ToolBatchRunner:
                 output=json.dumps({"status": "error", "error": str(exc)}),
                 fallback_status="error",
             )
+            if operation_execution is not None and not settlement_attempted:
+                settlement_attempted = True
+                try:
+                    operation_execution.settle(result.output)
+                except Exception:
+                    pass
             self._record_call_result(prepared, result)
             return result
         finally:
@@ -426,15 +486,35 @@ class ToolBatchRunner:
         }})
 
     async def execute(self, calls: list[dict]) -> BatchOutcome:
+        if self.lifecycle.review_requested:
+            self.pause = TurnOutcome(
+                summary="",
+                status="error",
+                reason_code=self.lifecycle.review_reason_code or "external_effect_unknown",
+            )
+            return BatchOutcome(self.pause)
+        if self.lifecycle.pause_requested:
+            self.pause = TurnOutcome(summary="", status="paused", reason_code="user_pause")
+            return BatchOutcome(self.pause)
         self.recovery.begin_round()
         self._execution_plan = self._build_execution_plan(self.user_request(), calls)
         steps = {step.step_id: step for step in self._execution_plan.steps}
         self.emit({"event": "plan", "data": self._execution_plan.to_dict()})
         self._sync_plan()
         for batch in can_parallelize(calls, self.registry.get_tool):
+            if self.lifecycle.review_requested:
+                self.pause = TurnOutcome(
+                    summary="",
+                    status="error",
+                    reason_code=self.lifecycle.review_reason_code or "external_effect_unknown",
+                )
+                break
+            if self.lifecycle.pause_requested:
+                self.pause = TurnOutcome(summary="", status="paused", reason_code="user_pause")
+                break
             pending: list[PreparedToolCall] = []
             for call in batch:
-                if self.pause is not None:
+                if self.pause is not None or self.lifecycle.review_requested or self.lifecycle.pause_requested:
                     break
                 prepared = self._prepare(call, steps)
                 if prepared.rejection is not None or not prepared.policy_decision.allowed:
@@ -457,6 +537,16 @@ class ToolBatchRunner:
                     self._start(prepared)
                     pending.append(prepared)
             await self._flush_prepared_tool_calls(pending)
+            if self.lifecycle.review_requested:
+                self.pause = TurnOutcome(
+                    summary="",
+                    status="error",
+                    reason_code=self.lifecycle.review_reason_code or "external_effect_unknown",
+                )
+                break
+            if self.lifecycle.pause_requested:
+                self.pause = TurnOutcome(summary="", status="paused", reason_code="user_pause")
+                break
             if self.pause is not None:
                 break
         self.pause = self.pause or self.recovery.finish_round(len(calls))
