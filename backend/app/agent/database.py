@@ -12,9 +12,10 @@ import logging
 import sqlite3
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.agent.db_bootstrap import initialize_database
 from app.agent.runtime_paths import RUNTIME_DIR
@@ -71,6 +72,24 @@ class Database:
     def commit(self) -> None:
         with self._lock:
             self.conn.commit()
+
+    @contextmanager
+    def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+        """Run a unit of work on the shared connection under its reentrant lock.
+
+        ``BEGIN IMMEDIATE`` serializes competing Journal writers across both
+        threads and independent Database instances before they read revisions
+        or allocate event sequence numbers.
+        """
+        with self._lock:
+            conn = self.conn
+            conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     def fetchone(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
         with self._lock:
