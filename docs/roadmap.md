@@ -1,5 +1,7 @@
 # Roadmap
 
-Planned improvements that are not built yet.
+## v1.1
 
-Nothing is planned right now. The last item here, controlling the Chrome you already have open, with your logins and tabs, without restarts or repeated prompts, shipped as the Monaw Chrome extension. See [browser-automation.md](browser-automation.md).
+Monaw v1.1 focuses on durable execution and crash recovery, file previews and Undo, and an execution timeline with Pause and Continue. The [v1.1 implementation plan](v1.1-implementation-plan.md) tracks phase ownership, parallel work, and release checks.
+
+The Monaw Chrome extension shipped support for controlling an open Chrome session. See [browser automation](browser-automation.md).
