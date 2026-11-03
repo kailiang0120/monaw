@@ -299,6 +299,11 @@ def sanitize_event_payload(event_type: str, payload: object) -> dict[str, object
         if event_type == "operation.prepared":
             safe_enum("operation_kind", OPERATION_KINDS)
             safe_enum("effect_class", EFFECT_CLASSES)
+        elif event_type == "operation.updated":
+            # A native file operation can commit its pre-effect snapshot and
+            # promotion independently of a status transition. Expose only the
+            # bounded classification, never its private manifest reference.
+            safe_enum("effect_class", EFFECT_CLASSES)
         safe_enum("status", OPERATION_STATUSES)
         if "revision" in payload:
             safe_int("revision", minimum=1)

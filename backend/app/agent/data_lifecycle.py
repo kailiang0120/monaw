@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import time
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from app.agent.ui_events import publish_ui_event
 
 MAX_DIAGNOSTIC_BYTES = 200 * 1024 * 1024
 MAX_BACKEND_LOG_BYTES = 5 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -207,6 +209,14 @@ def enforce_runtime_retention() -> dict[str, int]:
     counts.update(approval_broker.enforce_retention(max_age_days=RETENTION_DAYS))
     counts.update(access_grant_broker.enforce_retention(max_age_days=RETENTION_DAYS))
     counts.update(get_db().enforce_scheduled_task_run_retention(max_age_days=RETENTION_DAYS))
+    try:
+        from app.agent.durable.journal import Journal
+        from app.agent.durable.recovery import _cleanup_file_mutation_snapshots
+
+        counts.update(_cleanup_file_mutation_snapshots(Journal(get_db())))
+    except Exception as exc:
+        logger.warning("file mutation snapshot cleanup failed error_type=%s", type(exc).__name__)
+        counts.update({"snapshot_files_deleted": 0, "snapshot_bytes_deleted": 0})
     return counts
 
 

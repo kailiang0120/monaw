@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from contextvars import ContextVar, Token
 from typing import Any
 
 from app.agent.durable.models import EffectClass, OperationStatus
@@ -124,6 +125,14 @@ class OperationExecution:
         self._status: OperationStatus = "prepared"
         self._effect_started = False
         self._pending_resume = False
+        self._pending_ticket_id = ""
+        self._pending_ticket_status = ""
+        self._active_approval_ticket_id = ""
+        self._pending_approval_binding = ""
+        self._approval_bindings: dict[str, str] = {}
+        self._active_approval_binding = ""
+        self._native_transient_grant_candidate = ""
+        self._native_transient_grant_approvals: dict[str, str] = {}
 
     @property
     def effect_started(self) -> bool:
@@ -132,6 +141,34 @@ class OperationExecution:
     @property
     def trusted_pending_resume(self) -> bool:
         return self._pending_resume
+
+    @property
+    def approved_ticket_id(self) -> str:
+        """Approval ticket whose exact payload is executing in this handler."""
+        return self._active_approval_ticket_id
+
+    @property
+    def approved_binding_digest(self) -> str:
+        """Private plan binding retained only in this live operation context."""
+        return self._active_approval_binding
+
+    @property
+    def durable_workspace_dir(self) -> str:
+        return str(_field(self.durable_run, "workspace_dir", "") or "")
+
+    def can_promote_native_file_mutation(self) -> bool:
+        """Whether this is one supported trusted native file operation."""
+        return bool(
+            self.trusted_builtin
+            and self.operation_kind in {
+                "file_write", "file_move", "file_copy", "file_delete", "file_mkdir", "file_mutation"
+            }
+            and self.tool_name in {
+                "fs_write", "fs_append", "fs_patch", "fs_move", "fs_rename",
+                "fs_copy", "fs_delete", "file_write", "file_append", "file_patch",
+                "move", "rename", "copy", "delete",
+            }
+        )
 
     def prepare(self) -> None:
         # This commit must complete before ToolExecutor can schedule a worker.
@@ -176,6 +213,16 @@ class OperationExecution:
                         "This operation cannot be replayed without a trusted preflight result.",
                     )
                 assert_dispatch_allowed(self.durable_run, self.lifecycle, begin_run=True)
+                self._active_approval_ticket_id = (
+                    self._pending_ticket_id
+                    if self._pending_ticket_status == "pending_approval"
+                    else ""
+                )
+                self._active_approval_binding = (
+                    self._approval_bindings.get(self._active_approval_ticket_id, "")
+                    if self._active_approval_ticket_id
+                    else ""
+                )
                 self._pending_resume = False
                 return
             assert_dispatch_allowed(self.durable_run, self.lifecycle)
@@ -187,6 +234,8 @@ class OperationExecution:
                 )
             self._transition("executing")
             self._effect_started = True
+            self._active_approval_ticket_id = ""
+            self._active_approval_binding = ""
 
     def note_pending_preflight(self, output: object) -> bool:
         """Accept a pending gate only when a known native preflight is safe."""
@@ -205,7 +254,192 @@ class OperationExecution:
                     self.tool_name, output, trusted_builtin=self.trusted_builtin
                 )
             ))
+            self._pending_ticket_id = (
+                str(payload.get("ticket_id") or "") if self._pending_resume else ""
+            )
+            self._pending_ticket_status = (
+                str(payload.get("status") or "") if self._pending_resume else ""
+            )
+            if self._pending_resume and self._pending_ticket_status == "pending_approval":
+                if self._pending_approval_binding:
+                    self._approval_bindings[self._pending_ticket_id] = self._pending_approval_binding
+                self._pending_approval_binding = ""
+                self._native_transient_grant_candidate = ""
+            elif self._pending_resume:
+                # An access grant continuation is not an approval of a plan.
+                self._pending_approval_binding = ""
+                self._clear_native_transient_grants()
             return self._pending_resume
+
+    def bind_pending_approval_to_plan(self, binding_digest: str) -> None:
+        """Bind the next native approval ticket to its private immutable plan."""
+        if (
+            not isinstance(binding_digest, str)
+            or len(binding_digest) != 64
+            or any(char not in "0123456789abcdef" for char in binding_digest)
+        ):
+            raise ValueError("binding_digest must be a SHA-256 digest")
+        with self._lock:
+            if current_operation_execution() is not self or not self.can_promote_native_file_mutation():
+                raise OperationDispatchBlocked("unknown", "No native file approval context is active.")
+            self._pending_approval_binding = binding_digest
+
+    def note_native_transient_grant_candidate(self, binding_digest: str) -> None:
+        """Remember an exact once-grant scope before its legacy gate consumes it."""
+        if (
+            not isinstance(binding_digest, str)
+            or len(binding_digest) != 64
+            or any(char not in "0123456789abcdef" for char in binding_digest)
+        ):
+            raise ValueError("binding_digest must be a SHA-256 digest")
+        with self._lock:
+            if current_operation_execution() is not self or not self.can_promote_native_file_mutation():
+                raise OperationDispatchBlocked("unknown", "No native file grant context is active.")
+            self._native_transient_grant_candidate = binding_digest
+
+    def bind_native_transient_grant_to_approval(
+        self, ticket_id: str, binding_digest: str
+    ) -> bool:
+        """Bind the consumed legacy grant to the mutation approval it produced."""
+        with self._lock:
+            if (
+                current_operation_execution() is not self
+                or not self.can_promote_native_file_mutation()
+                or not ticket_id
+                or self._native_transient_grant_candidate != binding_digest
+            ):
+                return False
+            self._native_transient_grant_approvals[str(ticket_id)] = binding_digest
+            self._native_transient_grant_candidate = ""
+            return True
+
+    def has_native_transient_grant_approval(
+        self, ticket_id: str, binding_digest: str
+    ) -> bool:
+        """Check the live approved continuation against its private exact scope."""
+        with self._lock:
+            return bool(
+                current_operation_execution() is self
+                and self.can_promote_native_file_mutation()
+                and ticket_id
+                and self._active_approval_ticket_id == ticket_id
+                and self._native_transient_grant_approvals.get(ticket_id) == binding_digest
+            )
+
+    def _clear_native_transient_grants(self) -> None:
+        self._native_transient_grant_candidate = ""
+        self._native_transient_grant_approvals.clear()
+
+    def promote_native_file_mutation(
+        self,
+        *,
+        snapshot_ref: str,
+        input_summary: dict[str, Any],
+        precondition_evidence: dict[str, Any],
+    ) -> None:
+        """Commit snapshot-backed verifiable classification before native I/O."""
+        with self._lock:
+            if current_operation_execution() is not self or not self.can_promote_native_file_mutation():
+                raise OperationDispatchBlocked(
+                    "unknown", "Only the active trusted native file operation can be promoted."
+                )
+            if not self._effect_started or self._status != "executing" or self.effect_class != "opaque_effect":
+                raise OperationDispatchBlocked(
+                    "external_effect_unknown", "The native file operation is not at its promotion boundary."
+                )
+            assert_dispatch_allowed(self.durable_run, self.lifecycle)
+            self.journal.promote_operation_to_verifiable_write(
+                self.run_id,
+                self.operation_id,
+                owner_instance_id=self.owner_instance_id,
+                attempt=self.attempt,
+                snapshot_ref=snapshot_ref,
+                input_summary=input_summary,
+                precondition_evidence=precondition_evidence,
+            )
+            self.effect_class = "verifiable_write"
+
+    def assert_native_file_effect_allowed(self) -> None:
+        """Recheck durable ownership/pause/review gates at the native boundary."""
+        if current_operation_execution() is not self or not self.can_promote_native_file_mutation():
+            raise OperationDispatchBlocked(
+                "unknown", "Only the active trusted native file operation can mutate files."
+            )
+        if self._status != "executing" or self.effect_class != "verifiable_write":
+            raise OperationDispatchBlocked(
+                "external_effect_unknown", "The native file operation has no committed snapshot."
+            )
+        assert_dispatch_allowed(self.durable_run, self.lifecycle)
+
+    def assert_native_file_preflight_allowed(self) -> None:
+        """Recheck durable fences before staging a native file result."""
+        if current_operation_execution() is not self or not self.can_promote_native_file_mutation():
+            raise OperationDispatchBlocked(
+                "unknown", "Only the active trusted native file operation can stage files."
+            )
+        if self._status != "executing":
+            raise OperationDispatchBlocked(
+                "external_effect_unknown", "The native file operation is no longer executing."
+            )
+        assert_dispatch_allowed(self.durable_run, self.lifecycle)
+
+    def native_file_no_effect(self, reason_code: str = "operation_failed") -> None:
+        """Settle a promoted native file operation when no filesystem effect ran."""
+        with self._lock:
+            if (
+                current_operation_execution() is not self
+                or not self.can_promote_native_file_mutation()
+                or self.effect_class not in {"opaque_effect", "verifiable_write"}
+            ):
+                return
+            if self._status != "executing":
+                return
+            self._transition(
+                "failed",
+                reason_code=reason_code,
+                evidence={"verification_result": "unchanged"},
+            )
+            self._clear_native_transient_grants()
+
+    def verify_native_file_mutation(self, verifier: object) -> dict[str, Any]:
+        """Verify the private snapshot-backed row; never trust handler output."""
+        with self._lock:
+            if current_operation_execution() is not self or self.effect_class != "verifiable_write":
+                raise OperationDispatchBlocked(
+                    "external_effect_unknown", "No promoted native file operation is active."
+                )
+            if self._status != "executing":
+                raise OperationDispatchBlocked(
+                    "external_effect_unknown", "The native file operation is no longer executing."
+                )
+            load = getattr(self.journal, "load_operation_internal", None)
+            verify = getattr(verifier, "verify", None)
+            if not callable(load) or not callable(verify):
+                raise TypeError("native file verifier is unavailable")
+            private_operation = load(self.run_id, self.operation_id)
+            if not isinstance(private_operation, dict):
+                raise RuntimeError("private file operation evidence is unavailable")
+            result = verify(private_operation)
+            evidence = result if isinstance(result, dict) else {}
+            verification = str(evidence.get("verification_result") or "unknown")
+            if verification == "completed":
+                self._transition("verified", reason_code="verified", evidence=evidence)
+            elif verification == "unchanged":
+                self._transition("failed", reason_code="operation_failed", evidence=evidence)
+            else:
+                self._transition("uncertain", reason_code="verification_failed", evidence=evidence)
+                _block_run(self.run_id, self.lifecycle)
+            return evidence
+
+    def native_file_verification_unavailable(self) -> None:
+        """Keep the run blocked when post-effect evidence could not be read."""
+        with self._lock:
+            if (
+                current_operation_execution() is self
+                and self._status == "executing"
+                and self.effect_class == "verifiable_write"
+            ):
+                self._settle_uncertain("verification_failed")
 
     def preflight_rejected(self, reason_code: str = "approval_rejected") -> None:
         """Record a known no-effect denial from a trusted native gate."""
@@ -218,6 +452,7 @@ class OperationExecution:
                 evidence={"verification_result": "unchanged"},
             )
             self._pending_resume = False
+            self._clear_native_transient_grants()
 
     def _settle_uncertain(self, reason_code: str = "external_effect_unknown") -> None:
         self._transition(
@@ -289,6 +524,7 @@ class OperationExecution:
             reason_code="unknown",
             evidence={"verification_result": "unknown"},
         )
+        self._clear_native_transient_grants()
 
 
 def _payload(output: str | None) -> dict[str, Any]:
@@ -306,6 +542,25 @@ def _payload_reason(output: str | None) -> str:
 def _result_status(output: str | None) -> str:
     payload = _payload(output)
     return str(payload.get("status") or "ok").lower()
+
+
+_CURRENT_OPERATION_EXECUTION: ContextVar[OperationExecution | None] = ContextVar(
+    "agent_current_operation_execution", default=None
+)
+
+
+def current_operation_execution() -> OperationExecution | None:
+    return _CURRENT_OPERATION_EXECUTION.get()
+
+
+def set_current_operation_execution(
+    operation: OperationExecution | None,
+) -> Token[OperationExecution | None]:
+    return _CURRENT_OPERATION_EXECUTION.set(operation)
+
+
+def reset_current_operation_execution(token: Token[OperationExecution | None]) -> None:
+    _CURRENT_OPERATION_EXECUTION.reset(token)
 
 
 def prepare_tool_operation(

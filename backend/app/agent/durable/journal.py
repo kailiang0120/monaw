@@ -834,6 +834,101 @@ class Journal:
             ).fetchone()
             return self._operation_dto(updated)
 
+    def promote_operation_to_verifiable_write(
+        self,
+        run_id: str,
+        operation_id: str,
+        *,
+        owner_instance_id: str,
+        attempt: int,
+        snapshot_ref: str,
+        input_summary: object = None,
+        precondition_evidence: object = None,
+    ) -> OperationDTO:
+        """Promote one executing native operation after its private snapshot commits.
+
+        The P2 dispatch boundary deliberately starts file tools as opaque. A
+        trusted native filesystem handler may classify the exact executing row
+        as verifiable only after SnapshotStore has durably captured the plan.
+        This CAS commits the private snapshot reference, sanitized plan summary,
+        and classification together before the filesystem mutation starts.
+        """
+        run_id = _required_id(run_id, name="run_id")
+        operation_id = _required_id(operation_id, name="operation_id")
+        owner_instance_id = _required_id(owner_instance_id, name="owner_instance_id")
+        private_snapshot_ref = _private_text(snapshot_ref, name="snapshot_ref", max_length=4096)
+        if not private_snapshot_ref:
+            raise ValueError("snapshot_ref is required")
+        safe_summary = sanitize_evidence(input_summary)
+        safe_preconditions = sanitize_evidence(precondition_evidence)
+        now = _timestamp()
+
+        with self.db.transaction() as conn:
+            run = self._require_run(conn, run_id)
+            self._assert_owner(run, owner_instance_id, attempt)
+            if run["status"] != "running":
+                raise InvalidTransitionError("verifiable writes require a running Run")
+            op = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, operation_id),
+            ).fetchone()
+            if op is None:
+                raise OperationNotFoundError(operation_id)
+            if int(op["attempt"]) != attempt:
+                raise LeaseConflictError("operation belongs to a stale attempt")
+            if str(op["status"]) != "executing" or str(op["effect_class"]) != "opaque_effect":
+                raise InvalidTransitionError("only the exact executing opaque operation can be promoted")
+            if op["snapshot_ref"]:
+                raise InvalidTransitionError("operation already has a snapshot reference")
+
+            revision = int(run["revision"]) + 1
+            conn.execute(
+                """UPDATE run_operations SET effect_class = 'verifiable_write',
+                       input_summary_json = ?, precondition_json = ?, snapshot_ref = ?, updated_at = ?
+                   WHERE operation_id = ? AND run_id = ? AND attempt = ?
+                     AND status = 'executing' AND effect_class = 'opaque_effect'
+                     AND snapshot_ref IS NULL""",
+                (
+                    _safe_json(safe_summary),
+                    _safe_json(safe_preconditions),
+                    private_snapshot_ref,
+                    now,
+                    operation_id,
+                    run_id,
+                    attempt,
+                ),
+            )
+            self._require_rowcount(conn, "operation promotion lost its state fence")
+            conn.execute(
+                "UPDATE agent_runs SET revision = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+                (revision, now, run_id, int(run["revision"])),
+            )
+            self._require_rowcount(conn, "operation promotion lost its run revision fence")
+            self._append_event(
+                conn,
+                run_id,
+                "operation.updated",
+                {
+                    "operation_id": operation_id,
+                    "sequence": int(op["sequence_no"]),
+                    "attempt": attempt,
+                    "status": "executing",
+                    "effect_class": "verifiable_write",
+                    "reason_code": None,
+                    "evidence": {
+                        "snapshot_available": True,
+                        **safe_preconditions,
+                    },
+                    "revision": revision,
+                },
+                at=now,
+            )
+            updated = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, operation_id),
+            ).fetchone()
+            return self._operation_dto(updated)
+
     def load_operation(self, run_id: str, operation_id: str) -> OperationDTO | None:
         with self.db.transaction(immediate=False) as conn:
             row = conn.execute(

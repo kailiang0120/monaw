@@ -342,8 +342,14 @@ def resolve_grant(
     return ticket
 
 
-def check_session_grant(target_type: str, identifier: str, access: str = "read") -> bool:
-    """Check (and for "once", atomically consume) a grant for this run's scope."""
+def check_session_grant(
+    target_type: str,
+    identifier: str,
+    access: str = "read",
+    *,
+    consume_once: bool = True,
+) -> bool:
+    """Check a grant for this run's scope; by default consume a one-time grant."""
     db = get_db()
     if target_type == "path":
         stored_access = _SATISFYING_PATH_ACCESS.get(access, (access,))
@@ -354,9 +360,25 @@ def check_session_grant(target_type: str, identifier: str, access: str = "read")
         grant = db.check_session_grant(target_type, scoped_identifier)
         if grant == "session":
             return True
-        if grant == "once" and db.consume_once_grant(target_type, scoped_identifier):
-            return True
+        if grant == "once":
+            if not consume_once or db.consume_once_grant(target_type, scoped_identifier):
+                return True
     return False
+
+
+def session_grant_kind(target_type: str, identifier: str, access: str = "read") -> str | None:
+    """Peek without consuming and return the narrowest active grant kind."""
+    db = get_db()
+    if target_type == "path":
+        stored_access = _SATISFYING_PATH_ACCESS.get(access, (access,))
+    else:
+        stored_access = ("",)
+    for candidate in stored_access:
+        scoped_identifier = _session_grant_identifier(identifier, candidate)
+        grant = db.check_session_grant(target_type, scoped_identifier)
+        if grant in {"session", "once"}:
+            return str(grant)
+    return None
 
 
 def clear_session_grants() -> None:

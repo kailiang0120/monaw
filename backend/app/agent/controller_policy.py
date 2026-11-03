@@ -568,11 +568,22 @@ def _grant_access_for_action(action: ActionType) -> str:
     return "write"
 
 
-def _check_session_grant(target_type: str, identifier: str, action: ActionType = ActionType.READ) -> bool:
+def _check_session_grant(
+    target_type: str,
+    identifier: str,
+    action: ActionType = ActionType.READ,
+    *,
+    consume_once: bool = True,
+) -> bool:
     """Check if a session grant covering ``action`` exists via the access grant broker."""
     try:
         from app.agent.access_grant_broker import check_session_grant
-        return check_session_grant(target_type, identifier, _grant_access_for_action(action))
+        return check_session_grant(
+            target_type,
+            identifier,
+            _grant_access_for_action(action),
+            consume_once=consume_once,
+        )
     except Exception:
         return False
 
@@ -773,7 +784,20 @@ def resolve_permission(
     target_app: str = "",
     state: ControllerPolicyState | None = None,
     settings_data: AgentSettings | None = None,
+    allow_session_grants: bool = True,
+    consume_once_grants: bool = True,
 ) -> PermissionDecision:
+    def session_granted(target_type: str, identifier: str, requested_action: ActionType) -> bool:
+        return bool(
+            allow_session_grants
+            and _check_session_grant(
+                target_type,
+                identifier,
+                requested_action,
+                consume_once=consume_once_grants,
+            )
+        )
+
     restricted = _non_interactive_decision(action, target_path)
     if restricted is not None:
         return restricted
@@ -801,7 +825,7 @@ def resolve_permission(
             blocked_by_root = _is_path_in_blocked_roots(canon, state.blocked_roots)
             if blocked_by_root and not _is_trusted_runtime_path(canon):
                 if _is_user_private_grantable_root(canon, state.blocked_roots):
-                    path_session_granted = _check_session_grant("path", target_path, action)
+                    path_session_granted = session_granted("path", target_path, action)
                     if not _is_state_permitted_root(canon, state.permitted_roots) and not path_session_granted:
                         return PermissionDecision(
                             allowed=False,
@@ -828,7 +852,7 @@ def resolve_permission(
             and not trusted_runtime_path
             and not _is_state_permitted_root(canon, state.permitted_roots)
             and not path_session_granted
-            and not _check_session_grant("path", target_path, action)
+            and not session_granted("path", target_path, action)
         ):
             return _path_access_grant_decision(target_path, "compat_state")
 
@@ -837,7 +861,7 @@ def resolve_permission(
             and normalized_target_app
             and compat_app_entry is None
             and state.mode != PermissionMode.FULL_ACCESS
-            and not _check_session_grant("app", normalized_target_app, action)
+            and not session_granted("app", normalized_target_app, action)
         ):
             return PermissionDecision(
                 allowed=False,
@@ -921,7 +945,7 @@ def resolve_permission(
     if canon_path and _is_path_in_blocked_roots(canon_path, perms.blocked_roots) and not trusted_runtime_path:
         if _is_user_private_grantable_root(canon_path, perms.blocked_roots):
             has_persistent_grant = matched_path_rule is not None and _path_rule_allows(matched_path_rule, action)
-            path_session_granted = _check_session_grant("path", target_path, action)
+            path_session_granted = session_granted("path", target_path, action)
             if not has_persistent_grant and not path_session_granted:
                 return PermissionDecision(
                     allowed=False,
@@ -956,7 +980,7 @@ def resolve_permission(
         and matched_path_rule is None
         and not trusted_runtime_path
         and not path_session_granted
-        and not _check_session_grant("path", target_path, action)
+        and not session_granted("path", target_path, action)
     ):
         return _path_access_grant_decision(target_path, "settings.json")
 
@@ -965,7 +989,7 @@ def resolve_permission(
         and normalized_target_app
         and app_rule is None
         and perms.mode == "custom"
-        and not _check_session_grant("app", normalized_target_app, action)
+        and not session_granted("app", normalized_target_app, action)
     ):
         return PermissionDecision(
             allowed=False,

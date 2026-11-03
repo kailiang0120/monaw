@@ -11,7 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.agent.iteration_budget import IterationBudget
-from app.agent.durable.operation_execution import OperationDispatchBlocked
+from app.agent.durable.operation_execution import (
+    OperationDispatchBlocked,
+    reset_current_operation_execution,
+    set_current_operation_execution,
+)
 from app.agent.tool_cancellation import (
     cancel_call,
     reset_current_call_id,
@@ -216,7 +220,11 @@ class ToolExecutor:
         async def invoke():
             if operation_execution is not None:
                 operation_execution.begin_effect()
-            return await fn(**arguments)
+            operation_token = set_current_operation_execution(operation_execution)
+            try:
+                return await fn(**arguments)
+            finally:
+                reset_current_operation_execution(operation_token)
 
         task = asyncio.create_task(invoke())
         task.add_done_callback(lambda _task: finish_cancellation(cancellation_id))
@@ -279,7 +287,11 @@ class ToolExecutor:
                     return json.dumps({"status": "cancelled", "reason_code": "user_stopped"})
                 if operation_execution is not None:
                     operation_execution.begin_effect()
-                return fn(**arguments)
+                operation_token = set_current_operation_execution(operation_execution)
+                try:
+                    return fn(**arguments)
+                finally:
+                    reset_current_operation_execution(operation_token)
             finally:
                 for lock in reversed(acquired):
                     lock.release()

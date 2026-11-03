@@ -299,6 +299,28 @@ def _can_pause_recovered_run(journal: Journal, run: Mapping[str, Any]) -> bool:
         return bool(row is not None and journal._has_safe_resume_input(conn, row))
 
 
+def _cleanup_file_mutation_snapshots(journal: Journal) -> dict[str, int]:
+    """Prune expired orphans while retaining every active/recoverable ref."""
+    from app.agent.file_mutation.snapshot_store import SnapshotStore
+
+    rows = journal.db.fetchall(
+        """SELECT DISTINCT o.snapshot_ref, o.status AS operation_status, r.status AS run_status
+           FROM run_operations AS o JOIN agent_runs AS r ON r.run_id = o.run_id
+           WHERE o.snapshot_ref IS NOT NULL"""
+    )
+    keep_run_states = frozenset(
+        {"running", "waiting_approval", "pausing", "interrupted", "needs_review", "paused"}
+    )
+    terminal_operation_states = frozenset({"verified", "failed", "cancelled", "returned"})
+    referenced = {
+        str(row["snapshot_ref"])
+        for row in rows
+        if str(row["run_status"]) in keep_run_states
+        or str(row["operation_status"]) not in terminal_operation_states
+    }
+    return SnapshotStore().cleanup(referenced)
+
+
 def recover_startup_runs(
     *,
     journal: Journal | None = None,
@@ -321,6 +343,15 @@ def recover_startup_runs(
     if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
         raise ValueError("page_size must be a positive integer")
     proof = owner_proof or (lambda owner: owner_process_proof(owner))
+    if read_only_verifier is None:
+        try:
+            from app.agent.file_mutation.verifier import get_file_mutation_verifier
+
+            read_only_verifier = get_file_mutation_verifier().verify
+        except Exception as exc:
+            # Native file writes without the verifier stay unresolved; startup
+            # still hands off only after the existing process-death proof.
+            logger.warning("file mutation recovery verifier unavailable error_type=%s", type(exc).__name__)
     proof_cache: dict[str, OwnerProof] = {}
 
     def confirm_owner_dead(owner: str) -> OwnerProof:
@@ -351,6 +382,8 @@ def recover_startup_runs(
         "verified_operations": 0,
         "conflicts": 0,
         "errors": 0,
+        "snapshot_files_deleted": 0,
+        "snapshot_bytes_deleted": 0,
     }
     after_run_id = ""
     while True:
@@ -450,6 +483,10 @@ def recover_startup_runs(
                 )
         if len(page) < page_size:
             break
+    try:
+        report.update(_cleanup_file_mutation_snapshots(journal))
+    except Exception as exc:
+        logger.warning("file mutation snapshot cleanup failed error_type=%s", type(exc).__name__)
     return report
 
 
