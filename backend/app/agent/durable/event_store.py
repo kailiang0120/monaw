@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import math
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from app.agent.database import Database
@@ -97,3 +101,53 @@ class EventStore:
                 "next_seq": next_seq,
                 "last_seq": last_seq,
             }
+
+    async def follow_events(
+        self,
+        run_id: str,
+        *,
+        after_seq: int = 0,
+        poll_interval: float = 0.25,
+        page_size: int = 100,
+        max_events: int | None = None,
+        is_disconnected: Callable[[], Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Replay durable events, then poll the same cursor for new rows.
+
+        Database polling is deliberate: there is no in-memory subscribe/replay
+        handoff where an event could land in the gap. A slow consumer owns no
+        pending queue; it can resume from its last yielded sequence. If event
+        retention overtakes it, ``read_events`` raises ``EventsExpiredError``.
+        """
+        if isinstance(poll_interval, bool) or not isinstance(poll_interval, (int, float)):
+            raise ValueError("poll_interval must be a finite positive number")
+        if not math.isfinite(float(poll_interval)) or poll_interval <= 0:
+            raise ValueError("poll_interval must be a finite positive number")
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+            raise ValueError("page_size must be a positive integer")
+        if max_events is not None and (
+            isinstance(max_events, bool) or not isinstance(max_events, int) or max_events < 1
+        ):
+            raise ValueError("max_events must be a positive integer when provided")
+
+        cursor = after_seq
+        yielded = 0
+        while True:
+            page = self.read_events(run_id, after_seq=cursor, limit=page_size)
+            if is_disconnected is not None:
+                disconnected = is_disconnected()
+                if inspect.isawaitable(disconnected):
+                    disconnected = await disconnected
+                if disconnected:
+                    return
+
+            if page["events"]:
+                for event in page["events"]:
+                    cursor = int(event["seq"])
+                    yield event
+                    yielded += 1
+                    if max_events is not None and yielded >= max_events:
+                        return
+                continue
+
+            await asyncio.sleep(float(poll_interval))

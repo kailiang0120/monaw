@@ -154,17 +154,23 @@ def _authorized_run_context(
     expected_revision: int | None,
     require_active: bool = True,
 ) -> dict[str, Any]:
-    """Authorize session and saved conversation scope before reading files/cache."""
+    """Authorize the current session or signed desktop profile before reading files/cache."""
     db = get_db()
     journal = Journal(db)
-    session_id = str(request.state.control_session.session_id)
+    control_session = request.state.control_session
+    session_id = str(control_session.session_id)
+    profile_id = str(getattr(control_session, "profile_id", None) or "")
     scope = journal.load_run_internal(run_id)
     if scope is None:
         _raise(404, "run_not_found", "Run not found")
-    if (
-        str(scope.get("control_session_id") or "") != session_id
-        or str(scope.get("owner_principal_id") or "") != session_id
-    ):
+    stored_session_id = str(scope.get("control_session_id") or "")
+    owner_principal_id = str(scope.get("owner_principal_id") or "")
+    profile_match = bool(profile_id) and owner_principal_id == profile_id
+    legacy_session_match = (
+        stored_session_id == session_id
+        and owner_principal_id == session_id
+    )
+    if not (profile_match or legacy_session_match):
         _raise(403, "run_scope_mismatch", "Run is not owned by this control session")
     if (
         str(scope.get("conversation_id") or "") != conversation_id
@@ -186,6 +192,10 @@ def _authorized_run_context(
     lifecycle = None
     durable_run = None
     if require_active:
+        # The stable profile can inspect and undo its persisted operations after
+        # restart, but active Apply requires the exact current live session.
+        if stored_session_id != session_id:
+            _raise(403, "run_scope_mismatch", "Active file changes require the Run's current control session")
         lifecycle = _active_lifecycle_for_run(run_id)
         durable_run = getattr(lifecycle, "durable_run", None) if lifecycle is not None else None
         if (
@@ -205,7 +215,7 @@ def _authorized_run_context(
         "snapshot": snapshot,
         "conversation": conversation,
         "session_id": session_id,
-        "principal_id": session_id,
+        "principal_id": profile_id if profile_match else session_id,
         "workspace_dir": workspace_dir,
         "lifecycle": lifecycle,
         "durable_run": durable_run,

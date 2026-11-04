@@ -12,6 +12,7 @@ const { backendPort, useDevelopmentRenderer } = require('./runtime-options.cjs')
 const {
   generateControlSecret,
   generateControlSessionId,
+  loadOrCreateControlProfileId,
   mintControlSession,
   normalizeBackendHost,
 } = require('./control-auth')
@@ -29,6 +30,7 @@ const BACKEND_PORT = backendPort(runtimeConfig)
 const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`
 const CONTROL_SECRET = generateControlSecret()
 const CONTROL_SESSION_ID = generateControlSessionId()
+let CONTROL_PROFILE_ID = null
 const BACKEND_RESTART_EXIT_CODE = 78
 const isDev = !app.isPackaged
 const useDevServer = useDevelopmentRenderer(app.isPackaged)
@@ -347,7 +349,7 @@ function isTrustedRenderer(webContents, value) {
 function updateBackendSettings(payload) {
   return new Promise((resolve, reject) => {
     const body = Buffer.from(JSON.stringify(payload), 'utf8')
-    const session = mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID)
+    const session = mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID, undefined, undefined, CONTROL_PROFILE_ID)
     const request = http.request(
       `${BACKEND_BASE_URL}/api/settings`,
       {
@@ -513,6 +515,19 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   if (!hasInstanceLock) return
+  try {
+    CONTROL_PROFILE_ID = loadOrCreateControlProfileId({
+      safeStorage,
+      store: await getStore(),
+      profileContext: getMonawHomeDir(),
+      platform: process.platform,
+    })
+  } catch (err) {
+    // A missing OS encryption service disables cross-restart Run/Undo identity.
+    // Never fall back to a renderer-provided or plaintext profile id.
+    CONTROL_PROFILE_ID = null
+    console.error('[main] Profile-bound recovery is unavailable:', err.message)
+  }
   installContentSecurityPolicy()
   installMediaPermissionHandler()
   if (await portInUse(BACKEND_HOST, BACKEND_PORT)) {
@@ -672,7 +687,7 @@ async function applyStoredCredentialsToBackend() {
 
 ipcMain.handle('control:get-session', async (event) => {
   assertTrustedIpcSender(event)
-  return mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID)
+  return mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID, undefined, undefined, CONTROL_PROFILE_ID)
 })
 
 ipcMain.handle('credentials:status', async (event) => {

@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -29,6 +30,8 @@ ALL_SCOPES = frozenset(
         "diagnostics:control",
         "files:read",
         "files:mutate",
+        "runs:read",
+        "runs:control",
     }
 )
 MAX_AUTH_FAILURES_PER_MINUTE = 120
@@ -42,6 +45,16 @@ class ControlSession:
     scopes: frozenset[str]
     expires_at: int
     issuer: str
+    # Present only on a token signed by the trusted Electron main process.
+    # Unlike session_id, this opaque ID is stable for one protected Monaw Home.
+    profile_id: str | None = None
+
+
+_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def _valid_profile_id(value: object) -> bool:
+    return isinstance(value, str) and _PROFILE_ID_RE.fullmatch(value) is not None
 
 
 def _b64url_encode(value: bytes) -> str:
@@ -91,6 +104,8 @@ def _required_scope(method: str, path: str) -> str:
         return "files:read"
     if path.startswith("/api/file-mutations"):
         return "files:mutate"
+    if path == "/api/runs" or path.startswith("/api/runs/"):
+        return "runs:read" if method == "GET" else "runs:control"
     return "agent:run"
 
 
@@ -101,7 +116,10 @@ def mint_control_token(
     lifetime_seconds: int = 300,
     now: int | None = None,
     session_id: str | None = None,
+    profile_id: str | None = None,
 ) -> str:
+    if profile_id is not None and not _valid_profile_id(profile_id):
+        raise ValueError("profile_id must be a bounded safe identifier")
     issued_at = int(time.time() if now is None else now)
     payload = {
         "iss": TOKEN_ISSUER,
@@ -110,6 +128,8 @@ def mint_control_token(
         "jti": session_id or secrets.token_urlsafe(18),
         "scopes": sorted(set(scopes)),
     }
+    if profile_id is not None:
+        payload["profile_id"] = profile_id
     encoded = _b64url_encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     )
@@ -185,6 +205,9 @@ def verify_control_token(token: str, secret: str, *, now: int | None = None) -> 
         session_id = str(payload.get("jti") or "")
         if not session_id:
             raise ValueError("missing session id")
+        profile_id = payload.get("profile_id")
+        if profile_id is not None and not _valid_profile_id(profile_id):
+            raise ValueError("invalid profile id")
     except (ValueError, TypeError, binascii.Error, json.JSONDecodeError, UnicodeDecodeError):
         raise _credentials_error() from None
 
@@ -193,6 +216,7 @@ def verify_control_token(token: str, secret: str, *, now: int | None = None) -> 
         scopes=frozenset(raw_scopes),
         expires_at=expires_at,
         issuer=issuer,
+        profile_id=profile_id,
     )
 
 

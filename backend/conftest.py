@@ -20,6 +20,8 @@ TEST_GROUPS = {
         "test_mcp_credentials.py",
         "test_response_attachments.py",
         "test_file_mutations_api.py",
+        "test_profile_attachment_api.py",
+        "test_runs_api.py",
     },
     "runtime": {
         "test_architecture_boundaries.py",

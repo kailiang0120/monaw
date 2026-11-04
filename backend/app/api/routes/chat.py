@@ -87,6 +87,7 @@ async def chat(req: ChatRequest, request: Request):
     conv_id = req.conversation_id or str(uuid.uuid4())
     message = _message_with_attachments(req)
     control_session_id = request.state.control_session.session_id
+    owner_principal_id = request.state.control_session.profile_id or control_session_id
     runtime_attachments = _runtime_attachments(
         req,
         control_session_id=control_session_id,
@@ -120,7 +121,7 @@ async def chat(req: ChatRequest, request: Request):
                 attachments=runtime_attachments,
                 control_session_id=control_session_id,
                 execution_source="desktop",
-                principal_id=control_session_id,
+                principal_id=owner_principal_id,
                 permission_profile_id="desktop-current",
                 interactive=True,
                 steering=inbox,
@@ -246,6 +247,7 @@ async def create_chat_job(req: ChatRequest, request: Request):
     message = _message_with_attachments(req)
     merged = build_runtime_namespace(settings, load_agent_settings(settings))
     control_session_id = request.state.control_session.session_id
+    owner_principal_id = request.state.control_session.profile_id or control_session_id
     runtime_attachments = _runtime_attachments(
         req,
         control_session_id=control_session_id,
@@ -262,7 +264,7 @@ async def create_chat_job(req: ChatRequest, request: Request):
             attachments=runtime_attachments,
             control_session_id=control_session_id,
             execution_source="desktop_job",
-            principal_id=control_session_id,
+            principal_id=owner_principal_id,
             permission_profile_id="desktop-current",
             interactive=True,
         )

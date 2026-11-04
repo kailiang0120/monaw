@@ -322,20 +322,25 @@ def resume_run(
     )
     if scope is None or scope["owner_instance_id"] is not None:
         raise LeaseConflictError("paused run still has an owner")
+    # The trusted caller supplies a stable profile principal for desktop
+    # recovery. The old control session is intentionally not part of this
+    # identity check: it is process-scoped and approval tickets remain bound
+    # to it. Legacy runs whose principal was their old session ID do not match
+    # a newly minted profile principal and are not migrated here.
     expected_scope = (
         str(scope["workspace_dir"] or ""),
         str(scope["execution_source"] or ""),
         str(scope["owner_principal_id"] or ""),
-        str(scope["control_session_id"] or ""),
     )
     requested_scope = (
         str(workspace_dir or ""),
         str(execution_source or ""),
         str(principal_id or ""),
-        str(control_session_id or ""),
     )
     if requested_scope != expected_scope:
         raise InvalidTransitionError("run scope changed since the saved checkpoint")
+    if not str(control_session_id or ""):
+        raise InvalidTransitionError("a current desktop control session is required")
     if str(scope["current_workspace_dir"] or "") != str(scope["workspace_dir"] or ""):
         raise InvalidTransitionError("conversation workspace changed since the saved checkpoint")
     try:
@@ -406,6 +411,7 @@ def resume_run(
         expected_attempt=int(latest["attempt"]),
         turn_id=turn_id,
         lease_seconds=lease_seconds,
+        control_session_id=control_session_id,
     )
     handle = DurableTurnRun(
         journal=journal,

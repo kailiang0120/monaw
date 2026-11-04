@@ -434,3 +434,99 @@ def test_agent_verified_operation_can_be_undone_after_preview_cache_is_cleared(
     assert response.json()["status"] == "undone"
     assert response.json()["operation_id"] == operation_id
     assert target.read_bytes() == before
+
+
+def test_profile_can_undo_persisted_operation_after_session_changes(
+    file_mutation_api_context,
+):
+    from app.api.routes import file_mutations
+
+    context = file_mutation_api_context
+    _finish_api_run(context)
+    profile_id = "profile-file-mutation-api"
+    old_session_id = context["session_id"]
+    conversation_id = "chat-file-mutation-profile"
+    context["db"].create_conversation(conversation_id, "Profile-scoped Undo", str(context["root"]))
+    run = create_durable_run(
+        conversation_id=conversation_id,
+        execution_source="desktop",
+        principal_id=profile_id,
+        control_session_id=old_session_id,
+        workspace_dir=str(context["root"]),
+        run_id="run-file-mutation-profile",
+        turn_id="turn-file-mutation-profile",
+        db=context["db"],
+    )
+    target = context["root"] / "profile-owned-operation.txt"
+    before = b"profile before image\n"
+    target.write_bytes(before)
+
+    conversation_token = set_current_conversation_id(conversation_id)
+    session_token = set_current_control_session_id(old_session_id)
+    principal_token = set_current_principal_id(profile_id)
+    operation = prepare_tool_operation(run, tool_name="fs_write", trusted_builtin=True)
+    assert operation is not None
+    operation.begin_effect()
+    execution_token = set_current_operation_execution(operation)
+    try:
+        raw = file_ops.file_write(str(target), "profile after image\n", overwrite=True)
+    finally:
+        reset_current_operation_execution(execution_token)
+        reset_current_principal_id(principal_token)
+        reset_current_control_session_id(session_token)
+        reset_current_conversation_id(conversation_token)
+    operation.note_pending_preflight(raw)
+    operation.settle(raw)
+    assert json.loads(raw)["status"] == "ok"
+    operation_row = run.journal.load_operation_internal(run.run_id, operation.operation_id)
+    assert operation_row is not None and operation_row["status"] == "verified"
+
+    _finish_api_run({**context, "run": run, "run_id": run.run_id})
+    with file_mutations._RECORD_LOCK:
+        # Simulate the in-memory preview/idempotency cache being lost with the
+        # old desktop session; the operation and snapshot remain durable.
+        file_mutations._PREVIEWS.clear()
+        file_mutations._IDEMPOTENCY.clear()
+
+    new_session_id = "session-after-profile-restart"
+    profile_token = mint_control_token(
+        os.environ["MONAW_CONTROL_SECRET"],
+        scopes=ALL_SCOPES,
+        session_id=new_session_id,
+        profile_id=profile_id,
+    )
+    expected_revision = Journal(context["db"]).snapshot(run.run_id)["revision"]
+    undo_body = {
+        "run_id": run.run_id,
+        "conversation_id": conversation_id,
+        "expected_revision": expected_revision,
+    }
+
+    other_profile_token = mint_control_token(
+        os.environ["MONAW_CONTROL_SECRET"],
+        scopes=ALL_SCOPES,
+        session_id="other-profile-session",
+        profile_id="profile-file-mutation-other",
+    )
+    denied = context["client"].post(
+        f"/api/file-mutations/{operation.operation_id}/undo",
+        json=undo_body,
+        headers={
+            "Authorization": f"Bearer {other_profile_token}",
+            "Idempotency-Key": "other-profile-undo",
+        },
+    )
+    assert denied.status_code == 403
+    assert target.read_bytes() != before
+
+    response = context["client"].post(
+        f"/api/file-mutations/{operation.operation_id}/undo",
+        json=undo_body,
+        headers={
+            "Authorization": f"Bearer {profile_token}",
+            "Idempotency-Key": "same-profile-after-restart-undo",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "undone"
+    assert target.read_bytes() == before

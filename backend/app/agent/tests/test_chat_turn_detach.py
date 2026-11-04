@@ -10,10 +10,18 @@ import pytest
 from app.agent.steering import RunStream, _inboxes, conversation_is_running, sse_chunk
 from app.api.routes import chat as chat_routes
 from app.schemas import ChatRequest, ChatStopRequest
+from app.security.control_plane import ALL_SCOPES, TOKEN_ISSUER, ControlSession
 
 
-def _request(session_id: str = "session-1"):
-    return SimpleNamespace(state=SimpleNamespace(control_session=SimpleNamespace(session_id=session_id)))
+def _request(session_id: str = "session-1", *, profile_id: str | None = None):
+    control_session = ControlSession(
+        session_id=session_id,
+        scopes=ALL_SCOPES,
+        expires_at=4_000_000_000,
+        issuer=TOKEN_ISSUER,
+        profile_id=profile_id,
+    )
+    return SimpleNamespace(state=SimpleNamespace(control_session=control_session))
 
 
 @pytest.fixture

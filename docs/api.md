@@ -71,6 +71,16 @@ unauthenticated runtime endpoint.
 | `POST` | `/api/openai-account/logout` | `settings:write` | `dict` |
 | `GET` | `/api/openai-account/status` | `settings:read` | `dict` |
 | `POST` | `/api/privacy/delete-data` | `agent:run` | `DataDeletionResult` |
+| `GET` | `/api/runs` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/events` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/events/stream` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/operations` | `runs:read` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/operations/{operation_id}/resolve` | `runs:control` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/pause` | `runs:control` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/recovery` | `runs:read` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/resume` | `runs:control` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/stop` | `runs:control` | `stream/file/none` |
 | `POST` | `/api/sandbox/docker/resolve-image` | `settings:write` | `SandboxResolveImageResponse` |
 | `GET` | `/api/sandbox/status` | `settings:read` | `SandboxStatusPayload` |
 | `GET` | `/api/scheduled-tasks` | `agent:run` | `list` |

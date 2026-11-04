@@ -15,7 +15,19 @@ from app.agent.response_attachments import (
     collect_response_attachments,
     public_attachment_payload,
     register_attachment_path,
+    resolve_attachment_handle_path,
     resolve_attachment_path,
+    runtime_attachment_from_ref,
+)
+from app.agent.run_context import (
+    reset_current_control_session_id,
+    reset_current_conversation_id,
+    reset_current_execution_source,
+    reset_current_principal_id,
+    set_current_control_session_id,
+    set_current_conversation_id,
+    set_current_execution_source,
+    set_current_principal_id,
 )
 
 
@@ -252,6 +264,70 @@ def test_attachment_registry_scopes_records_by_session_and_conversation(monkeypa
         principal_id="session-a",
         conversation_id="conv-b",
     ) is None
+
+
+def test_profile_owned_run_keeps_upload_and_output_attachments_session_scoped(monkeypatch, tmp_path: Path):
+    registry_path = tmp_path / "attachment_registry.json"
+    upload = tmp_path / "upload.txt"
+    output = tmp_path / "generated.txt"
+    upload.write_text("user upload", encoding="utf-8")
+    output.write_text("generated output", encoding="utf-8")
+    monkeypatch.setattr(attachments_module, "_ATTACHMENT_REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(attachments_module, "_ATTACHMENT_REGISTRY_LOADED", False)
+    monkeypatch.setattr(attachments_module, "_is_read_allowed_by_policy", lambda _path: True)
+    attachments_module._ATTACHMENT_REGISTRY.clear()
+
+    session_id = "desktop-session-current"
+    profile_id = "desktop-profile-stable"
+    conversation_id = "profile-attachment-chat"
+    register_attachment_path(
+        "uploaded-input",
+        upload,
+        control_session_id=session_id,
+        principal_id=session_id,
+        conversation_id=conversation_id,
+    )
+    runtime_input = runtime_attachment_from_ref(
+        {"id": "uploaded-input"},
+        control_session_id=session_id,
+        principal_id=session_id,
+        conversation_id=conversation_id,
+    )
+    assert runtime_input is not None
+
+    context_tokens = [
+        (reset_current_conversation_id, set_current_conversation_id(conversation_id)),
+        (reset_current_control_session_id, set_current_control_session_id(session_id)),
+        (reset_current_execution_source, set_current_execution_source("desktop")),
+        (reset_current_principal_id, set_current_principal_id(profile_id)),
+    ]
+    try:
+        assert resolve_attachment_handle_path("attachment://uploaded-input") == upload.resolve()
+        generated = collect_response_attachments(explicit_paths=[str(output)])
+        assert len(generated) == 1
+    finally:
+        for reset, token in reversed(context_tokens):
+            reset(token)
+
+    output_record = attachments_module._ATTACHMENT_REGISTRY[generated[0]["id"]]
+    assert output_record.principal_id == session_id
+    same_session_request = SimpleNamespace(
+        state=SimpleNamespace(
+            control_session=SimpleNamespace(session_id=session_id, profile_id=profile_id)
+        )
+    )
+    assert files_module._authorized_attachment_path(
+        same_session_request, output_record.id, conversation_id
+    ) == output.resolve()
+
+    other_session_request = SimpleNamespace(
+        state=SimpleNamespace(
+            control_session=SimpleNamespace(session_id="different-session", profile_id=profile_id)
+        )
+    )
+    with pytest.raises(Exception) as exc_info:
+        files_module._authorized_attachment_path(other_session_request, output_record.id, conversation_id)
+    assert getattr(exc_info.value, "status_code", None) == 404
 
 
 def test_file_preview_endpoint_returns_thumbnail(monkeypatch, tmp_path: Path):

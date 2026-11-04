@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -353,10 +354,14 @@ class Journal:
         turn_id: str,
         lease_seconds: int = 30,
         expected_attempt: int | None = None,
+        control_session_id: str | None = None,
     ) -> RunDTO:
         run_id = _required_id(run_id, name="run_id")
         owner_instance_id = _required_id(owner_instance_id, name="owner_instance_id")
         turn_id = _required_id(turn_id, name="turn_id")
+        control_session_id = _private_text(
+            control_session_id, name="control_session_id", max_length=512
+        )
         lease_seconds = _lease_seconds(lease_seconds)
         now_dt = _now()
         now = _timestamp(now_dt)
@@ -389,6 +394,7 @@ class Journal:
             conn.execute(
                 """UPDATE agent_runs SET status = 'running', owner_instance_id = ?,
                        lease_expires_at = ?, attempt = ?, revision = ?, turn_id = ?,
+                       control_session_id = COALESCE(?, control_session_id),
                        reason_code = NULL, updated_at = ?, finished_at = NULL
                    WHERE run_id = ? AND revision = ? AND status = 'paused'
                      AND owner_instance_id IS NULL AND lease_expires_at IS NULL""",
@@ -398,6 +404,7 @@ class Journal:
                     attempt,
                     revision,
                     turn_id,
+                    control_session_id,
                     now,
                     run_id,
                     int(row["revision"]),
@@ -538,6 +545,7 @@ class Journal:
         owner_instance_id: str,
         attempt: int,
         expected_revision: int,
+        expected_scope: Mapping[str, str] | None = None,
         reason_code: str | None = None,
         recovery_input_ref: str | None = None,
     ) -> RunDTO:
@@ -552,6 +560,8 @@ class Journal:
         with self.db.transaction() as conn:
             row = self._require_run(conn, run_id)
             self._assert_owner(row, owner_instance_id, attempt)
+            if expected_scope is not None:
+                self._assert_expected_scope(conn, row, expected_scope)
             self._expect_revision(row, expected_revision)
             current = str(row["status"])
             if to_status not in _RUN_TRANSITIONS[current]:
@@ -747,6 +757,7 @@ class Journal:
         owner_instance_id: str,
         attempt: int,
         expected_revision: int | None = None,
+        expected_scope: Mapping[str, str] | None = None,
         reason_code: str | None = None,
         evidence: object = None,
     ) -> OperationDTO:
@@ -762,6 +773,8 @@ class Journal:
         with self.db.transaction() as conn:
             run = self._require_run(conn, run_id)
             self._assert_owner(run, owner_instance_id, attempt)
+            if expected_scope is not None:
+                self._assert_expected_scope(conn, run, expected_scope)
             if expected_revision is not None:
                 self._expect_revision(run, expected_revision)
             op = conn.execute(
@@ -1705,6 +1718,28 @@ class Journal:
             raise ValueError("expected_revision must be an integer")
         if int(row["revision"]) != expected_revision:
             raise RevisionConflictError("run revision is stale")
+
+    @staticmethod
+    def _assert_expected_scope(
+        conn: sqlite3.Connection,
+        run_row: sqlite3.Row,
+        expected_scope: Mapping[str, str],
+    ) -> None:
+        """Fence a mutation against owner, source, and current workspace changes."""
+        for field in ("owner_principal_id", "execution_source", "workspace_dir"):
+            if field in expected_scope and str(run_row[field] or "") != str(expected_scope[field] or ""):
+                raise RevisionConflictError("run authorization scope changed")
+        if "conversation_workspace_dir" in expected_scope:
+            conversation = conn.execute(
+                "SELECT workspace_dir FROM conversations WHERE id = ?",
+                (str(run_row["conversation_id"]),),
+            ).fetchone()
+            if (
+                conversation is None
+                or str(conversation["workspace_dir"] or "")
+                != str(expected_scope["conversation_workspace_dir"] or "")
+            ):
+                raise RevisionConflictError("conversation workspace changed")
 
     @staticmethod
     def _expect_attempt(row: sqlite3.Row, expected_attempt: int | None) -> None:
