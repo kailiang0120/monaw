@@ -842,6 +842,8 @@ export interface ApprovalTicket {
 
 export interface ApprovalEvent {
   execution_environment?: ExecutionEnvironment
+  /** Optional planner preview for a supported native file approval. */
+  file_preview?: unknown
   ticket_id: string
   action: string
   reason: string

@@ -5,7 +5,10 @@ import { ChatWindow } from './components/ChatWindow'
 import { InputBar } from './components/InputBar'
 import { ApprovalToast } from './components/ApprovalToast'
 import { AccessGrantCard } from './components/AccessGrantCard'
+import { ExecutionTimeline } from './components/ExecutionTimeline'
+import type { RunAction } from './components/ExecutionTimeline'
 import { useChat } from './hooks/useChat'
+import { useRunController } from './hooks/useRunController'
 import { useItemActions } from './hooks/useItemActions'
 import { deleteConversation, fetchConversations, renameConversation, setConversationWorkspace, validateConversationWorkspace } from './lib/api/conversations'
 import {
@@ -22,6 +25,9 @@ import { useSetupReadiness } from './features/onboarding/useSetupReadiness'
 import { shouldShowGuide } from './features/onboarding/readiness'
 import { syncStoredApiKeysToBackendWithRetry } from './lib/apiKeySync'
 import { fetchPendingAccessGrants } from './lib/api/accessGrants'
+import { undoFileMutation } from './lib/api/fileMutations'
+import type { FileMutationUndoResult, UndoCapability } from './lib/api/fileMutations'
+import type { OperationResolution, RunOperation } from './lib/api/runs'
 import { subscribeServerEvents, type ServerEvent } from './lib/api/serverEvents'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from './lib/identity'
 import type { AgentSettings, Conversation, ModelOptions, ScheduledTask, UploadedAttachment } from './lib/api/types'
@@ -144,6 +150,44 @@ export default function App() {
     stopStreaming,
     clearMessages,
   } = useChat(activeConvId)
+  const runController = useRunController(activeConvId)
+
+  const streamingStateRef = useRef(isStreaming)
+  useEffect(() => {
+    const wasStreaming = streamingStateRef.current
+    streamingStateRef.current = isStreaming
+    if (isStreaming && !wasStreaming && activeConvId) {
+      // A new Run can start inside an existing conversation, so its arrival
+      // must select the newest server snapshot without waiting for navigation.
+      void runController.refreshLatest()
+    }
+  }, [activeConvId, isStreaming, runController.refreshLatest])
+
+  const handleRunAction = async (action: RunAction) => {
+    if (action === 'pause') await runController.pause()
+    else if (action === 'resume') await runController.resume()
+    else await runController.stop()
+  }
+
+  const handleOperationResolution = async (operationId: string, resolution: OperationResolution) => {
+    if (resolution === 'verify') await runController.verifyOperation(operationId)
+    else await runController.skipOperation(operationId)
+  }
+
+  const handleUndoOperation = async (
+    operation: RunOperation,
+    capability: UndoCapability,
+  ): Promise<FileMutationUndoResult> => {
+    const currentRun = runController.snapshot
+    if (!currentRun || currentRun.run_id !== operation.run_id) {
+      throw new Error('The execution changed before Undo. Refresh the latest status and try again.')
+    }
+    return undoFileMutation(operation.operation_id, {
+      run_id: operation.run_id,
+      conversation_id: currentRun.conversation_id,
+      expected_revision: capability.revision,
+    })
+  }
 
   useEffect(() => {
     activeConvIdRef.current = activeConvId
@@ -607,6 +651,21 @@ export default function App() {
 
         <div className="flex min-w-0 flex-1 flex-col">
           <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <ExecutionTimeline
+              runs={runController.runs}
+              snapshot={runController.snapshot}
+              operations={runController.operations}
+              recovery={runController.recovery}
+              loading={runController.loading}
+              error={runController.error?.message}
+              connected={runController.eventsConnected}
+              busy={runController.refreshing}
+              onSelectRun={runController.selectRun}
+              onAction={handleRunAction}
+              onResolveOperation={handleOperationResolution}
+              onUndo={handleUndoOperation}
+              onRefresh={runController.refreshRun}
+            />
             <ChatWindow
               messages={messages}
               isLoadingHistory={isLoadingHistory}

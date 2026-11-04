@@ -436,6 +436,43 @@ def test_agent_verified_operation_can_be_undone_after_preview_cache_is_cleared(
     assert target.read_bytes() == before
 
 
+def test_undo_capability_checks_conflict_and_completed_undo(file_mutation_api_context):
+    context = file_mutation_api_context
+    target = context["root"] / "undo-capability.txt"
+    target.write_bytes(b"before\n")
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+    query = {"run_id": context["run_id"], "conversation_id": context["conversation_id"]}
+    route = f"/api/file-mutations/{operation_id}/undo-capability"
+
+    available = context["client"].get(route, params=query, headers=context["headers"])
+    assert available.status_code == 200
+    assert available.json()["status"] == "available"
+    assert "path" not in available.json()
+    target.write_bytes(b"external edit\n")
+    conflict = context["client"].get(route, params=query, headers=context["headers"])
+    assert conflict.json()["status"] == "conflict"
+    assert target.read_bytes() == b"external edit\n"
+
+
+def test_undo_capability_reflects_successful_undo(file_mutation_api_context):
+    context = file_mutation_api_context
+    target = context["root"] / "undo-capability-complete.txt"
+    target.write_bytes(b"before\n")
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+    query = {"run_id": context["run_id"], "conversation_id": context["conversation_id"]}
+    route = f"/api/file-mutations/{operation_id}/undo-capability"
+    result = context["client"].get(route, params=query, headers=context["headers"])
+    undone = context["client"].post(
+        f"/api/file-mutations/{operation_id}/undo",
+        json={**query, "expected_revision": result.json()["revision"]},
+        headers={**context["headers"], "Idempotency-Key": "capability-undo"},
+    )
+    assert undone.status_code == 200, undone.text
+    assert context["client"].get(route, params=query, headers=context["headers"]).json()["status"] == "undone"
+
+
 def test_profile_can_undo_persisted_operation_after_session_changes(
     file_mutation_api_context,
 ):

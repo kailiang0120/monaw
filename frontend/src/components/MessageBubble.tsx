@@ -26,6 +26,7 @@ import mascotAlertStill from '../assets/mascots/curious.png'
 import mascotSuccessStill from '../assets/mascots/good.png'
 import mascotThinkingStill from '../assets/mascots/thinking.png'
 import { ImagePreviewDialog } from './ImagePreviewDialog'
+import { FileChangePreview, type FileChangePreviewData } from './FileChangePreview'
 import { PlanProgress } from './PlanProgress'
 import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
@@ -71,6 +72,71 @@ function formatResponseDuration(durationMs: number): string {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = (totalSeconds % 60).toFixed(1)
   return `${minutes}m ${seconds}s`
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function normalizeFileChangePreview(value: unknown): FileChangePreviewData | null {
+  const payload = recordValue(value)
+  if (!payload) return null
+
+  // Agent file tools return their planner preview under `preview`; the
+  // file-mutation HTTP endpoint returns the same fields at the top level.
+  const nestedPreview = recordValue(payload.preview)
+  const candidate = nestedPreview && Array.isArray(nestedPreview.files)
+    ? nestedPreview
+    : payload
+  const diff = recordValue(candidate.preview)
+  if (!Array.isArray(candidate.files) || candidate.files.length === 0 || candidate.files.length > 20
+    || !diff || (diff.kind !== 'unified_diff' && diff.kind !== 'summary')) return null
+  if (!payload.mutation_id && candidate.version !== 1) return null
+  if (diff.reason !== undefined && !['binary_or_undecodable', 'input_limit', 'line_limit', 'output_limit'].includes(String(diff.reason))) return null
+  if (diff.truncated !== undefined && typeof diff.truncated !== 'boolean') return null
+
+  const files = candidate.files.flatMap((item) => {
+    const file = recordValue(item)
+    if (!file || typeof file.path !== 'string' || file.path.length === 0 || file.path.length > 4096 || /[\u0000-\u001f\u007f]/.test(file.path)) return []
+    const before = recordValue(file.before)
+    const after = recordValue(file.after)
+    const stateIsSafe = (state: Record<string, unknown> | null) => state !== null
+      && typeof state.exists === 'boolean'
+      && typeof state.kind === 'string'
+      && (state.size === null || (typeof state.size === 'number' && Number.isInteger(state.size) && state.size >= 0 && state.size <= 1_000_000_000_000))
+    if (!stateIsSafe(before) || !stateIsSafe(after)) return []
+    return [{
+      path: file.path,
+      role: typeof file.role === 'string' && file.role.length <= 40 && !/[\u0000-\u001f\u007f]/.test(file.role) ? file.role : undefined,
+      before: before ?? undefined,
+      after: after ?? undefined,
+    }]
+  })
+  if (files.length === 0 || files.length !== candidate.files.length || (typeof diff.text === 'string' && diff.text.length > 48 * 1024)
+    || (diff.kind === 'unified_diff' && typeof diff.text !== 'string')) return null
+
+  return {
+    mutation_id: typeof payload.mutation_id === 'string' && payload.mutation_id.length <= 128 ? payload.mutation_id : undefined,
+    revision: typeof payload.revision === 'number' ? payload.revision : undefined,
+    operation: typeof candidate.operation === 'string' && candidate.operation.length <= 40 ? candidate.operation : undefined,
+    files,
+    preview: diff,
+    undo_capability: candidate.undo_capability === 'available' || candidate.undo_capability === 'unavailable' ? candidate.undo_capability : undefined,
+    apply_available: typeof payload.apply_available === 'boolean' ? payload.apply_available : undefined,
+    reason_code: typeof payload.reason_code === 'string' && payload.reason_code.length <= 128 ? payload.reason_code : null,
+    expires_in_seconds: typeof payload.expires_in_seconds === 'number' ? payload.expires_in_seconds : undefined,
+  }
+}
+
+function readFileChangePreview(output?: string): FileChangePreviewData | null {
+  if (!output || output.length > 100_000) return null
+  try {
+    return normalizeFileChangePreview(JSON.parse(output))
+  } catch {
+    return null
+  }
 }
 
 export const MessageBubble = memo(function MessageBubble({
@@ -670,6 +736,7 @@ function ToolCallScroller({
         const isExpanded = expandedId === key
         const label = toolCallActivityLabel(toolCall)
         const environment = toolCall.output !== undefined ? toolEnvironment(toolCall.output) : undefined
+        const filePreview = isExpanded ? readFileChangePreview(toolCall.output) : null
 
         return (
             <li
@@ -705,6 +772,7 @@ function ToolCallScroller({
                   {toolCall.output !== undefined ? (
                     <>
                       <ExecutionEnvironment environment={environment} />
+                      {filePreview && <FileChangePreview preview={filePreview} />}
                       <ToolPayloadInline label="Result" value={toolCall.output} />
                     </>
                   ) : toolCall.pending ? (
@@ -772,6 +840,7 @@ function toolEnvironment(value: string): Environment | undefined {
 
 function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
   const [localStatus, setLocalStatus] = useState<'idle' | 'approving' | 'rejecting' | 'approved' | 'rejected'>('idle')
+  const filePreview = useMemo(() => normalizeFileChangePreview(notice.file_preview), [notice.file_preview])
 
   const handleApprove = async () => {
     setLocalStatus('approving')
@@ -831,6 +900,11 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           )}
         </div>
       </div>
+      {filePreview && (
+        <div className="mb-3 pl-7">
+          <FileChangePreview preview={filePreview} />
+        </div>
+      )}
       <div className="flex items-center gap-2 pl-7">
         <button
           type="button"

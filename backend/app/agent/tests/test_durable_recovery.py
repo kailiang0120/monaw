@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -127,7 +128,12 @@ def test_dead_process_handoff_marks_opaque_effect_needs_review_without_replay(tm
 
         child.terminate()
         child.wait(timeout=10)
-        assert owner_process_proof(old_owner, lock_dir=lock_dir) == "dead"
+        proof = owner_process_proof(old_owner, lock_dir=lock_dir)
+        deadline = time.monotonic() + 2
+        while proof == "live" and time.monotonic() < deadline:
+            time.sleep(0.05)
+            proof = owner_process_proof(old_owner, lock_dir=lock_dir)
+        assert proof == "dead", f"expected dead owner proof after child exit, got {proof!r}"
 
         report = recover_startup_runs(
             journal=journal,

@@ -60,6 +60,39 @@ describe('MessageBubble', () => {
     expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled()
   })
 
+  it('shows the trusted file diff before the user approves a write', () => {
+    render(<MessageBubble message={{
+      id: 'approval-file-preview',
+      role: 'assistant',
+      content: '',
+      approvals: [{
+        ticket_id: 'ticket-file-preview',
+        action: 'Write report.txt',
+        reason: 'This change needs your approval.',
+        type: 'required',
+        file_preview: {
+          version: 1,
+          operation: 'write',
+          files: [{
+            path: 'C:/workspace/report.txt',
+            role: 'target',
+            before: { exists: true, kind: 'file', size: 4 },
+            after: { exists: true, kind: 'file', size: 12 },
+          }],
+          undo_capability: 'available',
+          preview: { kind: 'unified_diff', text: '--- before\n+++ after\n-old\n+new report\n' },
+        },
+      } as any],
+    }} />)
+
+    const preview = screen.getByRole('region', { name: 'File change preview' })
+    expect(preview).toHaveTextContent('C:/workspace/report.txt')
+    expect(screen.getByLabelText('Text diff')).toHaveTextContent('+new report')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Apply file change' })).not.toBeInTheDocument()
+  })
+
   it('switches the mascot animation while the assistant is working', () => {
     const { rerender } = render(<MessageBubble message={{
       id: 'msg-mascot', role: 'assistant', content: '', streaming: true,

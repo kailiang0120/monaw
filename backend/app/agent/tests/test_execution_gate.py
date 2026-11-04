@@ -380,6 +380,79 @@ def test_resolve_pending_output_passes_through_non_pending_output():
     assert _resolve_pending(ExecutionGateService(), output) == output
 
 
+def _pending_file_preview() -> dict[str, object]:
+    return {
+        "operation": "write",
+        "files": [{
+            "path": "C:/workspace/report.txt",
+            "role": "target",
+            "before": {"exists": True, "size": 4},
+            "after": {"exists": True, "size": 12},
+        }],
+        "undo_capability": "available",
+        "preview": {"kind": "unified_diff", "text": "--- before\n+++ after\n-old\n+new report\n"},
+    }
+
+
+class _PendingPreflightOperation:
+    def __init__(self, tool_name: str, *, trusted_builtin: bool) -> None:
+        self.tool_name = tool_name
+        self.trusted_builtin = trusted_builtin
+
+    def note_pending_preflight(self, _tool_output: str) -> bool:
+        return True
+
+
+def _emit_pending_approval_with_file_preview(
+    *, tool_name: str, trusted_builtin: bool, preview: dict[str, object]
+) -> list[dict[str, object]]:
+    ticket = create_ticket(
+        tool_name=tool_name,
+        interactive=True,
+        action_description="Write report.txt",
+        payload={"input_str": '{"path":"C:/workspace/report.txt"}'},
+    )
+    service = ExecutionGateService()
+
+    async def stop_after_prompt(**_kwargs):
+        yield {"_result": json.dumps({"status": "cancelled", "reason_code": "test_finished"})}
+
+    service.await_ticket_resolution = stop_after_prompt  # type: ignore[method-assign]
+    events: list[dict[str, object]] = []
+    asyncio.run(service.resolve_pending_output(
+        tool_output=json.dumps({"status": "pending_approval", "ticket_id": ticket.id, "preview": preview}),
+        tool_dict={"name": tool_name},
+        arguments={"path": "C:/workspace/report.txt"},
+        budget=IterationBudget(max_iterations=1),
+        execute_tool=_fake_execute_tool,
+        emit=events.append,
+        operation_execution=_PendingPreflightOperation(tool_name, trusted_builtin=trusted_builtin),  # type: ignore[arg-type]
+    ))
+    return events
+
+
+def test_pending_approval_event_includes_bounded_preview_for_trusted_native_file_write():
+    preview = _pending_file_preview()
+
+    events = _emit_pending_approval_with_file_preview(
+        tool_name="fs_write", trusted_builtin=True, preview=preview,
+    )
+
+    assert events[0]["event"] == "approval_required"
+    assert events[0]["data"]["file_preview"] == preview  # type: ignore[index]
+
+
+def test_untrusted_tool_cannot_inject_a_file_preview_into_approval_event():
+    preview = _pending_file_preview()
+
+    events = _emit_pending_approval_with_file_preview(
+        tool_name="mcp__fixture__write_file", trusted_builtin=False, preview=preview,
+    )
+
+    assert events[0]["event"] == "approval_required"
+    assert "file_preview" not in events[0]["data"]  # type: ignore[operator]
+
+
 def test_resolve_pending_output_errors_when_gate_hops_are_exhausted():
     service = ExecutionGateService()
 

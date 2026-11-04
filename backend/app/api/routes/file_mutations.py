@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.agent.database import get_db
@@ -850,6 +850,89 @@ async def apply_file_mutation(
         record.apply_response = dict(result)
         _IDEMPOTENCY[idem_scope] = (payload_digest, dict(result))
     return result
+
+
+@router.get("/{operation_id}/undo-capability")
+async def undo_capability(
+    operation_id: str,
+    request: Request,
+    run_id: str = Query(..., min_length=1, max_length=128),
+    conversation_id: str = Query(..., min_length=1, max_length=128),
+):
+    """Check current Undo eligibility without claiming or changing files.
+
+    Eligibility is advisory: Undo independently repeats every check at its
+    effect boundary. Do not expose paths, contents, or private snapshot data.
+    """
+    scope = _authorized_run_context(
+        request, run_id=run_id, conversation_id=conversation_id,
+        expected_revision=None, require_active=False,
+    )
+
+    def check() -> dict[str, Any]:
+        import os
+        from app.agent.file_mutation.fingerprint import FingerprintError
+        from app.agent.file_mutation.snapshot_store import SnapshotStoreError
+        from app.agent.file_mutation.undo_manager import UndoManager, UndoPermissionError, UndoUnavailableError
+        from app.skills.filesystem import file_ops
+
+        journal = scope["journal"]
+        operation = journal.load_operation_internal(run_id, operation_id)
+        if operation is None:
+            _raise(404, "operation_not_found", "File operation was not found in this Run")
+        snapshot = journal.snapshot(run_id)
+        if snapshot is None:
+            _raise(404, "run_not_found", "Run not found")
+
+        def result(status: str, reason: str | None = None) -> dict[str, Any]:
+            return {"run_id": run_id, "operation_id": operation_id,
+                    "status": status, "reason_code": reason,
+                    "revision": int(snapshot["revision"])}
+
+        if (operation.get("status") != "verified"
+            or operation.get("effect_class") != "verifiable_write"
+            or operation.get("operation_kind") not in {"file_write", "file_move", "file_delete"}
+            or not operation.get("snapshot_ref")):
+            return result("unavailable", "undo_unavailable")
+        manager = UndoManager(journal, store=file_ops._p3_snapshot_store())
+        try:
+            with _runtime_context(scope):
+                original = manager.store.load(
+                    str(operation["snapshot_ref"]), run_id=run_id, operation_id=operation_id,
+                )
+                operands = original.get("operands")
+                if not isinstance(operands, list) or not operands or any(not isinstance(item, dict) for item in operands):
+                    return result("unavailable", "undo_unavailable")
+                manager._authorize_source_inverse(str(operation["operation_kind"]), operands)
+                claim = scope["db"].fetchone(
+                    """SELECT status FROM run_operations WHERE run_id = ?
+                       AND related_operation_id = ? AND operation_kind = 'undo'
+                       AND status NOT IN ('failed', 'cancelled')
+                       ORDER BY sequence_no DESC LIMIT 1""", (run_id, operation_id),
+                )
+                if claim is not None:
+                    if claim["status"] == "verified":
+                        return result("undone")
+                    return result("needs_review", "undo_in_progress")
+                if not manager._snapshot_is_live(original):
+                    return result("expired", "undo_expired")
+                if snapshot["status"] not in {"completed", "failed", "cancelled"}:
+                    return result("unavailable", "run_not_terminal")
+                if (os.name != "nt" and operation["operation_kind"] == "file_write"
+                    and len(operands) == 1 and operands[0].get("before", {}).get("exists") is not True):
+                    return result("unavailable", "undo_unavailable")
+                observed = manager._fingerprint_original_after(operands)
+                if not manager._matches_original_after(original, observed):
+                    return result("conflict", "undo_conflict")
+                return result("available")
+        except UndoPermissionError:
+            return result("unavailable", "permission_denied")
+        except (SnapshotStoreError, UndoUnavailableError):
+            return result("unavailable", "undo_unavailable")
+        except (FingerprintError, OSError, ValueError, TypeError):
+            return result("conflict", "undo_conflict")
+
+    return await asyncio.to_thread(check)
 
 
 @router.post("/{operation_or_mutation_id}/undo")

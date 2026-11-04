@@ -125,6 +125,23 @@ class ExecutionGateService:
                     ticket, expected_session_id=current_control_session_id(),
                     expected_conversation_id=current_conversation_id(),
                     expected_execution_source=current_execution_source())
+                # Native file planners attach a bounded, read-authorized
+                # preview to the transient gate output. Surface it before the
+                # user decides; never copy arbitrary external tool output or
+                # persist it in the durable event journal.
+                if (ticket is not None and not validation_error
+                    and operation_execution is not None
+                    and getattr(operation_execution, "trusted_builtin", False)
+                    and getattr(operation_execution, "tool_name", "") in {"fs_write", "file_write", "fs_move", "move", "fs_delete", "delete"}):
+                    try:
+                        preflight = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
+                        preview = preflight.get("preview") if isinstance(preflight, dict) else None
+                        if (isinstance(preview, dict) and isinstance(preview.get("files"), list)
+                            and isinstance(preview.get("preview"), dict)
+                            and len(json.dumps(preview, ensure_ascii=False)) <= 100_000):
+                            pending_event["data"]["file_preview"] = preview
+                    except (TypeError, ValueError):
+                        pass
                 blocked = review_state.blocked_output(str(tool_dict.get("name", "")), arguments, ticket)
                 if ticket is not None and blocked and not validation_error:
                     reason = json.loads(blocked)["reason"]
