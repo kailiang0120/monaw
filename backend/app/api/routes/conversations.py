@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.agent.database import get_db
+from app.agent.database import ConversationHasUnresolvedRunError, get_db
 from app.agent.conversation_workspace import validate_workspace_dir
 from app.agent.context_usage import (
     build_context_usage_report,
@@ -376,7 +376,10 @@ async def rename_conversation(conv_id: str, body: ConversationRename):
 @router.delete("/conversations/{conv_id}", response_model=OkResponse)
 async def delete_conversation(conv_id: str):
     memory_manager = peek_memory_manager()
-    found = memory_manager.delete(conv_id) if memory_manager is not None else delete_conversation_file(conv_id)
+    try:
+        found = memory_manager.delete(conv_id) if memory_manager is not None else delete_conversation_file(conv_id)
+    except ConversationHasUnresolvedRunError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not found:
         raise HTTPException(status_code=404, detail="Conversation not found")
     publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "deleted"})

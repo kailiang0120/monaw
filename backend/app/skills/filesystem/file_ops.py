@@ -2931,9 +2931,23 @@ def fs_rename(path: str, new_name: str, overwrite: bool = False, dry_run: bool =
     return _json({"status": "ok", "operation": "rename", "source": str(source), "destination": str(destination), "new_path": str(destination), "before_source": before_source, "before_destination": before_destination, "after": _stat_payload(destination)})
 
 
-def _p3_delete_regular_file(path: Path, expected_before: PathState) -> None:
-    """Delete only the authorized regular file after a final stable-policy check."""
-    for action in (ActionType.READ, ActionType.DELETE):
+def _p3_delete_regular_file(
+    path: Path,
+    expected_before: PathState,
+    *,
+    allow_confirmed_mutation: bool = False,
+) -> None:
+    """Delete an exact regular file after a final stable-policy check.
+
+    Confirmed Undo may use the operation's existing MUTATE scope for its one
+    verified inverse deletion. This does not permit blocked paths, missing
+    grants, or denied MUTATE access, and ordinary file deletion still requires
+    DELETE permission.
+    """
+    if not isinstance(allow_confirmed_mutation, bool):
+        raise TypeError("allow_confirmed_mutation must be a boolean")
+    delete_action = ActionType.MUTATE if allow_confirmed_mutation else ActionType.DELETE
+    for action in (ActionType.READ, delete_action):
         decision = resolve_permission(
             action,
             target_path=str(path),
@@ -2945,8 +2959,9 @@ def _p3_delete_regular_file(path: Path, expected_before: PathState) -> None:
             or decision.requires_access_grant
             or not decision.allowed
             or (action == ActionType.READ and decision.requires_confirmation)
+            or (action == ActionType.MUTATE and decision.requires_confirmation and not allow_confirmed_mutation)
         ):
-            raise PermissionError("stable READ and DELETE permission changed before deletion")
+            raise PermissionError("stable READ and mutation permission changed before deletion")
 
     current = PathState.from_fingerprint(fingerprint_path(path, include_bytes=True))
     if current != expected_before:

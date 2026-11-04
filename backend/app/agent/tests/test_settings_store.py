@@ -616,6 +616,7 @@ def test_runtime_namespace_uses_settings_json_values():
     runtime = build_runtime_namespace(_base_settings(), settings_data)
 
     assert runtime.model_provider == "openai"
+    assert not hasattr(runtime, "execution_detail")
     assert runtime.mcp.servers[0]["name"] == "filesystem"
     assert runtime.mcp.servers[0]["command"] == "npx"
 

@@ -7,7 +7,9 @@ param(
     # (for example frontend\release\win-unpacked). Changes nothing outside a temporary folder.
     [string]$AppDir,
     # Where the Monaw home, install folder and logs go; a new temporary folder by default.
-    [string]$WorkDir
+    [string]$WorkDir,
+    [string]$ExpectedVersion,
+    [string]$ExpectedCandidateSha256
 )
 
 # Upgrade check: install $FromInstaller silently, seed settings, a conversation
@@ -30,6 +32,8 @@ New-Item -ItemType Directory -Force $home_ | Out-Null
 
 $secret = -join ((1..48) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
 $marker = "upgrade-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+$workspace_ = Join-Path $WorkDir "workspace"
+New-Item -ItemType Directory -Force $workspace_ | Out-Null
 
 function Get-InstalledMonaw {
     $keys = @(
@@ -113,7 +117,7 @@ function Invoke-Api($Backend, [string]$Method, [string]$Path, $Body) {
 
 function Add-Data($Backend) {
     Invoke-Api $Backend PUT "/api/settings" @{ identity = @{ user_name = $marker } } | Out-Null
-    Invoke-Api $Backend POST "/api/conversations" @{ title = "Conversation $marker" } | Out-Null
+    $script:conversation = Invoke-Api $Backend POST "/api/conversations" @{ title = "Conversation $marker"; workspace_dir = $workspace_ }
     Invoke-Api $Backend POST "/api/scheduled-tasks" @{
         title = "Task $marker"; prompt = "Upgrade check; never runs."; scheduleKind = "cron"; cronExpr = "0 9 * * 1"; enabled = $false
     } | Out-Null
@@ -123,10 +127,18 @@ function Add-Data($Backend) {
 function Assert-Data($Backend) {
     $failures = @()
     if ((Invoke-Api $Backend GET "/api/settings").identity.user_name -ne $marker) { $failures += "settings" }
-    if (-not ((Invoke-Api $Backend GET "/api/conversations") | Where-Object { $_.title -eq "Conversation $marker" })) { $failures += "conversation" }
-    if (-not ((Invoke-Api $Backend GET "/api/scheduled-tasks") | Where-Object { $_.title -eq "Task $marker" })) { $failures += "scheduled task" }
+    if (-not ((Invoke-Api $Backend GET "/api/conversations") | Where-Object { $_.id -eq $conversation.id -and $_.workspace_dir -eq $workspace_ })) { $failures += "conversation or workspace" }
+    if (-not ((Invoke-Api $Backend GET "/api/conversations/$($conversation.id)/messages").messages | Where-Object { $_.role -eq "user" -and $_.content -eq "Message $marker" })) { $failures += "history message" }
+    if (-not ((Invoke-Api $Backend GET "/api/scheduled-tasks") | Where-Object { $_.title -eq "Task $marker" -and $_.enabled -eq $false })) { $failures += "disabled scheduled task" }
     if ($failures) { throw "Missing after the upgrade: $($failures -join ', ')." }
     Write-Host "Settings, conversation and scheduled task are intact."
+}
+
+function Add-History {
+    # Seed history in the old schema while its backend is stopped. No model account is needed.
+    $code = 'import sqlite3,sys,datetime; c=sqlite3.connect(sys.argv[1]); c.execute("INSERT INTO messages(conversation_id,role,content,created_at) VALUES(?,?,?,?)", (sys.argv[2],"user",sys.argv[3],datetime.datetime.now(datetime.timezone.utc).isoformat())); c.commit()'
+    uv run --directory backend --locked python -c $code (Join-Path $home_ "runtime\agent.db") $conversation.id "Message $marker"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to seed historical message." }
 }
 
 # The whole app, as a user starts it, until its backend is healthy.
@@ -180,6 +192,7 @@ if ($AppDir) {
     $backend = Start-Backend $AppDir
     Add-Data $backend
     Stop-Backend $backend
+    Add-History
     $backend = Start-Backend $AppDir
     try { Assert-Data $backend } finally { Stop-Backend $backend }
     Test-AppStarts $AppDir
@@ -189,6 +202,11 @@ if ($AppDir) {
 
 $FromInstaller = (Resolve-Path $FromInstaller).Path
 $ToInstaller = (Resolve-Path $ToInstaller).Path
+Write-Host "Source installer SHA-256: $((Get-FileHash $FromInstaller -Algorithm SHA256).Hash)"
+Write-Host "Candidate installer SHA-256: $((Get-FileHash $ToInstaller -Algorithm SHA256).Hash)"
+if ($ExpectedCandidateSha256 -and (Get-FileHash $ToInstaller -Algorithm SHA256).Hash -ne $ExpectedCandidateSha256) {
+    throw "Candidate installer hash mismatch."
+}
 if (Get-InstalledMonaw) {
     throw "Monaw is installed on this machine. Run the upgrade check on a clean machine, such as the Upgrade check workflow."
 }
@@ -198,12 +216,20 @@ try {
     $backend = Start-Backend $installDir
     Add-Data $backend
     Stop-Backend $backend
+    Add-History
     Test-AppStarts $installDir
     $oldAsar = (Get-FileHash (Join-Path $installDir "resources\app.asar")).Hash
 
     Install-Monaw $ToInstaller
     if ((Get-FileHash (Join-Path $installDir "resources\app.asar")).Hash -eq $oldAsar) {
-        Write-Warning "resources\app.asar is unchanged; the two installers may contain the same app."
+        throw "resources\app.asar is unchanged; the two installers may contain the same app."
+    }
+    if ($ExpectedVersion) {
+        $installed = @(Get-InstalledMonaw)
+        if ($installed.Count -ne 1 -or $installed[0].DisplayVersion -ne $ExpectedVersion) {
+            throw "Installed version is not $ExpectedVersion."
+        }
+        Write-Host "Installed version: $($installed[0].DisplayVersion)"
     }
     if (-not (Test-Path (Join-Path $installDir "THIRD_PARTY_NOTICES.txt"))) {
         throw "THIRD_PARTY_NOTICES.txt is missing from the upgraded install."

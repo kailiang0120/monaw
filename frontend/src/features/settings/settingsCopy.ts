@@ -51,6 +51,11 @@ export const PAGE_COPY = {
     blurb: 'Inspect what the agent actually did: traces, token usage, and errors.',
     keywords: 'observability traces logs tokens usage errors debugging replay',
   },
+  execution: {
+    label: 'Execution detail',
+    blurb: 'Choose how much Run-scoped information appears in execution cards.',
+    keywords: 'run execution details diagnostics developer simple concise verbose operations',
+  },
   permissions: {
     label: 'Permissions',
     blurb: 'Control when the agent must stop and ask you before it changes something.',

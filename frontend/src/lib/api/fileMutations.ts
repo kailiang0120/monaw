@@ -74,6 +74,27 @@ export interface FileMutationUndoInput {
   run_id: string
   conversation_id: string
   expected_revision: number
+  confirmation_id: string
+}
+
+export interface UndoPreviewFile {
+  path: string
+  role: string
+  action: 'restore' | 'remove' | string
+  before: Record<string, unknown>
+  after: Record<string, unknown>
+  preview: Record<string, unknown>
+}
+
+export interface UndoPreview {
+  confirmation_id: string
+  run_id: string
+  conversation_id: string
+  operation_id: string
+  revision: number
+  operation: string
+  files: UndoPreviewFile[]
+  expires_in_seconds: number
 }
 
 export interface FileMutationUndoResult {
@@ -147,6 +168,23 @@ export async function fetchUndoCapability(
     { signal },
   )
   return readJson<UndoCapability>(response, 'Failed to check Undo availability')
+}
+
+export async function previewUndoFileMutation(
+  operationOrMutationId: string,
+  input: Omit<FileMutationUndoInput, 'confirmation_id'>,
+  signal?: AbortSignal,
+): Promise<UndoPreview> {
+  const response = await apiFetch(
+    mutationUrl(`/${encodeURIComponent(operationOrMutationId)}/undo-preview`),
+    {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify(input),
+      signal,
+    },
+  )
+  return readJson<UndoPreview>(response, 'Failed to prepare Undo preview')
 }
 
 export async function undoFileMutation(

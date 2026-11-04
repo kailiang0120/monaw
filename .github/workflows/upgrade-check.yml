@@ -49,7 +49,23 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release download "${{ inputs.from_tag }}" --repo "${{ github.repository }}" --pattern "Monaw-Setup-*-x64.exe" --dir previous
+          FROM_TAG: ${{ inputs.from_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release download "$env:FROM_TAG" --repo "$env:REPOSITORY" --pattern "Monaw-Setup-*-x64.exe" --dir previous
+          if ($LASTEXITCODE -ne 0) { throw 'Release download failed' }
+          $release = gh release view "$env:FROM_TAG" --repo "$env:REPOSITORY" --json assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Release metadata lookup failed' }
+          $installer = @(Get-Item previous/Monaw-Setup-*-x64.exe)
+          if ($installer.Count -ne 1) { throw 'Expected exactly one previous installer' }
+          $asset = @($release.assets | Where-Object { $_.name -eq $installer[0].Name })
+          if ($asset.Count -ne 1 -or $asset[0].digest -notmatch '^sha256:[0-9a-fA-F]{64}$') { throw 'Release asset has no unique SHA-256 digest' }
+          if ((Get-FileHash $installer[0].FullName -Algorithm SHA256).Hash -ne $asset[0].digest.Substring(7)) { throw 'Previous installer hash mismatch' }
+          $candidate = @(Get-Item frontend/release/Monaw-Setup-*-x64.exe)
+          if ($candidate.Count -ne 1) { throw 'Expected exactly one candidate installer' }
+          $hash = (Get-FileHash $candidate[0].FullName -Algorithm SHA256).Hash
+          "Candidate SHA-256: $hash`nCommit: $env:GITHUB_SHA`nRun: $env:GITHUB_RUN_ID" | Tee-Object -FilePath candidate-checksum.txt
+          "CANDIDATE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upgrade
         shell: pwsh
@@ -57,14 +73,17 @@ jobs:
           ./scripts/check-upgrade.ps1 `
             -FromInstaller (Get-Item previous/Monaw-Setup-*-x64.exe).FullName `
             -ToInstaller (Get-Item frontend/release/Monaw-Setup-*-x64.exe).FullName `
-            -WorkDir "$env:RUNNER_TEMP/monaw-upgrade"
+            -WorkDir "$env:RUNNER_TEMP/monaw-upgrade" `
+            -ExpectedVersion ((Get-Content frontend/package.json -Raw | ConvertFrom-Json).version) `
+            -ExpectedCandidateSha256 $env:CANDIDATE_SHA256
 
       - name: Upload logs
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: upgrade-check-logs
           path: |
             ${{ runner.temp }}/monaw-upgrade/*.log*
             ${{ runner.temp }}/monaw-upgrade/home/runtime/*.log
+            candidate-checksum.txt
           if-no-files-found: warn

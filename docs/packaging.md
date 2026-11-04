@@ -133,10 +133,10 @@ Startup failures are also written to `runtime/backend.log`.
 Run the **Upgrade check** workflow (Actions > Upgrade check > Run workflow) on the branch to release, with the tag users have now. On a clean Windows runner it builds the installer, downloads the older one from that release, and runs `scripts/check-upgrade.ps1`, which:
 
 1. installs the older release silently into a folder with a space in its name;
-2. starts its backend against a fresh Monaw home and saves a user name, a conversation and a disabled scheduled task;
+2. starts its backend against a fresh Monaw home and saves a user name, a conversation with workspace and historical message, and a disabled scheduled task;
 3. starts `Monaw.exe` until its backend is healthy;
-4. installs the new build over it, as a user would, and checks `THIRD_PARTY_NOTICES.txt` arrived and `app.asar` changed;
-5. checks the settings, conversation and scheduled task are still there and the new `Monaw.exe` starts;
+4. checks the downloaded release against its published SHA-256, records the candidate SHA-256 and commit, installs the new build over it, and verifies the installed version, `THIRD_PARTY_NOTICES.txt` and changed `app.asar`;
+5. checks the settings, history, workspace and disabled scheduled task are still there and the new `Monaw.exe` starts;
 6. uninstalls and checks the Monaw home is kept.
 
 First run, 1 November 2026, from the published v1.0.0 installer to `e1fb59b` ([run 41295028277](https://github.com/kailiang0120/monaw/actions/runs/41295028277)): passed. The v1.0.0 install took 29 s and the upgrade 13 s; both versions started from the installed folder, the seeded data survived, and uninstalling kept the Monaw home.

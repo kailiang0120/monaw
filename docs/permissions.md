@@ -198,19 +198,17 @@ permission.
 File Undo is offered only for supported, verified ordinary-file writes,
 deletes, and same-volume `fs_move` operations with a valid private snapshot and
 no conflicting later change. The separate `fs_rename` tool is opaque and does
-not have Undo. Undo rechecks current READ and MUTATE permissions; when it
-removes a newly created file, current DELETE permission is required. Folder
+not have Undo. Undo rechecks current READ and MUTATE permissions, including
+when its confirmed inverse removes a file created by the original operation. Folder
 trees, links, cross-volume changes, Copy, and Shell/Browser/MCP side effects do
 not have general Undo through the current API. If a user edits or replaces the
 target, changes its parent scope, or revokes permission, Monaw preserves the
 current file and marks Undo conflicted or unavailable.
 
-The inverse action must be allowed directly by current policy without a
-confirmation or access grant. Undo does not issue a second approval request
-and does not reuse `once` or `session` grants from the forward operation. In
-Default mode, MUTATE and DELETE confirmations can therefore make Undo
-unavailable even after the user approved the original file change. The current
-permission decision must not require confirmation or a grant. On non-Windows
+Undo has its own short-lived preview and confirmation, bound to the operation,
+revision, workspace and file state. It does not reuse `once` or `session`
+grants from the forward operation or override explicit permission denials.
+Permission and file identity are checked again at the effect boundary. On non-Windows
 platforms, deleting a newly created file as an Undo is unavailable because
 Monaw cannot safely bind the deletion to the file identity.
 
@@ -218,8 +216,8 @@ Snapshots contain private before-image bytes and file identity/path metadata.
 On Windows they are protected with DPAPI for the current Windows user. Each
 before-image is limited to 4 MiB, a snapshot to 8 MiB of before-image bytes,
 and the store to 512 MiB. Undo expires after 30 days. Active or unresolved Runs
-keep their referenced evidence for recovery; cleanup removes only old
-unreferenced snapshots. The API exposes a snapshot-available flag, not snapshot
+keep their referenced evidence for recovery; deleting a terminal conversation
+also queues its unshared snapshots for safe reclamation. The API exposes a snapshot-available flag, not snapshot
 contents or paths. See [operations.md](operations.md) for backup, deletion, and
 retention behavior.
 

@@ -102,6 +102,7 @@ def file_mutation_api_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     with file_mutations._RECORD_LOCK:
         file_mutations._PREVIEWS.clear()
         file_mutations._IDEMPOTENCY.clear()
+        file_mutations._UNDO_CONFIRMATIONS.clear()
     client = TestClient(app)
     headers = {
         "Authorization": f"Bearer {token}",
@@ -404,6 +405,50 @@ def _finish_api_run(context) -> None:
     )
 
 
+def _request_undo_preview(context, operation_id: str, *, token: str | None = None):
+    revision = Journal(context["db"]).snapshot(context["run_id"])["revision"]
+    return context["client"].post(
+        f"/api/file-mutations/{operation_id}/undo-preview",
+        json={
+            "run_id": context["run_id"],
+            "conversation_id": context["conversation_id"],
+            "expected_revision": revision,
+        },
+        headers={
+            "Authorization": f"Bearer {token}" if token else f"Bearer {context['token']}",
+        },
+    )
+
+
+def _confirm_undo(context, operation_id: str, confirmation_id: str, *, key: str = "undo-confirmed", token: str | None = None):
+    revision = Journal(context["db"]).snapshot(context["run_id"])["revision"]
+    return context["client"].post(
+        f"/api/file-mutations/{operation_id}/undo",
+        json={
+            "run_id": context["run_id"],
+            "conversation_id": context["conversation_id"],
+            "expected_revision": revision,
+            "confirmation_id": confirmation_id,
+        },
+        headers={
+            "Authorization": f"Bearer {token}" if token else f"Bearer {context['token']}",
+            "Idempotency-Key": key,
+        },
+    )
+
+
+def _set_default_mode_for_undo(context, *, write: bool = True) -> None:
+    settings = AgentSettings()
+    settings.permissions.mode = "default"
+    settings.permissions.blocked_roots = []
+    settings.permissions.path_rules = [
+        PathRule(path=str(context["root"]), read=True, write=write, delete=False, launch=False)
+    ]
+    settings.permissions.allow_delete = False
+    settings.permissions.confirmations.mutate = True
+    save_agent_settings(settings, settings_path=context["settings_path"])
+
+
 def test_agent_verified_operation_can_be_undone_after_preview_cache_is_cleared(
     file_mutation_api_context,
 ):
@@ -418,17 +463,9 @@ def test_agent_verified_operation_can_be_undone_after_preview_cache_is_cleared(
     with file_mutations._RECORD_LOCK:
         file_mutations._PREVIEWS.clear()
         file_mutations._IDEMPOTENCY.clear()
-    expected_revision = Journal(context["db"]).snapshot(context["run_id"])["revision"]
-
-    response = context["client"].post(
-        f"/api/file-mutations/{operation_id}/undo",
-        json={
-            "run_id": context["run_id"],
-            "conversation_id": context["conversation_id"],
-            "expected_revision": expected_revision,
-        },
-        headers={**context["headers"], "Idempotency-Key": "undo-agent-operation"},
-    )
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+    response = _confirm_undo(context, operation_id, preview.json()["confirmation_id"], key="undo-agent-operation")
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "undone"
@@ -455,6 +492,233 @@ def test_undo_capability_checks_conflict_and_completed_undo(file_mutation_api_co
     assert target.read_bytes() == b"external edit\n"
 
 
+def test_default_mode_uses_separate_confirmation_to_remove_only_the_created_file(
+    file_mutation_api_context,
+):
+    context = file_mutation_api_context
+    target = context["root"] / "created-in-default-mode.txt"
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+    _set_default_mode_for_undo(context)
+
+    query = {"run_id": context["run_id"], "conversation_id": context["conversation_id"]}
+    capability = context["client"].get(
+        f"/api/file-mutations/{operation_id}/undo-capability",
+        params=query,
+        headers=context["headers"],
+    )
+    assert capability.status_code == 200
+    assert capability.json()["status"] == "available"
+
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+    preview_body = preview.json()
+    assert preview_body["files"][0]["path"] == str(target)
+    assert preview_body["files"][0]["action"] == "remove"
+    assert preview_body["files"][0]["before"]["exists"] is True
+    assert preview_body["files"][0]["after"]["exists"] is False
+    assert target.read_bytes() == b"agent after image\n"
+
+    confirmed = _confirm_undo(
+        context, operation_id, preview_body["confirmation_id"], key="default-mode-undo"
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "undone"
+    assert not target.exists()
+
+
+def test_undo_preview_can_be_declined_and_client_cannot_forge_confirmation(
+    file_mutation_api_context,
+):
+    context = file_mutation_api_context
+    target = context["root"] / "declined-undo.txt"
+    target.write_bytes(b"before\n")
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+    assert target.read_bytes() == b"agent after image\n"
+    assert not [
+        row for row in Journal(context["db"]).list_operations(context["run_id"])
+        if row["operation_kind"] == "undo"
+    ]
+
+    forged = _confirm_undo(context, operation_id, "x" * 64, key="forged-confirmation")
+    assert forged.status_code == 409
+    assert forged.json()["code"] == "undo_confirmation_expired"
+    assert target.read_bytes() == b"agent after image\n"
+
+
+def test_expired_undo_confirmation_leaves_file_untouched(file_mutation_api_context):
+    from app.api.routes import file_mutations
+
+    context = file_mutation_api_context
+    target = context["root"] / "expired-undo-confirmation.txt"
+    target.write_bytes(b"before\n")
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+    confirmation_id = preview.json()["confirmation_id"]
+    with file_mutations._RECORD_LOCK:
+        file_mutations._UNDO_CONFIRMATIONS[confirmation_id].expires_at = time.monotonic() - 1
+
+    response = _confirm_undo(context, operation_id, confirmation_id, key="expired-confirmation")
+    assert response.status_code == 409
+    assert response.json()["code"] == "undo_confirmation_expired"
+    assert target.read_bytes() == b"agent after image\n"
+
+
+def test_permissions_revoked_after_undo_preview_leave_file_untouched(file_mutation_api_context):
+    context = file_mutation_api_context
+    target = context["root"] / "revoked-undo-permission.txt"
+    target.write_bytes(b"before\n")
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+    _set_default_mode_for_undo(context)
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+
+    _set_default_mode_for_undo(context, write=False)
+    response = _confirm_undo(
+        context, operation_id, preview.json()["confirmation_id"], key="revoked-undo-permission"
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "permission_denied"
+    assert target.read_bytes() == b"agent after image\n"
+
+
+def test_external_edit_after_undo_preview_is_preserved(file_mutation_api_context):
+    context = file_mutation_api_context
+    target = context["root"] / "edited-after-undo-preview.txt"
+    target.write_bytes(b"before\n")
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+    target.write_bytes(b"user content C\n")
+
+    response = _confirm_undo(
+        context, operation_id, preview.json()["confirmation_id"], key="edited-after-undo-preview"
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "undo_conflict"
+    assert target.read_bytes() == b"user content C\n"
+
+
+def test_undo_confirmation_is_bound_to_operation_and_revision(file_mutation_api_context):
+    context = file_mutation_api_context
+    first = context["root"] / "bound-first.txt"
+    second = context["root"] / "bound-second.txt"
+    first.write_bytes(b"first before\n")
+    first_operation = _create_agent_verified_write(context, first)
+    second.write_bytes(b"second before\n")
+    second_operation = _create_agent_verified_write(context, second)
+    _finish_api_run(context)
+    preview = _request_undo_preview(context, first_operation)
+    assert preview.status_code == 200, preview.text
+    confirmation_id = preview.json()["confirmation_id"]
+
+    wrong_operation = _confirm_undo(
+        context, second_operation, confirmation_id, key="wrong-operation"
+    )
+    assert wrong_operation.status_code == 409
+    assert wrong_operation.json()["code"] == "undo_confirmation_invalid"
+    assert first.read_bytes() == second.read_bytes() == b"agent after image\n"
+
+    body = {
+        "run_id": context["run_id"],
+        "conversation_id": context["conversation_id"],
+        "expected_revision": preview.json()["revision"] + 1,
+        "confirmation_id": confirmation_id,
+    }
+    wrong_revision = context["client"].post(
+        f"/api/file-mutations/{first_operation}/undo",
+        json=body,
+        headers={**context["headers"], "Idempotency-Key": "wrong-revision"},
+    )
+    assert wrong_revision.status_code == 409
+    assert wrong_revision.json()["code"] == "undo_confirmation_invalid"
+    assert first.read_bytes() == b"agent after image\n"
+
+
+def test_workspace_change_rejects_a_pending_undo_confirmation(file_mutation_api_context):
+    context = file_mutation_api_context
+    target = context["root"] / "workspace-bound-undo.txt"
+    target.write_bytes(b"before\n")
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+
+    replacement_workspace = context["root"].parent / "replacement-workspace"
+    replacement_workspace.mkdir()
+    context["db"].update_conversation(
+        context["conversation_id"], workspace_dir=str(replacement_workspace)
+    )
+    response = _confirm_undo(
+        context, operation_id, preview.json()["confirmation_id"], key="changed-workspace"
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "workspace_changed"
+    assert target.read_bytes() == b"agent after image\n"
+
+
+def test_repeated_undo_confirmation_claims_only_one_inverse(file_mutation_api_context):
+    context = file_mutation_api_context
+    target = context["root"] / "duplicate-undo-confirmation.txt"
+    target.write_bytes(b"before\n")
+    operation_id = _create_agent_verified_write(context, target)
+    _finish_api_run(context)
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+    preview_body = preview.json()
+    confirmation_body = {
+        "run_id": context["run_id"],
+        "conversation_id": context["conversation_id"],
+        "expected_revision": preview_body["revision"],
+        "confirmation_id": preview_body["confirmation_id"],
+    }
+    headers = {**context["headers"], "Idempotency-Key": "same-undo-confirmation"}
+    route = f"/api/file-mutations/{operation_id}/undo"
+    barrier = threading.Barrier(3)
+
+    def submit():
+        barrier.wait(timeout=5)
+        return context["client"].post(route, json=confirmation_body, headers=headers)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(submit)
+        second = pool.submit(submit)
+        barrier.wait(timeout=5)
+        responses = [first.result(timeout=15), second.result(timeout=15)]
+
+    assert all(response.status_code == 200 for response in responses), [response.text for response in responses]
+    assert target.read_bytes() == b"before\n"
+    undo_rows = [
+        row for row in Journal(context["db"]).list_operations(context["run_id"])
+        if row["operation_kind"] == "undo"
+    ]
+    assert len(undo_rows) == 1
+    replay = context["client"].post(route, json=confirmation_body, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json()["status"] == "undone"
+    assert target.read_bytes() == b"before\n"
+
+    another_key = context["client"].post(
+        route,
+        json=confirmation_body,
+        headers={**context["headers"], "Idempotency-Key": "second-confirmation-key"},
+    )
+    assert another_key.status_code == 409
+    assert another_key.json()["code"] == "undo_confirmation_used"
+    assert len([
+        row for row in Journal(context["db"]).list_operations(context["run_id"])
+        if row["operation_kind"] == "undo"
+    ]) == 1
+
+
 def test_undo_capability_reflects_successful_undo(file_mutation_api_context):
     context = file_mutation_api_context
     target = context["root"] / "undo-capability-complete.txt"
@@ -464,11 +728,9 @@ def test_undo_capability_reflects_successful_undo(file_mutation_api_context):
     query = {"run_id": context["run_id"], "conversation_id": context["conversation_id"]}
     route = f"/api/file-mutations/{operation_id}/undo-capability"
     result = context["client"].get(route, params=query, headers=context["headers"])
-    undone = context["client"].post(
-        f"/api/file-mutations/{operation_id}/undo",
-        json={**query, "expected_revision": result.json()["revision"]},
-        headers={**context["headers"], "Idempotency-Key": "capability-undo"},
-    )
+    preview = _request_undo_preview(context, operation_id)
+    assert preview.status_code == 200, preview.text
+    undone = _confirm_undo(context, operation_id, preview.json()["confirmation_id"], key="capability-undo")
     assert undone.status_code == 200, undone.text
     assert context["client"].get(route, params=query, headers=context["headers"]).json()["status"] == "undone"
 
@@ -532,11 +794,25 @@ def test_profile_can_undo_persisted_operation_after_session_changes(
         session_id=new_session_id,
         profile_id=profile_id,
     )
+    # This helper uses the main context IDs, so build the profile Run's preview
+    # directly under the new signed profile and preserve the returned binding.
     expected_revision = Journal(context["db"]).snapshot(run.run_id)["revision"]
+    preview_response = context["client"].post(
+        f"/api/file-mutations/{operation.operation_id}/undo-preview",
+        json={
+            "run_id": run.run_id,
+            "conversation_id": conversation_id,
+            "expected_revision": expected_revision,
+        },
+        headers={"Authorization": f"Bearer {profile_token}"},
+    )
+    assert preview_response.status_code == 200, preview_response.text
+    confirmation_id = preview_response.json()["confirmation_id"]
     undo_body = {
         "run_id": run.run_id,
         "conversation_id": conversation_id,
         "expected_revision": expected_revision,
+        "confirmation_id": confirmation_id,
     }
 
     other_profile_token = mint_control_token(

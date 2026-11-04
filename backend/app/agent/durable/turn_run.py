@@ -40,7 +40,33 @@ class DurableTurnRun:
     lease_lost: bool = False
     pause_requested: bool = False
     is_continuation: bool = False
+    recovery_evidence: list[dict[str, Any]] = field(default_factory=list)
     pause_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+    def persist_recovery_input(
+        self,
+        conversation_id: str,
+        user_message: str,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        """Persist the accepted user input before this attempt can cause effects."""
+        if self.is_continuation:
+            raise InvalidTransitionError("continuation attempts reuse their original recovery input")
+        result = self.journal.persist_recovery_input(
+            self.run_id,
+            owner_instance_id=self.owner_instance_id,
+            attempt=self.attempt,
+            turn_id=self.turn_id,
+            conversation_id=conversation_id,
+            user_message=user_message,
+            attachments=attachments,
+            expected_revision=self.revision,
+        )
+        run = result["run"]
+        self.revision = int(run["revision"])
+        self.status = str(run["status"])
+        return [int(item) for item in result["user_message_ids"]]
 
     def request_pause(self) -> None:
         self.pause_requested = True
@@ -424,6 +450,17 @@ def resume_run(
         status=str(claimed["status"]),
         recovery_input_ref=f"turn_checkpoint:{original_turn_id}",
         is_continuation=True,
+        recovery_evidence=[
+            {
+                "operation_id": str(operation["operation_id"]),
+                "operation_kind": str(operation["operation_kind"]),
+                "status": "verified",
+                "input_summary": dict(operation["input_summary"]),
+                "evidence": dict(operation["evidence"]),
+            }
+            for operation in journal.list_operations(run_id, limit=500)
+            if operation["effect_class"] == "verifiable_write" and operation["status"] == "verified"
+        ][-20:],
     )
     return handle, {
         "run_id": run_id,

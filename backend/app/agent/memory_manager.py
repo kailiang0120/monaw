@@ -625,9 +625,9 @@ class MemoryManager:
     def delete(self, conversation_id: str) -> bool:
         """Delete conversation from memory and database."""
         found_memory = conversation_id in self._active_states
+        found_db = self._db.delete_conversation(conversation_id)
         if found_memory:
             del self._active_states[conversation_id]
-        found_db = self._db.delete_conversation(conversation_id)
         return found_memory or found_db
 
     def list_conversations(self) -> list[str]:

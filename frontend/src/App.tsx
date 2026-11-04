@@ -108,6 +108,7 @@ export default function App() {
   const [isBackendReady, setIsBackendReady] = useState(() => typeof window === 'undefined' || !window.electronAPI?.isElectron)
   const [theme, setTheme] = useState<ThemeMode>(() => initialTheme())
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('default')
+  const [executionDetail, setExecutionDetail] = useState<AgentSettings['execution_detail']>('simple')
   const [modelSelection, setModelSelection] = useState<ModelSelection>({
     provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'medium',
   })
@@ -208,6 +209,7 @@ export default function App() {
   const handleUndoOperation = async (
     operation: RunOperation,
     capability: UndoCapability,
+    confirmationId: string,
   ): Promise<FileMutationUndoResult> => {
     const currentRun = runController.snapshot
     if (!currentRun || currentRun.run_id !== operation.run_id) {
@@ -217,6 +219,7 @@ export default function App() {
       run_id: operation.run_id,
       conversation_id: currentRun.conversation_id,
       expected_revision: capability.revision,
+      confirmation_id: confirmationId,
     })
   }
 
@@ -259,6 +262,7 @@ export default function App() {
       const settings = await fetchSettings()
       setIsBackendReady(true)
       setApprovalMode(settings.permissions.mode)
+      setExecutionDetail(settings.execution_detail ?? 'simple')
       setModelSelection({
         provider: settings.llm.provider,
         model_name: settings.llm.model_name,
@@ -686,7 +690,9 @@ export default function App() {
               runs={runController.runs}
               snapshot={runController.snapshot}
               operations={runController.operations}
+              events={runController.events}
               recovery={runController.recovery}
+              detailMode={executionDetail}
               loading={runController.loading}
               error={runController.error?.message}
               connected={runController.eventsConnected}

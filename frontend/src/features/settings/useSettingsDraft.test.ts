@@ -70,6 +70,39 @@ describe('useSettingsDraft', () => {
     expect(result.current.isDirty).toBe(true)
   })
 
+  it('defaults old settings to concise and only sends execution detail as presentation metadata', async () => {
+    const { result } = loaded(buildSettings({ execution_detail: 'simple' }))
+    expect(result.current.draft?.execution_detail).toBe('simple')
+    mocks.updateSettings.mockResolvedValue(buildSettings({ execution_detail: 'developer', settings_version: 'v2' }))
+
+    act(() => result.current.updateDraft((current) => ({ ...current, execution_detail: 'developer' })))
+    expect(result.current.isDirty).toBe(true)
+
+    let outcome = ''
+    await act(async () => { outcome = await result.current.save(FALLBACK_MODEL_OPTIONS) })
+
+    expect(outcome).toBe('saved')
+    expect(mocks.updateSettings.mock.calls[0][0]).toMatchObject({ execution_detail: 'developer' })
+    expect(result.current.draft?.execution_detail).toBe('developer')
+    expect(result.current.isDirty).toBe(false)
+  })
+
+  it('keeps a failed mode change unsaved so the main execution view can stay on its last saved mode', async () => {
+    const savedSettings = buildSettings({ execution_detail: 'simple' })
+    const { result } = loaded(savedSettings)
+    mocks.updateSettings.mockRejectedValue(new Error('Settings service unavailable.'))
+
+    act(() => result.current.updateDraft((current) => ({ ...current, execution_detail: 'detailed' })))
+    let outcome = ''
+    await act(async () => { outcome = await result.current.save(FALLBACK_MODEL_OPTIONS) })
+
+    expect(outcome).toBe('failed')
+    expect(result.current.draft?.execution_detail).toBe('detailed')
+    expect(result.current.isDirty).toBe(true)
+    expect(savedSettings.execution_detail).toBe('simple')
+    expect(mocks.updateSettings.mock.calls[0][0]).toMatchObject({ execution_detail: 'detailed' })
+  })
+
   it('treats an edited connection key as unsaved and sends only edited keys outside Electron', async () => {
     const { result } = loaded()
     mocks.updateSettings.mockResolvedValue(buildSettings({ settings_version: 'v2' }))

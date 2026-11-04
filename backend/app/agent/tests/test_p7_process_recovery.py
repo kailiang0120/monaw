@@ -359,10 +359,23 @@ def test_p7_real_process_crash_matrix_recovers_without_replaying_native_write(
     assert db.fetchone(
         "SELECT COUNT(*) FROM tool_outcomes WHERE conversation_id = ?", (conversation_id,)
     )[0] == tool_outcomes
-    # The fake provider's tool response has not reached the atomic turn checkpoint.
-    assert db.fetchone(
-        "SELECT COUNT(*) FROM turn_checkpoints WHERE turn_id = ?", ("p7-turn-" + fault,)
-    )[0] == 0
+    # The accepted user input is durable before dispatch. The response and tool
+    # transcript are still pending until normal turn finalization.
+    checkpoint = db.fetchone(
+        "SELECT user_message_ids, finalized FROM turn_checkpoints WHERE turn_id = ?",
+        ("p7-turn-" + fault,),
+    )
+    assert checkpoint is not None
+    assert checkpoint["finalized"] == 0
+    import json
+
+    user_message_ids = json.loads(checkpoint["user_message_ids"])
+    assert len(user_message_ids) == 1
+    saved_input = db.fetchone(
+        "SELECT role, content FROM messages WHERE id = ?", (user_message_ids[0],)
+    )
+    assert saved_input is not None
+    assert (saved_input["role"], saved_input["content"]) == ("user", "Write the requested file.")
 
     import app.agent.file_mutation.snapshot_store as snapshot_store_module
 
@@ -397,6 +410,11 @@ def test_p7_real_process_crash_matrix_recovers_without_replaying_native_write(
         if fault == "effect_in_progress":
             recovered_run = journal.load_run(run_id)
             assert recovered_run["status"] == "needs_review"
+            assert "resume" not in recovered_run["available_actions"]
+        else:
+            recovered_run = journal.load_run(run_id)
+            assert recovered_run["status"] == "paused"
+            assert "resume" in recovered_run["available_actions"]
         if fault in {"after_write_before_result", "after_result_submit"}:
             assert journal.list_operations(run_id)[0]["effect_class"] == "verifiable_write"
     finally:
@@ -418,7 +436,9 @@ def test_p7_real_process_crash_matrix_recovers_without_replaying_native_write(
                 read_policy=lambda path: Path(path).resolve().is_relative_to(workspace.resolve()),
             ).verify,
         )
-        assert second_report["recovered"] == 1
+        # Safe Runs are now durably paused after the first handoff and need no
+        # second recovery pass. Needs-review Runs remain inspectable at startup.
+        assert second_report["recovered"] == (1 if fault == "effect_in_progress" else 0)
         assert second_report["errors"] == 0
         assert target.read_bytes() == after_bytes
         if operation_status is not None:

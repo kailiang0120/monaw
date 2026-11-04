@@ -27,6 +27,7 @@ import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel
 import { McpSettings } from './McpSettings'
 import { MemoryRetrieval } from './MemoryRetrieval'
 import { SandboxSettings } from './SandboxSettings'
+import { ExecutionDetailSetting } from './ExecutionDetailSetting'
 import { StorageSettings } from './StorageSettings'
 import { useSettingsDraft } from './useSettingsDraft'
 import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
@@ -153,6 +154,7 @@ const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
   browser: Globe2,
   permissions: Shield,
   sandbox: Container,
+  execution: Activity,
   observability: Activity,
   storage: HardDrive,
 }
@@ -165,7 +167,7 @@ const NAV_GROUPS: Array<{ id: string; label: string; items: SettingsTab[] }> = [
   { id: 'intelligence', label: 'Intelligence', items: ['model'] },
   { id: 'capabilities', label: 'Capabilities', items: ['tools', 'browser'] },
   { id: 'safety', label: 'Safety', items: ['permissions', 'sandbox'] },
-  { id: 'inspect', label: 'Inspect', items: ['observability', 'storage'] },
+  { id: 'inspect', label: 'Inspect', items: ['execution', 'observability', 'storage'] },
 ]
 
 const ALL_TABS: SettingsTab[] = NAV_GROUPS.flatMap((group) => group.items)
@@ -1438,6 +1440,16 @@ export function SettingsModal({
                   <Suspense fallback={null}>
                     <ObservabilityPanel refreshKey={observabilityRefreshKey} />
                   </Suspense>
+                </>
+              )}
+
+              {activeTab === 'execution' && (
+                <>
+                  <PageHeader title={PAGE_COPY.execution.label} />
+                  <ExecutionDetailSetting
+                    value={draft.execution_detail}
+                    onChange={(execution_detail) => updateDraft((current) => ({ ...current, execution_detail }))}
+                  />
                 </>
               )}
 

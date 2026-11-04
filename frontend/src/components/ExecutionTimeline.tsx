@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, CircleDashed, Loader2, Pause, Play, Square } from 'lucide-react'
-import type { OperationResolution, RecoveryReport, RunAction as ApiRunAction, RunOperation, RunSnapshot } from '../lib/api/runs'
+import type { OperationResolution, RecoveryReport, RunAction as ApiRunAction, RunEvent, RunOperation, RunSnapshot } from '../lib/api/runs'
 import type { FileMutationUndoResult, UndoCapability } from '../lib/api/fileMutations'
+import type { AgentSettings } from '../lib/api/types'
 import { ApiError } from '../lib/api/client'
 import { RecoveryPanel } from './RecoveryPanel'
 
@@ -11,7 +12,9 @@ export interface ExecutionTimelineProps {
   runs?: RunSnapshot[]
   snapshot?: RunSnapshot | null
   operations?: RunOperation[]
+  events?: RunEvent[]
   recovery?: RecoveryReport | null
+  detailMode?: AgentSettings['execution_detail']
   loading?: boolean
   error?: string | null
   connected?: boolean
@@ -19,7 +22,7 @@ export interface ExecutionTimelineProps {
   onSelectRun?: (runId: string) => void
   onAction?: (action: RunAction) => void | Promise<void>
   onResolveOperation?: (operationId: string, resolution: OperationResolution) => void | Promise<void>
-  onUndo?: (operation: RunOperation, capability: UndoCapability) => Promise<FileMutationUndoResult>
+  onUndo?: (operation: RunOperation, capability: UndoCapability, confirmationId: string) => Promise<FileMutationUndoResult>
   onRefresh?: () => void | Promise<void>
 }
 
@@ -99,11 +102,19 @@ function formatRunChoice(run: RunSnapshot): string {
   return `Attempt ${run.attempt} · ${RUN_STATUS_LABELS[run.status]}`
 }
 
+function formatRunTime(value: string | null): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
+
 export function ExecutionTimeline({
   runs = [],
   snapshot,
   operations = [],
+  events = [],
   recovery,
+  detailMode = 'simple',
   loading = false,
   error,
   connected,
@@ -116,6 +127,24 @@ export function ExecutionTimeline({
 }: ExecutionTimelineProps) {
   const [pendingAction, setPendingAction] = useState<RunAction | null>(null)
   const [actionError, setActionError] = useState('')
+  const [operationsExpanded, setOperationsExpanded] = useState(detailMode !== 'simple')
+  const detailContextRef = useRef({ mode: detailMode, runId: snapshot?.run_id ?? null })
+
+  useEffect(() => {
+    const previous = detailContextRef.current
+    const runChanged = previous.runId !== (snapshot?.run_id ?? null)
+    const modeChanged = previous.mode !== detailMode
+    if (runChanged) {
+      // Each Run starts at the chosen mode's default: compact by default,
+      // expanded for the two detail modes.
+      setOperationsExpanded(detailMode !== 'simple')
+    } else if (modeChanged && detailMode !== 'simple') {
+      // Entering a detail mode exposes the steps automatically. Returning to
+      // concise preserves the user's temporary disclosure state.
+      setOperationsExpanded(true)
+    }
+    detailContextRef.current = { mode: detailMode, runId: snapshot?.run_id ?? null }
+  }, [detailMode, snapshot?.run_id])
 
   if (!snapshot) {
     if (!loading) return null
@@ -129,12 +158,22 @@ export function ExecutionTimeline({
     )
   }
 
-  const verifiedCount = operations.filter((operation) => operation.status === 'verified').length
+  // Only pair diagnostics with the selected Run. A stale detail bundle must
+  // never appear beside a snapshot after the user switches execution.
+  const runOperations = operations.filter((operation) => operation.run_id === snapshot.run_id)
+  const runEvents = events.filter((event) => event.run_id === snapshot.run_id)
+  const runRecovery = recovery?.run_id === snapshot.run_id && recovery.run.run_id === snapshot.run_id
+    ? {
+        ...recovery,
+        unresolved_operations: recovery.unresolved_operations.filter((operation) => operation.run_id === snapshot.run_id),
+      }
+    : null
+  const verifiedCount = runOperations.filter((operation) => operation.status === 'verified').length
   const availableActions = new Set(snapshot.available_actions)
   const actions = (['pause', 'resume', 'stop'] as const).filter((action) => availableActions.has(action))
   const hasRecovery = snapshot.status === 'interrupted'
     || snapshot.status === 'needs_review'
-    || operations.some((operation) => operation.status === 'verified'
+    || runOperations.some((operation) => operation.status === 'verified'
       && ['file_write', 'file_move', 'file_delete'].includes(operation.operation_kind))
 
   const performAction = async (action: RunAction) => {
@@ -169,7 +208,7 @@ export function ExecutionTimeline({
                 {RUN_STATUS_LABELS[snapshot.status]}
               </p>
               <p className="mt-0.5 text-[11px] text-neutral-500">
-                {verifiedCount} verified{operations.length > 0 ? ` · ${operations.length} operation${operations.length === 1 ? '' : 's'}` : ''}
+                {verifiedCount} verified{runOperations.length > 0 ? ` · ${runOperations.length} operation${runOperations.length === 1 ? '' : 's'}` : ''}
               </p>
             </div>
           </div>
@@ -210,6 +249,58 @@ export function ExecutionTimeline({
             {reasonText(snapshot.reason_code)}
           </p>
         )}
+        {detailMode !== 'simple' && (
+          <dl aria-label="Execution details" className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-white/[0.06] px-3 py-2.5 text-[11px] sm:grid-cols-4">
+            <div>
+              <dt className="text-neutral-500">Attempt</dt>
+              <dd className="mt-0.5 text-neutral-300">{snapshot.attempt}</dd>
+            </div>
+            <div>
+              <dt className="text-neutral-500">Started</dt>
+              <dd className="mt-0.5 text-neutral-300">{formatRunTime(snapshot.created_at)}</dd>
+            </div>
+            <div>
+              <dt className="text-neutral-500">Last update</dt>
+              <dd className="mt-0.5 text-neutral-300">{formatRunTime(snapshot.updated_at)}</dd>
+            </div>
+            {snapshot.finished_at && (
+              <div>
+                <dt className="text-neutral-500">Finished</dt>
+                <dd className="mt-0.5 text-neutral-300">{formatRunTime(snapshot.finished_at)}</dd>
+              </div>
+            )}
+          </dl>
+        )}
+        {detailMode === 'developer' && (
+          <dl aria-label="Run diagnostics" className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-white/[0.06] px-3 py-2.5 text-[11px] sm:grid-cols-3">
+            <div className="min-w-0">
+              <dt className="text-neutral-500">Run ID</dt>
+              <dd className="mt-0.5 break-all font-mono text-neutral-300">{snapshot.run_id}</dd>
+            </div>
+            <div>
+              <dt className="text-neutral-500">Revision</dt>
+              <dd className="mt-0.5 font-mono text-neutral-300">{snapshot.revision}</dd>
+            </div>
+            <div>
+              <dt className="text-neutral-500">Event cursor</dt>
+              <dd className="mt-0.5 font-mono text-neutral-300">{snapshot.last_seq}</dd>
+            </div>
+            {runEvents.length > 0 && (
+              <div className="col-span-full min-w-0">
+                <dt className="text-neutral-500">Recent Run events</dt>
+                <dd>
+                  <ol className="mt-1 space-y-1 font-mono text-neutral-300">
+                    {runEvents.slice(-8).map((event) => (
+                      <li key={`${event.run_id}:${event.seq}`} className="break-words">
+                        #{event.seq} {event.type} · {formatRunTime(event.at)}
+                      </li>
+                    ))}
+                  </ol>
+                </dd>
+              </div>
+            )}
+          </dl>
+        )}
         {connected === false && snapshot.status === 'running' && (
           <p className="border-t border-white/[0.06] px-3 py-2 text-[11px] text-amber-200" role="status" aria-live="polite">
             Reconnecting to execution updates. The last saved status is shown.
@@ -230,8 +321,8 @@ export function ExecutionTimeline({
           <div className="border-t border-white/[0.06] px-3 py-2.5">
             <RecoveryPanel
               snapshot={snapshot}
-              operations={operations}
-              recovery={recovery}
+              operations={runOperations}
+              recovery={runRecovery}
               onResolveOperation={onResolveOperation}
               onUndo={onUndo}
               onRefresh={onRefresh}
@@ -239,13 +330,22 @@ export function ExecutionTimeline({
           </div>
         )}
 
-        {operations.length > 0 && (
-          <details className="border-t border-white/[0.06]">
-            <summary className="cursor-pointer list-none px-3 py-2 text-[11px] font-medium text-neutral-400 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40">
-              Operation details <span className="ml-1 text-neutral-600">({operations.length})</span>
+        {runOperations.length > 0 && (
+          <details
+            open={operationsExpanded}
+            className="border-t border-white/[0.06]"
+          >
+            <summary
+              onClick={(event) => {
+                event.preventDefault()
+                setOperationsExpanded((expanded) => !expanded)
+              }}
+              className="cursor-pointer list-none px-3 py-2 text-[11px] font-medium text-neutral-400 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40"
+            >
+              Operation details <span className="ml-1 text-neutral-600">({runOperations.length})</span>
             </summary>
             <ol className="space-y-1 px-3 pb-3" aria-label="Execution operations">
-              {operations.map((operation) => (
+              {runOperations.map((operation) => (
                 <li key={operation.operation_id} className="flex min-w-0 items-start gap-2 rounded-md bg-black/15 px-2.5 py-2">
                   <span className="mt-0.5 shrink-0"><OperationIcon status={operation.status} /></span>
                   <div className="min-w-0 flex-1">
@@ -253,6 +353,14 @@ export function ExecutionTimeline({
                       {operation.sequence}. {humanize(operation.operation_kind)}
                       <span className="ml-2 text-neutral-500">{OPERATION_STATUS_LABELS[operation.status]}</span>
                     </p>
+                    {detailMode === 'developer' && (
+                      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-[10px] text-neutral-500">
+                        <dt>Operation ID</dt><dd className="break-all font-mono text-neutral-300">{operation.operation_id}</dd>
+                        <dt>Effect class</dt><dd className="text-neutral-300">{operation.effect_class}</dd>
+                        <dt>Snapshot</dt><dd className="text-neutral-300">{operation.snapshot_available ? 'Available' : 'Unavailable'}</dd>
+                        {operation.reason_code && <><dt>Reason code</dt><dd className="break-all font-mono text-neutral-300">{operation.reason_code}</dd></>}
+                      </dl>
+                    )}
                     {operation.reason_code && <p className="mt-1 text-[10px] text-neutral-500">{reasonText(operation.reason_code)}</p>}
                     {Object.keys(operation.evidence).length > 0 && (
                       <details className="mt-1.5">

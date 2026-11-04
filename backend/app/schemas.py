@@ -414,6 +414,7 @@ class AgentSettingsPayload(BaseModel):
     permissions: PermissionSettingsPayload
     sandbox: SandboxSettingsPayload
     identity: IdentitySettingsPayload
+    execution_detail: Literal["simple", "detailed", "developer"] = "simple"
     settings_version: str = ""
     available_skills: list[SkillDescriptorPayload] = Field(default_factory=list)
     api_keys: ApiKeyStatusPayload | None = None
@@ -466,6 +467,7 @@ class SettingsUpdate(BaseModel):
     permissions: Optional[PermissionSettingsPayload] = None
     sandbox: Optional[SandboxSettingsPayload] = None
     identity: Optional[IdentitySettingsPayload] = None
+    execution_detail: Optional[Literal["simple", "detailed", "developer"]] = None
     model_provider: Optional[str] = Field(None, pattern="^(openai|gemini|codex)$")
     openai_api_key: Optional[str] = None
     google_api_key: Optional[str] = None

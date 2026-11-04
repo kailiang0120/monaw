@@ -23,6 +23,7 @@ from app.agent.durable.models import (
     RevisionConflictError,
 )
 from app.agent.file_mutation.fingerprint import FileFingerprint, FingerprintError, canonical_path, fingerprint_path
+from app.agent.file_mutation.diff_engine import unified_diff_preview
 from app.agent.file_mutation.planner import MutationPlan, PathState, PlanOperand, build_plan
 from app.agent.file_mutation.snapshot_store import SnapshotStore, SnapshotStoreError, _safe_root_identity, get_snapshot_store
 from app.agent.file_mutation.verifier import FileMutationVerifier, _state_matches
@@ -148,7 +149,9 @@ def _set_fd_times(descriptor: int, *, atime_ns: int | None, modified_ns: int) ->
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _delete_exact_file(path: Path, expected: PathState) -> bool:
+def _delete_exact_file(
+    path: Path, expected: PathState, *, confirmation_granted: bool = False
+) -> bool:
     """Delete a file only when the filesystem can bind deletion to its identity.
 
     Windows uses P3's exclusive, handle-bound delete implementation. POSIX has
@@ -159,7 +162,10 @@ def _delete_exact_file(path: Path, expected: PathState) -> bool:
     try:
         from app.skills.filesystem.file_ops import _p3_delete_regular_file
 
-        _p3_delete_regular_file(path, expected)
+        if confirmation_granted:
+            _p3_delete_regular_file(path, expected, allow_confirmed_mutation=True)
+        else:
+            _p3_delete_regular_file(path, expected)
     except Exception:
         # A changed identity, denied permission, or unsupported filesystem
         # leaves the artifact for review instead of unlinking by path.
@@ -265,6 +271,7 @@ class UndoManager:
         principal_id: str | None = None,
         idempotency_key: str | None = None,
         expected_revision: int | None = None,
+        confirmed: bool = False,
     ) -> dict[str, Any]:
         source = self.journal.load_operation_internal(run_id, operation_id)
         if source is None:
@@ -296,7 +303,9 @@ class UndoManager:
         operands = original.get("operands")
         if not isinstance(operands, list) or not operands or any(not isinstance(item, dict) for item in operands):
             raise UndoUnavailableError("the original file snapshot is malformed")
-        self._authorize_source_inverse(str(source["operation_kind"]), operands)
+        self._authorize_source_inverse(
+            str(source["operation_kind"]), operands, confirmation_granted=confirmed
+        )
         principal_hash = hashlib.sha256(principal_id.encode("utf-8")).hexdigest()
         key_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
         payload_hash = _digest({
@@ -363,7 +372,7 @@ class UndoManager:
                 stage_path: Path | None = None
                 plan: MutationPlan | None = None
                 try:
-                    self._authorize_step(spec)
+                    self._authorize_step(spec, confirmation_granted=confirmed)
                     self.journal.prepare_undo_step(
                         run_id, undo_id, step_operation_id=step_id,
                         operation_kind=spec["operation_kind"],
@@ -418,6 +427,7 @@ class UndoManager:
                         payload=effect_data.get("payload"), stage_path=stage_path,
                         step_operation_id=step_id,
                         target_modified_ns=effect_data.get("target_modified_ns"),
+                        confirmation_granted=confirmed,
                     )
                 except Exception as exc:
                     evidence = self.verifier.verify(
@@ -483,6 +493,167 @@ class UndoManager:
             self._fail_parent_without_effect(run_id, undo_id, owner_id)
             raise UndoConflictError("Undo could not safely prepare its inverse") from exc
 
+    def preview(self, run_id: str, operation_id: str) -> dict[str, Any]:
+        """Return a bounded preview and private fingerprint binding for one inverse.
+
+        This method never claims a journal operation or writes to the filesystem.
+        Confirmation may satisfy a policy confirmation requirement, but it
+        cannot satisfy a blocked path or an access grant.
+        """
+        source = self.journal.load_operation_internal(run_id, operation_id)
+        if source is None:
+            raise OperationNotFoundError(operation_id)
+        if (
+            source["effect_class"] != "verifiable_write"
+            or source["status"] != "verified"
+            or source["operation_kind"] not in {"file_write", "file_move", "file_delete"}
+            or not isinstance(source.get("snapshot_ref"), str)
+        ):
+            raise UndoUnavailableError("operation has no verified, supported file effect")
+        try:
+            original = self.store.load(
+                str(source["snapshot_ref"]), run_id=run_id, operation_id=operation_id
+            )
+        except SnapshotStoreError as exc:
+            raise UndoUnavailableError("the original file snapshot is unavailable") from exc
+        if not self._snapshot_is_live(original):
+            raise UndoUnavailableError("the file snapshot has expired")
+        operands = original.get("operands")
+        if not isinstance(operands, list) or not operands or any(not isinstance(item, dict) for item in operands):
+            raise UndoUnavailableError("the original file snapshot is malformed")
+
+        self._authorize_source_inverse(
+            str(source["operation_kind"]), operands, confirmation_granted=True
+        )
+        try:
+            observed = self._fingerprint_original_after(operands)
+        except FingerprintError as exc:
+            raise UndoConflictError("file state could not be safely rechecked") from exc
+        if not self._matches_original_after(original, observed):
+            raise UndoConflictError("file state no longer matches the verified operation post-state")
+
+        files = self._preview_files(str(source["operation_kind"]), original, observed)
+        fingerprint = _digest({
+            "snapshot_ref": source["snapshot_ref"],
+            "binding_digest": original.get("binding_digest"),
+            "operands": {
+                path: self._fingerprint_binding(value)
+                for path, value in sorted(observed.items())
+            },
+        })
+        return {"files": files, "fingerprint_digest": fingerprint}
+
+    @staticmethod
+    def _fingerprint_binding(value: FileFingerprint) -> dict[str, Any]:
+        return {
+            "path": value.path,
+            "exists": value.exists,
+            "kind": value.kind,
+            "size": value.size,
+            "sha256": value.sha256,
+            "identity": list(value.identity) if value.identity is not None else None,
+            "parent_identity": list(value.parent_identity),
+            "modified_ns": value.modified_ns,
+            "created_ns": value.created_ns,
+        }
+
+    @staticmethod
+    def _preview_state(value: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "exists": bool(value.get("exists")),
+            "kind": str(value.get("kind") or ("file" if value.get("exists") else "absent")),
+            "size": int(value.get("size") or 0),
+        }
+
+    def _preview_files(
+        self,
+        operation_kind: str,
+        original: Mapping[str, Any],
+        observed: Mapping[str, FileFingerprint],
+    ) -> list[dict[str, Any]]:
+        operands = original["operands"]
+        rows: list[dict[str, Any]] = []
+
+        def add_row(
+            operand: Mapping[str, Any],
+            current: FileFingerprint,
+            after_state: Mapping[str, Any],
+            after_bytes: bytes | None,
+            action: str,
+        ) -> None:
+            path = str(operand["path"])
+            diff = unified_diff_preview(
+                current.data,
+                after_bytes,
+                fromfile=path,
+                tofile=f"{path} after Undo",
+            )
+            rows.append({
+                "path": path,
+                "role": str(operand.get("role") or "target"),
+                "action": action,
+                "before": self._preview_state({
+                    "exists": current.exists,
+                    "kind": current.kind,
+                    "size": current.size,
+                }),
+                "after": self._preview_state(after_state),
+                "preview": diff.to_dict(),
+            })
+
+        if operation_kind == "file_write":
+            target = operands[0]
+            path = str(target["path"])
+            prior = target["before"]
+            prior_bytes = self.store.before_bytes(original, path) if prior["exists"] else None
+            add_row(
+                target,
+                observed[path],
+                prior,
+                prior_bytes,
+                "restore" if prior["exists"] else "remove",
+            )
+            return rows
+
+        if operation_kind == "file_delete":
+            target = operands[0]
+            path = str(target["path"])
+            add_row(
+                target,
+                observed[path],
+                target["before"],
+                self.store.before_bytes(original, path),
+                "restore",
+            )
+            return rows
+
+        if operation_kind == "file_move":
+            source = next(item for item in operands if str(item.get("role") or "").lower() == "source")
+            destination = next(
+                item for item in operands
+                if str(item.get("role") or "").lower() in {"destination", "dest", "target"}
+            )
+            source_path, destination_path = str(source["path"]), str(destination["path"])
+            moved_bytes = observed[destination_path].data
+            if moved_bytes is None:
+                raise UndoUnavailableError("the moved file bytes are unavailable for preview")
+            add_row(source, observed[source_path], source["before"], moved_bytes, "restore")
+            prior_destination = destination["before"]
+            destination_bytes = (
+                self.store.before_bytes(original, destination_path)
+                if prior_destination["exists"] else None
+            )
+            add_row(
+                destination,
+                observed[destination_path],
+                prior_destination,
+                destination_bytes,
+                "restore" if prior_destination["exists"] else "remove",
+            )
+            return rows
+
+        raise UndoUnavailableError("inverse preview is unavailable for this operation")
+
     @staticmethod
     def _snapshot_is_live(snapshot: Mapping[str, Any]) -> bool:
         try:
@@ -491,13 +662,38 @@ class UndoManager:
         except (TypeError, ValueError):
             return False
 
-    def _permission_allowed(self, action: ActionType, path: str) -> bool:
+    def _permission_allowed(
+        self, action: ActionType, path: str, *, confirmation_granted: bool = False
+    ) -> bool:
         try:
-            return _decision_allowed(self.permission_check(action, path))
+            decision = self.permission_check(action, path)
+            if _decision_allowed(decision):
+                return True
+            if not confirmation_granted:
+                return False
+            if isinstance(decision, Mapping):
+                return bool(
+                    decision.get("allowed") is True
+                    and decision.get("blocked") is not True
+                    and decision.get("requires_access_grant") is not True
+                    and decision.get("requires_confirmation") is True
+                )
+            return bool(
+                getattr(decision, "allowed", False) is True
+                and getattr(decision, "blocked", False) is not True
+                and getattr(decision, "requires_access_grant", False) is not True
+                and getattr(decision, "requires_confirmation", False) is True
+            )
         except Exception:
             return False
 
-    def _authorize_source_inverse(self, operation_kind: str, operands: list[dict[str, Any]]) -> None:
+    def _authorize_source_inverse(
+        self,
+        operation_kind: str,
+        operands: list[dict[str, Any]],
+        *,
+        confirmation_granted: bool = False,
+    ) -> None:
         actions: set[tuple[ActionType, str]] = set()
         for item in operands:
             path = str(item.get("path") or "")
@@ -507,16 +703,28 @@ class UndoManager:
             actions.add((ActionType.MUTATE, path))
         if operation_kind == "file_write" and len(operands) == 1 and operands[0].get("before", {}).get("exists") is not True:
             path = str(operands[0]["path"])
-            actions.discard((ActionType.MUTATE, path))
-            actions.add((ActionType.DELETE, path))
+            if not confirmation_granted:
+                actions.discard((ActionType.MUTATE, path))
+                actions.add((ActionType.DELETE, path))
         for action, path in actions:
-            if not self._permission_allowed(action, path):
+            if not self._permission_allowed(action, path, confirmation_granted=confirmation_granted):
                 raise UndoPermissionError("current file permissions do not allow Undo")
 
-    def _authorize_step(self, spec: Mapping[str, Any]) -> None:
+    def _authorize_step(
+        self, spec: Mapping[str, Any], *, confirmation_granted: bool = False
+    ) -> None:
         action = ActionType.DELETE if spec["operation_kind"] == "file_delete" else ActionType.MUTATE
+        if (
+            confirmation_granted
+            and spec["operation_kind"] == "file_delete"
+            and spec["source"].get("operation_kind") == "file_write"
+            and spec["roles"]["target"].get("before", {}).get("exists") is not True
+        ):
+            action = ActionType.MUTATE
         for path in spec["paths"]:
-            if not self._permission_allowed(ActionType.READ, path) or not self._permission_allowed(action, path):
+            if not self._permission_allowed(ActionType.READ, path) or not self._permission_allowed(
+                action, path, confirmation_granted=confirmation_granted
+            ):
                 raise UndoPermissionError("current file permissions do not allow this inverse step")
 
     def _fingerprint_operand(self, operand: Mapping[str, Any], *, include_bytes: bool) -> FileFingerprint:
@@ -817,6 +1025,7 @@ class UndoManager:
         stage_path: Path | None,
         step_operation_id: str,
         target_modified_ns: object,
+        confirmation_granted: bool = False,
     ) -> None:
         """Perform one fenced step; kept as a seam for crash-injection tests."""
         operands = plan.operands
@@ -840,7 +1049,10 @@ class UndoManager:
             return
         target, before = Path(operands[0].path), operands[0].before
         if operation_kind == "file_delete":
-            self._remove_exact(target, before, step_operation_id)
+            self._remove_exact(
+                target, before, step_operation_id,
+                confirmation_granted=confirmation_granted,
+            )
             return
         if operation_kind == "file_write" and before.exists:
             if payload is None:
@@ -903,35 +1115,27 @@ class UndoManager:
             os.close(descriptor)
 
     @staticmethod
-    def _remove_exact(target: Path, expected: PathState, step_operation_id: str) -> None:
+    def _remove_exact(
+        target: Path,
+        expected: PathState,
+        step_operation_id: str,
+        *,
+        confirmation_granted: bool = False,
+    ) -> None:
         if os.name != "nt":
             raise UndoNeedsReviewError(
                 "this platform cannot safely bind deletion to the verified file identity"
             )
-        quarantine = target.parent / (
-            f".monaw-undo-remove-{hashlib.sha256(step_operation_id.encode()).hexdigest()[:24]}.tmp"
-        )
-        _atomic_rename_no_replace(
-            target,
-            quarantine,
-            expected_source_parent=expected.parent_identity,
-            expected_destination_parent=expected.parent_identity,
-        )
-        try:
-            moved = fingerprint_path(quarantine, include_bytes=True)
-            if (
-                moved.identity != expected.identity
-                or moved.sha256 != expected.sha256
-                or moved.size != expected.size
-                or moved.parent_identity != expected.parent_identity
-            ):
-                raise UndoNeedsReviewError("quarantined path changed before Undo delete")
-            if not _delete_exact_file(quarantine, PathState.from_fingerprint(moved)):
-                raise UndoNeedsReviewError(
-                    "quarantined file could not be deleted by its verified identity"
-                )
-        except BaseException:
-            raise
+        # Delete the authorized leaf directly with P3's exclusive handle-bound
+        # primitive. This keeps current permission checks attached to the exact
+        # file path covered by the server-side Undo confirmation; no temporary
+        # sibling path is introduced into the authorization scope.
+        if not _delete_exact_file(
+            target, expected, confirmation_granted=confirmation_granted
+        ):
+            raise UndoNeedsReviewError(
+                f"{step_operation_id}: file could not be deleted by its verified identity"
+            )
 
     def _record_step_verification(
         self, run_id: str, step_id: str, owner_id: str, evidence: Mapping[str, Any]

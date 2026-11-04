@@ -213,7 +213,9 @@ def enforce_runtime_retention() -> dict[str, int]:
         from app.agent.durable.journal import Journal
         from app.agent.durable.recovery import _cleanup_file_mutation_snapshots
 
-        counts.update(_cleanup_file_mutation_snapshots(Journal(get_db())))
+        journal = Journal(get_db())
+        counts.update(journal.enforce_terminal_event_retention())
+        counts.update(_cleanup_file_mutation_snapshots(journal))
     except Exception as exc:
         logger.warning("file mutation snapshot cleanup failed error_type=%s", type(exc).__name__)
         counts.update({"snapshot_files_deleted": 0, "snapshot_bytes_deleted": 0})

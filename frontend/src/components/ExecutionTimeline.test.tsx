@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { RunOperation, RunSnapshot } from '../lib/api/runs'
+import type { RunEvent, RunOperation, RunSnapshot } from '../lib/api/runs'
 import { ExecutionTimeline } from './ExecutionTimeline'
 
 const runningSnapshot: RunSnapshot = {
@@ -33,6 +33,14 @@ const verifiedOperation: RunOperation = {
   snapshot_available: true,
   created_at: '2026-11-03T01:01:00Z',
   updated_at: '2026-11-03T01:02:00Z',
+}
+
+const runEvent: RunEvent = {
+  run_id: runningSnapshot.run_id,
+  seq: 14,
+  type: 'operation.verified',
+  at: '2026-11-03T01:02:00Z',
+  payload: { private_text: 'Never show arbitrary event payloads.' },
 }
 
 describe('ExecutionTimeline', () => {
@@ -95,5 +103,91 @@ describe('ExecutionTimeline', () => {
     fireEvent.click(screen.getByText('Verification evidence'))
     expect(screen.getByText('unknown')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Verify' })).toBeInTheDocument()
+  })
+
+  it('keeps concise details temporary and preserves an expanded panel and controls when the mode changes', () => {
+    const { rerender } = render(
+      <ExecutionTimeline
+        snapshot={runningSnapshot}
+        operations={[verifiedOperation]}
+        detailMode="simple"
+        onAction={vi.fn()}
+      />,
+    )
+
+    expect(screen.queryByText('Run ID')).not.toBeInTheDocument()
+    const operationsDetails = screen.getByText(/Operation details/).closest('details')
+    expect(operationsDetails).not.toHaveAttribute('open')
+    fireEvent.click(screen.getByText(/Operation details/))
+    expect(operationsDetails).toHaveAttribute('open')
+
+    rerender(
+      <ExecutionTimeline
+        snapshot={runningSnapshot}
+        operations={[verifiedOperation]}
+        events={[runEvent]}
+        detailMode="developer"
+        onAction={vi.fn()}
+      />,
+    )
+
+    expect(operationsDetails).toHaveAttribute('open')
+    expect(screen.getByText(runningSnapshot.run_id)).toBeInTheDocument()
+    expect(screen.getByText('op-file-write')).toBeInTheDocument()
+    expect(screen.getByText(/#14 operation.verified/)).toBeInTheDocument()
+    expect(screen.queryByText('Never show arbitrary event payloads.')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pause execution' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Stop execution' })).toBeEnabled()
+  })
+
+  it('auto-expands steps in detail modes while allowing manual collapse and preserving it when returning to concise', () => {
+    const { rerender } = render(
+      <ExecutionTimeline snapshot={runningSnapshot} operations={[verifiedOperation]} detailMode="simple" />,
+    )
+    const details = screen.getByText(/Operation details/).closest('details')
+    expect(details).not.toHaveAttribute('open')
+
+    rerender(<ExecutionTimeline snapshot={runningSnapshot} operations={[verifiedOperation]} detailMode="detailed" />)
+    expect(details).toHaveAttribute('open')
+    expect(screen.getByText(/2\. File write/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText(/Operation details/))
+    expect(details).not.toHaveAttribute('open')
+
+    rerender(<ExecutionTimeline snapshot={runningSnapshot} operations={[verifiedOperation]} detailMode="developer" />)
+    expect(details).toHaveAttribute('open')
+    fireEvent.click(screen.getByText(/Operation details/))
+    expect(details).not.toHaveAttribute('open')
+
+    rerender(<ExecutionTimeline snapshot={runningSnapshot} operations={[verifiedOperation]} detailMode="simple" />)
+    expect(details).not.toHaveAttribute('open')
+  })
+
+  it('filters operation and event diagnostics to the selected Run', () => {
+    const unrelatedOperation: RunOperation = {
+      ...verifiedOperation,
+      run_id: 'another-run',
+      operation_id: 'unrelated-operation',
+    }
+    const unrelatedEvent: RunEvent = {
+      ...runEvent,
+      run_id: 'another-run',
+      seq: 15,
+      type: 'unrelated.secret_event',
+    }
+    render(
+      <ExecutionTimeline
+        snapshot={runningSnapshot}
+        operations={[verifiedOperation, unrelatedOperation]}
+        events={[runEvent, unrelatedEvent]}
+        detailMode="developer"
+      />,
+    )
+
+    expect(screen.getByText('1 verified · 1 operation')).toBeInTheDocument()
+    expect(screen.getByText(/#14 operation.verified/)).toBeInTheDocument()
+    expect(screen.queryByText(/#15 unrelated.secret_event/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText(/Operation details/))
+    expect(screen.getByText('op-file-write')).toBeInTheDocument()
+    expect(screen.queryByText('unrelated-operation')).not.toBeInTheDocument()
   })
 })

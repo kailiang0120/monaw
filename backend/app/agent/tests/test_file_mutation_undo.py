@@ -22,6 +22,8 @@ from app.agent.durable.operation_execution import (
 )
 from app.agent.durable.turn_run import create_durable_run
 from app.agent.file_mutation.snapshot_store import SnapshotStore
+from app.agent.file_mutation.fingerprint import fingerprint_path
+from app.agent.file_mutation.planner import PathState
 from app.agent.run_context import (
     reset_current_control_session_id,
     reset_current_conversation_id,
@@ -519,6 +521,36 @@ def test_undo_rechecks_read_and_inverse_mutation_permissions(undo_context):
         assert denied_action in {action for action, _path in checked}
         assert all(str(target) == path for _action, path in checked)
         assert target.read_bytes() == b"after image\n"
+
+
+def test_confirmed_undo_delete_boundary_still_rejects_revoked_mutation_access(
+    undo_context,
+):
+    import app.agent.controller_policy as controller_policy
+
+    target = undo_context["root"] / "confirmed-delete-permission.txt"
+    target.write_bytes(b"must remain\n")
+    settings = AgentSettings()
+    settings.permissions.mode = "default"
+    settings.permissions.blocked_roots = []
+    settings.permissions.path_rules = [
+        PathRule(
+            path=str(undo_context["root"]),
+            read=True,
+            write=False,
+            delete=False,
+            launch=False,
+        )
+    ]
+    settings.permissions.allow_delete = False
+    save_agent_settings(settings, settings_path=controller_policy._settings_json_path())
+
+    before = PathState.from_fingerprint(fingerprint_path(target, include_bytes=True))
+    with pytest.raises(PermissionError):
+        file_ops._p3_delete_regular_file(
+            target, before, allow_confirmed_mutation=True
+        )
+    assert target.read_bytes() == b"must remain\n"
 
 
 def test_concurrent_undo_claims_create_only_one_inverse(undo_context):

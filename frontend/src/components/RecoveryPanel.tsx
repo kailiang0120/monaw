@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Clock3, Loader2, RotateCcw, ShieldAlert } from 'lucide-react'
 import { ApiError } from '../lib/api/client'
-import { fetchUndoCapability } from '../lib/api/fileMutations'
-import type { FileMutationUndoResult, UndoCapability } from '../lib/api/fileMutations'
+import { fetchUndoCapability, previewUndoFileMutation } from '../lib/api/fileMutations'
+import type { FileMutationUndoResult, UndoCapability, UndoPreview } from '../lib/api/fileMutations'
 import type { OperationResolution, RecoveryReport, RunOperation, RunSnapshot } from '../lib/api/runs'
-import { InlineConfirm } from './ui/InlineConfirm'
 
 type CapabilityStatus = UndoCapability['status']
 
@@ -25,6 +24,15 @@ function humanize(value: string): string {
   return value.replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase())
 }
 
+function undoFileState(state: Record<string, unknown>): string {
+  if (state.exists === false) return 'Will not exist'
+  const kind = typeof state.kind === 'string' ? humanize(state.kind) : 'File'
+  const size = typeof state.size === 'number' && Number.isFinite(state.size)
+    ? ` · ${state.size.toLocaleString()} bytes`
+    : ''
+  return `${kind}${size}`
+}
+
 function resolutionErrorText(error: unknown, resolution: OperationResolution): string {
   if (error instanceof ApiError && error.code === 'revision_conflict') {
     return 'The execution changed. The latest status is being loaded.'
@@ -35,6 +43,8 @@ function resolutionErrorText(error: unknown, resolution: OperationResolution): s
 function undoErrorText(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === 'undo_conflict') return 'File changed after this operation. Undo was not applied.'
+    if (error.code === 'permission_denied') return 'Current file permissions do not allow Undo.'
+    if (error.code === 'undo_confirmation_expired') return 'The Undo preview expired. Prepare a new preview before confirming.'
     if (error.code === 'revision_conflict' || error.code === 'stale_preview') {
       return 'The execution changed before Undo. The latest status is being loaded.'
     }
@@ -48,7 +58,7 @@ export interface RecoveryPanelProps {
   operations?: RunOperation[]
   recovery?: RecoveryReport | null
   onResolveOperation?: (operationId: string, resolution: OperationResolution) => void | Promise<void>
-  onUndo?: (operation: RunOperation, capability: UndoCapability) => Promise<FileMutationUndoResult>
+  onUndo?: (operation: RunOperation, capability: UndoCapability, confirmationId: string) => Promise<FileMutationUndoResult>
   onRefresh?: () => void | Promise<void>
 }
 
@@ -65,8 +75,13 @@ export function RecoveryPanel({
   const [undoOutcomes, setUndoOutcomes] = useState<Record<string, string>>({})
   const [pendingResolution, setPendingResolution] = useState<{ id: string; action: OperationResolution } | null>(null)
   const [pendingUndoId, setPendingUndoId] = useState<string | null>(null)
-  const [confirmUndoId, setConfirmUndoId] = useState<string | null>(null)
+  const [undoPreviews, setUndoPreviews] = useState<Record<string, UndoPreview>>({})
+  const [pendingUndoPreviewId, setPendingUndoPreviewId] = useState<string | null>(null)
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({})
+  const undoPreviewRequestRef = useRef<{ operationId: string; contextKey: string; controller: AbortController } | null>(null)
+  const undoContextKey = `${snapshot.run_id}\0${snapshot.conversation_id}\0${snapshot.revision}`
+  const undoContextKeyRef = useRef(undoContextKey)
+  undoContextKeyRef.current = undoContextKey
 
   const visibleOperations = useMemo(() => {
     const byId = new Map(operations.map((operation) => [operation.operation_id, operation]))
@@ -85,11 +100,15 @@ export function RecoveryPanel({
   const unresolved = visibleOperations.filter((operation) => UNRESOLVED_STATUSES.has(operation.status))
 
   useEffect(() => {
+    undoPreviewRequestRef.current?.controller.abort()
+    undoPreviewRequestRef.current = null
     const operationIds = JSON.parse(candidateKey) as string[]
     const controller = new AbortController()
     let cancelled = false
     setUndoCapabilities({})
     setUndoCheckErrors({})
+    setUndoPreviews({})
+    setPendingUndoPreviewId(null)
     if (operationIds.length === 0) return () => controller.abort()
 
     void Promise.all(operationIds.map(async (operationId) => {
@@ -114,11 +133,15 @@ export function RecoveryPanel({
     return () => {
       cancelled = true
       controller.abort()
+      if (undoPreviewRequestRef.current?.contextKey === undoContextKey) {
+        undoPreviewRequestRef.current.controller.abort()
+        undoPreviewRequestRef.current = null
+      }
     }
-  }, [candidateKey, snapshot.conversation_id, snapshot.revision, snapshot.run_id])
+  }, [candidateKey, undoContextKey])
 
   const runResolution = async (operationId: string, resolution: OperationResolution) => {
-    if (!onResolveOperation || pendingResolution || pendingUndoId) return
+    if (!onResolveOperation || pendingResolution || pendingUndoId || pendingUndoPreviewId) return
     setPendingResolution({ id: operationId, action: resolution })
     setActionErrors((current) => ({ ...current, [operationId]: '' }))
     try {
@@ -134,12 +157,17 @@ export function RecoveryPanel({
 
   const runUndo = async (operation: RunOperation) => {
     const capability = undoCapabilities[operation.operation_id]
-    if (!onUndo || !capability || capability.status !== 'available' || pendingUndoId) return
+    const preview = undoPreviews[operation.operation_id]
+    if (!onUndo || !capability || capability.status !== 'available' || !preview || pendingUndoId || pendingUndoPreviewId) return
     setPendingUndoId(operation.operation_id)
-    setConfirmUndoId(null)
     setActionErrors((current) => ({ ...current, [operation.operation_id]: '' }))
     try {
-      const result = await onUndo(operation, capability)
+      const result = await onUndo(operation, capability, preview.confirmation_id)
+      setUndoPreviews((current) => {
+        const next = { ...current }
+        delete next[operation.operation_id]
+        return next
+      })
       if (result.status === 'undone') {
         setUndoCapabilities((current) => ({
           ...current,
@@ -173,6 +201,67 @@ export function RecoveryPanel({
     } finally {
       setPendingUndoId(null)
     }
+  }
+
+  const prepareUndoPreview = async (operation: RunOperation) => {
+    const capability = undoCapabilities[operation.operation_id]
+    if (
+      !capability
+      || capability.status !== 'available'
+      || pendingUndoPreviewId
+      || pendingUndoId
+      || Object.keys(undoPreviews).length > 0
+    ) return
+    setPendingUndoPreviewId(operation.operation_id)
+    setActionErrors((current) => ({ ...current, [operation.operation_id]: '' }))
+    const requestContextKey = undoContextKey
+    const controller = new AbortController()
+    undoPreviewRequestRef.current?.controller.abort()
+    undoPreviewRequestRef.current = {
+      operationId: operation.operation_id,
+      contextKey: requestContextKey,
+      controller,
+    }
+    try {
+      const preview = await previewUndoFileMutation(operation.operation_id, {
+        run_id: snapshot.run_id,
+        conversation_id: snapshot.conversation_id,
+        expected_revision: capability.revision,
+      }, controller.signal)
+      if (
+        controller.signal.aborted
+        || undoContextKeyRef.current !== requestContextKey
+        || undoPreviewRequestRef.current?.controller !== controller
+      ) return
+      setUndoPreviews((current) => ({ ...current, [operation.operation_id]: preview }))
+    } catch (error) {
+      if (
+        controller.signal.aborted
+        || undoContextKeyRef.current !== requestContextKey
+        || (error instanceof DOMException && error.name === 'AbortError')
+      ) return
+      setActionErrors((current) => ({ ...current, [operation.operation_id]: undoErrorText(error) }))
+      if (error instanceof ApiError && error.code === 'undo_conflict') {
+        setUndoCapabilities((current) => ({
+          ...current,
+          [operation.operation_id]: { ...capability, status: 'conflict', reason_code: 'undo_conflict' },
+        }))
+      }
+      void onRefresh?.()
+    } finally {
+      if (undoPreviewRequestRef.current?.controller === controller) {
+        undoPreviewRequestRef.current = null
+        setPendingUndoPreviewId(null)
+      }
+    }
+  }
+
+  const cancelUndoPreview = (operationId: string) => {
+    setUndoPreviews((current) => {
+      const next = { ...current }
+      delete next[operationId]
+      return next
+    })
   }
 
   const refreshUndoStatus = async (operation: RunOperation) => {
@@ -228,6 +317,8 @@ export function RecoveryPanel({
             && ['executing', 'uncertain', 'needs_review'].includes(operation.status)
           const canSkip = actions.has('skip') && UNRESOLVED_STATUSES.has(operation.status)
           const capability = undoCapabilities[operation.operation_id]
+          const undoPreview = undoPreviews[operation.operation_id]
+          const hasOtherUndoPreview = Object.keys(undoPreviews).some((operationId) => operationId !== operation.operation_id)
           const isUnresolved = UNRESOLVED_STATUSES.has(operation.status)
           const isCandidate = operation.status === 'verified'
             && operation.effect_class === 'verifiable_write'
@@ -293,21 +384,17 @@ export function RecoveryPanel({
                       : capability?.status === 'available' && onUndo
                       ? pendingUndoId === operation.operation_id
                         ? <span className="inline-flex items-center gap-1 text-[10px] text-amber-200" role="status"><Loader2 size={11} className="animate-spin" aria-hidden="true" />Undoing…</span>
-                        : confirmUndoId === operation.operation_id
-                        ? <InlineConfirm
-                            label="Undo this file change?"
-                            confirmLabel={pendingUndoId === operation.operation_id ? 'Undoing…' : 'Undo now'}
-                            onConfirm={() => void runUndo(operation)}
-                            onCancel={() => setConfirmUndoId(null)}
-                            className="rounded-md border border-red-400/20 bg-red-400/[0.04] px-1"
-                          />
+                        : pendingUndoPreviewId === operation.operation_id
+                        ? <span className="inline-flex items-center gap-1 text-[10px] text-amber-200" role="status"><Loader2 size={11} className="animate-spin" aria-hidden="true" />Preparing Undo preview…</span>
+                        : undoPreview
+                        ? <span className="text-[10px] text-amber-200" role="status">Review the inverse below</span>
                         : <button
                             type="button"
-                            disabled={pendingUndoId !== null || pendingResolution !== null}
-                            onClick={() => setConfirmUndoId(operation.operation_id)}
+                            disabled={pendingUndoId !== null || pendingUndoPreviewId !== null || pendingResolution !== null || hasOtherUndoPreview}
+                            onClick={() => void prepareUndoPreview(operation)}
                             className="inline-flex items-center gap-1 rounded-md border border-red-400/20 px-2 py-1 text-[10px] font-medium text-red-200 hover:bg-red-400/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/40 disabled:cursor-not-allowed disabled:opacity-50"
                           >
-                            <RotateCcw size={11} aria-hidden="true" /> Undo
+                            <RotateCcw size={11} aria-hidden="true" /> Review Undo
                           </button>
                       : capability
                         ? <span className={`text-[10px] ${capability.status === 'conflict' ? 'text-amber-200' : 'text-neutral-500'}`} role={capability.status === 'conflict' ? 'status' : undefined}>
@@ -319,6 +406,60 @@ export function RecoveryPanel({
                   )}
                 </div>
               </div>
+              {undoPreview && capability?.status === 'available' && onUndo && (
+                <section
+                  aria-label="Undo confirmation preview"
+                  className="mt-2 space-y-2 rounded-md border border-red-400/20 bg-red-400/[0.04] p-2.5"
+                  role="group"
+                >
+                  <div>
+                    <h3 className="text-[10px] font-medium text-red-100">Review what Undo will change</h3>
+                    <p className="mt-1 text-[10px] leading-relaxed text-neutral-400">
+                      This preview is bound to the current file state and expires in {Math.max(0, Math.ceil(undoPreview.expires_in_seconds / 60))} minutes.
+                    </p>
+                  </div>
+                  <ul className="space-y-1.5" aria-label="Files affected by Undo">
+                    {undoPreview.files.map((file) => {
+                      const diff = file.preview
+                      const diffText = typeof diff.text === 'string' ? diff.text : ''
+                      return (
+                        <li key={`${file.path}-${file.role}`} className="rounded border border-white/[0.06] bg-black/20 p-2">
+                          <p className="break-all font-mono text-[10px] text-neutral-300">{file.path}</p>
+                          <p className="mt-0.5 text-[10px] text-neutral-500">Undo will {humanize(file.action)} this file.</p>
+                          <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-[10px]">
+                            <dt className="text-neutral-600">Current</dt>
+                            <dd className="text-neutral-400">{undoFileState(file.before)}</dd>
+                            <dt className="text-neutral-600">After Undo</dt>
+                            <dd className="text-neutral-400">{undoFileState(file.after)}</dd>
+                          </dl>
+                          {diff.kind === 'unified_diff' && diffText
+                            ? <pre aria-label={`Undo text diff for ${file.path}`} className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-white/[0.05] bg-black/25 p-2 font-mono text-[10px] leading-relaxed text-neutral-300">{diffText}</pre>
+                            : <p className="mt-2 text-[10px] text-neutral-500">A text diff is unavailable for this file; the byte sizes above show the change.</p>}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={pendingUndoId !== null || pendingResolution !== null}
+                      onClick={() => void runUndo(operation)}
+                      className="rounded-md border border-red-400/30 bg-red-400/10 px-2.5 py-1.5 text-[10px] font-medium text-red-100 hover:bg-red-400/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/40 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Undo now
+                    </button>
+                    <button
+                      type="button"
+                      autoFocus
+                      disabled={pendingUndoId !== null}
+                      onClick={() => cancelUndoPreview(operation.operation_id)}
+                      className="rounded-md px-2.5 py-1.5 text-[10px] text-neutral-400 hover:bg-white/[0.06] hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </section>
+              )}
               {actionErrors[operation.operation_id] && (
                 <p className="mt-2 text-[10px] text-amber-200" role="alert">{actionErrors[operation.operation_id]}</p>
               )}

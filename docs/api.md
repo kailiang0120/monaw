@@ -46,6 +46,7 @@ unauthenticated runtime endpoint.
 | `POST` | `/api/file-mutations/{mutation_id}/apply` | `files:mutate` | `stream/file/none` |
 | `GET` | `/api/file-mutations/{operation_id}/undo-capability` | `files:mutate` | `stream/file/none` |
 | `POST` | `/api/file-mutations/{operation_or_mutation_id}/undo` | `files:mutate` | `stream/file/none` |
+| `POST` | `/api/file-mutations/{operation_or_mutation_id}/undo-preview` | `files:mutate` | `stream/file/none` |
 | `GET` | `/api/files/{attachment_id}` | `files:read` | `stream/file/none` |
 | `GET` | `/api/files/{attachment_id}/preview` | `files:read` | `stream/file/none` |
 | `GET` | `/api/memories` | `agent:run` | `list` |

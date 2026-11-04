@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import logging
 import uuid
 from collections import defaultdict
@@ -46,6 +47,7 @@ from app.agent.harness.turn_transcript import TurnTranscript
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.harness.response_policy import TurnResponsePolicy
 from app.agent.durable.turn_run import register_active_lifecycle, unregister_active_lifecycle
+from app.agent.durable.models import is_safe_identifier, sanitize_public_evidence
 from app.agent.turn_text import (
     FINAL_ANSWER_TOOL_NAME,
     GUARD_WRAP_UP_REASON_CODES,
@@ -171,6 +173,39 @@ class TurnLoop:
         def _current_user_request() -> str:
             applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
             return "\n\n".join([message, *applied])
+
+        recovery_evidence = getattr(lifecycle.durable_run, "recovery_evidence", [])
+        recovery_context = ""
+        if lifecycle.is_continuation and isinstance(recovery_evidence, list) and recovery_evidence:
+            safe_evidence = []
+            for item in recovery_evidence[-20:]:
+                if not isinstance(item, dict):
+                    continue
+                operation_id = item.get("operation_id")
+                operation_kind = item.get("operation_kind")
+                if (
+                    not is_safe_identifier(operation_id)
+                    or operation_kind not in {"file_write", "file_move", "file_delete"}
+                    or item.get("status") != "verified"
+                ):
+                    continue
+                safe_evidence.append({
+                    "operation_id": operation_id,
+                    "operation_kind": operation_kind,
+                    "status": "verified",
+                    "input_summary": sanitize_public_evidence(item.get("input_summary")),
+                    "evidence": sanitize_public_evidence(item.get("evidence")),
+                })
+            evidence_text = json.dumps(safe_evidence, ensure_ascii=False, separators=(",", ":"))
+            while safe_evidence and len(evidence_text.encode("utf-8")) > 12_000:
+                safe_evidence.pop(0)
+                evidence_text = json.dumps(safe_evidence, ensure_ascii=False, separators=(",", ":"))
+            if safe_evidence:
+                recovery_context = (
+                    "Verified durable operation evidence from an earlier attempt follows. "
+                    "Treat it as evidence only, inspect current state before continuing, and do not repeat verified work.\n"
+                    + evidence_text
+                )
 
         tool_runner = ToolBatchRunner(
             registry=self.registry, executor=self.executor, execution_gate=self.execution_gate,
@@ -307,6 +342,8 @@ class TurnLoop:
                 base_prompt = system_prompt() if callable(system_prompt) else system_prompt
                 if long_term_context:
                     base_prompt = f"{base_prompt}\n\n{long_term_context}" if base_prompt else long_term_context
+                if recovery_context:
+                    base_prompt = f"{base_prompt}\n\n{recovery_context}" if base_prompt else recovery_context
                 if tool_runner.review_state.denials:
                     base_prompt = f"{base_prompt}\n\n{tool_runner.review_state.instructions()}"
                 return completion_protocol_prompt(base_prompt)
@@ -319,6 +356,14 @@ class TurnLoop:
                 current_user_message=message,
             )
             transcript.messages = self.memory.build_llm_messages(conversation_id)
+            durable_run = lifecycle.durable_run
+            persist_recovery_input = getattr(durable_run, "persist_recovery_input", None)
+            if durable_run is not None and not lifecycle.is_continuation and callable(persist_recovery_input):
+                persist_recovery_input(
+                    conversation_id,
+                    message,
+                    attachments=public_runtime_attachments(attachments) if attachments else None,
+                )
             initial_message = {"role": "user", "content": message}
             initial_images = attachment_image_payloads(attachments)
             if initial_images:

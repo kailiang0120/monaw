@@ -294,6 +294,125 @@ class Journal:
             row = self._require_run(conn, run_id)
             return self._run_dto(conn, row)
 
+    def persist_recovery_input(
+        self,
+        run_id: str,
+        *,
+        owner_instance_id: str,
+        attempt: int,
+        turn_id: str,
+        conversation_id: str,
+        user_message: str,
+        attachments: list[dict[str, Any]] | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Atomically bind the accepted user input to its live Run before effects.
+
+        The pending turn checkpoint is completed by ``Database.persist_turn_messages``
+        when the normal turn finalizer writes the assistant reply and tool results.
+        """
+        run_id = _required_id(run_id, name="run_id")
+        owner_instance_id = _required_id(owner_instance_id, name="owner_instance_id")
+        turn_id = _required_id(turn_id, name="turn_id")
+        conversation_id = _required_id(conversation_id, name="conversation_id")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise ValueError("attempt must be a positive integer")
+        if not isinstance(user_message, str):
+            raise ValueError("user_message must be a string")
+        if attachments is not None and not isinstance(attachments, list):
+            raise ValueError("attachments must be a list")
+        attachments_json = json.dumps(attachments, ensure_ascii=False) if attachments else ""
+        now = _timestamp()
+        with self.db.transaction() as conn:
+            run = self._require_run(conn, run_id)
+            self._assert_owner(run, owner_instance_id, attempt)
+            if expected_revision is not None:
+                self._expect_revision(run, expected_revision)
+            if (
+                str(run["status"]) != "running"
+                or str(run["turn_id"] or "") != turn_id
+                or str(run["conversation_id"] or "") != conversation_id
+            ):
+                raise InvalidTransitionError("recovery input does not belong to the active Run turn")
+
+            checkpoint = conn.execute(
+                "SELECT conversation_id, user_message_ids FROM turn_checkpoints WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+            if checkpoint is not None:
+                if str(checkpoint["conversation_id"]) != conversation_id:
+                    raise JournalConflictError("turn checkpoint belongs to another conversation")
+                try:
+                    user_ids = json.loads(checkpoint["user_message_ids"])
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise JournalConflictError("turn checkpoint user IDs are invalid") from exc
+                if not isinstance(user_ids, list) or not user_ids or any(
+                    isinstance(item, bool) or not isinstance(item, int) for item in user_ids
+                ):
+                    raise JournalConflictError("turn checkpoint has no valid recovery input")
+                first_user = conn.execute(
+                    "SELECT role, content, attachments_json FROM messages WHERE id = ? AND conversation_id = ?",
+                    (int(user_ids[0]), conversation_id),
+                ).fetchone()
+                if (
+                    first_user is None
+                    or first_user["role"] != "user"
+                    or first_user["content"] != user_message
+                    or str(first_user["attachments_json"] or "") != attachments_json
+                ):
+                    raise JournalConflictError("turn checkpoint contains different recovery input")
+                return {
+                    "run": self._run_dto(conn, run),
+                    "user_message_ids": [int(item) for item in user_ids],
+                    "inserted": False,
+                }
+
+            cursor = conn.execute(
+                """INSERT INTO messages (conversation_id, role, content, attachments_json, created_at)
+                   VALUES (?, 'user', ?, ?, ?)""",
+                (conversation_id, user_message, attachments_json, now),
+            )
+            message_id = int(cursor.lastrowid)
+            conn.execute(
+                """INSERT INTO turn_checkpoints (
+                       turn_id, conversation_id, user_message_ids, finalized
+                   ) VALUES (?, ?, ?, 0)""",
+                (turn_id, conversation_id, json.dumps([message_id])),
+            )
+            conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+            revision = int(run["revision"]) + 1
+            conn.execute(
+                """UPDATE agent_runs SET recovery_input_ref = ?, revision = ?, updated_at = ?
+                   WHERE run_id = ? AND owner_instance_id = ? AND attempt = ? AND revision = ?""",
+                (
+                    f"turn_checkpoint:{turn_id}",
+                    revision,
+                    now,
+                    run_id,
+                    owner_instance_id,
+                    attempt,
+                    int(run["revision"]),
+                ),
+            )
+            self._require_rowcount(conn, "recovery input lost its Run revision fence")
+            self._append_event(
+                conn,
+                run_id,
+                "run.updated",
+                {
+                    "status": "running",
+                    "attempt": attempt,
+                    "revision": revision,
+                    "reason_code": "checkpoint_committed",
+                },
+                at=now,
+            )
+            return {
+                "run": self._run_dto(conn, self._require_run(conn, run_id)),
+                "user_message_ids": [message_id],
+                "inserted": True,
+            }
+
     def load_run(self, run_id: str) -> RunDTO | None:
         with self.db.transaction(immediate=False) as conn:
             row = conn.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
@@ -1618,6 +1737,136 @@ class Journal:
         self, run_id: str, *, after_seq: int = 0, limit: int = 100
     ) -> EventPageDTO:
         return self.event_store.read_events(run_id, after_seq=after_seq, limit=limit)
+
+    def enforce_terminal_event_retention(
+        self,
+        *,
+        now: datetime | None = None,
+        max_age_days: int = 90,
+        max_events_per_run: int = 500,
+        max_total_events: int = 50_000,
+    ) -> dict[str, int]:
+        """Bound terminal Run events while leaving active/recoverable histories intact.
+
+        Pruning is transactional and only targets completed, failed, or cancelled
+        Runs. ``last_seq`` remains monotonic, so EventStore reports a pruned
+        cursor as expired and clients can rebuild from an atomic Run snapshot.
+        """
+        if isinstance(max_age_days, bool) or not isinstance(max_age_days, int) or max_age_days < 0:
+            raise ValueError("max_age_days must be a nonnegative integer")
+        if isinstance(max_events_per_run, bool) or not isinstance(max_events_per_run, int) or max_events_per_run < 1:
+            raise ValueError("max_events_per_run must be a positive integer")
+        if isinstance(max_total_events, bool) or not isinstance(max_total_events, int) or max_total_events < 1:
+            raise ValueError("max_total_events must be a positive integer")
+        current = now or _now()
+        if current.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        cutoff = _timestamp(current.astimezone(timezone.utc) - timedelta(days=max_age_days))
+        terminal = tuple(sorted(_TERMINAL_RUN_STATUSES))
+        placeholders = ",".join("?" for _ in terminal)
+        deleted = 0
+        affected_runs: set[str] = set()
+
+        with self.db.transaction() as conn:
+            aged_runs = conn.execute(
+                f"""SELECT r.run_id FROM agent_runs AS r
+                    WHERE r.status IN ({placeholders})
+                      AND COALESCE(r.finished_at, r.updated_at, r.created_at) < ?
+                      AND EXISTS (SELECT 1 FROM run_events AS e WHERE e.run_id = r.run_id)""",
+                (*terminal, cutoff),
+            ).fetchall()
+            affected_runs.update(str(row["run_id"]) for row in aged_runs)
+            aged = conn.execute(
+                f"""DELETE FROM run_events
+                    WHERE run_id IN (
+                      SELECT run_id FROM agent_runs
+                      WHERE status IN ({placeholders})
+                        AND COALESCE(finished_at, updated_at, created_at) < ?
+                    )""",
+                (*terminal, cutoff),
+            )
+            deleted += max(0, int(aged.rowcount))
+
+            over_limit = conn.execute(
+                f"""SELECT r.run_id, COUNT(e.seq) AS event_count
+                    FROM agent_runs AS r JOIN run_events AS e ON e.run_id = r.run_id
+                    WHERE r.status IN ({placeholders})
+                    GROUP BY r.run_id
+                    HAVING COUNT(e.seq) > ?""",
+                (*terminal, max_events_per_run),
+            ).fetchall()
+            for run in over_limit:
+                run_id = str(run["run_id"])
+                keep_from = conn.execute(
+                    """SELECT seq FROM run_events WHERE run_id = ?
+                       ORDER BY seq DESC LIMIT 1 OFFSET ?""",
+                    (run_id, max_events_per_run - 1),
+                ).fetchone()
+                if keep_from is None:
+                    continue
+                result = conn.execute(
+                    "DELETE FROM run_events WHERE run_id = ? AND seq < ?",
+                    (run_id, int(keep_from["seq"])),
+                )
+                removed = max(0, int(result.rowcount))
+                if removed:
+                    deleted += removed
+                    affected_runs.add(run_id)
+
+            remaining = int(
+                conn.execute(
+                    f"""SELECT COUNT(*) FROM run_events AS e
+                        JOIN agent_runs AS r ON r.run_id = e.run_id
+                        WHERE r.status IN ({placeholders})""",
+                    terminal,
+                ).fetchone()[0]
+            )
+            excess = max(0, remaining - max_total_events)
+            if excess:
+                # Select Runs by terminal age, then remove only sequence prefixes
+                # within each Run. Event timestamps may move backward with the
+                # wall clock; ordering individual rows by created_at could prune
+                # an interior seq and make a cursor gap invisible to replay.
+                oldest_runs = conn.execute(
+                    f"""SELECT e.run_id, COUNT(e.seq) AS event_count FROM run_events AS e
+                        JOIN agent_runs AS r ON r.run_id = e.run_id
+                        WHERE r.status IN ({placeholders})
+                        GROUP BY e.run_id
+                        ORDER BY COALESCE(r.finished_at, r.updated_at, r.created_at) ASC,
+                                 e.run_id ASC""",
+                    terminal,
+                ).fetchall()
+                for run in oldest_runs:
+                    if excess <= 0:
+                        break
+                    run_id = str(run["run_id"])
+                    prefix = conn.execute(
+                        "SELECT seq FROM run_events WHERE run_id = ? ORDER BY seq ASC LIMIT ?",
+                        (run_id, excess),
+                    ).fetchall()
+                    if not prefix:
+                        continue
+                    # Deleting through the last selected sequence also removes
+                    # any pre-existing holes inside that prefix, never rows
+                    # after it.
+                    boundary = int(prefix[-1]["seq"])
+                    result = conn.execute(
+                        "DELETE FROM run_events WHERE run_id = ? AND seq <= ?",
+                        (run_id, boundary),
+                    )
+                    removed = max(0, int(result.rowcount))
+                    deleted += removed
+                    excess -= removed
+                    if removed:
+                        affected_runs.add(run_id)
+
+        return {
+            "run_events_deleted": deleted,
+            "run_event_runs_pruned": len(affected_runs),
+            "run_event_max_per_run": max_events_per_run,
+            "run_event_max_total": max_total_events,
+            "run_event_retention_days": max_age_days,
+        }
 
     def _append_event(
         self,

@@ -621,3 +621,66 @@ def test_raw_secrets_and_arbitrary_inputs_never_reach_sqlite_or_event_payload(tm
     )
     assert last_event_payload["evidence"] == {"verification_result": "unknown", "target_exists": True}
     db.close()
+
+
+def test_recovery_input_is_checkpointed_before_effects_and_finalized_once(tmp_path):
+    db = _new_database(tmp_path / "agent.db")
+    journal = Journal(db)
+    created = _create_run(journal)
+
+    early = journal.persist_recovery_input(
+        "run-journal",
+        owner_instance_id="owner-a",
+        attempt=1,
+        turn_id=created["turn_id"],
+        conversation_id=created["conversation_id"],
+        user_message="original request",
+        expected_revision=int(created["revision"]),
+    )
+    assert early["inserted"] is True
+    assert early["run"]["revision"] == int(created["revision"]) + 1
+    assert db.fetchone(
+        "SELECT updated_at FROM conversations WHERE id = ?", (created["conversation_id"],)
+    )[0] == db.fetchone(
+        "SELECT updated_at FROM agent_runs WHERE run_id = ?", ("run-journal",)
+    )[0]
+    checkpoint = db.fetchone(
+        "SELECT user_message_ids, finalized FROM turn_checkpoints WHERE turn_id = ?",
+        (created["turn_id"],),
+    )
+    assert checkpoint["finalized"] == 0
+    original_user_ids = json.loads(checkpoint["user_message_ids"])
+
+    messages = [
+        {"role": "user", "content": "original request"},
+        {"role": "assistant", "content": "completed", "tool_calls": [{
+            "tool_name": "file_write", "input": "{}", "output": "verified", "status": "complete",
+        }]},
+    ]
+    user_ids, inserted = db.persist_turn_messages(created["turn_id"], created["conversation_id"], messages)
+    assert inserted is True
+    assert user_ids == original_user_ids
+    assert db.fetchone(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
+        (created["conversation_id"],),
+    )[0] == 1
+    assert db.fetchone(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'assistant'",
+        (created["conversation_id"],),
+    )[0] == 1
+    assert db.fetchone(
+        "SELECT finalized FROM turn_checkpoints WHERE turn_id = ?", (created["turn_id"],)
+    )[0] == 1
+    assert db.fetchone(
+        "SELECT COUNT(*) FROM tool_calls WHERE conversation_id = ?", (created["conversation_id"],)
+    )[0] == 1
+
+    retry_ids, retry_inserted = db.persist_turn_messages(
+        created["turn_id"], created["conversation_id"], messages
+    )
+    assert retry_ids == original_user_ids
+    assert retry_inserted is False
+    assert db.fetchone(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?", (created["conversation_id"],)
+    )[0] == 2
+    db.close()

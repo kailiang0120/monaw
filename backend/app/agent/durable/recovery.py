@@ -301,7 +301,10 @@ def _can_pause_recovered_run(journal: Journal, run: Mapping[str, Any]) -> bool:
 
 def _cleanup_file_mutation_snapshots(journal: Journal) -> dict[str, int]:
     """Prune expired orphans while retaining every active/recoverable ref."""
-    from app.agent.file_mutation.snapshot_store import SnapshotStore
+    from app.agent.file_mutation.snapshot_store import (
+        SnapshotStore,
+        reclaim_pending_snapshot_refs,
+    )
 
     rows = journal.db.fetchall(
         """SELECT DISTINCT o.snapshot_ref, o.status AS operation_status, r.status AS run_status
@@ -318,7 +321,15 @@ def _cleanup_file_mutation_snapshots(journal: Journal) -> dict[str, int]:
         if str(row["run_status"]) in keep_run_states
         or str(row["operation_status"]) not in terminal_operation_states
     }
-    return SnapshotStore().cleanup(referenced)
+    pending = reclaim_pending_snapshot_refs(journal.db)
+    expired = SnapshotStore().cleanup(referenced)
+    return {
+        "snapshot_files_deleted": int(pending["snapshot_files_deleted"])
+        + int(expired["snapshot_files_deleted"]),
+        "snapshot_bytes_deleted": int(pending["snapshot_bytes_deleted"])
+        + int(expired["snapshot_bytes_deleted"]),
+        "snapshot_gc_pending": int(pending["snapshot_gc_pending"]),
+    }
 
 
 def recover_pending_undo_operations(

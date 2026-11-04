@@ -356,6 +356,9 @@ class AgentSettings(BaseModel):
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     identity: IdentitySettings = Field(default_factory=IdentitySettings)
+    # Controls what the desktop shows for Runs. This is presentation-only and
+    # is intentionally not copied into build_runtime_namespace().
+    execution_detail: Literal["simple", "detailed", "developer"] = "simple"
 
 
 def confirmation_settings_for_mode(

@@ -907,6 +907,127 @@ class SnapshotStore:
                     continue
         return {"snapshot_files_deleted": removed, "snapshot_bytes_deleted": bytes_removed}
 
+    def reclaim_refs(self, snapshot_refs: set[str] | frozenset[str]) -> dict[str, Any]:
+        """Immediately remove safe snapshot files after their DB refs are tombstoned.
+
+        The caller must hold the database transaction that owns the GC claims,
+        preventing a concurrent Journal write from reusing one of these opaque
+        identifiers while the file is removed.
+        """
+        if not isinstance(snapshot_refs, (set, frozenset)):
+            raise ValueError("snapshot_refs must be a set of opaque snapshot references")
+        safe_refs = {
+            ref for ref in snapshot_refs
+            if isinstance(ref, str) and _SNAPSHOT_REF_RE.fullmatch(ref)
+        }
+        deleted: set[str] = set()
+        missing: set[str] = set()
+        skipped: set[str] = set()
+        bytes_removed = 0
+        root = self._root()
+        with _lock, _interprocess_store_lock(root):
+            for reference in safe_refs:
+                path = root / f"{reference}.snap"
+                try:
+                    value = os.lstat(path)
+                except FileNotFoundError:
+                    missing.add(reference)
+                    continue
+                except OSError:
+                    skipped.add(reference)
+                    continue
+                if (
+                    not stat.S_ISREG(value.st_mode)
+                    or int(getattr(value, "st_nlink", 1)) != 1
+                    or int(getattr(value, "st_file_attributes", 0)) & _FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    skipped.add(reference)
+                    continue
+                try:
+                    size = int(value.st_size)
+                    path.unlink()
+                except FileNotFoundError:
+                    missing.add(reference)
+                except OSError:
+                    skipped.add(reference)
+                else:
+                    deleted.add(reference)
+                    bytes_removed += size
+        return {
+            "deleted_refs": deleted,
+            "missing_refs": missing,
+            "skipped_refs": skipped,
+            "snapshot_bytes_deleted": bytes_removed,
+        }
+
+
+def reclaim_pending_snapshot_refs(
+    db: Any,
+    *,
+    snapshot_refs: set[str] | frozenset[str] | None = None,
+    store: SnapshotStore | None = None,
+) -> dict[str, int]:
+    """Retry queued deletions while fencing new DB references and active refs.
+
+    The immediate SQLite transaction is deliberately held through filesystem
+    unlink. Journal reference writes take the same DB write lock and the
+    migration trigger rejects a tombstoned ref, closing the delete/register
+    race across Database connections and processes.
+    """
+    if snapshot_refs is not None and not isinstance(snapshot_refs, (set, frozenset)):
+        raise ValueError("snapshot_refs must be a set of opaque snapshot references")
+    requested = {
+        ref for ref in snapshot_refs or ()
+        if isinstance(ref, str) and _SNAPSHOT_REF_RE.fullmatch(ref)
+    }
+    selected_store = store or get_snapshot_store()
+    now = _now().isoformat(timespec="microseconds")
+    with db.transaction() as conn:
+        if snapshot_refs is None:
+            rows = conn.execute(
+                "SELECT snapshot_ref FROM snapshot_ref_gc WHERE state = 'pending' ORDER BY created_at"
+            ).fetchall()
+        elif requested:
+            placeholders = ",".join("?" for _ in requested)
+            rows = conn.execute(
+                f"""SELECT snapshot_ref FROM snapshot_ref_gc
+                    WHERE state = 'pending' AND snapshot_ref IN ({placeholders})
+                    ORDER BY created_at""",
+                tuple(requested),
+            ).fetchall()
+        else:
+            rows = []
+        pending = {str(row["snapshot_ref"]) for row in rows}
+        reclaimable = {
+            reference for reference in pending
+            if conn.execute(
+                "SELECT 1 FROM run_operations WHERE snapshot_ref = ? LIMIT 1",
+                (reference,),
+            ).fetchone() is None
+        }
+        has_live_ref = pending - reclaimable
+        if reclaimable:
+            result = selected_store.reclaim_refs(reclaimable)
+            complete = set(result["deleted_refs"]) | set(result["missing_refs"])
+            if complete:
+                placeholders = ",".join("?" for _ in complete)
+                conn.execute(
+                    f"""UPDATE snapshot_ref_gc
+                        SET state = 'reclaimed', reclaimed_at = ?
+                        WHERE state = 'pending' AND snapshot_ref IN ({placeholders})""",
+                    (now, *complete),
+                )
+            return {
+                "snapshot_files_deleted": len(result["deleted_refs"]),
+                "snapshot_bytes_deleted": int(result["snapshot_bytes_deleted"]),
+                "snapshot_gc_pending": len(has_live_ref | set(result["skipped_refs"])),
+            }
+        return {
+            "snapshot_files_deleted": 0,
+            "snapshot_bytes_deleted": 0,
+            "snapshot_gc_pending": len(has_live_ref),
+        }
+
 
 _DEFAULT_STORE: SnapshotStore | None = None
 _DEFAULT_STORE_LOCK = threading.Lock()

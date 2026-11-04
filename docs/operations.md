@@ -188,12 +188,22 @@ not permit best-effort Undo. File changes are still subject to path policy and
 approval before they run.
 
 Run state, operation evidence, and events are stored in `runtime\agent.db`.
-Events currently have no automatic age-based cleanup. The `410 events_expired`
-response indicates a sequence gap in the rows that remain, not a configured
-retention period. Deleting a conversation cascades its Run, operation, and
-event rows from the database. Snapshot files are separate: they are not removed
-immediately when a conversation is deleted and remain until the orphan cleanup
-can safely reclaim files at least 30 days old.
+Terminal Run events are kept for up to 90 days, capped at the newest 500 events
+per Run and 50,000 terminal events total. Events for active, paused, interrupted,
+and `needs_review` Runs are retained. When a client cursor falls behind pruned
+events, the API returns `410 events_expired`; Monaw reloads the atomic Run
+snapshot and operation list. That restores the current status and operation
+timeline, though older intermediate state changes may be gone.
+
+Deleting a conversation removes its Run, operation, and event rows. Monaw
+returns `409` while the conversation has an active, paused, interrupted, or
+`needs_review` Run, or an unresolved operation. Stop or resolve it before
+deleting the conversation so recovery evidence is not lost. After deletion,
+Monaw immediately queues snapshots that have no remaining Run reference for
+safe reclamation. A snapshot shared by multiple Runs remains while any Run
+still references it; a filesystem lock or unsafe file type can defer deletion
+until the next retention pass. Deleting a conversation removes its Undo history,
+but does not change workspace files.
 
 `Settings -> Observability -> Delete Data` clears diagnostics, logs,
 observability artifacts, memory files, approval/access-grant history,
@@ -205,11 +215,13 @@ snapshots; workspace folders outside `.monaw` are not deleted by that action.
 
 ## Retention And Full Local Deletion
 
-Monaw enforces runtime retention on startup for observability data, debug
-bundles, backend logs, approval/access-grant history, attachment registry data,
-browser/MCP diagnostics, scheduled-task output, and old unreferenced file
-snapshots. Run events and active/recoverable snapshots do not have an age-based
-cleanup policy.
+Monaw enforces runtime retention on startup and every six hours for
+observability data, debug bundles, backend logs, approval/access-grant history,
+attachment registry data, browser/MCP diagnostics, scheduled-task output,
+terminal Run events, pending snapshot deletions, and old unreferenced file
+snapshots. Active/recoverable snapshots are preserved. Snapshot Undo evidence
+expires after 30 days; once a conversation is deleted, its Run-scoped Undo
+history is gone even if a shared snapshot file remains for another Run.
 
 For app-managed deletion of retained diagnostics and support data, use:
 

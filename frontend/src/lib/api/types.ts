@@ -646,6 +646,7 @@ export interface AgentSettings {
     user_identity: string
     communication_style: string
   }
+  execution_detail: 'simple' | 'detailed' | 'developer'
   settings_version: string
   available_skills: SkillDescriptor[]
   api_keys: {
@@ -729,6 +730,7 @@ export interface SettingsUpdatePayload {
   permissions?: AgentSettings['permissions']
   sandbox?: AgentSettings['sandbox']
   identity?: AgentSettings['identity']
+  execution_detail?: AgentSettings['execution_detail']
   openai_api_key?: string
   google_api_key?: string
   tavily_api_key?: string

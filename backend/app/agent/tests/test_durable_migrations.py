@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.agent.database import Database
+from app.agent.database import ConversationHasUnresolvedRunError, Database
 from app.agent.migrations import runner as migration_runner
 
 
@@ -90,7 +90,7 @@ def test_v17_database_upgrades_in_place_and_retains_history_workspace_and_tasks(
     assert upgraded.fetchone("SELECT COUNT(*) FROM agent_runs")[0] == 0
     versions = [row["version"] for row in upgraded.fetchall("SELECT version FROM schema_migrations ORDER BY version")]
     assert versions[:13] == list(range(5, 18))
-    assert versions[-5:] == [18, 19, 20, 21, 22]
+    assert versions[-7:] == [18, 19, 20, 21, 22, 23, 24]
     upgraded.close()
 
 
@@ -190,6 +190,12 @@ def test_durable_tables_enforce_constraints_and_cascade_on_conversation_delete(t
     assert db.fetchone("SELECT 1 FROM run_events WHERE run_id = 'run-1' AND seq = 1") is not None
     assert db.fetchone("SELECT 1 FROM run_attempts WHERE run_id = 'run-1' AND attempt = 1") is not None
 
+    with pytest.raises(ConversationHasUnresolvedRunError):
+        db.delete_conversation("durable-chat")
+    assert db.fetchone("SELECT 1 FROM conversations WHERE id = 'durable-chat'") is not None
+    db.execute("UPDATE agent_runs SET status = 'failed', finished_at = ? WHERE run_id = ?", (now, "run-1"))
+    db.execute("UPDATE run_operations SET status = 'cancelled' WHERE run_id = ?", ("run-1",))
+    db.commit()
     assert db.delete_conversation("durable-chat") is True
     for table in ("agent_runs", "run_operations", "run_events", "run_attempts"):
         assert db.fetchone(f"SELECT 1 FROM {table} WHERE run_id = 'run-1'") is None

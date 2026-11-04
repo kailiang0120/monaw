@@ -31,6 +31,7 @@ export function draftSignature(settings: AgentSettings): string {
     permissions: settings.permissions,
     sandbox: settings.sandbox,
     identity: settings.identity,
+    execution_detail: settings.execution_detail,
     telegramUserIds: (settings.telegram_allowed_user_ids ?? '').trim(),
     telegramChatIds: (settings.telegram_allowed_chat_ids ?? '').trim(),
   })
@@ -164,6 +165,7 @@ export function useSettingsDraft() {
           permissions: draft.permissions,
           sandbox: draft.sandbox,
           identity: draft.identity,
+          execution_detail: draft.execution_detail,
           telegram_allowed_user_ids: draft.telegram_allowed_user_ids.trim(),
           telegram_allowed_chat_ids: draft.telegram_allowed_chat_ids.trim(),
           ...browserSecretPayload,

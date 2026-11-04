@@ -190,6 +190,66 @@ def test_cooperative_pause_during_model_wait_stops_before_tool_dispatch():
     assert memory.persisted_turns[0]["status"] == "paused"
 
 
+def test_continue_injects_only_sanitized_verified_operation_evidence():
+    captured_system_prompts: list[str] = []
+
+    class EvidenceLLM:
+        async def chat_with_tools(self, _messages, _tools, *, system_prompt="", **_kwargs):
+            captured_system_prompts.append(system_prompt)
+            return final_answer_response("Continued safely")
+
+    class ContinuationHandle:
+        run_id = "verified-recovery-run"
+        turn_id = "verified-recovery-turn"
+        lease_seconds = 30
+        is_continuation = True
+        recovery_evidence = [{
+            "operation_id": "verified-file-op",
+            "operation_kind": "file_write",
+            "status": "verified",
+            "input_summary": {"target_count": 1},
+            "evidence": {"verification_result": "completed", "target_exists": True},
+        }]
+
+        def renew_lease(self):
+            return None
+
+        def finalize(self, *_args, **_kwargs):
+            return True
+
+    class ContinuationMemory(PersistingFakeMemory):
+        async def persist_turn(self, *args, **kwargs):
+            kwargs.pop("persist_user_message", None)
+            return await super().persist_turn(*args, **kwargs)
+
+    loop = TurnLoop(
+        llm_client=EvidenceLLM(),
+        registry=ToolRegistry(),
+        memory=ContinuationMemory(),
+        observability=FakeObservability(),
+    )
+
+    async def collect():
+        return [event async for event in loop.run(
+            "Continue the task.",
+            "verified-recovery-chat",
+            system_prompt="",
+            durable_run=ContinuationHandle(),
+        )]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+
+    assert events[-1]["data"]["status"] == "complete"
+    assert len(captured_system_prompts) == 1
+    assert "Verified durable operation evidence from an earlier attempt" in captured_system_prompts[0]
+    assert '"operation_id":"verified-file-op"' in captured_system_prompts[0]
+    assert '"verification_result":"completed"' in captured_system_prompts[0]
+    assert "before_sha256" not in captured_system_prompts[0]
+
+
 def test_durable_run_factory_waits_for_conversation_lock():
     first_started = asyncio.Event()
     release_first = asyncio.Event()

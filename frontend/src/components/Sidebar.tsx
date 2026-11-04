@@ -322,16 +322,6 @@ export function Sidebar({
       >
         <button
           type="button"
-          onClick={() => onNewChat()}
-          className="ghost-button mb-1 h-9 w-9 rounded-xl"
-          aria-label="New chat"
-          title="New chat"
-          tabIndex={collapsed ? 0 : -1}
-        >
-          <SquarePen size={15} />
-        </button>
-        <button
-          type="button"
           onClick={onToggleCollapsed}
           className="ghost-button h-9 w-9 rounded-xl"
           aria-label="Scheduled tasks"
@@ -363,6 +353,16 @@ export function Sidebar({
         <div className="flex flex-col gap-1">
           <button
             type="button"
+            onClick={() => onNewChat()}
+            className="ghost-button h-9 w-9 rounded-xl"
+            aria-label="New chat"
+            title="New chat"
+            tabIndex={collapsed ? 0 : -1}
+          >
+            <SquarePen size={15} />
+          </button>
+          <button
+            type="button"
             onClick={onToggleTheme}
             className="ghost-button h-9 w-9 rounded-xl"
             aria-label={nextThemeLabel}
@@ -390,19 +390,6 @@ export function Sidebar({
             : 'opacity-100 delay-[80ms] animate-slide-in-panel'
         }`}
       >
-        {/* Scheduled tasks + conversation list */}
-        <div className="px-2 pt-2">
-          <button
-            type="button"
-            onClick={() => onNewChat()}
-            className="flex w-full items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[13px] font-medium text-neutral-200 transition-colors hover:border-accent/30 hover:bg-accent/10 hover:text-accent-light"
-            aria-label="New chat"
-            tabIndex={collapsed ? -1 : 0}
-          >
-            <SquarePen size={14} />
-            New chat
-          </button>
-        </div>
         {/* Scheduled stays put; only the chat list below scrolls. */}
         <div className="sidebar-scroll max-h-[40%] shrink-0 overflow-y-auto px-2 pt-2">
           <ScheduledTasksList
@@ -491,6 +478,16 @@ export function Sidebar({
 
         {/* Footer */}
         <div className="border-t border-white/[0.05] p-2">
+          <button
+            type="button"
+            onClick={() => onNewChat()}
+            className="mb-1 flex w-full items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[13px] font-medium text-neutral-200 transition-colors hover:border-accent/30 hover:bg-accent/10 hover:text-accent-light"
+            aria-label="New chat"
+            tabIndex={collapsed ? -1 : 0}
+          >
+            <SquarePen size={14} />
+            New chat
+          </button>
           <div className="flex items-center gap-1">
             <button
               type="button"

@@ -235,6 +235,72 @@ def test_recovered_run_pauses_only_with_reconstructable_checkpoint(tmp_path):
     db.close()
 
 
+def test_resume_run_carries_verified_operation_evidence_into_new_attempt(tmp_path):
+    from app.agent.durable.turn_run import resume_run
+
+    db, journal = _new_journal(tmp_path)
+    old_owner = "owner-v1-" + "e" * 32
+    recovery_owner = OwnerProcessIdentity(tmp_path / "recovery-locks")
+    created = _create_run(journal, owner=old_owner, turn_id="evidence-turn")
+    journal.persist_recovery_input(
+        "recovery-run",
+        owner_instance_id=old_owner,
+        attempt=1,
+        turn_id="evidence-turn",
+        conversation_id="recovery-chat",
+        user_message="Write the requested file.",
+        expected_revision=int(created["revision"]),
+    )
+    operation = journal.prepare_operation(
+        "recovery-run",
+        operation_id="verified-file-operation",
+        owner_instance_id=old_owner,
+        attempt=1,
+        operation_kind="file_write",
+        effect_class="verifiable_write",
+        input_summary={"target_count": 1},
+    )
+    journal.transition_operation(
+        "recovery-run", operation["operation_id"], to_status="authorized",
+        owner_instance_id=old_owner, attempt=1,
+    )
+    journal.transition_operation(
+        "recovery-run", operation["operation_id"], to_status="executing",
+        owner_instance_id=old_owner, attempt=1,
+    )
+    recovery_id = recovery_owner.acquire()
+    report = recover_startup_runs(
+        journal=journal,
+        recovery_owner_instance_id=recovery_id,
+        owner_proof=lambda _owner: "dead",
+        read_only_verifier=lambda _record: {
+            "verification_result": "completed", "target_exists": True,
+        },
+    )
+    assert report["paused"] == 1
+
+    handle, checkpoint = resume_run(
+        "recovery-run",
+        execution_source="desktop",
+        principal_id="",
+        control_session_id="new-session",
+        workspace_dir="",
+        db=db,
+    )
+    assert checkpoint["user_message_ids"]
+    assert handle.attempt == 2
+    assert handle.recovery_evidence == [{
+        "operation_id": "verified-file-operation",
+        "operation_kind": "file_write",
+        "status": "verified",
+        "input_summary": {"target_count": 1},
+        "evidence": {"verification_result": "completed", "target_exists": True},
+    }]
+    handle.finalize("error", "test_cleanup")
+    recovery_owner.close()
+    db.close()
+
+
 def test_dispatch_guard_allows_same_process_workspace_siblings_and_blocks_cross_process_overlap(tmp_path):
     db, journal = _new_journal(tmp_path)
     current_owner = get_owner_instance_id()

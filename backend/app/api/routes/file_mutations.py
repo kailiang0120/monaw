@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import json
+import secrets
 import threading
 import time
 import uuid
@@ -45,9 +46,12 @@ from app.agent.run_context import (
 router = APIRouter(prefix="/file-mutations")
 
 PREVIEW_TTL_SECONDS = 15 * 60
+UNDO_CONFIRMATION_TTL_SECONDS = 5 * 60
 PREVIEW_LIMIT = 512
+UNDO_CONFIRMATION_LIMIT = 512
 _PREVIEWS: dict[str, "MutationPreviewRecord"] = {}
 _IDEMPOTENCY: dict[tuple[str, str, str, str], tuple[str, dict[str, Any]]] = {}
+_UNDO_CONFIRMATIONS: dict[str, "UndoConfirmationRecord"] = {}
 _PREVIEW_LOCKS: dict[tuple[str, str, str, str], threading.Lock] = {}
 _PREVIEW_LOCK_USERS: dict[tuple[str, str, str, str], int] = {}
 _RECORD_LOCK = threading.RLock()
@@ -86,6 +90,15 @@ class FileMutationUndoIn(BaseModel):
     run_id: str = Field(..., min_length=1, max_length=128)
     conversation_id: str = Field(..., min_length=1, max_length=128)
     expected_revision: int = Field(..., ge=1)
+    confirmation_id: str = Field(..., min_length=32, max_length=128)
+
+
+class FileMutationUndoPreviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(..., min_length=1, max_length=128)
+    conversation_id: str = Field(..., min_length=1, max_length=128)
+    expected_revision: int = Field(..., ge=1)
 
 
 @dataclass
@@ -114,6 +127,24 @@ class MutationPreviewRecord:
     apply_key: str = ""
     apply_payload_digest: str = ""
     apply_response: dict[str, Any] | None = None
+
+
+@dataclass
+class UndoConfirmationRecord:
+    confirmation_id: str
+    session_id: str
+    principal_id: str
+    run_id: str
+    conversation_id: str
+    workspace_key: str
+    operation_id: str
+    revision: int
+    fingerprint_digest: str
+    preview: dict[str, Any]
+    expires_at: float
+    state: Literal["prepared", "used"] = "prepared"
+    idempotency_key: str = ""
+    request_digest: str = ""
 
 
 def _raise(status_code: int, code: str, message: str, **details: Any) -> None:
@@ -401,6 +432,9 @@ def _purge_expired_records(now: float | None = None) -> None:
     for key, lock in list(_PREVIEW_LOCKS.items()):
         if key not in _IDEMPOTENCY and not _PREVIEW_LOCK_USERS.get(key) and not lock.locked():
             _PREVIEW_LOCKS.pop(key, None)
+    for confirmation_id, record in list(_UNDO_CONFIRMATIONS.items()):
+        if record.expires_at <= current:
+            _UNDO_CONFIRMATIONS.pop(confirmation_id, None)
 
 
 def _request_digest(value: object) -> str:
@@ -903,7 +937,9 @@ async def undo_capability(
                 operands = original.get("operands")
                 if not isinstance(operands, list) or not operands or any(not isinstance(item, dict) for item in operands):
                     return result("unavailable", "undo_unavailable")
-                manager._authorize_source_inverse(str(operation["operation_kind"]), operands)
+                manager._authorize_source_inverse(
+                    str(operation["operation_kind"]), operands, confirmation_granted=True
+                )
                 claim = scope["db"].fetchone(
                     """SELECT status FROM run_operations WHERE run_id = ?
                        AND related_operation_id = ? AND operation_kind = 'undo'
@@ -935,6 +971,112 @@ async def undo_capability(
     return await asyncio.to_thread(check)
 
 
+def _resolve_undo_operation_id(identifier: str, scope: dict[str, Any]) -> str:
+    with _RECORD_LOCK:
+        _purge_expired_records()
+        record = _PREVIEWS.get(identifier)
+        if record is not None and record.session_id == str(scope["session_id"]):
+            if record.run_id != str(scope["scope"]["run_id"]):
+                _raise(404, "mutation_not_found", "File mutation was not found or has expired")
+            if record.conversation_id != str(scope["scope"]["conversation_id"]):
+                _raise(404, "mutation_not_found", "File mutation was not found or has expired")
+            if record.status != "applied" or not record.applied_operation_id:
+                _raise(409, "undo_unavailable", "This file mutation has not been applied")
+            return record.applied_operation_id
+    return identifier
+
+
+@router.post("/{operation_or_mutation_id}/undo-preview")
+async def preview_file_mutation_undo(
+    operation_or_mutation_id: str,
+    body: FileMutationUndoPreviewIn,
+    request: Request,
+):
+    """Prepare a short-lived, server-bound confirmation for one exact inverse."""
+    scope = _authorized_run_context(
+        request,
+        run_id=body.run_id,
+        conversation_id=body.conversation_id,
+        expected_revision=body.expected_revision,
+        require_active=False,
+    )
+    operation_id = _resolve_undo_operation_id(operation_or_mutation_id, scope)
+    if scope["snapshot"]["status"] not in {"completed", "failed", "cancelled"}:
+        _raise(409, "run_not_terminal", "Undo is available after the Run has stopped")
+
+    def _do_preview() -> tuple[dict[str, Any], dict[str, Any]]:
+        from app.agent.file_mutation.undo_manager import UndoManager
+        from app.skills.filesystem import file_ops
+
+        journal = scope["journal"]
+        operation = journal.load_operation_internal(body.run_id, operation_id)
+        if operation is None:
+            _raise(404, "operation_not_found", "File operation was not found in this Run")
+        claim = scope["db"].fetchone(
+            """SELECT status FROM run_operations WHERE run_id = ?
+               AND related_operation_id = ? AND operation_kind = 'undo'
+               AND status NOT IN ('failed', 'cancelled')
+               ORDER BY sequence_no DESC LIMIT 1""",
+            (body.run_id, operation_id),
+        )
+        if claim is not None:
+            if claim["status"] == "verified":
+                _raise(409, "undo_already_completed", "This file change has already been undone")
+            _raise(409, "undo_in_progress", "This Undo is already in progress or needs review")
+        manager = UndoManager(journal, store=file_ops._p3_snapshot_store())
+        with _runtime_context(scope):
+            preview = manager.preview(body.run_id, operation_id)
+        return operation, preview
+
+    try:
+        operation, preview = await asyncio.to_thread(_do_preview)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        name = type(exc).__name__
+        if name == "UndoConflictError":
+            _raise(409, "undo_conflict", "The file changed after the Undo preview; it was left untouched")
+        if name == "UndoPermissionError":
+            _raise(403, "permission_denied", "Current file permissions do not allow Undo")
+        if name == "UndoUnavailableError":
+            _raise(409, "undo_unavailable", "Undo evidence is unavailable or expired")
+        if name == "OperationNotFoundError":
+            _raise(404, "operation_not_found", "File operation was not found in this Run")
+        _raise(409, "undo_preview_failed", "The Undo preview could not be prepared safely")
+
+    confirmation_id = secrets.token_urlsafe(32)
+    expires_at = time.monotonic() + UNDO_CONFIRMATION_TTL_SECONDS
+    response = {
+        "confirmation_id": confirmation_id,
+        "run_id": body.run_id,
+        "conversation_id": body.conversation_id,
+        "operation_id": operation_id,
+        "revision": int(scope["snapshot"]["revision"]),
+        "operation": str(operation.get("operation_kind") or "file_write"),
+        "files": preview["files"],
+        "expires_in_seconds": UNDO_CONFIRMATION_TTL_SECONDS,
+    }
+    confirmation = UndoConfirmationRecord(
+        confirmation_id=confirmation_id,
+        session_id=str(scope["session_id"]),
+        principal_id=str(scope["principal_id"]),
+        run_id=body.run_id,
+        conversation_id=body.conversation_id,
+        workspace_key=_workspace_key(scope["workspace_dir"]),
+        operation_id=operation_id,
+        revision=int(scope["snapshot"]["revision"]),
+        fingerprint_digest=str(preview["fingerprint_digest"]),
+        preview=response,
+        expires_at=expires_at,
+    )
+    with _RECORD_LOCK:
+        _purge_expired_records()
+        if len(_UNDO_CONFIRMATIONS) >= UNDO_CONFIRMATION_LIMIT:
+            _raise(429, "undo_preview_limit", "Too many pending Undo previews; refresh and try again")
+        _UNDO_CONFIRMATIONS[confirmation_id] = confirmation
+    return response
+
+
 @router.post("/{operation_or_mutation_id}/undo")
 async def undo_file_mutation(
     operation_or_mutation_id: str,
@@ -950,33 +1092,64 @@ async def undo_file_mutation(
         request,
         run_id=body.run_id,
         conversation_id=body.conversation_id,
+        # The opaque confirmation record binds the original revision. A same-key
+        # retry after a completed inverse must reach Journal's durable replay.
         expected_revision=None,
         require_active=False,
     )
+    operation_id = _resolve_undo_operation_id(operation_or_mutation_id, scope)
+    request_digest = _request_digest({
+        "run_id": body.run_id,
+        "conversation_id": body.conversation_id,
+        "operation_id": operation_id,
+        "expected_revision": body.expected_revision,
+        "confirmation_id": body.confirmation_id,
+    })
     with _RECORD_LOCK:
         _purge_expired_records()
-        record = _PREVIEWS.get(operation_or_mutation_id)
-        if record is not None and record.session_id == str(scope["session_id"]):
-            if record.run_id != body.run_id or record.conversation_id != body.conversation_id:
-                _raise(404, "mutation_not_found", "File mutation was not found or has expired")
-            operation_id = record.applied_operation_id
+        confirmation = _UNDO_CONFIRMATIONS.get(body.confirmation_id)
+        if confirmation is None or confirmation.expires_at <= time.monotonic():
+            _raise(409, "undo_confirmation_expired", "The Undo preview expired; prepare a new preview")
+        if (
+            confirmation.session_id != str(scope["session_id"])
+            or confirmation.principal_id != str(scope["principal_id"])
+            or confirmation.run_id != body.run_id
+            or confirmation.conversation_id != body.conversation_id
+            or confirmation.workspace_key != _workspace_key(scope["workspace_dir"])
+            or confirmation.operation_id != operation_id
+            or confirmation.revision != body.expected_revision
+        ):
+            _raise(409, "undo_confirmation_invalid", "The Undo confirmation does not match this file change")
+        if confirmation.state == "used":
+            if confirmation.idempotency_key != key or confirmation.request_digest != request_digest:
+                _raise(409, "undo_confirmation_used", "This Undo confirmation has already been used")
+            replay = True
         else:
-            operation_id = operation_or_mutation_id
-    if not operation_id:
-        _raise(409, "undo_unavailable", "This file mutation has not been applied by this session")
+            confirmation.state = "used"
+            confirmation.idempotency_key = key
+            confirmation.request_digest = request_digest
+            replay = False
 
     def _do_undo() -> dict[str, Any]:
-        from app.agent.file_mutation.undo_manager import UndoManager
+        from app.agent.file_mutation.undo_manager import UndoManager, UndoConflictError
         from app.skills.filesystem import file_ops
 
         with _runtime_context(scope):
             manager = UndoManager(scope["journal"], store=file_ops._p3_snapshot_store())
+            if not replay:
+                current_preview = manager.preview(body.run_id, operation_id)
+                if not hmac.compare_digest(
+                    str(current_preview.get("fingerprint_digest") or ""),
+                    confirmation.fingerprint_digest,
+                ):
+                    raise UndoConflictError("file state changed after the Undo preview")
             return manager.undo(
                 body.run_id,
                 operation_id,
                 expected_revision=body.expected_revision,
                 idempotency_key=key,
                 principal_id=str(scope["principal_id"]),
+                confirmed=True,
             )
 
     try:
@@ -986,7 +1159,7 @@ async def undo_file_mutation(
     except Exception as exc:
         name = type(exc).__name__
         if name == "UndoConflictError":
-            _raise(409, "undo_conflict", "The file changed after Apply; it was left untouched")
+            _raise(409, "undo_conflict", "The file changed after the Undo preview; it was left untouched")
         if name == "UndoPermissionError":
             _raise(403, "permission_denied", "Current file permissions do not allow Undo")
         if name == "UndoUnavailableError":
