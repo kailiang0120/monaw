@@ -35,6 +35,8 @@ export interface ChatRun {
   message: string
   attachments: UploadedAttachment[]
   started_at: number
+  /** A resumed Run: it continues the paused reply and has no user message of its own. */
+  continuation?: boolean
 }
 
 export interface TurnStartedEvent {

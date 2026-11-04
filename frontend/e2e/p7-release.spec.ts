@@ -87,29 +87,44 @@ test('file diff, approval, safe pause, real app/backend restart, Continue and Un
   const recoveredReport = (await desktop.api(`/api/runs/${run.run_id}/recovery`)).data
   expect(recoveredReport.run).toMatchObject({ status: 'paused', available_actions: expect.arrayContaining(['resume']) })
   expect(recoveredReport.unresolved_operations).toEqual([])
-  await expect(desktop.page.getByRole('region', { name: 'Execution timeline' })).toBeVisible()
-  await expect(desktop.page.getByRole('region', { name: 'Recovery and file changes' })).toBeVisible()
   await expect(desktop.page.getByRole('button', { name: 'Continue execution' })).toBeVisible()
 
   const continuePosts: string[] = []
+  const followRequests: string[] = []
   desktop.page.on('request', (request) => {
-    if (request.method() === 'POST' && new URL(request.url()).pathname === `/api/runs/${run.run_id}/resume`) {
+    const path = new URL(request.url()).pathname
+    if (request.method() === 'POST' && path === `/api/runs/${run.run_id}/resume`) {
       continuePosts.push(request.url())
     }
+    // Continue shows the resumed work live instead of waiting for the Run to end.
+    if (request.method() === 'GET' && path === `/api/chat/runs/${run.run_id}/events`) {
+      followRequests.push(request.url())
+    }
   })
+  await desktop.signal('file-resume-continue.hold')
   const continueButton = desktop.page.getByRole('button', { name: 'Continue execution' })
   await continueButton.focus()
   await desktop.page.keyboard.press('Enter')
   await desktop.page.keyboard.press('Enter')
   await expect.poll(() => continuePosts.length).toBe(1)
+  // While the resumed model call is held, the chat is following it: Stop and
+  // Pause are offered for that Run, not a stale "Paused" bubble.
+  await desktop.started('file-resume-continue')
+  await expect.poll(() => followRequests.length).toBeGreaterThan(0)
+  await expect(desktop.page.getByRole('button', { name: 'Stop response' })).toBeVisible()
+  await expect(desktop.page.getByRole('button', { name: 'Pause execution' })).toBeVisible()
+  await desktop.signal('file-resume-continue.release')
   await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.status).toBe('completed')
   await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.attempt).toBe(2)
   await expect(desktop.page.getByText('Fixture file-resume completed.', { exact: false }).last()).toBeVisible()
+  // The reply that wrote the file lists it in its Changes summary.
+  await expect(desktop.page.getByRole('region', { name: 'Changes in this reply' }).first()).toContainText('file-resume.txt')
   const operations = (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations
   expect(operations.filter((operation: { operation_kind: string }) => operation.operation_kind === 'file_write')).toHaveLength(1)
   expect((await desktop.events()).filter((event) => event.kind === 'model' && event.scenario === 'file-resume').map((event) => event.index)).toEqual([0, 1, 2])
   expect((await desktop.api('/api/settings')).data.permissions.mode).toBe('default')
 
+  await desktop.page.getByText('Review individual file changes', { exact: true }).click()
   const reviewUndo = desktop.page.getByRole('button', { name: 'Review Undo', exact: true })
   await expect(reviewUndo).toBeVisible()
   await reviewUndo.focus()
@@ -212,6 +227,7 @@ test('Undo rechecks the file and preserves external edits on conflict', async ({
   await desktop.start()
   await desktop.page.getByText('[e2e:recover]', { exact: true }).last().click()
   expect((await desktop.api('/api/settings')).data.permissions.mode).toBe('default')
+  await desktop.page.getByText('Review individual file changes', { exact: true }).click()
   const reviewUndo = desktop.page.getByRole('button', { name: 'Review Undo', exact: true })
   await expect(reviewUndo).toBeVisible()
   await reviewUndo.click()

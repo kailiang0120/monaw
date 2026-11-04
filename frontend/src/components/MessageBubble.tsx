@@ -27,6 +27,7 @@ import mascotSuccessStill from '../assets/mascots/good.png'
 import mascotThinkingStill from '../assets/mascots/thinking.png'
 import { ImagePreviewDialog } from './ImagePreviewDialog'
 import { FileChangePreview, type FileChangePreviewData } from './FileChangePreview'
+import { TurnChanges } from './TurnChanges'
 import { PlanProgress } from './PlanProgress'
 import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
@@ -319,6 +320,8 @@ export const MessageBubble = memo(function MessageBubble({
       )}
 
       <AttachmentStrip attachments={message.attachments} onPreview={setPreviewAttachment} />
+      {/* The reply's summary of what it wrote, once its work is done. */}
+      {!message.streaming && <TurnChanges toolCalls={message.toolCalls} />}
       {previewDialog}
     </article>
   )

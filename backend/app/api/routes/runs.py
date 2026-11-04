@@ -31,6 +31,7 @@ from app.agent.durable.models import (
 from app.agent.durable.turn_run import get_active_lifecycle, pause_run, resume_run
 from app.agent.job_manager import get_job
 from app.agent.steering import SteeringInbox, get_steering, register_steering, unregister_steering
+from app.agent.ui_events import publish_ui_event
 from app.agent.conversation_workspace import reset_workspace_dir, set_workspace_dir
 from app.agent.run_context import (
     reset_current_control_session_id,
@@ -526,6 +527,7 @@ def _start_resume_worker(durable_run: Any, resume_input: dict[str, Any]) -> None
         session_id,
         run_id=run_id,
         display_message="Continue previous task",
+        continuation=True,
     )
     try:
         register_steering(inbox)
@@ -538,6 +540,12 @@ def _start_resume_worker(durable_run: Any, resume_input: dict[str, Any]) -> None
             logger.exception("Unable to finalize duplicate resumed run run_id=%s", run_id)
         logger.warning("Unable to register resumed Run inbox run_id=%s error=%s", run_id, type(exc).__name__)
         return
+
+    conversation_id = scope["conversation_id"]
+    # Like a chat turn: the sidebar marks the chat as running, and a viewer that
+    # follows this inbox gets the steering target before any other event.
+    publish_ui_event("conversation.changed", {"conversation_id": conversation_id, "action": "run_started"})
+    inbox.stream.publish("turn_started", {"run_id": run_id, "conversation_id": conversation_id})
 
     async def drive() -> None:
         try:
@@ -556,16 +564,23 @@ def _start_resume_worker(durable_run: Any, resume_input: dict[str, Any]) -> None
                 steering=inbox,
                 durable_run=durable_run,
             ):
-                inbox.stream.publish(str(event.get("event") or "message"), event.get("data") or {})
-                if str(event.get("event") or "") == "done":
+                event_name = str(event.get("event") or "message")
+                if event_name == "done":
+                    publish_ui_event("conversation.changed", {"conversation_id": conversation_id, "action": "messages_changed"})
+                    publish_ui_event("usage.changed", {"conversation_id": conversation_id})
+                    publish_ui_event("observability.changed", {"conversation_id": conversation_id})
+                inbox.stream.publish(event_name, event.get("data") or {})
+                if event_name == "done":
                     break
         except asyncio.CancelledError:
+            publish_ui_event("conversation.changed", {"conversation_id": conversation_id, "action": "messages_changed"})
             raise
         except Exception:
             logger.exception("Resumed durable Run failed run_id=%s", run_id)
         finally:
             unregister_steering(inbox)
             inbox.stream.close()
+            publish_ui_event("conversation.changed", {"conversation_id": conversation_id, "action": "run_finished"})
 
     inbox.task = asyncio.create_task(drive(), name=f"resume-run-{run_id}")
 

@@ -90,7 +90,7 @@ def test_v17_database_upgrades_in_place_and_retains_history_workspace_and_tasks(
     assert upgraded.fetchone("SELECT COUNT(*) FROM agent_runs")[0] == 0
     versions = [row["version"] for row in upgraded.fetchall("SELECT version FROM schema_migrations ORDER BY version")]
     assert versions[:13] == list(range(5, 18))
-    assert versions[-7:] == [18, 19, 20, 21, 22, 23, 24]
+    assert versions[-8:] == [18, 19, 20, 21, 22, 23, 24, 25]
     upgraded.close()
 
 

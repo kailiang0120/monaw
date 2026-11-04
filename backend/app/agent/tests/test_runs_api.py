@@ -487,6 +487,8 @@ def test_resume_dispatches_a_real_worker_and_finalizes_the_new_attempt(
         }
 
     monkeypatch.setattr(runtime, "run_agent_stream", fake_run_agent_stream)
+    ui_events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(runs, "publish_ui_event", lambda name, data: ui_events.append((name, data)))
     request = SimpleNamespace(
         state=SimpleNamespace(
             control_session=SimpleNamespace(
@@ -496,6 +498,7 @@ def test_resume_dispatches_a_real_worker_and_finalizes_the_new_attempt(
             )
         )
     )
+    followed: list[bytes] = []
 
     async def scenario():
         response = await runs.resume_run_route(
@@ -510,11 +513,20 @@ def test_resume_dispatches_a_real_worker_and_finalizes_the_new_attempt(
         assert response["accepted"] is True
         inbox = get_steering(context["run"].run_id, NEW_SESSION_ID)
         assert inbox is not None and inbox.task is not None
+        # The chat follows a resumed Run like any running turn, continuing the paused reply.
+        assert inbox.continuation is True
+        subscription = inbox.stream.subscribe()
         await asyncio.wait_for(inbox.task, timeout=3)
+        while (chunk := await subscription.get()) is not None:
+            followed.append(chunk)
         return response
 
     response = asyncio.run(scenario())
 
+    assert followed and followed[0].startswith(b"event: turn_started")
+    assert any(chunk.startswith(b"event: done") for chunk in followed)
+    actions = [data.get("action") for name, data in ui_events if name == "conversation.changed"]
+    assert actions[0] == "run_started" and actions[-1] == "run_finished" and "messages_changed" in actions
     assert response["run"]["status"] == "running"
     assert len(observed) == 1
     assert observed[0]["conversation_id"] == context["conversation_id"]

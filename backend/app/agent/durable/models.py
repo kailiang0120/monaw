@@ -43,6 +43,7 @@ class RunDTO(TypedDict):
     created_at: str
     updated_at: str
     finished_at: str | None
+    assistant_message_id: int | None
 
 
 class OperationDTO(TypedDict):

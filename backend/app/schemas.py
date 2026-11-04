@@ -65,6 +65,7 @@ class ChatRunOut(BaseModel):
     message: str
     attachments: list[dict] = Field(default_factory=list)
     started_at: float
+    continuation: bool = False
 
 
 class ChatSteerResponse(BaseModel):

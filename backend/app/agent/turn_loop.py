@@ -75,6 +75,33 @@ def conversation_lock(conversation_id: str) -> asyncio.Lock:
     return _SESSION_LOCKS[conversation_id]
 
 
+async def _model_request_or_pause(request, lifecycle):
+    """Await a model request, or cancel it and return None once a pause is requested.
+
+    A model call has no side effects, so Pause need not wait out a long
+    reasoning call before it reaches a safe point.
+    """
+    request_task = asyncio.ensure_future(request)
+    pause_event = getattr(lifecycle, "pause_event", None)
+    if not isinstance(pause_event, asyncio.Event):
+        return await request_task
+    pause_task = asyncio.ensure_future(pause_event.wait())
+    try:
+        await asyncio.wait({request_task, pause_task}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        request_task.cancel()
+        pause_task.cancel()
+        await asyncio.gather(request_task, pause_task, return_exceptions=True)
+        raise
+    pause_task.cancel()
+    await asyncio.gather(pause_task, return_exceptions=True)
+    if request_task.done():
+        return request_task.result()
+    request_task.cancel()
+    await asyncio.gather(request_task, return_exceptions=True)
+    return None
+
+
 class TurnLoop:
     MAX_ITERATIONS = 200
     # A turn nobody is watching (scheduled task, Telegram) has no Stop button,
@@ -494,10 +521,17 @@ class TurnLoop:
                 try:
                     visible_tools = self.registry.get_all_tools(visible_only=True)
                     tool_choice = response_policy.take_tool_choice()
-                    model_result = await model_runner.request(transcript.snapshot(
+                    model_result = await _model_request_or_pause(model_runner.request(transcript.snapshot(
                         tools=visible_tools, system_prompt=_current_system_prompt(), tool_choice=tool_choice,
                         metadata={"iteration": iteration_index + 1, "consumed": budget.consumed},
-                    ))
+                    )), lifecycle)
+                    if model_result is None:
+                        # Paused while the model was thinking. The call has no
+                        # effects, so it is dropped and Continue asks again.
+                        stop_requested = True
+                        incomplete_reason_code = "user_pause"
+                        final_text = "Paused at a safe point. Continue to resume from the saved conversation."
+                        break
                     obs_usage_total = obs_usage_total.merge(model_result.usage)
                 except ModelRequestError as exc:
                     final_text = str(exc)

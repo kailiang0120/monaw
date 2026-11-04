@@ -190,6 +190,71 @@ def test_cooperative_pause_during_model_wait_stops_before_tool_dispatch():
     assert memory.persisted_turns[0]["status"] == "paused"
 
 
+def test_pause_cancels_a_model_call_instead_of_waiting_for_it():
+    from app.agent.durable.turn_run import pause_run
+
+    model_started = asyncio.Event()
+    model_cancelled = asyncio.Event()
+
+    class NeverAnsweringLLM:
+        async def chat_with_tools(self, messages, tools, **kwargs):  # noqa: ARG002
+            model_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                model_cancelled.set()
+                raise
+
+    class PauseHandle:
+        run_id = "pause-cancels-model-call"
+        turn_id = "pause-cancels-model-turn"
+        lease_lost = False
+        pause_requested = False
+
+        def begin_pause(self):
+            self.pause_requested = True
+
+        def renew_lease(self):
+            return None
+
+        def finalize(self, outcome_status, reason_code=""):
+            self.finalized = (outcome_status, reason_code)
+            return True
+
+    handle = PauseHandle()
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(
+        llm_client=NeverAnsweringLLM(),
+        registry=ToolRegistry([]),
+        memory=memory,
+        observability=FakeObservability(),
+    )
+
+    async def collect():
+        task = asyncio.create_task(_collect(loop, handle))
+        await asyncio.wait_for(model_started.wait(), timeout=2)
+        assert await pause_run(handle.run_id)
+        # A long reasoning call must not hold the pause: no release is ever sent.
+        events = await asyncio.wait_for(task, timeout=2)
+        assert model_cancelled.is_set()
+        return events
+
+    async def _collect(turn_loop, durable_run):
+        return [event async for event in turn_loop.run(
+            "think for a long time", "pause-model-call", system_prompt="", durable_run=durable_run,
+        )]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+
+    assert handle.finalized == ("paused", "user_pause")
+    assert events[-1]["event"] == "done"
+    assert events[-1]["data"]["status"] == "paused"
+    assert memory.persisted_turns[0]["status"] == "paused"
+
+
 def test_continue_injects_only_sanitized_verified_operation_evidence():
     captured_system_prompts: list[str] = []
 

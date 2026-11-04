@@ -37,6 +37,7 @@ export interface RunSnapshot {
   created_at: string
   updated_at: string
   finished_at: string | null
+  assistant_message_id?: number | null
 }
 
 export interface RunOperation {

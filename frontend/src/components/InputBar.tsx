@@ -1,5 +1,5 @@
 import { type ClipboardEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
-import { FileText, ListPlus, Loader2, Mic, Paperclip, Pencil, Send, Shield, Square, Terminal, X } from 'lucide-react'
+import { FileText, ListPlus, Loader2, Mic, Paperclip, Pause, Pencil, Play, Send, Shield, Square, Terminal, X } from 'lucide-react'
 import { ContextUsageBar } from './ContextUsageBar'
 import { WorkspacePicker } from './WorkspacePicker'
 import { Dropdown } from './Dropdown'
@@ -139,6 +139,8 @@ interface Props {
   onRemoveQueued?: (id: string) => void
   onSendQueuedNow?: (id: string) => void
   onStop: () => void
+  runControl?: 'pause' | 'resume' | 'pausing' | 'starting'
+  onRunControl?: () => Promise<void>
   isStreaming: boolean
   conversationId: string | null
   contextRefreshKey: number
@@ -169,6 +171,8 @@ export function InputBar({
   onRemoveQueued,
   onSendQueuedNow,
   onStop,
+  runControl,
+  onRunControl,
   isStreaming,
   conversationId,
   contextRefreshKey,
@@ -187,6 +191,8 @@ export function InputBar({
   onApprovalModeChange,
 }: Props) {
   const [value, setValue] = useState('')
+  const [runControlPending, setRunControlPending] = useState(false)
+  const [runControlError, setRunControlError] = useState('')
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
   const [recording, setRecording] = useState(false)
@@ -840,6 +846,26 @@ export function InputBar({
               {/* Context usage ring */}
               <ContextUsageBar usage={contextUsage} />
 
+              {/* Pause / Continue sit beside Send and Stop: a paused or pausing Run
+                  must never leave the composer without a way to send or stop. */}
+              {runControl && runControl !== 'starting' && (
+                <button
+                  type="button"
+                  disabled={runControlPending || runControl === 'pausing' || !onRunControl}
+                  aria-label={runControl === 'resume' ? 'Continue execution' : runControl === 'pausing' ? 'Pausing safely' : 'Pause execution'}
+                  title={runControl === 'resume' ? 'Continue execution' : runControl === 'pausing' ? 'Pausing safely' : 'Pause execution'}
+                  onClick={() => {
+                    if (!onRunControl || runControlPending) return
+                    setRunControlPending(true)
+                    setRunControlError('')
+                    void onRunControl().catch((error: unknown) => setRunControlError(error instanceof Error ? error.message : 'Execution control failed.')).finally(() => setRunControlPending(false))
+                  }}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.03] text-neutral-300 outline-none transition-colors hover:border-white/[0.12] hover:text-neutral-100 focus:border-accent/50 disabled:opacity-50"
+                >
+                  {runControlPending || runControl === 'pausing' ? <Loader2 size={12} className="animate-spin" /> : runControl === 'resume' ? <Play size={12} /> : <Pause size={12} />}
+                </button>
+              )}
+
               {/* Send / Stop */}
               {isStreaming && (
                 <button
@@ -877,6 +903,7 @@ export function InputBar({
             </div>
           </div>
           {modelSelectionError && <div role="alert" className="px-3 pb-2 text-[11px] text-red-300">{modelSelectionError}</div>}
+          {runControlError && <div role="alert" className="px-3 pb-2 text-[11px] text-red-300">{runControlError}</div>}
           {!selectedModelAvailable && (
             <div role="status" className="px-3 pb-2 text-[11px] text-amber-300">
               {modelSelection.provider === 'gemini' && !hasGoogleKey

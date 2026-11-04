@@ -121,6 +121,9 @@ class FixtureProvider:
             await barrier("interrupt")
         if scenario == "file-resume" and index == 1:
             await barrier("file-resume")
+        # Opt-in: hold the resumed call so a test can watch the continued Run live.
+        if scenario == "file-resume" and index == 2 and (CONTROL / "file-resume-continue.hold").exists():
+            await barrier("file-resume-continue")
         return LLMResponse(content="", tool_calls=[call("final_answer", {"answer": answer})], finish_reason="tool_calls")
 
 

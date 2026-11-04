@@ -1920,6 +1920,13 @@ class Journal:
             actions = ["inspect", "verify", "stop"]
         else:
             actions = ["inspect"]
+        message = conn.execute(
+            """SELECT c.assistant_message_id FROM run_attempts AS a
+               JOIN turn_checkpoints AS c ON c.turn_id = a.turn_id
+               WHERE a.run_id = ? AND c.conversation_id = ? AND c.assistant_message_id IS NOT NULL
+               ORDER BY a.attempt DESC LIMIT 1""",
+            (row["run_id"], row["conversation_id"]),
+        ).fetchone()
         return {
             "run_id": str(row["run_id"]),
             "conversation_id": str(row["conversation_id"]),
@@ -1932,6 +1939,7 @@ class Journal:
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
             "finished_at": str(row["finished_at"]) if row["finished_at"] else None,
+            "assistant_message_id": int(message["assistant_message_id"]) if message else None,
         }
 
     def _operation_dto(self, row: sqlite3.Row) -> OperationDTO:

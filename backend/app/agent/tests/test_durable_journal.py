@@ -44,6 +44,24 @@ def _commit_resume_input(db: Database, created):
     )
 
 
+def test_run_links_only_its_saved_assistant_message_after_restart(tmp_path):
+    db = _new_database(tmp_path / "agent.db")
+    journal = Journal(db)
+    first = _create_run(journal)
+    assert journal.load_run(first["run_id"])["assistant_message_id"] is None
+    _commit_resume_input(db, first)
+    journal.transition_run(first["run_id"], owner_instance_id="owner-a", attempt=1, to_status="completed", expected_revision=first["revision"])
+    second = _create_run(journal, run_id="other-run")
+    _commit_resume_input(db, second)
+    first_id = journal.load_run(first["run_id"])["assistant_message_id"]
+    second_id = journal.load_run(second["run_id"])["assistant_message_id"]
+    assert first_id and second_id and first_id != second_id
+    reopened = Database(db._path)
+    reopened.init_db()
+    assert Journal(reopened).load_run(first["run_id"])["assistant_message_id"] == first_id
+    assert reopened.fetchone("SELECT role FROM messages WHERE id = ?", (first_id,))["role"] == "assistant"
+
+
 def test_parallel_operation_prepares_have_monotonic_sequences_and_read_back_from_snapshot(tmp_path):
     db_a = _new_database(tmp_path / "agent.db")
     db_b = Database(db_a._path)

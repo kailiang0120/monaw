@@ -63,6 +63,7 @@ export interface AccessGrantNotice {
 
 export interface Message {
   id: string
+  runId?: string
   role: 'user' | 'assistant'
   content: string
   attachments?: UploadedAttachment[]
@@ -341,6 +342,7 @@ export function useChat(conversationId: string | null) {
       appliedSteeringIdsRef.current.clear()
       setQueuePaused(false)
 
+      const runId = follow?.run_id ?? newRunId()
       const userMsg: Message = {
         id: crypto.randomUUID(),
         role: 'user',
@@ -357,6 +359,7 @@ export function useChat(conversationId: string | null) {
       const requestStartedAtMs = Date.now() - runAgeMs
       const assistantMsg: Message = {
         id: assistantId,
+        runId,
         role: 'assistant',
         content: '',
         toolCalls: [],
@@ -365,7 +368,9 @@ export function useChat(conversationId: string | null) {
         responseStartedAtMs: requestStartedAtMs,
       }
 
-      setMessages((prev) => [...prev, userMsg, assistantMsg])
+      // A resumed Run continues below the paused reply; its prompt is not the user's.
+      const continuation = Boolean(follow?.continuation)
+      setMessages((prev) => continuation ? [...prev, assistantMsg] : [...prev, userMsg, assistantMsg])
       setIsStreaming(true)
 
       const pendingToolRef = { current: null as ToolCall | null }
@@ -612,7 +617,6 @@ export function useChat(conversationId: string | null) {
         })
       }
 
-      const runId = follow?.run_id ?? newRunId()
       runIdRef.current = runId
       const abort = chatStream(
         text,
@@ -809,6 +813,7 @@ export function useChat(conversationId: string | null) {
             const empty = !kept.content && !kept.toolCalls?.length && !kept.activityItems?.length && !kept.approvals?.length
             const next: Message = {
               id: nextId, role: 'assistant', content: '', toolCalls: [], streaming: true, runStatus: 'streaming',
+              runId,
               responseStartedAtMs: previous.responseStartedAtMs,
             }
             const done: Message[] = empty ? [] : [{
@@ -830,6 +835,15 @@ export function useChat(conversationId: string | null) {
 
   followRunRef.current = (run: ChatRun) =>
     sendMessage(run.message.trim() || 'Please review the attached file(s).', run.attachments, () => {}, undefined, run)
+
+  /** Watch a turn that started outside this view, such as a resumed Run. False if it is not running. */
+  const followRun = useCallback(async (runId: string): Promise<boolean> => {
+    const runs = await fetchChatRuns()
+    const run = runs?.find((item) => item.run_id === runId)
+    if (!run || run.conversation_id !== conversationIdRef.current) return false
+    followRunRef.current?.(run)
+    return true
+  }, [])
 
   const stopStreaming = useCallback(() => {
     endRun()
@@ -912,6 +926,7 @@ export function useChat(conversationId: string | null) {
     setPendingAccessGrant,
     loadOlderMessages,
     sendMessage,
+    followRun,
     refreshMessages,
     stopStreaming,
     clearMessages,

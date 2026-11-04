@@ -6,6 +6,7 @@ import { InputBar } from './components/InputBar'
 import { ApprovalToast } from './components/ApprovalToast'
 import { AccessGrantCard } from './components/AccessGrantCard'
 import { ExecutionTimeline } from './components/ExecutionTimeline'
+import { RecoveryPanel } from './components/RecoveryPanel'
 import type { RunAction } from './components/ExecutionTimeline'
 import { useChat } from './hooks/useChat'
 import { useRunController } from './hooks/useRunController'
@@ -28,6 +29,7 @@ import { fetchPendingAccessGrants } from './lib/api/accessGrants'
 import { undoFileMutation } from './lib/api/fileMutations'
 import type { FileMutationUndoResult, UndoCapability } from './lib/api/fileMutations'
 import type { OperationResolution, RunOperation } from './lib/api/runs'
+import { composerRunControl } from './lib/runControl'
 import { subscribeServerEvents, type ServerEvent } from './lib/api/serverEvents'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from './lib/identity'
 import type { AgentSettings, Conversation, ModelOptions, ScheduledTask, UploadedAttachment } from './lib/api/types'
@@ -141,6 +143,7 @@ export default function App() {
     setPendingAccessGrant,
     loadOlderMessages,
     sendMessage,
+    followRun,
     steerMessage,
     steeringConversationId,
     queued,
@@ -153,6 +156,9 @@ export default function App() {
   } = useChat(activeConvId)
   const runController = useRunController(activeConvId)
   const resumedRunMessageRefresh = useRef<string | null>(null)
+  const streamingRunId = isStreaming
+    ? [...messages].reverse().find((message) => message.role === 'assistant' && message.streaming)?.runId ?? null
+    : null
 
   const streamingStateRef = useRef(isStreaming)
   useEffect(() => {
@@ -195,6 +201,12 @@ export default function App() {
       } catch (error) {
         if (resumedRunMessageRefresh.current === runId) resumedRunMessageRefresh.current = null
         throw error
+      }
+      // Show the continued work live, as for any running turn; otherwise the
+      // chat stays on "Paused" until the Run ends or asks for approval.
+      if (runId) {
+        const following = await followRun(runId).catch(() => false)
+        if (!following) refreshMessages()
       }
     } else {
       await runController.stop()
@@ -686,23 +698,6 @@ export default function App() {
 
         <div className="flex min-w-0 flex-1 flex-col">
           <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <ExecutionTimeline
-              runs={runController.runs}
-              snapshot={runController.snapshot}
-              operations={runController.operations}
-              events={runController.events}
-              recovery={runController.recovery}
-              detailMode={executionDetail}
-              loading={runController.loading}
-              error={runController.error?.message}
-              connected={runController.eventsConnected}
-              busy={runController.refreshing}
-              onSelectRun={runController.selectRun}
-              onAction={handleRunAction}
-              onResolveOperation={handleOperationResolution}
-              onUndo={handleUndoOperation}
-              onRefresh={runController.refreshRun}
-            />
             <ChatWindow
               messages={messages}
               isLoadingHistory={isLoadingHistory}
@@ -713,6 +708,22 @@ export default function App() {
               agentName={agentName}
               onLoadOlderMessages={loadOlderMessages}
               onPromptSelect={handleSend}
+              afterMessages={(() => {
+                const run = runController.snapshot
+                const lastMessage = messages[messages.length - 1]
+                const hasUndo = runController.operations.some((operation) => operation.run_id === run?.run_id
+                  && operation.status === 'verified' && operation.effect_class === 'verifiable_write'
+                  && ['file_write', 'file_move', 'file_delete'].includes(operation.operation_kind))
+                if (!run || run.status !== 'completed' || isStreaming || lastMessage?.role !== 'assistant'
+                    || (lastMessage.runId !== run.run_id && String(run.assistant_message_id ?? '') !== lastMessage.id) || !hasUndo) return null
+                return (
+                  <details className="mb-4 text-xs text-neutral-400">
+                    <summary className="inline-flex cursor-pointer rounded-md border border-white/[0.08] px-2 py-1 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">Review individual file changes</summary>
+                    <p className="mt-2 text-[11px] text-neutral-500">These controls undo individual supported file operations. They do not restore the entire Run.</p>
+                    <div className="mt-2"><RecoveryPanel snapshot={run} operations={runController.operations} onUndo={handleUndoOperation} onRefresh={runController.refreshRun} /></div>
+                  </details>
+                )
+              })()}
               emptyState={showGuide ? (
                 <FirstRunGuide
                   required={readiness.required}
@@ -725,6 +736,27 @@ export default function App() {
                 />
               ) : undefined}
             />
+            {executionDetail === 'developer' && (
+              <div className="max-h-64 shrink-0 overflow-y-auto pb-2">
+                <ExecutionTimeline
+                  runs={runController.runs} snapshot={runController.snapshot} operations={runController.operations}
+                  events={runController.events} recovery={runController.recovery} detailMode={executionDetail}
+                  loading={runController.loading} error={runController.error?.message} connected={runController.eventsConnected}
+                  busy={runController.refreshing} onSelectRun={runController.selectRun} onAction={handleRunAction}
+                  onResolveOperation={handleOperationResolution} onUndo={handleUndoOperation} onRefresh={runController.refreshRun}
+                />
+              </div>
+            )}
+            {executionDetail !== 'developer' && runController.snapshot
+              && ['interrupted', 'needs_review'].includes(runController.snapshot.status) && (
+              <details className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-2 text-xs text-amber-200">
+                <summary className="cursor-pointer rounded-md px-1 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">Review interrupted action</summary>
+                <div className="max-h-48 overflow-y-auto pt-2">
+                  <RecoveryPanel snapshot={runController.snapshot} operations={runController.operations} recovery={runController.recovery}
+                    onResolveOperation={handleOperationResolution} onRefresh={runController.refreshRun} />
+                </div>
+              </details>
+            )}
             {pendingAccessGrant && (
               <AccessGrantCard
                 key={pendingAccessGrant.ticket_id}
@@ -747,6 +779,8 @@ export default function App() {
               onRemoveQueued={removeQueued}
               onSendQueuedNow={sendQueuedNow}
               onStop={stopStreaming}
+              runControl={composerRunControl(runController.snapshot, isStreaming, streamingRunId)}
+              onRunControl={() => handleRunAction(runController.snapshot?.available_actions?.includes('resume') ? 'resume' : 'pause')}
               isStreaming={isStreaming}
               conversationId={activeConvId}
               contextRefreshKey={messages.length}

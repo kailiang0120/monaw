@@ -181,6 +181,7 @@ async def list_chat_runs(request: Request):
         {
             "run_id": inbox.run_id, "conversation_id": inbox.conversation_id, "message": inbox.display_message,
             "attachments": inbox.public_attachments, "started_at": inbox.started_at,
+            "continuation": inbox.continuation,
         }
         for inbox in running_turns(request.state.control_session.session_id)
     ]

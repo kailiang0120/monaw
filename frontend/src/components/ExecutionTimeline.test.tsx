@@ -46,6 +46,17 @@ const runEvent: RunEvent = {
 describe('ExecutionTimeline', () => {
   afterEach(cleanup)
 
+  it('uses the shared execution dropdown to select an older run', () => {
+    const completed = { ...runningSnapshot, status: 'completed' as const, available_actions: [] }
+    const previous = { ...completed, run_id: 'previous-run', attempt: 1 }
+    const onSelectRun = vi.fn()
+    render(<ExecutionTimeline snapshot={completed} runs={[completed, previous]} onSelectRun={onSelectRun} />)
+    expect(screen.getByLabelText('Execution timeline')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Choose execution' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Attempt 1 · Completed' }))
+    expect(onSelectRun).toHaveBeenCalledWith('previous-run')
+  })
+
   it('uses server actions for controls and exposes them as keyboard-focusable buttons', () => {
     render(<ExecutionTimeline snapshot={runningSnapshot} onAction={vi.fn()} />)
 

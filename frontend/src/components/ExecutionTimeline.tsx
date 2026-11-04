@@ -4,6 +4,7 @@ import type { OperationResolution, RecoveryReport, RunAction as ApiRunAction, Ru
 import type { FileMutationUndoResult, UndoCapability } from '../lib/api/fileMutations'
 import type { AgentSettings } from '../lib/api/types'
 import { ApiError } from '../lib/api/client'
+import { Dropdown } from './Dropdown'
 import { RecoveryPanel } from './RecoveryPanel'
 
 export type RunAction = Extract<ApiRunAction, 'pause' | 'resume' | 'stop'>
@@ -175,6 +176,19 @@ export function ExecutionTimeline({
     || snapshot.status === 'needs_review'
     || runOperations.some((operation) => operation.status === 'verified'
       && ['file_write', 'file_move', 'file_delete'].includes(operation.operation_kind))
+  const runSelector = runs.length > 1 && onSelectRun ? (
+    <div className="flex items-center gap-2 text-[11px] text-neutral-500">
+      <span>Execution</span>
+      <Dropdown
+        ariaLabel="Choose execution"
+        value={snapshot.run_id}
+        options={runs.map((run) => ({ value: run.run_id, label: formatRunChoice(run) }))}
+        onChange={onSelectRun}
+        size="sm"
+        className="max-w-44"
+      />
+    </div>
+  ) : null
 
   const performAction = async (action: RunAction) => {
     if (!onAction || pendingAction || busy) return
@@ -213,19 +227,7 @@ export function ExecutionTimeline({
             </div>
           </div>
 
-          {runs.length > 1 && onSelectRun && (
-            <label className="flex items-center gap-2 text-[11px] text-neutral-500">
-              <span>Execution</span>
-              <select
-                aria-label="Choose execution"
-                value={snapshot.run_id}
-                onChange={(event) => onSelectRun(event.target.value)}
-                className="max-w-44 rounded-md border border-white/[0.1] bg-[#171614] px-2 py-1 text-xs text-neutral-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                {runs.map((run) => <option key={run.run_id} value={run.run_id}>{formatRunChoice(run)}</option>)}
-              </select>
-            </label>
-          )}
+          {runSelector}
 
           <div className="flex items-center gap-1.5">
             {actions.map((action) => (

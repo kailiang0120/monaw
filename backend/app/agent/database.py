@@ -858,6 +858,7 @@ class Database:
                 else:
                     user_ids = []
                     records_to_insert = messages
+                assistant_message_id = None
                 for message in records_to_insert:
                     cursor = conn.execute(
                         """INSERT INTO messages (
@@ -869,6 +870,8 @@ class Database:
                          json.dumps(message["attachments"], ensure_ascii=False) if message.get("attachments") else "", now),
                     )
                     message_id = cursor.lastrowid
+                    if message["role"] == "assistant":
+                        assistant_message_id = int(message_id)
                     if message["role"] == "user":
                         user_ids.append(message_id)
                     for call in message.get("tool_calls", []):
@@ -882,13 +885,13 @@ class Database:
                 conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conv_id))
                 if existing is None:
                     conn.execute(
-                        "INSERT INTO turn_checkpoints (turn_id, conversation_id, user_message_ids) VALUES (?, ?, ?)",
-                        (turn_id, conv_id, json.dumps(user_ids)),
+                        "INSERT INTO turn_checkpoints (turn_id, conversation_id, user_message_ids, assistant_message_id) VALUES (?, ?, ?, ?)",
+                        (turn_id, conv_id, json.dumps(user_ids), assistant_message_id),
                     )
                 else:
                     conn.execute(
-                        "UPDATE turn_checkpoints SET user_message_ids = ?, finalized = 1 WHERE turn_id = ?",
-                        (json.dumps(user_ids), turn_id),
+                        "UPDATE turn_checkpoints SET user_message_ids = ?, finalized = 1, assistant_message_id = ? WHERE turn_id = ?",
+                        (json.dumps(user_ids), assistant_message_id, turn_id),
                     )
                 conn.commit()
                 return user_ids, True
