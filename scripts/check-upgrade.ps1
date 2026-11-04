@@ -145,7 +145,7 @@ function Test-AppStarts([string]$Folder) {
         [Environment]::SetEnvironmentVariable($name, $appEnv[$name])
     }
     try {
-        Start-Process (Join-Path $Folder "Monaw.exe") | Out-Null
+        Start-Process (Join-Path $Folder "Monaw.exe") -WindowStyle Hidden | Out-Null
     }
     finally {
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }

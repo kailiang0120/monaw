@@ -14,6 +14,26 @@ def test_delete_runtime_data_clears_observability_support_and_retained_content(t
 
     db = Database(runtime_dir / "agent.db")
     db.init_db()
+    db.create_conversation("kept-conversation", "Conversation survives Delete Data")
+    now = "2026-11-04T00:00:00Z"
+    db.execute(
+        """INSERT INTO agent_runs (
+               run_id, conversation_id, execution_source, attempt, revision,
+               last_seq, status, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("kept-run", "kept-conversation", "desktop", 1, 1, 1, "completed", now, now),
+    )
+    db.execute(
+        "INSERT INTO run_events (run_id, seq, event_type, created_at, payload_json) VALUES (?, ?, ?, ?, ?)",
+        ("kept-run", 1, "run.created", now, '{"status":"completed","attempt":1,"revision":1}'),
+    )
+    db.commit()
+
+    snapshot_dir = runtime_dir / "file_mutation" / "snapshots"
+    snapshot_dir.mkdir(parents=True)
+    private_snapshot = snapshot_dir / f"snap-v1-{'a' * 32}.snap"
+    private_snapshot.write_bytes(b"private before-image fixture")
+
     db.create_scheduled_task({
         "id": "task-1",
         "title": "Daily",
@@ -87,3 +107,6 @@ def test_delete_runtime_data_clears_observability_support_and_retained_content(t
     assert not memory_root.exists()
     assert db.list_scheduled_task_runs("task-1")[0]["final_text"] == ""
     assert db.list_scheduled_task_runs("task-1")[0]["error"] == ""
+    assert db.get_conversation("kept-conversation") is not None
+    assert db.fetchone("SELECT 1 FROM run_events WHERE run_id = 'kept-run' AND seq = 1") is not None
+    assert private_snapshot.read_bytes() == b"private before-image fixture"

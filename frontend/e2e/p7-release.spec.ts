@@ -1,0 +1,176 @@
+import { test, expect, type Desktop } from './desktop'
+import { readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+async function runFor(desktop: Desktop, conversationId: string) {
+  const route = `/api/runs?conversation_id=${encodeURIComponent(conversationId)}`
+  await expect.poll(async () => (await desktop.api(route)).data.runs?.length ?? 0).toBeGreaterThan(0)
+  const runs = (await desktop.api(route)).data.runs
+  return runs.sort((left: { updated_at: string }, right: { updated_at: string }) => right.updated_at.localeCompare(left.updated_at))[0]
+}
+
+async function fileWriteRunFor(desktop: Desktop, conversationId: string) {
+  const route = `/api/runs?conversation_id=${encodeURIComponent(conversationId)}`
+  await expect.poll(async () => {
+    const runs = (await desktop.api(route)).data.runs ?? []
+    for (const run of runs) {
+      const operations = (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations ?? []
+      if (operations.some((operation: { operation_kind: string }) => operation.operation_kind === 'file_write')) return true
+    }
+    return false
+  }).toBe(true)
+  const runs = (await desktop.api(route)).data.runs ?? []
+  for (const run of runs) {
+    const operations = (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations ?? []
+    if (operations.some((operation: { operation_kind: string }) => operation.operation_kind === 'file_write')) return run
+  }
+  throw new Error('No file write Run was created')
+}
+
+test('file diff, approval, safe pause, real app/backend restart, Continue and Undo', async ({ desktop }) => {
+  test.setTimeout(150_000)
+  await desktop.send('recover')
+  await expect(desktop.page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
+  const target = join(desktop.root, 'workspace', 'file-resume.txt')
+  await writeFile(target, 'before approval\n')
+
+  await desktop.send('file-resume')
+  const preview = desktop.page.getByRole('region', { name: 'File change preview' })
+  await expect(preview).toBeVisible()
+  await expect(preview.getByLabel('Text diff')).toContainText('-before approval')
+  await expect(preview.getByLabel('Text diff')).toContainText('+approved update')
+  expect(await readFile(target, 'utf8')).toBe('before approval\n')
+
+  const conversations = (await desktop.api('/api/conversations')).data
+  expect(conversations).toHaveLength(1)
+  const conversationId = conversations[0].id as string
+  const run = await runFor(desktop, conversationId)
+  const pausePosts: string[] = []
+  desktop.page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === `/api/runs/${run.run_id}/pause`) {
+      pausePosts.push(request.url())
+    }
+  })
+
+  const approve = desktop.page.getByRole('button', { name: 'Approve', exact: true })
+  await approve.focus()
+  await desktop.page.keyboard.press('Enter')
+  await desktop.started('file-resume')
+  expect(await readFile(target, 'utf8')).toBe('approved update\n')
+  await expect.poll(async () => {
+    const operations = (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations
+    return operations?.map((operation: { operation_kind: string; status: string }) => `${operation.operation_kind}:${operation.status}`)
+  }).toEqual(['file_write:verified'])
+
+  const pause = desktop.page.getByRole('button', { name: 'Pause execution' })
+  await pause.focus()
+  await desktop.page.keyboard.press('Enter')
+  await expect.poll(() => pausePosts.length).toBe(1)
+  await desktop.signal('file-resume.release')
+  await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.status).toBe('paused')
+  const paused = (await desktop.api(`/api/runs/${run.run_id}`)).data
+  expect(paused.available_actions).toContain('resume')
+  expect(pausePosts).toHaveLength(1)
+  expect((await desktop.api(`/api/runs/${run.run_id}/recovery`)).data.run.status).toBe('paused')
+
+  // The default permission mode correctly requires confirmation for Undo too.
+  // The isolated fixture opts into full access only after the approved write,
+  // so the later Undo checks current permission instead of reusing the ticket.
+  expect((await desktop.api('/api/settings', { permissions: { mode: 'full_access' } }, 'PUT')).status).toBe(200)
+
+  const oldElectronPid = desktop.app.process().pid
+  const backendsBefore = (await desktop.events()).filter((event) => event.kind === 'backend_started')
+  await desktop.close()
+  await desktop.start()
+  expect(desktop.app.process().pid).not.toBe(oldElectronPid)
+  const backendsAfter = (await desktop.events()).filter((event) => event.kind === 'backend_started')
+  expect(backendsAfter.length).toBeGreaterThan(backendsBefore.length)
+  expect(backendsAfter.at(-1).pid).not.toBe(backendsBefore.at(-1).pid)
+
+  await desktop.page.getByText('[e2e:recover]', { exact: true }).last().click()
+  await expect(desktop.page.getByText('[e2e:file-resume]', { exact: true }).last()).toBeVisible()
+  const recoveredReport = (await desktop.api(`/api/runs/${run.run_id}/recovery`)).data
+  expect(recoveredReport.run).toMatchObject({ status: 'paused', available_actions: expect.arrayContaining(['resume']) })
+  expect(recoveredReport.unresolved_operations).toEqual([])
+  await expect(desktop.page.getByRole('region', { name: 'Execution timeline' })).toBeVisible()
+  await expect(desktop.page.getByRole('region', { name: 'Recovery and file changes' })).toBeVisible()
+  await expect(desktop.page.getByRole('button', { name: 'Continue execution' })).toBeVisible()
+
+  const continuePosts: string[] = []
+  desktop.page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === `/api/runs/${run.run_id}/resume`) {
+      continuePosts.push(request.url())
+    }
+  })
+  const continueButton = desktop.page.getByRole('button', { name: 'Continue execution' })
+  await continueButton.focus()
+  await desktop.page.keyboard.press('Enter')
+  await desktop.page.keyboard.press('Enter')
+  await expect.poll(() => continuePosts.length).toBe(1)
+  await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.status).toBe('completed')
+  await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.attempt).toBe(2)
+  await expect(desktop.page.getByText('Fixture file-resume completed.', { exact: false }).last()).toBeVisible()
+  const operations = (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations
+  expect(operations.filter((operation: { operation_kind: string }) => operation.operation_kind === 'file_write')).toHaveLength(1)
+  expect((await desktop.events()).filter((event) => event.kind === 'model' && event.scenario === 'file-resume').map((event) => event.index)).toEqual([0, 1, 2])
+
+  const undo = desktop.page.getByRole('button', { name: 'Undo', exact: true })
+  await expect(undo).toBeVisible()
+  await undo.focus()
+  await desktop.page.keyboard.press('Enter')
+  const undoConfirmation = desktop.page.getByRole('group', { name: 'Undo this file change?' })
+  await expect(undoConfirmation).toBeVisible()
+  // Confirmation initially focuses Cancel. Shift+Tab selects the destructive
+  // action explicitly, then Enter exercises the keyboard path through Undo.
+  await desktop.page.keyboard.press('Shift+Tab')
+  await desktop.page.keyboard.press('Enter')
+  await expect.poll(() => readFile(target, 'utf8')).toBe('before approval\n')
+  await expect(desktop.page.getByText('This change has already been undone', { exact: true })).toBeVisible()
+  expect(continuePosts).toHaveLength(1)
+  expect(desktop.errors).toEqual([])
+})
+
+test('Undo rechecks the file and preserves external edits on conflict', async ({ desktop }) => {
+  await desktop.send('recover')
+  await expect(desktop.page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
+  const target = join(desktop.root, 'workspace', 'file-conflict.txt')
+  await writeFile(target, 'original conflict target\n')
+  await desktop.send('file-conflict')
+  const preview = desktop.page.getByRole('region', { name: 'File change preview' })
+  await expect(preview.getByLabel('Text diff')).toContainText('+approved update')
+  expect(await readFile(target, 'utf8')).toBe('original conflict target\n')
+  await desktop.page.getByRole('button', { name: 'Approve', exact: true }).click()
+  await expect(desktop.page.getByText('Fixture file-conflict completed.', { exact: false }).last()).toBeVisible()
+
+  const conversation = (await desktop.api('/api/conversations')).data[0]
+  const run = await fileWriteRunFor(desktop, conversation.id)
+  await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.status).toBe('completed')
+  const operation = (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations
+    .find((item: { operation_kind: string }) => item.operation_kind === 'file_write')
+  expect(operation).toBeTruthy()
+  expect(operation).toMatchObject({ status: 'verified', effect_class: 'verifiable_write', snapshot_available: true })
+  // Undo is independently authorized at its effect boundary. The original
+  // approval applies to the write, not to this later inverse operation.
+  expect((await desktop.api('/api/settings', { permissions: { mode: 'full_access' } }, 'PUT')).status).toBe(200)
+  const capabilityPath = `/api/file-mutations/${encodeURIComponent(operation.operation_id)}/undo-capability?run_id=${encodeURIComponent(run.run_id)}&conversation_id=${encodeURIComponent(conversation.id)}`
+  const capability = (await desktop.api(capabilityPath)).data
+  expect(capability.reason_code, JSON.stringify(capability)).toBeNull()
+  expect(capability.status).toBe('available')
+
+  // The timeline had checked Undo under default permissions before the test
+  // changed them. A real restart loads the new permission state and rechecks.
+  await desktop.close()
+  await desktop.start()
+  await desktop.page.getByText('[e2e:recover]', { exact: true }).last().click()
+  await expect(desktop.page.getByRole('button', { name: 'Undo', exact: true })).toBeVisible()
+
+  await writeFile(target, 'external edit must stay\n')
+  await desktop.page.getByRole('button', { name: 'Undo', exact: true }).click()
+  const confirmation = desktop.page.getByRole('group', { name: 'Undo this file change?' })
+  await expect(confirmation).toBeVisible()
+  await confirmation.getByRole('button', { name: 'Undo now', exact: true }).click()
+  await expect(desktop.page.getByRole('alert').filter({ hasText: 'File changed after this operation. Undo was not applied.' })).toBeVisible()
+  expect(await readFile(target, 'utf8')).toBe('external edit must stay\n')
+  await expect.poll(async () => (await desktop.api(capabilityPath)).data.status).toBe('conflict')
+  expect(desktop.errors).toEqual([])
+})

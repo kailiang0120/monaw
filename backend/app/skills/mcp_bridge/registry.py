@@ -363,6 +363,20 @@ def _pending_mcp_approval(
         action_description=action,
         payload=payload,
     )
+    # This evidence lives only on the active operation object. A remote MCP
+    # result is wrapped by ServerManager and cannot attest its own pending
+    # status as a preflight.
+    from app.agent.durable.operation_execution import current_operation_execution
+
+    operation_execution = current_operation_execution()
+    if operation_execution is not None:
+        operation_execution.attest_local_approval_preflight(
+            ticket,
+            expected_tool_name=reflected_name,
+            expected_action_type="mcp_tool",
+            expected_target_app=server_name,
+            expected_payload=payload,
+        )
     return json.dumps(
         {
             "status": "pending_approval",

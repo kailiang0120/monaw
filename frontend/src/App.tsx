@@ -151,6 +151,7 @@ export default function App() {
     clearMessages,
   } = useChat(activeConvId)
   const runController = useRunController(activeConvId)
+  const resumedRunMessageRefresh = useRef<string | null>(null)
 
   const streamingStateRef = useRef(isStreaming)
   useEffect(() => {
@@ -163,10 +164,40 @@ export default function App() {
     }
   }, [activeConvId, isStreaming, runController.refreshLatest])
 
+  useEffect(() => {
+    const run = runController.snapshot
+    if (
+      isStreaming
+      || !run
+      || run.conversation_id !== activeConvId
+      || resumedRunMessageRefresh.current !== run.run_id
+      || !['completed', 'failed', 'cancelled'].includes(run.status)
+    ) return
+    resumedRunMessageRefresh.current = null
+    refreshMessages()
+  }, [
+    activeConvId,
+    isStreaming,
+    refreshMessages,
+    runController.snapshot?.conversation_id,
+    runController.snapshot?.run_id,
+    runController.snapshot?.status,
+  ])
+
   const handleRunAction = async (action: RunAction) => {
     if (action === 'pause') await runController.pause()
-    else if (action === 'resume') await runController.resume()
-    else await runController.stop()
+    else if (action === 'resume') {
+      const runId = runController.snapshot?.run_id
+      resumedRunMessageRefresh.current = runId ?? null
+      try {
+        await runController.resume()
+      } catch (error) {
+        if (resumedRunMessageRefresh.current === runId) resumedRunMessageRefresh.current = null
+        throw error
+      }
+    } else {
+      await runController.stop()
+    }
   }
 
   const handleOperationResolution = async (operationId: string, resolution: OperationResolution) => {

@@ -179,6 +179,50 @@ Files:
 %USERPROFILE%\.monaw\runtime\policy\approval_log.md
 ```
 
+## Run Recovery And Undo
+
+Run recovery is a separate desktop control surface. Run read and control
+requests use the signed Monaw profile and recheck the current conversation
+workspace. A historical chat from before durable Runs were introduced remains
+readable, but does not gain a recovery timeline during upgrade. `available_actions`
+from the server reflects the current Run state and evidence; a stale revision or
+changed workspace is rejected.
+
+Continue starts a new attempt from a safe checkpoint. It does not replay an
+interrupted Shell, Browser, MCP, or other opaque tool call. An effect without
+reliable evidence remains `needs_review`; inspect the external state before
+retrying an equivalent action. File Verify is a read-only check against saved
+file identity and fingerprints. It does not repair a file or override a denied
+permission.
+
+File Undo is offered only for supported, verified ordinary-file writes,
+deletes, and same-volume `fs_move` operations with a valid private snapshot and
+no conflicting later change. The separate `fs_rename` tool is opaque and does
+not have Undo. Undo rechecks current READ and MUTATE permissions; when it
+removes a newly created file, current DELETE permission is required. Folder
+trees, links, cross-volume changes, Copy, and Shell/Browser/MCP side effects do
+not have general Undo through the current API. If a user edits or replaces the
+target, changes its parent scope, or revokes permission, Monaw preserves the
+current file and marks Undo conflicted or unavailable.
+
+The inverse action must be allowed directly by current policy without a
+confirmation or access grant. Undo does not issue a second approval request
+and does not reuse `once` or `session` grants from the forward operation. In
+Default mode, MUTATE and DELETE confirmations can therefore make Undo
+unavailable even after the user approved the original file change. The current
+permission decision must not require confirmation or a grant. On non-Windows
+platforms, deleting a newly created file as an Undo is unavailable because
+Monaw cannot safely bind the deletion to the file identity.
+
+Snapshots contain private before-image bytes and file identity/path metadata.
+On Windows they are protected with DPAPI for the current Windows user. Each
+before-image is limited to 4 MiB, a snapshot to 8 MiB of before-image bytes,
+and the store to 512 MiB. Undo expires after 30 days. Active or unresolved Runs
+keep their referenced evidence for recovery; cleanup removes only old
+unreferenced snapshots. The API exposes a snapshot-available flag, not snapshot
+contents or paths. See [operations.md](operations.md) for backup, deletion, and
+retention behavior.
+
 ## Settings And Generated Policy Files
 
 The source of truth is:

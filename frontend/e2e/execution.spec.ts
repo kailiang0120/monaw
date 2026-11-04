@@ -7,6 +7,16 @@ test('execution UI reads the real Run routes and accepts a keyboard Stop once', 
   await expect(desktop.page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
   const conversation = (await desktop.api('/api/conversations')).data[0]
 
+  let allowEventStream = false
+  let eventStreamRequests = 0
+  await desktop.page.route('**/api/runs/*/events/stream*', async (route) => {
+    eventStreamRequests++
+    if (!allowEventStream) {
+      await route.abort('failed')
+      return
+    }
+    await route.continue()
+  })
   await desktop.send('stream')
   await desktop.started('stream')
 
@@ -23,6 +33,12 @@ test('execution UI reads the real Run routes and accepts a keyboard Stop once', 
     status: 'running',
     available_actions: expect.arrayContaining(['stop']),
   })
+
+  await expect.poll(() => eventStreamRequests).toBeGreaterThan(0)
+  await expect(desktop.page.getByRole('status').filter({ hasText: 'Reconnecting to execution updates.' })).toBeVisible()
+  allowEventStream = true
+  await expect.poll(() => eventStreamRequests).toBeGreaterThan(1)
+  await expect(desktop.page.getByRole('status').filter({ hasText: 'Reconnecting to execution updates.' })).toHaveCount(0)
 
   const eventPage = (await desktop.api(`/api/runs/${activeRun.run_id}/events?after_seq=0&limit=20`)).data
   expect(eventPage).toMatchObject({ run_id: activeRun.run_id, events: expect.any(Array) })
@@ -41,6 +57,7 @@ test('execution UI reads the real Run routes and accepts a keyboard Stop once', 
   })
   const stop = desktop.page.getByRole('button', { name: 'Stop execution' })
   await stop.focus()
+  await desktop.page.keyboard.press('Enter')
   await desktop.page.keyboard.press('Enter')
   await expect.poll(() => stopPosts.length).toBe(1)
   await expect.poll(async () => (await desktop.api(`/api/runs/${activeRun.run_id}`)).data.status)

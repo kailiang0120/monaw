@@ -10,8 +10,11 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 
 if (-not $SkipBackend) {
     & (Join-Path $PSScriptRoot "test-backend.ps1") -Group $BackendGroup
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+    # test-backend.ps1 launches uv via Start-Process, which does not set
+    # LASTEXITCODE on success. Inspect the script's success status instead;
+    # in a fresh PowerShell session $null -ne 0 would skip the frontend.
+    if (-not $?) {
+        exit 1
     }
 }
 

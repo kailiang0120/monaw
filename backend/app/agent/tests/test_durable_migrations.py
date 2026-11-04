@@ -24,7 +24,7 @@ def _v17_migration_directory(tmp_path: Path) -> Path:
     return destination
 
 
-def test_v17_database_upgrades_in_place_and_retains_existing_rows(tmp_path, monkeypatch):
+def test_v17_database_upgrades_in_place_and_retains_history_workspace_and_tasks(tmp_path, monkeypatch):
     database_path = tmp_path / "agent.db"
     v17_migrations = _v17_migration_directory(tmp_path)
     latest_migrations = migration_runner._migration_dir
@@ -36,16 +36,32 @@ def test_v17_database_upgrades_in_place_and_retains_existing_rows(tmp_path, monk
         range(5, 18)
     )
 
-    old_db.create_conversation("legacy-chat", "Legacy chat", workspace_dir="C:/work/legacy")
-    message = old_db.execute(
+    workspace = tmp_path / "legacy-workspace"
+    workspace.mkdir()
+    (workspace / "keep.txt").write_text("existing workspace data", encoding="utf-8")
+    old_db.create_conversation("legacy-chat", "Legacy chat", workspace_dir=str(workspace))
+    user_message = old_db.execute(
         "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-        ("legacy-chat", "user", "keep this message", "2026-10-30T00:00:00Z"),
+        ("legacy-chat", "user", "keep this historical request", "2026-10-30T00:00:00Z"),
     )
-    message_id = int(message.lastrowid)
+    assistant_message = old_db.execute(
+        "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        ("legacy-chat", "assistant", "keep this historical reply", "2026-10-30T00:00:01Z"),
+    )
+    user_message_id = int(user_message.lastrowid)
+    assistant_message_id = int(assistant_message.lastrowid)
     old_db.execute(
         "INSERT INTO turn_checkpoints (turn_id, conversation_id, user_message_ids) VALUES (?, ?, ?)",
-        ("legacy-turn", "legacy-chat", json.dumps([message_id])),
+        ("legacy-turn", "legacy-chat", json.dumps([user_message_id])),
     )
+    old_db.create_scheduled_task({
+        "id": "legacy-scheduled-task",
+        "title": "Keep this task",
+        "prompt": "Never run during migration verification.",
+        "schedule_kind": "cron",
+        "cron_expr": "0 9 * * 1",
+        "enabled": 0,
+    })
     old_db.commit()
     old_db.close()
 
@@ -54,11 +70,24 @@ def test_v17_database_upgrades_in_place_and_retains_existing_rows(tmp_path, monk
     upgraded = Database(database_path)
     upgraded.init_db()
 
-    assert upgraded.fetchone("SELECT workspace_dir FROM conversations WHERE id = 'legacy-chat'")[0] == "C:/work/legacy"
-    assert upgraded.fetchone("SELECT content FROM messages WHERE id = ?", (message_id,))[0] == "keep this message"
+    assert upgraded.fetchone("SELECT workspace_dir FROM conversations WHERE id = 'legacy-chat'")[0] == str(workspace)
+    assert (workspace / "keep.txt").read_text(encoding="utf-8") == "existing workspace data"
+    assert [row["content"] for row in upgraded.get_messages("legacy-chat")] == [
+        "keep this historical request",
+        "keep this historical reply",
+    ]
+    assert upgraded.fetchone(
+        "SELECT content FROM messages WHERE id = ?", (assistant_message_id,)
+    )[0] == "keep this historical reply"
     assert upgraded.fetchone("SELECT user_message_ids FROM turn_checkpoints WHERE turn_id = 'legacy-turn'")[0] == json.dumps(
-        [message_id]
+        [user_message_id]
     )
+    task = upgraded.get_scheduled_task("legacy-scheduled-task")
+    assert task is not None
+    assert task["title"] == "Keep this task"
+    assert task["enabled"] == 0
+    # Existing history is not fabricated into new durable Runs during migration.
+    assert upgraded.fetchone("SELECT COUNT(*) FROM agent_runs")[0] == 0
     versions = [row["version"] for row in upgraded.fetchall("SELECT version FROM schema_migrations ORDER BY version")]
     assert versions[:13] == list(range(5, 18))
     assert versions[-5:] == [18, 19, 20, 21, 22]

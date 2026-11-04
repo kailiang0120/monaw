@@ -161,6 +161,19 @@ def register_tools(registry, settings) -> None:
             action_description=action,
             payload=payload,
         )
+        # Bind only the local control ticket produced here. The approval gate
+        # must not infer preflight from a reflected provider's output.
+        from app.agent.durable.operation_execution import current_operation_execution
+
+        operation_execution = current_operation_execution()
+        if operation_execution is not None:
+            operation_execution.attest_local_approval_preflight(
+                ticket,
+                expected_tool_name=tool_name,
+                expected_action_type="mcp_control",
+                expected_target_app=target,
+                expected_payload=payload,
+            )
         return _json(
             {
                 "status": "pending_approval",

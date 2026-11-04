@@ -17,7 +17,7 @@ The installer is published with each [release](https://github.com/kailiang0120/m
 1. Check the download against the published SHA-256 checksum:
 
    ```powershell
-   Get-FileHash .\Monaw-Setup-1.0.0-x64.exe -Algorithm SHA256
+   Get-FileHash .\Monaw-Setup-1.1.0-x64.exe -Algorithm SHA256
    ```
 
 2. Run the installer. Because it is unsigned, Windows SmartScreen may warn that it is from an unknown publisher; choose **More info** > **Run anyway** only if the checksum matches.

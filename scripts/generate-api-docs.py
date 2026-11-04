@@ -72,7 +72,27 @@ def generate() -> str:
     ]
     for method, path, scope, model in rows:
         lines.append(f"| `{method}` | `{path}` | `{scope}` | `{model}` |")
-    lines.append("")
+    lines.extend(
+        [
+            "",
+            "## Run and recovery routes",
+            "",
+            "Run routes apply to desktop Runs owned by the signed Monaw profile. Each request checks the current profile and the conversation's workspace; `runs:read` and `runs:control` are separate scopes. Use `available_actions` and the current revision returned by the server as the authority for controls. Historical conversations are not backfilled into Runs during an upgrade.",
+            "",
+            "Recovery verifies persisted state before offering Continue. It does not replay an interrupted tool call. Supported native file effects can be checked against private snapshots; Shell, Browser, MCP, and other opaque effects can remain `needs_review` until the user inspects them. A `verify` request is read-only. Run events and operation evidence are projected onto bounded public fields; file paths, file contents, snapshot references, and raw content hashes are not returned.",
+            "",
+            "Run events are stored in `agent.db` and currently have no automatic age-based retention. The `410 events_expired` response means the requested sequence has a gap in the rows that remain; it is not evidence of a configured retention period. Deleting a conversation cascades its Run, operation, and event rows, while old unreferenced snapshot files are reclaimed separately by snapshot cleanup.",
+            "",
+            "## File-mutation routes",
+            "",
+            "Preview and Apply currently cover one ordinary file write in an active desktop Run. Preview records and their idempotency results are in memory, bound to the current control session, and expire after 15 minutes; they cannot be replayed after a backend restart. Apply checks current permissions and the preview's file identity and fingerprint before writing.",
+            "",
+            "Undo is available only for a completed, verified, supported native file operation with live evidence and matching current file state. The current permission decision must allow the inverse without confirmation or an access grant; the API has no second approval path and does not reuse once/session grants from the forward operation. A conflict leaves the changed file untouched; a missing or expired snapshot makes Undo unavailable. Undo for deleting a newly created file is unavailable outside Windows. The routes do not provide general-purpose restore or Undo for Shell, Browser, MCP, Copy, the separate `fs_rename` tool, directory-tree, link, or unsupported metadata changes. See [operations.md](operations.md) for snapshot storage and retention limits.",
+            "",
+            "`POST /api/privacy/delete-data` clears diagnostics and other retained runtime artifacts described in [operations.md](operations.md). It does not delete conversations, Run history, workspaces, settings, saved credentials, or recovery snapshots.",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 

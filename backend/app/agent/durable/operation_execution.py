@@ -127,6 +127,9 @@ class OperationExecution:
         self._pending_resume = False
         self._pending_ticket_id = ""
         self._pending_ticket_status = ""
+        # A local gate may attest the exact broker ticket it just created.
+        # This stays in memory and is never derived from provider output.
+        self._attested_preflight_ticket_id = ""
         self._active_approval_ticket_id = ""
         self._pending_approval_binding = ""
         self._approval_bindings: dict[str, str] = {}
@@ -223,6 +226,7 @@ class OperationExecution:
                     if self._active_approval_ticket_id
                     else ""
                 )
+                self._attested_preflight_ticket_id = ""
                 self._pending_resume = False
                 return
             assert_dispatch_allowed(self.durable_run, self.lifecycle)
@@ -234,13 +238,75 @@ class OperationExecution:
                 )
             self._transition("executing")
             self._effect_started = True
+            self._attested_preflight_ticket_id = ""
             self._active_approval_ticket_id = ""
             self._active_approval_binding = ""
+
+    def attest_local_approval_preflight(
+        self,
+        ticket: object,
+        *,
+        expected_tool_name: str,
+        expected_action_type: str,
+        expected_target_app: str,
+        expected_payload: dict[str, Any],
+    ) -> bool:
+        """Attest a broker ticket created by this local MCP gate.
+
+        Provider output is never evidence. The ticket must still exist in the
+        local approval broker, be pending and hash-valid, and exactly match
+        the current operation plus the payload the bridge is about to return.
+        """
+        with self._lock:
+            if (
+                current_operation_execution() is not self
+                or not self._effect_started
+                or self._status != "executing"
+                or self.tool_name != expected_tool_name
+            ):
+                return False
+
+            ticket_id = str(_field(ticket, "id", "") or "")
+            payload = _field(ticket, "payload", {})
+            status = _field(ticket, "status", "")
+            status = str(getattr(status, "value", status) or "")
+            if (
+                not ticket_id
+                or status != "pending"
+                or _field(ticket, "tool_name", "") != expected_tool_name
+                or _field(ticket, "action_type", "") != expected_action_type
+                or _field(ticket, "target_app", "") != expected_target_app
+                or payload != expected_payload
+            ):
+                return False
+
+            # Re-read the canonical broker object so an arbitrary object with
+            # ticket-shaped fields cannot establish local preflight evidence.
+            from app.agent.approval_broker import get_ticket
+
+            canonical = get_ticket(ticket_id)
+            if (
+                canonical is None
+                or canonical.model_dump() != getattr(ticket, "model_dump", lambda: None)()
+                or canonical.status.value != "pending"
+                or canonical.compute_hash() != canonical.payload_hash
+            ):
+                return False
+            self._attested_preflight_ticket_id = ticket_id
+            return True
 
     def note_pending_preflight(self, output: object) -> bool:
         """Accept a pending gate only when a known native preflight is safe."""
         with self._lock:
             payload = _payload(output if isinstance(output, str) else None)
+            locally_attested = (
+                payload.get("status") == "pending_approval"
+                and isinstance(payload.get("ticket_id"), str)
+                and bool(payload.get("ticket_id"))
+                and payload.get("ticket_id") == self._attested_preflight_ticket_id
+            )
+            # An attestation authorizes exactly one matching returned ticket.
+            self._attested_preflight_ticket_id = ""
             read_only_gate = (
                 self.effect_class == "read_only"
                 and self.trusted_builtin
@@ -249,7 +315,8 @@ class OperationExecution:
                 and bool(payload.get("ticket_id"))
             )
             self._pending_resume = bool(self._effect_started and (
-                read_only_gate
+                locally_attested
+                or read_only_gate
                 or is_trusted_preflight(
                     self.tool_name, output, trusted_builtin=self.trusted_builtin
                 )

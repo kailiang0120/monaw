@@ -175,7 +175,7 @@ async def get_diagnostics_summary(request: Request):
     return {
         "backend": {
             "name": "Monaw Agent API",
-            "version": "1.0.0",
+            "version": "1.1.0",
             "port": settings.port,
             "runtime_dir": "",
             "database": _runtime_file_status(db_path),

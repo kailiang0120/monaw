@@ -83,6 +83,7 @@ TEST_GROUPS = {
         "test_file_mutation_evidence.py",
         "test_file_mutation_integration.py",
         "test_file_mutation_undo.py",
+        "test_p7_process_recovery.py",
         "test_mcp_bridge.py",
         "test_skill_creator_hardening.py",
         "test_windows_controller.py",

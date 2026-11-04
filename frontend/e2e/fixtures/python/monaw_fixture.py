@@ -15,6 +15,7 @@ from datetime import timedelta
 ROOT = Path(os.environ["MONAW_E2E_ROOT"]).resolve()
 CONTROL = ROOT / "control"
 CONTROL.mkdir(exist_ok=True)
+_provider_call_lock = threading.Lock()
 
 
 async def barrier(name: str) -> None:
@@ -35,6 +36,29 @@ class FixtureProvider:
         self.provider = provider
         self.calls = {}
 
+    def _next_call_index(self, conversation: str, scenario: str) -> int:
+        if scenario not in {"file-resume", "file-conflict"}:
+            key = (conversation, scenario)
+            index = self.calls.get(key, 0)
+            self.calls[key] = index + 1
+            return index
+
+        # These workflows deliberately span backend (and Electron) restarts.
+        # Keep only the synthetic provider call count in the disposable fixture
+        # so a restarted fake provider can advance to the next scripted step.
+        if not re.fullmatch(r"[a-z0-9_-]{1,128}", conversation):
+            raise RuntimeError("Invalid fixture conversation identifier")
+        call_file = CONTROL / f"provider-{scenario}-{conversation}.count"
+        with _provider_call_lock:
+            try:
+                index = int(call_file.read_text(encoding="ascii"))
+            except FileNotFoundError:
+                index = 0
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("Invalid persistent fixture provider count") from exc
+            call_file.write_text(str(index + 1), encoding="ascii")
+            return index
+
     async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None,
                               tool_choice=None, **kwargs):
         from app.agent.llm_client import LLMResponse, ToolCallRequest
@@ -47,9 +71,7 @@ class FixtureProvider:
             raise RuntimeError("Unscripted provider request in application test")
         scenario = markers[-1]
         conversation = current_conversation_id()
-        key = (conversation, scenario)
-        index = self.calls.get(key, 0)
-        self.calls[key] = index + 1
+        index = self._next_call_index(conversation, scenario)
         record("model", scenario=scenario, conversation=conversation, index=index)
 
         def call(name, arguments, suffix=""):
@@ -65,6 +87,13 @@ class FixtureProvider:
             elif scenario in {"allow", "deny"}:
                 return LLMResponse(content="", tool_calls=[call("fs_append", {
                     "path": str(ROOT / "workspace" / f"{scenario}.txt"), "content": "one change\n",
+                })], finish_reason="tool_calls")
+            elif scenario in {"file-resume", "file-conflict"}:
+                return LLMResponse(content="", tool_calls=[call("fs_write", {
+                    "path": str(ROOT / "workspace" / f"{scenario}.txt"),
+                    "content": "approved update\n",
+                    "overwrite": True,
+                    "create_parents": False,
                 })], finish_reason="tool_calls")
             elif scenario == "parallel":
                 return LLMResponse(content="", tool_calls=[
@@ -90,6 +119,8 @@ class FixtureProvider:
             if stream_callback:
                 await stream_callback("Fixture interrupt started. ")
             await barrier("interrupt")
+        if scenario == "file-resume" and index == 1:
+            await barrier("file-resume")
         return LLMResponse(content="", tool_calls=[call("final_answer", {"answer": answer})], finish_reason="tool_calls")
 
 
@@ -182,4 +213,5 @@ def install() -> None:
                 os._exit(78)  # Exercise Electron's existing backend-restart path.
             time.sleep(0.05)
     threading.Thread(target=restart_watcher, daemon=True).start()
+    record("backend_started", pid=os.getpid())
     (CONTROL / "provider-installed").touch()
