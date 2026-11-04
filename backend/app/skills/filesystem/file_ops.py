@@ -5,6 +5,7 @@ import io
 import json
 import os
 import hashlib
+import hmac
 import shutil
 import stat
 import threading
@@ -1463,6 +1464,7 @@ def file_write(
     dry_run: bool = False,
     *,
     _bypass_gate: bool = False,
+    _expected_binding_digest: str = "",
 ) -> str:
     if not path:
         return _json({"status": "error", "error": "path is required"})
@@ -1498,6 +1500,12 @@ def file_write(
             if gate_result:
                 return gate_result
             if not eligible:
+                if _expected_binding_digest:
+                    execution.native_file_no_effect("permission_changed")
+                    return _error(
+                        "permission_changed",
+                        "Stable file permissions changed after the preview; no file change was made.",
+                    )
                 # A session/once grant keeps the pre-P3 native path opaque so
                 # its established one-time consumption semantics stay intact.
                 use_preview_plan = False
@@ -1591,6 +1599,16 @@ def file_write(
                         "precondition_unavailable",
                         "The native file preconditions could not be captured; no file change was made.",
                     )
+
+            if _expected_binding_digest and not hmac.compare_digest(
+                plan.binding_digest, _expected_binding_digest
+            ):
+                if execution is not None:
+                    execution.native_file_no_effect("stale_preview")
+                return _error(
+                    "stale_preview",
+                    "The file changed after its preview; no file change was made. Review the operation again.",
+                )
 
             pending = _p3_gate_plan(
                 execution=execution,

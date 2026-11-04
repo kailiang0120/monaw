@@ -436,6 +436,11 @@ def register_active_lifecycle(run_id: str, lifecycle: Any) -> None:
         _ACTIVE_LIFECYCLES[run_id] = lifecycle
 
 
+def get_active_lifecycle(run_id: str) -> Any | None:
+    """Return the live lifecycle object for a run owned by this process."""
+    return _ACTIVE_LIFECYCLES.get(str(run_id or ""))
+
+
 def unregister_active_lifecycle(run_id: str, lifecycle: Any) -> None:
     if _ACTIVE_LIFECYCLES.get(run_id) is lifecycle:
         _ACTIVE_LIFECYCLES.pop(run_id, None)

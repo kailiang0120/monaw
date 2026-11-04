@@ -28,6 +28,7 @@ ALL_SCOPES = frozenset(
         "diagnostics:read",
         "diagnostics:control",
         "files:read",
+        "files:mutate",
     }
 )
 MAX_AUTH_FAILURES_PER_MINUTE = 120
@@ -88,6 +89,8 @@ def _required_scope(method: str, path: str) -> str:
         return "diagnostics:read" if method == "GET" else "diagnostics:control"
     if path.startswith("/api/files"):
         return "files:read"
+    if path.startswith("/api/file-mutations"):
+        return "files:mutate"
     return "agent:run"
 
 

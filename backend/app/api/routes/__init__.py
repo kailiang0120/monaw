@@ -7,6 +7,7 @@ from app.api.routes.conversations import router as conversations_router
 from app.api.routes.diagnostics import router as diagnostics_router
 from app.api.routes.events import router as events_router
 from app.api.routes.files import router as files_router
+from app.api.routes.file_mutations import router as file_mutations_router
 from app.api.routes.memories import router as memories_router
 from app.api.routes.observability import router as observability_router
 from app.api.routes.openai_account import router as openai_account_router
@@ -35,6 +36,7 @@ router.include_router(openai_account_router)
 router.include_router(privacy_router)
 router.include_router(sandbox_router)
 router.include_router(files_router)
+router.include_router(file_mutations_router)
 router.include_router(uploads_router)
 router.include_router(speech_to_text_router)
 router.include_router(storage_router)

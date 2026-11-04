@@ -61,7 +61,7 @@ def test_v17_database_upgrades_in_place_and_retains_existing_rows(tmp_path, monk
     )
     versions = [row["version"] for row in upgraded.fetchall("SELECT version FROM schema_migrations ORDER BY version")]
     assert versions[:13] == list(range(5, 18))
-    assert versions[-3:] == [18, 19, 20]
+    assert versions[-4:] == [18, 19, 20, 21]
     upgraded.close()
 
 

@@ -19,6 +19,7 @@ TEST_GROUPS = {
         "test_mcp_settings_integration.py",
         "test_mcp_credentials.py",
         "test_response_attachments.py",
+        "test_file_mutations_api.py",
     },
     "runtime": {
         "test_architecture_boundaries.py",
@@ -79,6 +80,7 @@ TEST_GROUPS = {
         "test_file_mutation_preview.py",
         "test_file_mutation_evidence.py",
         "test_file_mutation_integration.py",
+        "test_file_mutation_undo.py",
         "test_mcp_bridge.py",
         "test_skill_creator_hardening.py",
         "test_windows_controller.py",

@@ -321,6 +321,206 @@ def _cleanup_file_mutation_snapshots(journal: Journal) -> dict[str, int]:
     return SnapshotStore().cleanup(referenced)
 
 
+def recover_pending_undo_operations(
+    *,
+    journal: Journal,
+    recovery_owner_instance_id: str,
+    owner_proof: Callable[[str], OwnerProof] | None = None,
+    verifier: ReadOnlyVerifier | None = None,
+) -> dict[str, int]:
+    """Find and classify inverse writes even when their original Run is terminal.
+
+    A dead Undo owner is adopted only after the same OS-lock proof used for
+    ordinary Run recovery. Recovery verifies child file operations read-only;
+    it never repeats an inverse filesystem action.
+    """
+    proof = owner_proof or (lambda owner: owner_process_proof(owner))
+    if verifier is None:
+        try:
+            from app.agent.file_mutation.verifier import get_file_mutation_verifier
+
+            verifier = get_file_mutation_verifier().verify
+        except Exception:
+            verifier = None
+    report = {"undo_scanned": 0, "undo_owner_live": 0, "undo_owner_unverified": 0,
+              "undo_recovered": 0, "undo_verified": 0, "undo_needs_review": 0,
+              "undo_conflicts": 0, "undo_errors": 0}
+
+    for parent in journal.iter_pending_undo_operations():
+        report["undo_scanned"] += 1
+        run_id = str(parent["run_id"])
+        undo_id = str(parent["operation_id"])
+        private = parent.get("precondition_evidence")
+        old_owner = str(private.get("undo_owner_instance_id") or "") if isinstance(private, Mapping) else ""
+        if not old_owner or old_owner == recovery_owner_instance_id:
+            report["undo_owner_unverified"] += 1
+            continue
+        try:
+            proof_state = proof(old_owner)
+        except Exception:
+            proof_state = "unknown"
+        if proof_state == "live":
+            report["undo_owner_live"] += 1
+            continue
+        if proof_state != "dead":
+            report["undo_owner_unverified"] += 1
+            continue
+        try:
+            journal.adopt_undo_operation(
+                run_id,
+                undo_id,
+                expected_owner_instance_id=old_owner,
+                recovery_owner_instance_id=recovery_owner_instance_id,
+            )
+            report["undo_recovered"] += 1
+            steps = journal.load_undo_steps(run_id, undo_id)
+            for step in steps:
+                status = str(step.get("status") or "")
+                step_id = str(step.get("operation_id") or "")
+                if status in {"prepared", "authorized"}:
+                    journal.transition_undo_operation(
+                        run_id,
+                        step_id,
+                        owner_instance_id=recovery_owner_instance_id,
+                        to_status="cancelled",
+                        reason_code="worker_lost",
+                        evidence={"verification_result": "unchanged"},
+                    )
+                    continue
+                if status not in {"executing", "uncertain", "needs_review"}:
+                    continue
+                evidence: Mapping[str, object] | None = None
+                if verifier is not None and step.get("snapshot_ref"):
+                    try:
+                        value = verifier(dict(step))
+                        evidence = value if isinstance(value, Mapping) else None
+                    except Exception:
+                        evidence = None
+                result = evidence.get("verification_result") if evidence is not None else None
+                if result in {"completed", "unchanged"}:
+                    try:
+                        from app.agent.file_mutation.snapshot_store import get_snapshot_store
+                        from app.agent.file_mutation.undo_manager import UndoManager
+
+                        verifier_instance = getattr(verifier, "__self__", None)
+                        snapshot_store = getattr(verifier_instance, "store", None) or get_snapshot_store()
+                        if not UndoManager.cleanup_recovered_artifact(step, store=snapshot_store):
+                            result = None
+                    except Exception:
+                        result = None
+                if result == "completed":
+                    journal.transition_undo_operation(
+                        run_id,
+                        step_id,
+                        owner_instance_id=recovery_owner_instance_id,
+                        to_status="verified",
+                        reason_code="verified",
+                        evidence=dict(evidence),
+                    )
+                    report["undo_verified"] += 1
+                elif result == "unchanged":
+                    journal.transition_undo_operation(
+                        run_id,
+                        step_id,
+                        owner_instance_id=recovery_owner_instance_id,
+                        to_status="failed",
+                        reason_code="undo_conflict",
+                        evidence=dict(evidence),
+                    )
+                    report["undo_conflicts"] += 1
+                else:
+                    current = status
+                    if current == "executing":
+                        journal.transition_undo_operation(
+                            run_id,
+                            step_id,
+                            owner_instance_id=recovery_owner_instance_id,
+                            to_status="uncertain",
+                            reason_code="external_effect_unknown",
+                            evidence={"verification_result": "unknown"},
+                        )
+                        current = "uncertain"
+                    if current == "uncertain":
+                        journal.transition_undo_operation(
+                            run_id,
+                            step_id,
+                            owner_instance_id=recovery_owner_instance_id,
+                            to_status="needs_review",
+                            reason_code="external_effect_unknown",
+                            evidence={"verification_result": "unknown"},
+                        )
+
+            settled_steps = journal.load_undo_steps(run_id, undo_id)
+            expected_steps = int(private.get("expected_steps", 0)) if isinstance(private, Mapping) else 0
+            verified_count = sum(step.get("status") == "verified" for step in settled_steps)
+            safe_no_effect = all(
+                step.get("status") in {"cancelled", "failed"} for step in settled_steps
+            )
+            current_parent = journal.load_operation_internal(run_id, undo_id) or {}
+            parent_status = str(current_parent.get("status") or "")
+            if expected_steps > 0 and verified_count == expected_steps:
+                if parent_status in {"executing", "uncertain", "needs_review"}:
+                    journal.transition_undo_operation(
+                        run_id,
+                        undo_id,
+                        owner_instance_id=recovery_owner_instance_id,
+                        to_status="verified",
+                        reason_code="verified",
+                        evidence={"verification_result": "completed", "target_count": expected_steps},
+                    )
+                report["undo_verified"] += 1
+            elif safe_no_effect:
+                if parent_status in {"prepared", "authorized"}:
+                    journal.transition_undo_operation(
+                        run_id,
+                        undo_id,
+                        owner_instance_id=recovery_owner_instance_id,
+                        to_status="cancelled",
+                        reason_code="worker_lost",
+                        evidence={"verification_result": "unchanged"},
+                    )
+                elif parent_status in {"executing", "uncertain", "needs_review"}:
+                    journal.transition_undo_operation(
+                        run_id,
+                        undo_id,
+                        owner_instance_id=recovery_owner_instance_id,
+                        to_status="failed",
+                        reason_code="undo_conflict",
+                        evidence={"verification_result": "unchanged"},
+                    )
+                report["undo_conflicts"] += 1
+            else:
+                if parent_status == "executing":
+                    journal.transition_undo_operation(
+                        run_id,
+                        undo_id,
+                        owner_instance_id=recovery_owner_instance_id,
+                        to_status="uncertain",
+                        reason_code="external_effect_unknown",
+                        evidence={"verification_result": "unknown"},
+                    )
+                    parent_status = "uncertain"
+                if parent_status == "uncertain":
+                    journal.transition_undo_operation(
+                        run_id,
+                        undo_id,
+                        owner_instance_id=recovery_owner_instance_id,
+                        to_status="needs_review",
+                        reason_code="external_effect_unknown",
+                        evidence={"verification_result": "unknown"},
+                    )
+                report["undo_needs_review"] += 1
+        except Exception as exc:
+            report["undo_errors"] += 1
+            logger.warning(
+                "pending Undo recovery skipped run=%s operation=%s error_type=%s",
+                run_id,
+                undo_id,
+                type(exc).__name__,
+            )
+    return report
+
+
 def recover_startup_runs(
     *,
     journal: Journal | None = None,
@@ -384,6 +584,14 @@ def recover_startup_runs(
         "errors": 0,
         "snapshot_files_deleted": 0,
         "snapshot_bytes_deleted": 0,
+        "undo_scanned": 0,
+        "undo_owner_live": 0,
+        "undo_owner_unverified": 0,
+        "undo_recovered": 0,
+        "undo_verified": 0,
+        "undo_needs_review": 0,
+        "undo_conflicts": 0,
+        "undo_errors": 0,
     }
     after_run_id = ""
     while True:
@@ -483,6 +691,18 @@ def recover_startup_runs(
                 )
         if len(page) < page_size:
             break
+    try:
+        report.update(
+            recover_pending_undo_operations(
+                journal=journal,
+                recovery_owner_instance_id=recovery_owner,
+                owner_proof=proof,
+                verifier=read_only_verifier,
+            )
+        )
+    except Exception as exc:
+        report["undo_errors"] += 1
+        logger.warning("pending Undo recovery failed error_type=%s", type(exc).__name__)
     try:
         report.update(_cleanup_file_mutation_snapshots(journal))
     except Exception as exc:

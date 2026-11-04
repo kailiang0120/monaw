@@ -154,6 +154,15 @@ def _decode_json(value: object) -> dict[str, bool | int | str]:
     return sanitize_evidence(raw)
 
 
+def _decode_private_json(value: object) -> dict[str, Any]:
+    """Decode a private journal manifest which is never projected to clients."""
+    try:
+        raw = json.loads(str(value or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def _workspace_key(value: object) -> str:
     raw = str(value or "").strip() or str(WORKSPACE_DIR)
     try:
@@ -929,6 +938,574 @@ class Journal:
             ).fetchone()
             return self._operation_dto(updated)
 
+    def claim_undo_operation(
+        self,
+        run_id: str,
+        source_operation_id: str,
+        *,
+        undo_operation_id: str,
+        principal_hash: str,
+        idempotency_key_hash: str,
+        payload_hash: str,
+        owner_instance_id: str,
+        expected_steps: int,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Durably claim a single inverse for one verified file operation.
+
+        Unlike ordinary operations, Undo may be requested after a Run reaches
+        a terminal state and therefore does not inherit the old worker lease.
+        Its own owner token, source fence, and per-principal idempotency record
+        are committed in the same transaction as the inverse Journal row.
+        """
+        run_id = _required_id(run_id, name="run_id")
+        source_operation_id = _required_id(source_operation_id, name="source_operation_id")
+        undo_operation_id = _required_id(undo_operation_id, name="undo_operation_id")
+        owner_instance_id = _required_id(owner_instance_id, name="owner_instance_id")
+        for value, field in (
+            (principal_hash, "principal_hash"),
+            (idempotency_key_hash, "idempotency_key_hash"),
+            (payload_hash, "payload_hash"),
+        ):
+            if not isinstance(value, str) or len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+                raise ValueError(f"{field} must be a SHA-256 digest")
+        if isinstance(expected_steps, bool) or not isinstance(expected_steps, int) or not 1 <= expected_steps <= 8:
+            raise ValueError("expected_steps must be between 1 and 8")
+        now = _timestamp()
+
+        with self.db.transaction() as conn:
+            key_row = conn.execute(
+                """SELECT payload_hash, undo_operation_id, run_id FROM run_undo_idempotency
+                   WHERE principal_hash = ? AND idempotency_key_hash = ?""",
+                (principal_hash, idempotency_key_hash),
+            ).fetchone()
+            if key_row is not None:
+                if (
+                    str(key_row["payload_hash"]) != payload_hash
+                    or str(key_row["run_id"]) != run_id
+                ):
+                    raise IdempotencyConflictError("Undo idempotency key was reused with a different request")
+                existing = conn.execute(
+                    "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                    (run_id, key_row["undo_operation_id"]),
+                ).fetchone()
+                if existing is None:
+                    raise JournalConflictError("Undo idempotency record lost its operation")
+                private = _decode_private_json(existing["precondition_json"])
+                if str(private.get("source_operation_id") or "") != source_operation_id:
+                    raise IdempotencyConflictError("Undo idempotency key was reused for another operation")
+                return {"operation": self._operation_dto(existing), "created": False}
+
+            run = self._require_run(conn, run_id)
+            if expected_revision is not None:
+                self._expect_revision(run, expected_revision)
+            if str(run["status"]) not in _TERMINAL_RUN_STATUSES:
+                raise InvalidTransitionError("Undo requires a terminal Run")
+
+            source = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, source_operation_id),
+            ).fetchone()
+            if source is None:
+                raise OperationNotFoundError(source_operation_id)
+            if (
+                str(source["status"]) != "verified"
+                or str(source["effect_class"]) != "verifiable_write"
+                or str(source["operation_kind"]) not in {"file_write", "file_move", "file_delete"}
+                or not source["snapshot_ref"]
+            ):
+                raise InvalidTransitionError("only a verified snapshot-backed file write, move, or delete can be undone")
+            existing_source_claim = conn.execute(
+                """SELECT operation_id FROM run_operations
+                   WHERE run_id = ? AND related_operation_id = ? AND operation_kind = 'undo'
+                     AND status NOT IN ('failed', 'cancelled')""",
+                (run_id, source_operation_id),
+            ).fetchone()
+            if existing_source_claim is not None:
+                raise IdempotencyConflictError("source operation already has an Undo claim")
+
+            sequence = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM run_operations WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            private_preconditions = {
+                "source_operation_id": source_operation_id,
+                "principal_hash": principal_hash,
+                "idempotency_key_hash": idempotency_key_hash,
+                "payload_hash": payload_hash,
+                "undo_owner_instance_id": owner_instance_id,
+                "expected_steps": expected_steps,
+            }
+            revision = int(run["revision"]) + 1
+            try:
+                conn.execute(
+                    """INSERT INTO run_operations (
+                           operation_id, run_id, attempt, sequence_no, tool_name,
+                           operation_kind, effect_class, status, reason_code,
+                           related_operation_id, input_summary_json, precondition_json,
+                           evidence_json, snapshot_ref, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, 'file_mutation', 'undo', 'verifiable_write',
+                                 'prepared', NULL, ?, '{}', ?, '{}', NULL, ?, ?)""",
+                    (
+                        undo_operation_id,
+                        run_id,
+                        int(source["attempt"]),
+                        sequence,
+                        source_operation_id,
+                        _safe_json(private_preconditions),
+                        now,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO run_undo_idempotency (
+                           principal_hash, idempotency_key_hash, payload_hash,
+                           undo_operation_id, run_id, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (principal_hash, idempotency_key_hash, payload_hash, undo_operation_id, run_id, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise JournalConflictError("Undo claim lost a source or idempotency race") from exc
+
+            conn.execute(
+                "UPDATE agent_runs SET revision = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+                (revision, now, run_id, int(run["revision"])),
+            )
+            self._require_rowcount(conn, "Undo claim lost its run revision fence")
+            self._append_event(
+                conn,
+                run_id,
+                "operation.prepared",
+                {
+                    "operation_id": undo_operation_id,
+                    "sequence": sequence,
+                    "attempt": int(source["attempt"]),
+                    "operation_kind": "undo",
+                    "effect_class": "verifiable_write",
+                    "status": "prepared",
+                    "revision": revision,
+                },
+                at=now,
+            )
+            created = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, undo_operation_id),
+            ).fetchone()
+            assert created is not None
+            return {"operation": self._operation_dto(created), "created": True}
+
+    def lookup_undo_idempotency(
+        self,
+        run_id: str,
+        source_operation_id: str,
+        *,
+        principal_hash: str,
+        idempotency_key_hash: str,
+        payload_hash: str,
+    ) -> OperationDTO | None:
+        """Return a previous inverse only for the same principal and payload."""
+        run_id = _required_id(run_id, name="run_id")
+        source_operation_id = _required_id(source_operation_id, name="source_operation_id")
+        for value, field in (
+            (principal_hash, "principal_hash"),
+            (idempotency_key_hash, "idempotency_key_hash"),
+            (payload_hash, "payload_hash"),
+        ):
+            if not isinstance(value, str) or len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+                raise ValueError(f"{field} must be a SHA-256 digest")
+        with self.db.transaction(immediate=False) as conn:
+            key_row = conn.execute(
+                """SELECT payload_hash, undo_operation_id, run_id FROM run_undo_idempotency
+                   WHERE principal_hash = ? AND idempotency_key_hash = ?""",
+                (principal_hash, idempotency_key_hash),
+            ).fetchone()
+            if key_row is None:
+                return None
+            if str(key_row["payload_hash"]) != payload_hash or str(key_row["run_id"]) != run_id:
+                raise IdempotencyConflictError("Undo idempotency key was reused with a different request")
+            operation = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, key_row["undo_operation_id"]),
+            ).fetchone()
+            if operation is None:
+                raise JournalConflictError("Undo idempotency record lost its operation")
+            private = _decode_private_json(operation["precondition_json"])
+            if str(private.get("source_operation_id") or "") != source_operation_id:
+                raise IdempotencyConflictError("Undo idempotency key was reused for another operation")
+            return self._operation_dto(operation)
+
+    def prepare_undo_step(
+        self,
+        run_id: str,
+        undo_operation_id: str,
+        *,
+        step_operation_id: str,
+        operation_kind: str,
+        input_summary: object = None,
+        precondition_evidence: object = None,
+    ) -> OperationDTO:
+        """Create one separately journaled, snapshot-bound inverse effect."""
+        run_id = _required_id(run_id, name="run_id")
+        undo_operation_id = _required_id(undo_operation_id, name="undo_operation_id")
+        step_operation_id = _required_id(step_operation_id, name="step_operation_id")
+        if operation_kind not in {"file_write", "file_move", "file_delete"}:
+            raise ValueError("unsupported Undo step kind")
+        safe_summary = sanitize_evidence(input_summary)
+        safe_preconditions = sanitize_evidence(precondition_evidence)
+        now = _timestamp()
+        with self.db.transaction() as conn:
+            parent = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, undo_operation_id),
+            ).fetchone()
+            if parent is None or str(parent["operation_kind"]) != "undo":
+                raise OperationNotFoundError(undo_operation_id)
+            if str(parent["status"]) not in {"authorized", "executing"}:
+                raise InvalidTransitionError("Undo steps require an authorized or executing inverse")
+            existing = conn.execute(
+                "SELECT * FROM run_operations WHERE operation_id = ?", (step_operation_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["run_id"]) != run_id
+                    or str(existing["related_operation_id"]) != undo_operation_id
+                    or str(existing["operation_kind"]) != operation_kind
+                    or _decode_json(existing["input_summary_json"]) != safe_summary
+                    or _decode_json(existing["precondition_json"]) != safe_preconditions
+                ):
+                    raise IdempotencyConflictError("Undo step id was reused with different metadata")
+                return self._operation_dto(existing)
+            sequence = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM run_operations WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            try:
+                conn.execute(
+                    """INSERT INTO run_operations (
+                           operation_id, run_id, attempt, sequence_no, tool_name,
+                           operation_kind, effect_class, status, reason_code,
+                           related_operation_id, input_summary_json, precondition_json,
+                           evidence_json, snapshot_ref, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, 'file_mutation', ?, 'verifiable_write',
+                                 'prepared', NULL, ?, ?, ?, '{}', NULL, ?, ?)""",
+                    (
+                        step_operation_id,
+                        run_id,
+                        int(parent["attempt"]),
+                        sequence,
+                        operation_kind,
+                        undo_operation_id,
+                        _safe_json(safe_summary),
+                        _safe_json(safe_preconditions),
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise JournalConflictError("Undo step could not be linked to its parent") from exc
+            run = self._require_run(conn, run_id)
+            revision = int(run["revision"]) + 1
+            conn.execute(
+                "UPDATE agent_runs SET revision = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+                (revision, now, run_id, int(run["revision"])),
+            )
+            self._require_rowcount(conn, "Undo step prepare lost its run revision fence")
+            self._append_event(
+                conn,
+                run_id,
+                "operation.prepared",
+                {
+                    "operation_id": step_operation_id,
+                    "sequence": sequence,
+                    "attempt": int(parent["attempt"]),
+                    "operation_kind": operation_kind,
+                    "effect_class": "verifiable_write",
+                    "status": "prepared",
+                    "revision": revision,
+                },
+                at=now,
+            )
+            row = conn.execute(
+                "SELECT * FROM run_operations WHERE operation_id = ?", (step_operation_id,)
+            ).fetchone()
+            assert row is not None
+            return self._operation_dto(row)
+
+    def set_undo_step_snapshot(
+        self, run_id: str, undo_operation_id: str, step_operation_id: str, snapshot_ref: str
+    ) -> OperationDTO:
+        run_id = _required_id(run_id, name="run_id")
+        undo_operation_id = _required_id(undo_operation_id, name="undo_operation_id")
+        step_operation_id = _required_id(step_operation_id, name="step_operation_id")
+        private_ref = _private_text(snapshot_ref, name="snapshot_ref", max_length=4096)
+        if not private_ref:
+            raise ValueError("snapshot_ref is required")
+        now = _timestamp()
+        with self.db.transaction() as conn:
+            parent = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ? AND operation_kind = 'undo'",
+                (run_id, undo_operation_id),
+            ).fetchone()
+            step = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, step_operation_id),
+            ).fetchone()
+            if parent is None or step is None or str(step["related_operation_id"]) != undo_operation_id:
+                raise OperationNotFoundError(step_operation_id)
+            if str(step["status"]) != "prepared" or step["snapshot_ref"]:
+                if str(step["snapshot_ref"] or "") == private_ref:
+                    return self._operation_dto(step)
+                raise InvalidTransitionError("Undo step snapshot can only be committed once before execution")
+            conn.execute(
+                """UPDATE run_operations SET snapshot_ref = ?, updated_at = ?
+                   WHERE run_id = ? AND operation_id = ? AND status = 'prepared' AND snapshot_ref IS NULL""",
+                (private_ref, now, run_id, step_operation_id),
+            )
+            self._require_rowcount(conn, "Undo snapshot commit lost its state fence")
+            run = self._require_run(conn, run_id)
+            revision = int(run["revision"]) + 1
+            conn.execute(
+                "UPDATE agent_runs SET revision = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+                (revision, now, run_id, int(run["revision"])),
+            )
+            self._require_rowcount(conn, "Undo snapshot commit lost its run revision fence")
+            self._append_event(
+                conn,
+                run_id,
+                "operation.updated",
+                {
+                    "operation_id": step_operation_id,
+                    "sequence": int(step["sequence_no"]),
+                    "attempt": int(step["attempt"]),
+                    "status": "prepared",
+                    "reason_code": None,
+                    "evidence": {"snapshot_available": True},
+                    "revision": revision,
+                },
+                at=now,
+            )
+            updated = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, step_operation_id),
+            ).fetchone()
+            assert updated is not None
+            return self._operation_dto(updated)
+
+    def transition_undo_operation(
+        self,
+        run_id: str,
+        operation_id: str,
+        *,
+        owner_instance_id: str,
+        to_status: OperationStatus,
+        reason_code: str | None = None,
+        evidence: object = None,
+    ) -> OperationDTO:
+        """Transition an Undo parent/step using its own process-owner fence."""
+        run_id = _required_id(run_id, name="run_id")
+        operation_id = _required_id(operation_id, name="operation_id")
+        owner_instance_id = _required_id(owner_instance_id, name="owner_instance_id")
+        if to_status not in OPERATION_STATUSES:
+            raise ValueError("unsupported operation status")
+        safe_reason = _reason_code(reason_code)
+        added_evidence = sanitize_evidence(evidence)
+        now = _timestamp()
+        with self.db.transaction() as conn:
+            op = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, operation_id),
+            ).fetchone()
+            if op is None:
+                raise OperationNotFoundError(operation_id)
+            if str(op["operation_kind"]) == "undo":
+                parent = op
+            else:
+                parent = conn.execute(
+                    """SELECT * FROM run_operations
+                       WHERE run_id = ? AND operation_id = ? AND operation_kind = 'undo'""",
+                    (run_id, op["related_operation_id"]),
+                ).fetchone()
+            if parent is None:
+                raise InvalidTransitionError("operation is not part of a durable Undo")
+            private = _decode_private_json(parent["precondition_json"])
+            if private.get("undo_owner_instance_id") != owner_instance_id:
+                raise LeaseConflictError("Undo owner does not match the current inverse generation")
+            current = str(op["status"])
+            if to_status not in _OPERATION_TRANSITIONS[current]:
+                raise InvalidTransitionError(f"cannot transition Undo operation from {current} to {to_status}")
+            if to_status == "verified" and added_evidence.get("verification_result") != "completed":
+                raise InvalidTransitionError("verified Undo steps require completed file evidence")
+            if to_status == "failed" and current in {"executing", "uncertain", "needs_review"}:
+                if added_evidence.get("verification_result") != "unchanged":
+                    raise InvalidTransitionError("failed Undo steps require unchanged file evidence")
+            combined = _decode_json(op["evidence_json"])
+            combined.update(added_evidence)
+            run = self._require_run(conn, run_id)
+            revision = int(run["revision"]) + 1
+            conn.execute(
+                """UPDATE run_operations SET status = ?, reason_code = ?, evidence_json = ?, updated_at = ?
+                   WHERE run_id = ? AND operation_id = ? AND status = ?""",
+                (to_status, safe_reason, _safe_json(combined), now, run_id, operation_id, current),
+            )
+            self._require_rowcount(conn, "Undo operation transition lost its state fence")
+            conn.execute(
+                "UPDATE agent_runs SET revision = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+                (revision, now, run_id, int(run["revision"])),
+            )
+            self._require_rowcount(conn, "Undo operation transition lost its run revision fence")
+            self._append_event(
+                conn,
+                run_id,
+                "operation.updated",
+                {
+                    "operation_id": operation_id,
+                    "sequence": int(op["sequence_no"]),
+                    "attempt": int(op["attempt"]),
+                    "status": to_status,
+                    "reason_code": safe_reason,
+                    "evidence": combined,
+                    "revision": revision,
+                },
+                at=now,
+            )
+            updated = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, operation_id),
+            ).fetchone()
+            assert updated is not None
+            return self._operation_dto(updated)
+
+    def adopt_undo_operation(
+        self,
+        run_id: str,
+        undo_operation_id: str,
+        *,
+        expected_owner_instance_id: str,
+        recovery_owner_instance_id: str,
+    ) -> OperationDTO:
+        """Transfer an inverse claim after recovery has proved its owner dead."""
+        run_id = _required_id(run_id, name="run_id")
+        undo_operation_id = _required_id(undo_operation_id, name="undo_operation_id")
+        expected_owner_instance_id = _required_id(expected_owner_instance_id, name="expected_owner_instance_id")
+        recovery_owner_instance_id = _required_id(recovery_owner_instance_id, name="recovery_owner_instance_id")
+        if expected_owner_instance_id == recovery_owner_instance_id:
+            raise ValueError("recovery owner must be different from the prior Undo owner")
+        now = _timestamp()
+        with self.db.transaction() as conn:
+            op = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ? AND operation_kind = 'undo'",
+                (run_id, undo_operation_id),
+            ).fetchone()
+            if op is None:
+                raise OperationNotFoundError(undo_operation_id)
+            if str(op["status"]) not in {"prepared", "authorized", "executing", "uncertain", "needs_review"}:
+                raise InvalidTransitionError("only a pending Undo can be adopted")
+            private = _decode_private_json(op["precondition_json"])
+            if private.get("undo_owner_instance_id") != expected_owner_instance_id:
+                raise LeaseConflictError("Undo owner changed before recovery adoption")
+            private["undo_owner_instance_id"] = recovery_owner_instance_id
+            conn.execute(
+                "UPDATE run_operations SET precondition_json = ?, updated_at = ? WHERE run_id = ? AND operation_id = ?",
+                (_safe_json(private), now, run_id, undo_operation_id),
+            )
+            run = self._require_run(conn, run_id)
+            revision = int(run["revision"]) + 1
+            conn.execute(
+                "UPDATE agent_runs SET revision = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+                (revision, now, run_id, int(run["revision"])),
+            )
+            self._require_rowcount(conn, "Undo recovery adoption lost its run revision fence")
+            self._append_event(
+                conn,
+                run_id,
+                "operation.updated",
+                {
+                    "operation_id": undo_operation_id,
+                    "sequence": int(op["sequence_no"]),
+                    "attempt": int(op["attempt"]),
+                    "status": str(op["status"]),
+                    "reason_code": "worker_lost",
+                    "evidence": {"verification_result": "not_checked"},
+                    "revision": revision,
+                },
+                at=now,
+            )
+            updated = conn.execute(
+                "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, undo_operation_id),
+            ).fetchone()
+            assert updated is not None
+            return self._operation_dto(updated)
+
+    def load_undo_steps(self, run_id: str, undo_operation_id: str) -> list[dict[str, Any]]:
+        run_id = _required_id(run_id, name="run_id")
+        undo_operation_id = _required_id(undo_operation_id, name="undo_operation_id")
+        with self.db.transaction(immediate=False) as conn:
+            rows = conn.execute(
+                """SELECT * FROM run_operations WHERE run_id = ? AND related_operation_id = ?
+                   ORDER BY sequence_no""",
+                (run_id, undo_operation_id),
+            ).fetchall()
+            return [self._operation_internal_row(row) for row in rows]
+
+    def list_pending_undo_operations(
+        self, *, after_operation_id: str = "", limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """List inverse parents even when their original Run is terminal."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        if not isinstance(after_operation_id, str) or len(after_operation_id) > 128:
+            raise ValueError("after_operation_id is invalid")
+        with self.db.transaction(immediate=False) as conn:
+            rows = conn.execute(
+                """SELECT * FROM run_operations
+                   WHERE operation_kind = 'undo'
+                     AND status IN ('prepared', 'authorized', 'executing', 'uncertain', 'needs_review')
+                     AND operation_id > ?
+                   ORDER BY operation_id ASC LIMIT ?""",
+                (after_operation_id, min(limit, 500)),
+            ).fetchall()
+            return [self._operation_internal_row(row) for row in rows]
+
+    def iter_pending_undo_operations(self, *, page_size: int = 200):
+        """Keyset-page pending inverses by stable operation id."""
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 500:
+            raise ValueError("page_size must be between 1 and 500")
+        after_operation_id = ""
+        while True:
+            page = self.list_pending_undo_operations(
+                after_operation_id=after_operation_id, limit=page_size
+            )
+            if not page:
+                break
+            for operation in page:
+                yield operation
+            after_operation_id = str(page[-1]["operation_id"])
+            if len(page) < page_size:
+                break
+
+    @staticmethod
+    def _operation_internal_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "run_id": str(row["run_id"]),
+            "operation_id": str(row["operation_id"]),
+            "sequence": int(row["sequence_no"]),
+            "attempt": int(row["attempt"]),
+            "operation_kind": str(row["operation_kind"]),
+            "effect_class": str(row["effect_class"]),
+            "status": str(row["status"]),
+            "reason_code": _reason_code(row["reason_code"]),
+            "input_summary": _decode_json(row["input_summary_json"]),
+            "precondition_evidence": _decode_private_json(row["precondition_json"]),
+            "evidence": _decode_json(row["evidence_json"]),
+            "snapshot_ref": str(row["snapshot_ref"]) if row["snapshot_ref"] else None,
+            "related_operation_id": str(row["related_operation_id"]) if row["related_operation_id"] else None,
+        }
+
     def load_operation(self, run_id: str, operation_id: str) -> OperationDTO | None:
         with self.db.transaction(immediate=False) as conn:
             row = conn.execute(
@@ -960,7 +1537,7 @@ class Journal:
                 "status": str(row["status"]),
                 "reason_code": _reason_code(row["reason_code"]),
                 "input_summary": _decode_json(row["input_summary_json"]),
-                "precondition_evidence": _decode_json(row["precondition_json"]),
+                "precondition_evidence": _decode_private_json(row["precondition_json"]),
                 "evidence": _decode_json(row["evidence_json"]),
                 "snapshot_ref": str(row["snapshot_ref"]) if row["snapshot_ref"] else None,
             }
