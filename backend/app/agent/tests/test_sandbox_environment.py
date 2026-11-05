@@ -192,7 +192,8 @@ def test_exec_start_uses_sanitized_env(monkeypatch, tmp_path):
     assert started["sandbox"]["env_inheritance"] == "scrubbed"
 
     command_id = started["command_id"]
-    for _ in range(20):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
         polled = json.loads(exec_tools.exec_poll(command_id, return_mode="full"))
         if polled.get("exit_code") is not None:
             break

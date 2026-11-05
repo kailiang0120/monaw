@@ -31,6 +31,7 @@ from app.agent.approval_broker import (
 from app.agent.approval_review import AutoReviewState, requires_user_review, review_action
 from app.agent.settings_store import load_agent_settings
 from app.agent.execution_resume import resume_approved_ticket
+from app.agent.action_identity import action_invocation, ticket_ownership_error
 from app.agent.iteration_budget import IterationBudget
 from app.agent.durable.operation_execution import OperationExecution
 from app.agent.harness.tool_executor import ToolExecutor
@@ -55,12 +56,8 @@ def _format_timeout(seconds: float) -> str:
     return f"{seconds:g} seconds"
 
 
-def _ticket_belongs_to_tool(ticket_tool: str, tool_name: str) -> bool:
-    # Desktop tools raise tickets for the inner action they dispatch to, e.g.
-    # computer_functions_act launching an app files a computer_functions_launch_app
-    # ticket, so the desktop family shares tickets.
-    desktop = "computer_functions_"
-    return ticket_tool == tool_name or (ticket_tool.startswith(desktop) and tool_name.startswith(desktop))
+def _ticket_belongs_to_tool(ticket, tool_name: str) -> bool:
+    return not ticket_ownership_error(ticket, tool_name)
 
 
 class ExecutionGateService:
@@ -100,6 +97,21 @@ class ExecutionGateService:
             pending_event = self.check_pending_status(tool_output)
             if pending_event is None:
                 return tool_output
+            pending_ticket = (get_approval_ticket if pending_event["event"] == "approval_required" else get_grant_ticket)(pending_event["data"]["ticket_id"])
+            ownership_error = "ticket missing" if pending_ticket is None else ticket_ownership_error(
+                pending_ticket, str(tool_dict.get("name") or ""), arguments)
+            if ownership_error:
+                return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch",
+                                   "error": ownership_error})
+            if pending_ticket.action_id:
+                pending_event["data"].update({key: getattr(pending_ticket, key) for key in (
+                    "action_id", "parent_action_id", "parent_tool_name", "root_action_id", "root_tool_name",
+                )})
+            if pending_event["event"] == "approval_required" and pending_ticket.action_descriptor:
+                pending_event["data"].update({"action_descriptor": pending_ticket.action_descriptor,
+                    "human_only": pending_ticket.human_only,
+                    "authorization_binding": pending_ticket.authorization_binding,
+                    "run_id": pending_ticket.run_id, "operation_id": pending_ticket.operation_id})
             if operation_execution is not None and not operation_execution.note_pending_preflight(tool_output):
                 self._retire_matching_pending_ticket(
                     pending_event,
@@ -118,7 +130,7 @@ class ExecutionGateService:
                 ticket = get_approval_ticket(pending_event["data"]["ticket_id"])
                 # Tool content can name a ticket, but cannot route another
                 # tool's action into review or replay.
-                if ticket is not None and not _ticket_belongs_to_tool(ticket.tool_name, str(tool_dict.get("name") or "")):
+                if ticket is not None and not _ticket_belongs_to_tool(ticket, str(tool_dict.get("name") or "")):
                     return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch",
                                        "error": "Approval ticket does not belong to this tool."})
                 validation_error = "ticket missing" if ticket is None else ticket_validation_error(
@@ -239,7 +251,7 @@ class ExecutionGateService:
         expected_execution_source = current_execution_source()
         if pending_event.get("event") == "approval_required":
             ticket = get_approval_ticket(ticket_id)
-            if ticket is None or not _ticket_belongs_to_tool(ticket.tool_name, tool_name):
+            if ticket is None or not _ticket_belongs_to_tool(ticket, tool_name):
                 return
             if (
                 ticket.control_session_id != expected_session_id
@@ -272,7 +284,7 @@ class ExecutionGateService:
             return
 
         ticket = get_grant_ticket(ticket_id)
-        if ticket is None or (
+        if ticket is None or ticket_ownership_error(ticket, tool_name) or (
             ticket.control_session_id != expected_session_id
             or ticket.conversation_id != expected_conversation_id
             or ticket.execution_source != expected_execution_source
@@ -295,6 +307,9 @@ class ExecutionGateService:
             return
         ticket_id = str(pending_event.get("data", {}).get("ticket_id") or "")
         if not ticket_id:
+            return
+        ticket = (get_grant_ticket if pending_event.get("event") == "access_grant_required" else get_approval_ticket)(ticket_id)
+        if ticket is None or ticket_ownership_error(ticket):
             return
         if pending_event.get("event") == "access_grant_required":
             resolve_grant(ticket_id, "deny")
@@ -355,6 +370,12 @@ class ExecutionGateService:
         operation_execution: OperationExecution | None = None,
         pause_requested: Callable[[], bool] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        ticket = (get_grant_ticket if event_kind == "access_grant_required" else get_approval_ticket)(ticket_id)
+        ownership_error = "ticket missing" if ticket is None else ticket_ownership_error(
+            ticket, str(tool_dict.get("name") or ""), arguments)
+        if ownership_error:
+            yield {"_result": json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch", "error": ownership_error})}
+            return
         if event_kind == "access_grant_required":
             event = register_grant_resume(ticket_id)
             get_decision = lambda: get_grant_resume_decision(ticket_id)
@@ -503,9 +524,16 @@ class ExecutionGateService:
             return json.dumps(
                 {"status": "error", "error": f"Approval ticket {ticket_id} not found after approval."}
             )
+        ownership_error = ticket_ownership_error(ticket, str((tool_dict or {}).get("name") or ""))
+        if ownership_error:
+            return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch", "error": ownership_error})
 
         def replay() -> str:
-            updated = resume_approved_ticket(ticket)
+            if ticket.action_id and ticket.tool_name != ticket.root_tool_name:
+                with action_invocation(ticket.tool_name, ticket.payload, delegated=True):
+                    updated = resume_approved_ticket(ticket)
+            else:
+                updated = resume_approved_ticket(ticket)
             return updated.execution_result or json.dumps({"status": "error", "error": "Approved action produced no result."})
 
         # Replays need the same locks, call identity, Stop handling and timeout
@@ -536,6 +564,10 @@ class ExecutionGateService:
         operation_execution: OperationExecution | None = None,
     ) -> str:
         grant_ticket = get_grant_ticket(ticket_id)
+        ownership_error = "ticket missing" if grant_ticket is None else ticket_ownership_error(
+            grant_ticket, str(tool_dict.get("name") or ""), arguments)
+        if ownership_error:
+            return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch", "error": ownership_error})
         validation_error = (
             "ticket not found"
             if grant_ticket is None

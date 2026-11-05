@@ -12,16 +12,27 @@ import threading
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from app.agent.settings_store import MCPServerConfig
 from app.agent.ui_events import publish_ui_event
-from app.security.mcp_credentials import child_environment, resolved_fields, redact_mcp_secrets, remember_secrets, SECRET_NAME
+from app.security.mcp_credentials import child_environment, resolved_fields, remember_secrets, SECRET_NAME
+from app.agent.action_security.sensitive_data import redact_sensitive
+from app.agent.action_security.destination_policy import canonical_origin
 
 from .builtin import builtin_mcp_servers, is_builtin_server
 from .images import externalize_image_blocks
 
 logger = logging.getLogger(__name__)
+
+
+def validate_mcp_endpoint(cfg: MCPServerConfig) -> None:
+    """Check the observable transport endpoint before any connection is opened."""
+    if cfg.transport != "streamable_http":
+        return
+    origin = canonical_origin(cfg.url)
+    if cfg.allowed_destinations and origin not in {canonical_origin(url) for url in cfg.allowed_destinations}:
+        raise ValueError("mcp_destination_not_allowed")
 
 MCP_SERVER_STATES = {"stopped", "starting", "connected", "unhealthy", "failed", "credentials_unavailable"}
 
@@ -194,7 +205,7 @@ class _CredentialStderr:
 
     def getvalue(self):
         with self._lock:
-            return redact_mcp_secrets(self._text.decode("utf-8", errors="replace"))
+            return redact_sensitive(self._text.decode("utf-8", errors="replace"))
 
     def close(self):
         if self._writer is not None:
@@ -290,7 +301,11 @@ class ServerManager:
         if stopped:
             self._unregister_active()
 
-    def call_tool_sync(self, tool_name: str, arguments: dict[str, Any]) -> str:
+    def call_tool_scoped(self, tool_name: str, arguments: dict[str, Any], *, expected_schema_hash: str,
+                         expected_server_identity: str, expected_tool_fingerprint: str = "") -> str:
+        return self.call_tool_sync(tool_name, arguments, _expected_scope=(expected_schema_hash, expected_server_identity, expected_tool_fingerprint))
+
+    def call_tool_sync(self, tool_name: str, arguments: dict[str, Any], *, _expected_scope=None) -> str:
         if getattr(self, "_credential_retired", False):
             return _err("mcp_credentials_changed", "MCP connection changed; reload tools before calling it")
         if (self._loop is None or self._session is None or not self.connected) and not self._recover_before_call():
@@ -310,7 +325,7 @@ class ServerManager:
         self.last_call_started_at = started.isoformat()
         try:
             future = asyncio.run_coroutine_threadsafe(
-                self._call_tool(tool_name, arguments),
+                self._call_tool(tool_name, arguments, expected_scope=_expected_scope),
                 self._loop,
             )
             result = future.result(timeout=self.cfg.call_timeout_ms / 1000)
@@ -336,7 +351,7 @@ class ServerManager:
                 "The MCP tool call failed.",
                 server=self.cfg.name,
                 tool=tool_name,
-                raw_error=redact_mcp_secrets(str(exc)),
+                raw_error=redact_sensitive(str(exc)),
             )
         finally:
             elapsed = datetime.now(timezone.utc) - started
@@ -413,8 +428,8 @@ class ServerManager:
             "connected": self.connected,
             "state": self.state,
             "tool_count": self.tool_count,
-            "last_error": redact_mcp_secrets(self.last_error) or None,
-            "unhealthy_reason": redact_mcp_secrets(self.unhealthy_reason) or None,
+            "last_error": redact_sensitive(self.last_error) or None,
+            "unhealthy_reason": redact_sensitive(self.unhealthy_reason) or None,
             "description": self.cfg.description,
             "command": self.cfg.command,
             "args": list(self.cfg.args),
@@ -426,7 +441,7 @@ class ServerManager:
             "started_at": self.started_at,
             "connected_at": self.connected_at,
             "disconnected_at": self.disconnected_at,
-            "stderr_tail": redact_mcp_secrets(self.stderr_tail.getvalue()),
+            "stderr_tail": redact_sensitive(self.stderr_tail.getvalue()),
             "last_call_started_at": self.last_call_started_at,
             "last_call_duration_ms": self.last_call_duration_ms,
             "failed_call_count": self.failed_call_count,
@@ -439,7 +454,25 @@ class ServerManager:
             return False
         return self.restart()
 
-    async def _call_tool(self, tool_name: str, arguments: dict[str, Any]):
+    async def _call_tool(self, tool_name: str, arguments: dict[str, Any], *, expected_scope=None):
+        if expected_scope is not None:
+            from .registry import _schema_hash, _server_identity, _annotations_payload, _tool_annotations
+            schema_hash, server_identity = expected_scope[:2]
+            if _server_identity(self.cfg) != server_identity or getattr(self, "_credential_retired", False):
+                raise ValueError("mcp_server_changed")
+            response = await self._session.list_tools()
+            self.tools = list(getattr(response, "tools", []) or [])
+            self.tool_count = len(self.tools)
+            current = next((tool for tool in self.tools if getattr(tool, "name", None) == tool_name), None)
+            if current is None or _schema_hash(getattr(current, "inputSchema", None) or {"type": "object", "properties": {}}) != schema_hash:
+                raise ValueError("mcp_schema_changed")
+            if len(expected_scope) > 2 and expected_scope[2] and _schema_hash({
+                "schema": getattr(current, "inputSchema", None) or {"type": "object", "properties": {}},
+                "annotations": _annotations_payload(_tool_annotations(current)),
+            }) != expected_scope[2]:
+                raise ValueError("mcp_tool_metadata_changed")
+            if self.cfg.allow_list and tool_name not in self.cfg.allow_list:
+                raise ValueError("mcp_tool_not_allowed")
         return await self._session.call_tool(tool_name, arguments=arguments)
 
     def _prepare_start_locked(self) -> None:
@@ -502,7 +535,7 @@ class ServerManager:
         return True
 
     def _mark_unhealthy(self, reason: str, *, failed_call: bool = False) -> None:
-        self.last_error = redact_mcp_secrets(reason)
+        self.last_error = redact_sensitive(reason)
         self.unhealthy_reason = self.last_error
         self.connected = False
         self.state = "unhealthy"
@@ -532,7 +565,7 @@ class ServerManager:
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            self.last_error = redact_mcp_secrets(str(exc))
+            self.last_error = redact_sensitive(str(exc))
             self.unhealthy_reason = self.last_error
             self.state = "failed"
             # SDK exceptions may echo headers, environment values, or launch data.
@@ -559,6 +592,7 @@ class ServerManager:
             self.stderr_tail.close()
 
     async def _serve(self) -> None:
+        validate_mcp_endpoint(self.cfg)
         from mcp import ClientSession
 
         env, headers = resolved_fields(self.cfg)
@@ -687,10 +721,9 @@ class ServerManager:
                 self._liveness_failures = 0
                 self.last_error = ""
                 self.unhealthy_reason = ""
-                if len(tools) != self.tool_count:
-                    self.tools = tools
-                    self.tool_count = len(tools)
-                    self._publish_changed()
+                self.tools = tools
+                self.tool_count = len(tools)
+                self._publish_changed()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -714,7 +747,7 @@ class ServerManager:
 
     def _record_liveness_failure(self, reason: str) -> bool:
         self._liveness_failures += 1
-        self.last_error = reason
+        self.last_error = redact_sensitive(reason)
         self.unhealthy_reason = ""
         self._publish_changed()
         if self._liveness_failures < self.liveness_failure_threshold:
@@ -792,9 +825,20 @@ def ensure_mcp_manager(cfg: MCPServerConfig) -> ServerManager:
     return manager
 
 
-def reconnect_mcp_server(name: str) -> dict[str, Any] | None:
+def reconnect_mcp_server(name: str, *, expected_config: MCPServerConfig | None = None) -> dict[str, Any] | None:
+    if expected_config is not None:
+        # Policy-controlled reconnect must select the approved command/endpoint,
+        # even if an old active manager still exists under the same name.
+        if expected_config.name != name:
+            raise ValueError("mcp_server_changed")
+        pinned = expected_config.model_copy(deep=True)
+        manager = ensure_mcp_manager(pinned)
+        if manager.cfg.model_dump() != pinned.model_dump():
+            raise ValueError("mcp_server_changed")
+    else:
+        manager = None
     with _ACTIVE_LOCK:
-        manager = _ACTIVE_MANAGERS.get(name)
+        manager = manager or _ACTIVE_MANAGERS.get(name)
     if manager is None:
         from app.agent.settings_store import load_agent_settings
         from app.config import settings as app_settings

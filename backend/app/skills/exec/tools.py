@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,6 +36,8 @@ _MAX_STDOUT = 8 * 1024
 _MAX_STDERR = 4 * 1024
 _ACTIVE_SETTINGS: Any | None = None
 _SESSION_REGISTRY = SandboxSessionRegistry()
+_REPLAY_ENVIRONMENTS: dict[str, dict[str, str]] = {}
+_REPLAY_ENV_LOCK = threading.RLock()
 
 
 def _safe_env_keys(env: dict[str, str] | None) -> list[str]:
@@ -250,48 +253,52 @@ def _permission_check(
         )
     if decision.requires_access_grant:
         return _pending_access_grant(workdir)
-    # Permission mode owns consent, except for host runs the sandbox policy
-    # marks always_ask: a fallback around Docker or an untrusted command on
-    # the host asks even after Full Access authorized exec.
-    needs_approval = bool(decision.requires_confirmation or sandbox.get("always_ask"))
+    from app.agent.controller_policy import _load_runtime_settings
+    # Full Access authorizes ordinary opaque execution. Hard sandbox denials
+    # were already enforced; a heuristic host hint cannot invent a new prompt.
+    full_access = _load_runtime_settings().permissions.mode == "full_access"
+    needs_approval = not full_access and bool(decision.requires_confirmation or sandbox.get("always_ask"))
+    if full_access:
+        sandbox["always_ask"] = False
+        sandbox["user_review_only"] = False
+        if sandbox.get("explicit_approval_required"):
+            sandbox["reason"] = "Full Access permits this command in the selected execution environment."
+            sandbox["reason_code"] = "full_access"
     sandbox["explicit_approval_required"] = needs_approval
     sandbox["execution_environment"] = execution_environment(sandbox)
-    if bypass_confirmation and approved_sandbox is not None:
-        # A ticket consents to the disclosed environment, not a later fallback,
-        # workspace, shell, network policy, or write strategy.
-        bypass_confirmation = consent_environment(approved_sandbox) == consent_environment(sandbox)
-    if needs_approval and not bypass_confirmation:
-        if host_approval_required:
-            decision = SimpleNamespace(
-                reason=str(
-                    sandbox.get("reason")
-                    or "This command will run on the host without strong isolation."
-                ),
-                reason_code=str(
-                    sandbox.get("reason_code") or "host_execution_approval_required"
-                ),
-                policy_source="sandbox_policy",
-            )
-        return _pending_approval(
-            decision,
-            (
-                f"Approve host execution in {workdir}: {command[:120]}"
-                if host_approval_required
-                else f"Execute command in {workdir}: {command[:120]}"
-            ),
-            {
-                "tool_name": tool_name,
-                "command": command,
-                "shell": shell,
-                "workdir": workdir,
-                "env": env or {},
-                "timeout": timeout,
-                "host": host,
-                "elevated": elevated,
-                **(extra_payload or {}),
-            },
-            sandbox,
-        )
+    from app.agent.action_security import attest_action, authorize_action
+    from app.agent.action_security.models import digest
+    # Shell text cannot prove the command's eventual effects. Bind the actual
+    # selected execution environment and exact payload without certifying it
+    # safe through command keywords. Full Access permits this opaque capability.
+    environment = consent_environment(sandbox)
+    payload = {"tool_name": tool_name, "command": command, "shell": shell,
+        "workdir": workdir, "env": env or {}, "timeout": timeout, "host": host,
+        "elevated": elevated, **(extra_payload or {})}
+    descriptor = attest_action(tool_name=tool_name, action_kind="execute_code", parameters=payload,
+        target={"app": "local_shell", "path": workdir, "shell": shell},
+        context_version=digest({"workdir": workdir, "environment": environment}), side_effect="unknown",
+        runtime_facts={"target_verified": True, "context_verified": True,
+            "execution_environment": environment,
+            "adapter_permission_requires_confirmation": needs_approval})
+    # Secrets remain in this live process, never in ordinary approval JSONL.
+    # Restarted approval continuations cannot recreate these credentials.
+    environment_token = uuid.uuid4().hex if env else ""
+    if environment_token:
+        with _REPLAY_ENV_LOCK:
+            while len(_REPLAY_ENVIRONMENTS) >= 128:
+                _REPLAY_ENVIRONMENTS.pop(next(iter(_REPLAY_ENVIRONMENTS)))
+            _REPLAY_ENVIRONMENTS[environment_token] = dict(env)
+    result = authorize_action(descriptor, replay_payload={"args": {**payload,
+        "env": _redacted_env(env), "env_keys": _safe_env_keys(env),
+        "_environment_token": environment_token, "sandbox": sandbox}})
+    if environment_token and (result is None or result.get("status") != "pending_approval"):
+        with _REPLAY_ENV_LOCK:
+            _REPLAY_ENVIRONMENTS.pop(environment_token, None)
+    if result is not None:
+        result["sandbox"] = sandbox
+        result["env_keys"] = _safe_env_keys(env)
+        return json.dumps(result, ensure_ascii=False)
     return None
 
 
@@ -659,6 +666,13 @@ def _parse_json_object(input_str: str) -> dict[str, Any]:
 
 def _resume_exec(input_str: str) -> str:
     args = _parse_json_object(input_str)
+    if args.get("_environment_token"):
+        with _REPLAY_ENV_LOCK:
+            environment = _REPLAY_ENVIRONMENTS.pop(args["_environment_token"], None)
+        if environment is None:
+            return json.dumps({"status": "denied", "reason_code": "exec_environment_expired",
+                "reason": "The approved environment is no longer available; create a fresh action."})
+        args["env"] = environment
     return exec_tool(
         command=str(args.get("command", "")),
         shell=str(args.get("shell", "auto")),
@@ -677,6 +691,13 @@ register_executor("exec", _resume_exec)
 
 def _resume_exec_start(input_str: str) -> str:
     args = _parse_json_object(input_str)
+    if args.get("_environment_token"):
+        with _REPLAY_ENV_LOCK:
+            environment = _REPLAY_ENVIRONMENTS.pop(args["_environment_token"], None)
+        if environment is None:
+            return json.dumps({"status": "denied", "reason_code": "exec_environment_expired",
+                "reason": "The approved environment is no longer available; create a fresh action."})
+        args["env"] = environment
     return exec_start(
         command=str(args.get("command", "")),
         shell=str(args.get("shell", "auto")),

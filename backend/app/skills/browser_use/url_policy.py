@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.agent.run_context import current_interactive
+from app.agent.action_security.destination_policy import canonical_origin, ensure_same_origin
 
 
 def ip_is_blocked_target(ip: ipaddress._BaseAddress) -> bool:
@@ -59,7 +60,25 @@ def normalize_fetch_url(raw_url: str) -> str:
         parsed = urlparse(value)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         raise ValueError("URL must be an http or https URL.")
+    canonical_origin(value)  # Reject embedded credentials, malformed ports and hosts.
     return value
+
+
+def ensure_allowed_current_origin(
+    manager: Any, url: str, *, expected_origin: str | None = None,
+    interactive: bool | None = None,
+) -> str:
+    """Validate observed page/frame origin before a subsequent agent command.
+
+    This controls commands only; it does not contain requests initiated by pages.
+    """
+    origin = canonical_origin(url)
+    if expected_origin:
+        ensure_same_origin(origin, expected_origin)
+    _, error = browser_url_policy(manager, url, action="current_origin", interactive=interactive)
+    if error:
+        raise ValueError(str(error["reason_code"]))
+    return origin
 
 
 def fetch_domain_allowed(url: str, allowed_domains: list[str]) -> bool:

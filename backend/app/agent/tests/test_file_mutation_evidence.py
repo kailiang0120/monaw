@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import json
 import stat
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -132,6 +133,38 @@ def test_fingerprint_rejects_special_and_hard_linked_paths(tmp_path: Path):
 
     with pytest.raises(FingerprintError, match="regular"):
         fingerprint_path(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows birthtime/ctime API compatibility")
+@pytest.mark.parametrize("changed_during_read", [False, True])
+def test_windows_fingerprint_uses_birthtime_across_apis_and_still_detects_handle_changes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed_during_read: bool):
+    target = tmp_path / "windows-time-identity.txt"
+    target.write_bytes(b"stable file bytes")
+    original_fstat, original_lstat = os.fstat, os.lstat
+    calls = 0
+    def normalize(value, *, handle=False):
+        fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+        birthtime = getattr(value, "st_birthtime_ns", value.st_ctime_ns)
+        fields["st_birthtime_ns"] = birthtime
+        fields["st_ctime_ns"] = birthtime + 1000000 if handle else birthtime
+        return SimpleNamespace(**fields)
+    def fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        value = normalize(original_fstat(descriptor), handle=True)
+        if changed_during_read and calls > 1:
+            value.st_ctime_ns += 100
+        return value
+    monkeypatch.setattr(os, "fstat", fstat)
+    monkeypatch.setattr(os, "lstat", lambda *args, **kwargs: normalize(original_lstat(*args, **kwargs)))
+    if changed_during_read:
+        with pytest.raises(FingerprintError, match="changed while being read"):
+            fingerprint_path(target, include_bytes=True)
+    else:
+        fingerprint = fingerprint_path(target, include_bytes=True)
+        assert fingerprint.data == b"stable file bytes"
+        assert fingerprint.created_ns == getattr(original_lstat(target), "st_birthtime_ns", original_lstat(target).st_ctime_ns)
 
 
 def test_snapshot_store_publishes_private_bounded_manifest_and_binds_run_operation(tmp_path: Path):

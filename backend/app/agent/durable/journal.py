@@ -1733,6 +1733,20 @@ class Journal:
                 "user_message_ids": user_ids,
             }
 
+    def record_action_security(self, run_id: str, *, operation_id: str,
+                              owner_instance_id: str, attempt: int, payload: dict) -> None:
+        """Append an allowlisted policy decision under existing run ownership."""
+        with self.db.transaction() as conn:
+            run = self._require_run(conn, run_id)
+            self._assert_owner(run, owner_instance_id, attempt)
+            operation = conn.execute(
+                "SELECT attempt FROM run_operations WHERE run_id = ? AND operation_id = ?",
+                (run_id, operation_id),
+            ).fetchone()
+            if operation is None or int(operation["attempt"]) != attempt:
+                raise OperationNotFoundError(operation_id)
+            self._append_event(conn, run_id, "action.security", {**payload, "operation_id": operation_id}, at=_timestamp())
+
     def read_events(
         self, run_id: str, *, after_seq: int = 0, limit: int = 100
     ) -> EventPageDTO:

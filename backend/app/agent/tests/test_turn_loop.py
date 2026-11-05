@@ -1700,7 +1700,9 @@ def test_turn_loop_prompts_for_access_while_siblings_run_and_reruns_with_call_id
     def gated_tool() -> str:
         gated_call_ids.append(current_call_id())
         if len(gated_call_ids) == 1:
-            return json.dumps({"status": "pending_access_grant", "ticket_id": "grant-1"})
+            from app.agent.access_grant_broker import create_grant_ticket
+            ticket = create_grant_ticket(target_type="app", target_identifier="fixture-app")
+            return json.dumps({"status": "pending_access_grant", "ticket_id": ticket.id})
         return json.dumps({"status": "ok", "value": "granted"})
 
     def sibling_tool() -> str:

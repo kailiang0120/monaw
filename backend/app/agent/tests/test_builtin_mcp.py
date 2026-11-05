@@ -110,6 +110,14 @@ def test_mcp_diagnostics_list_hides_builtin_servers(monkeypatch):
 def runtime_settings(monkeypatch):
     settings_data = AgentSettings()
     monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: settings_data)
+    def controlled_context(_manager, name, arguments, upload_scope=None):
+        policy = builtin.builtin_tool_policy(builtin.CHROME_DEVTOOLS_SERVER, name)
+        action = {"exec":"execute_code", "launch_app":"navigate", "mutate":"upload"}.get(policy.action.value, policy.action.value)
+        return {"context_token":"controlled-test-context", "context_version":"document:1", "url":"https://example.com/",
+                "target":{"page_id":arguments.get("pageId", 1)}, "destination":arguments.get("url", "https://example.com/"),
+                "action_kind":action, "side_effect":"unknown" if action == "execute_code" else "none" if policy.read_only else "local_mutation",
+                "runtime_facts":{"target_verified":True,"context_verified":True}, "data_scope":upload_scope or {}}
+    monkeypatch.setattr("app.skills.mcp_bridge.registry._browser_context", controlled_context)
     clear_all_reflected_tools()
     yield settings_data
     clear_all_reflected_tools()
@@ -120,7 +128,7 @@ def _devtools_entries(*tool_names, calls=None):
     cfg = MCPServerConfig(name=builtin.CHROME_DEVTOOLS_SERVER, command="npx")
     manager = SimpleNamespace(
         reflected_tool_names=[],
-        call_tool_sync=lambda tool, args: calls.append((tool, args)) or json.dumps({"ok": True, "status": "ok"}),
+        call_tool_sync=lambda tool, args: calls.append((tool, {key:value for key,value in args.items() if key != "__monaw_authorization"})) or json.dumps({"ok": True, "status": "ok"}),
     )
     tools = [SimpleNamespace(name=name, description="Chrome browser tool", inputSchema={"type": "object"})
              for name in tool_names]
@@ -168,31 +176,65 @@ def test_devtools_interactions_run_without_prompt_but_not_unattended(runtime_set
         reset_current_interactive(token)
 
 
-def test_devtools_script_and_file_tools_prompt_with_table_risk(runtime_settings):
+def test_devtools_script_and_file_tools_prompt_with_table_risk(runtime_settings, tmp_path):
     calls = []
     entries = _devtools_entries("evaluate_script", "upload_file", calls=calls)
 
-    pending = json.loads(entries["evaluate_script"]["callable"](function="() => 1"))
+    pending = json.loads(entries["evaluate_script"]["callable"](pageId=1, function="() => 1"))
     assert pending["status"] == "pending_approval"
     assert get_ticket(pending["ticket_id"]).risk_level == "high"
 
-    upload = json.loads(entries["upload_file"]["callable"](uid="1_2", filePaths=["C:/x.txt"]))
+    report = tmp_path / "report.txt"
+    report.write_text("report")
+    runtime_settings.browser.upload_workspace_roots = [str(tmp_path)]
+    runtime_settings.permissions.blocked_roots = []
+    runtime_settings.permissions = merge_agent_settings(runtime_settings, {"permissions": {"mode": "full_access"}}).permissions
+    upload = json.loads(entries["upload_file"]["callable"](uid="1_2", filePaths=[str(report)]))
     assert upload["status"] == "pending_approval"
     assert get_ticket(upload["ticket_id"]).risk_level == "high"
 
     # Full access skips the trust prompts, except upload_file which always asks.
     runtime_settings.permissions = merge_agent_settings(
         runtime_settings, {"permissions": {"mode": "full_access"}}).permissions
-    assert json.loads(entries["evaluate_script"]["callable"](function="() => 1"))["ok"] is True
-    assert json.loads(entries["upload_file"]["callable"](uid="1_2", filePaths=["C:/x.txt"]))["status"] == "pending_approval"
+    assert json.loads(entries["evaluate_script"]["callable"](pageId=1, function="() => 1"))["ok"] is True
+    assert json.loads(entries["upload_file"]["callable"](uid="1_2", filePaths=[str(report)]))["status"] == "pending_approval"
     assert [tool for tool, _ in calls] == ["evaluate_script"]
 
 
-def test_devtools_tools_outside_the_table_use_keyword_classification(runtime_settings):
+@pytest.mark.parametrize(("mode", "prompts"), [("default", True), ("custom", True), ("auto_review", True), ("full_access", False)])
+def test_script_execution_keeps_its_capability_and_exact_target_in_each_mode(runtime_settings, mode, prompts):
+    runtime_settings.permissions = merge_agent_settings(runtime_settings, {
+        "permissions": {"mode": mode, **({"dangerous_actions_require_confirm": True} if mode == "custom" else {})},
+    }).permissions
+    calls = []
+    cfg = MCPServerConfig(name=builtin.CHROME_DEVTOOLS_SERVER, command="fixture",
+                          trusted_tools=["evaluate_script"], tool_risk_overrides={"evaluate_script": "low"})
+    manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda name, args: calls.append({key:value for key,value in args.items() if key != "__monaw_authorization"}) or '{"status":"ok"}')
+    [entry] = build_tool_entries(cfg, manager, [SimpleNamespace(
+        name="evaluate_script", description="Read-only DOM inspection", inputSchema={"type": "object"},
+        annotations={"readOnlyHint": True, "destructiveHint": False},
+    )])
+    assert entry["metadata"]["capability"] == "code_execution"
+    assert entry["metadata"]["mutates_state"] is True and entry["metadata"]["observation"] is False
+    assert entry["metadata"]["risk_level"] == "high"
+    assert json.loads(entry["callable"](function="() => document.title"))["reason_code"] == "script_target_required"
+    arguments = {"pageId": 7, "function": "() => document.title"}
+    result = json.loads(entry["callable"](**arguments))
+    if prompts:
+        ticket = get_ticket(result["ticket_id"])
+        assert result["status"] == "pending_approval"
+        assert ticket.payload["args"] == arguments
+        assert ticket.action_descriptor["action_kind"] == "execute_code"
+        assert calls == []
+    else:
+        assert result["status"] == "ok" and calls == [arguments]
+
+
+def test_devtools_tools_outside_the_table_are_blocked(runtime_settings):
     entry = _devtools_entries("install_extension")["install_extension"]
 
-    assert "action" not in entry["mcp_bridge"]["approval"]
-    assert entry["mcp_bridge"]["approval"]["reason"] == "open_world_tool"
+    assert entry["mcp_bridge"]["approval"]["action"] == "exec"
+    assert json.loads(entry["callable"]())["reason_code"] == "unclassified_builtin_tool"
 
 
 def test_repeat_guard_allows_a_third_identical_take_snapshot(runtime_settings):
@@ -205,7 +247,7 @@ def test_repeat_guard_allows_a_third_identical_take_snapshot(runtime_settings):
 
     snapshots = [decide(entries["take_snapshot"]["name"], index) for index in range(3)]
     assert all(decision.allowed for decision in snapshots)
-    assert snapshots[-1].risk == "low"
+    assert snapshots[-1].risk == "high"  # MCP display risk cannot be lowered by provider metadata.
 
     scripts = [decide(entries["evaluate_script"]["name"], index) for index in range(3)]
     assert scripts[-1].metadata["code"] == "repeated_tool_call_blocked"
@@ -288,6 +330,7 @@ def test_chrome_response_destinations_are_not_a_navigation_target_boundary(runti
 
 
 def test_devtools_reads_stay_available_to_unattended_runs(runtime_settings):
+    runtime_settings.browser.allowed_domains = ["example.com"]
     entries = _devtools_entries("list_pages", "take_snapshot")
     token = set_current_interactive(False)
     try:

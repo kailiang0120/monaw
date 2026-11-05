@@ -5,7 +5,7 @@ const path = require('node:path')
 const os = require('node:os')
 
 const root = path.resolve(process.env.MONAW_E2E_ROOT || '')
-if (!root.startsWith(path.resolve(os.tmpdir()) + path.sep) || !path.basename(root).startsWith('monaw-e2e-')) {
+if (!root.startsWith(fs.realpathSync.native(os.tmpdir()) + path.sep) || !path.basename(root).startsWith('monaw-e2e-')) {
   throw new Error('Application tests require a disposable monaw-e2e directory')
 }
 const appData = path.join(root, 'appdata')

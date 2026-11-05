@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.runtime_paths import RUNTIME_DIR
 from app.agent.ui_events import publish_ui_event
+from app.agent.action_identity import bind_ticket, ticket_identity
 from app.agent.run_context import (
     current_control_session_id,
     current_conversation_id,
@@ -70,6 +71,17 @@ class ApprovalTicket(BaseModel):
     interactive: bool = True
     action_type: str = ""
     tool_name: str = ""
+    action_id: str = ""
+    parent_action_id: str = ""
+    parent_tool_name: str = ""
+    root_action_id: str = ""
+    root_tool_name: str = ""
+    run_id: str = ""
+    operation_id: str = ""
+    authorization_binding: str = ""
+    approval_material_hash: str = ""
+    action_descriptor: dict[str, Any] = Field(default_factory=dict)
+    human_only: bool = False
     target_path: str = ""
     target_app: str = ""
     risk_level: str = "medium"
@@ -95,6 +107,16 @@ class ApprovalTicket(BaseModel):
         raw = json.dumps(self.payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
+    def compute_material_hash(self) -> str:
+        fields = {key: getattr(self, key) for key in (
+            "id", "conversation_id", "control_session_id", "execution_source", "principal_id",
+            "permission_profile_id", "interactive", "tool_name", "action_type", "target_path", "target_app",
+            "action_id", "parent_action_id", "parent_tool_name", "root_action_id", "root_tool_name",
+            "run_id", "operation_id", "authorization_binding", "action_descriptor", "human_only",
+            "payload_hash", "expires_at",
+        )}
+        return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
@@ -109,7 +131,7 @@ _all_tickets: dict[str, ApprovalTicket] = {}
 def _is_expired(ticket: ApprovalTicket) -> bool:
     try:
         return datetime.fromisoformat(ticket.expires_at) <= datetime.now(timezone.utc)
-    except ValueError:
+    except (ValueError, TypeError):
         return True
 
 
@@ -256,9 +278,15 @@ def create_ticket(
     reason: str = "",
     action_description: str = "",
     payload: dict[str, Any] | None = None,
+    run_id: str = "",
+    operation_id: str = "",
+    authorization_binding: str = "",
+    action_descriptor: dict[str, Any] | None = None,
+    human_only: bool = False,
 ) -> ApprovalTicket:
     """Create and persist a new pending approval ticket."""
     ticket = ApprovalTicket(
+        **ticket_identity(tool_name),
         conversation_id=conversation_id or current_conversation_id(),
         control_session_id=control_session_id or current_control_session_id(),
         execution_source=execution_source or current_execution_source(),
@@ -273,8 +301,16 @@ def create_ticket(
         reason=reason,
         action_description=action_description,
         payload=payload or {},
+        run_id=run_id,
+        operation_id=operation_id,
+        authorization_binding=authorization_binding,
+        action_descriptor=action_descriptor or {},
+        human_only=human_only,
     )
     ticket.payload_hash = ticket.compute_hash()
+    if ticket.authorization_binding:
+        ticket.approval_material_hash = ticket.compute_material_hash()
+    bind_ticket(ticket)
     superseded_ids: list[str] = []
     with _state_lock:
         for existing in list(_pending_index.values()):
@@ -285,6 +321,7 @@ def create_ticket(
                 and existing.execution_source == ticket.execution_source
                 and existing.tool_name == ticket.tool_name
                 and existing.action_type == ticket.action_type
+                and existing.root_action_id == ticket.root_action_id
             ):
                 existing.status = TicketStatus.SUPERSEDED
                 existing.superseded_by = ticket.id
@@ -340,7 +377,7 @@ def ticket_validation_error(
     try:
         if datetime.fromisoformat(ticket.expires_at) <= datetime.now(timezone.utc):
             return "ticket is expired"
-    except ValueError:
+    except (ValueError, TypeError):
         return "ticket expiry is invalid"
     if expected_session_id and ticket.control_session_id != expected_session_id:
         return "ticket belongs to another control session"
@@ -350,6 +387,13 @@ def ticket_validation_error(
         return "ticket belongs to another execution source"
     if ticket.compute_hash() != ticket.payload_hash:
         return "ticket payload hash mismatch"
+    from app.agent.run_context import current_principal_id, current_permission_profile_id
+    if ticket.principal_id != current_principal_id():
+        return "ticket belongs to another principal"
+    if ticket.permission_profile_id != current_permission_profile_id():
+        return "ticket permission profile changed"
+    if ticket.authorization_binding and ticket.approval_material_hash != ticket.compute_material_hash():
+        return "ticket action binding changed"
     return ""
 
 
@@ -360,6 +404,8 @@ def apply_auto_review(ticket_id: str, snapshot: dict, decision: str, reason: str
     with _state_lock:
         ticket = _all_tickets.get(ticket_id)
         if ticket is None or ticket.model_dump() != snapshot or ticket_validation_error(ticket):
+            return None
+        if ticket.human_only and decision == "approve":
             return None
         ticket.review_decision = decision
         ticket.review_reason = reason

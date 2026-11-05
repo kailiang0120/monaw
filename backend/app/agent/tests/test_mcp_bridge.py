@@ -106,6 +106,8 @@ def _run_loop(loop: asyncio.AbstractEventLoop):
 
 
 def _settings_with_servers(servers: list[dict]) -> SimpleNamespace:
+    from app.agent import controller_policy
+    controller_policy._load_runtime_settings().mcp.servers = [MCPServerConfig.model_validate(cfg) for cfg in servers]
     return SimpleNamespace(mcp=SimpleNamespace(servers=servers))
 
 
@@ -128,6 +130,9 @@ def _prepare_mcp_durable_operation(monkeypatch, tool_name: str):
 
         def transition_operation(self, _run_id, _operation_id, *, to_status, **_kwargs):
             self.transitions.append(to_status)
+
+        def record_action_security(self, *_args, **_kwargs):
+            pass
 
     monkeypatch.setattr(recovery, "assert_run_dispatch_allowed", lambda _run: None)
     journal = Journal()
@@ -190,7 +195,7 @@ def test_build_tool_entries_prefixes_names_uses_affinity_and_maps_original_tool(
     assert manager.reflected_tool_names == ["mcp__filesystem__list_directory"]
 
 
-def test_read_like_mcp_tool_runs_without_approval():
+def test_read_like_mcp_tool_requires_review_without_explicit_trust():
     cfg = MCPServerConfig(name="filesystem", command="npx")
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda _tool, _args: "{}")
     tool = SimpleNamespace(
@@ -203,7 +208,8 @@ def test_read_like_mcp_tool_runs_without_approval():
     entry = build_tool_entries(cfg, manager, [tool])[0]
     pending = json.loads(entry["callable"](path=r"C:\Repo"))
 
-    assert pending == {}
+    assert pending["status"] == "pending_approval"
+    assert pending["human_only"] is True
     assert entry["mcp_bridge"]["approval"]["reason"] == "untrusted_read_tool"
 
 
@@ -227,7 +233,7 @@ def test_unknown_reflected_tool_requires_approval_and_resumes_original_call():
     pending = json.loads(entry["callable"](value="abc"))
 
     assert pending["status"] == "pending_approval"
-    assert pending["reason"] == "unknown_tool_risk"
+    assert pending["human_only"] is True
     assert calls == []
 
     ticket = get_ticket(pending["ticket_id"])
@@ -248,7 +254,7 @@ def test_unknown_reflected_tool_requires_approval_and_resumes_original_call():
         (
             "fixture",
             "get_credential_status",
-            {"trusted_tools": ["get_credential_status"]},
+            {},
             {"mode": "default"},
         ),
         (
@@ -273,6 +279,12 @@ def test_local_mcp_approval_ticket_is_attested_as_preflight(
         reflected_tool_names=[],
         call_tool_sync=lambda *_args: calls.append("provider") or "{}",
     )
+    if server_name == "chrome-devtools":
+        monkeypatch.setattr("app.skills.mcp_bridge.registry._browser_context", lambda *_a, **_kw: {
+            "context_token": "trusted-fixture", "context_version": "document:1", "url": "https://example.com/",
+            "action_kind": "click", "side_effect": "local_mutation", "target": {"uid": "1"},
+            "runtime_facts": {"target_verified": True, "context_verified": True},
+        })
     entry = build_tool_entries(
         MCPServerConfig(name=server_name, command="fixture", **cfg),
         manager,
@@ -292,7 +304,7 @@ def test_local_mcp_approval_ticket_is_attested_as_preflight(
                 operation_execution=operation,
             )
         )
-        assert result.status == "pending_approval"
+        assert result.status == "pending_approval", result.output
         assert operation.note_pending_preflight(result.output)
         assert operation.trusted_pending_resume
         operation.preflight_rejected()
@@ -321,7 +333,7 @@ def test_provider_pending_payload_after_effect_is_not_local_preflight(
         ),
     )
     entry = build_tool_entries(
-        MCPServerConfig(name="remote", command="fixture"),
+        MCPServerConfig(name="remote", command="fixture", trusted_tools=["transform"]),
         manager,
         [SimpleNamespace(name="transform", description="Transform", inputSchema={"type": "object"})],
     )[0]
@@ -369,7 +381,7 @@ def test_mcp_attestation_is_consumed_before_approved_remote_replay(
         ),
     )
     cfg = MCPServerConfig(
-        name="fixture", command="fixture", trusted_tools=["get_credential_status"]
+        name="fixture", command="fixture"
     )
     entry = build_tool_entries(
         cfg,
@@ -471,7 +483,7 @@ def test_destructive_tool_stays_disabled_even_with_read_only_hint():
 def test_full_access_executes_mcp_tools_without_approval_and_preserves_risk(_runtime_settings, tool_name):
     _runtime_settings.permissions = merge_agent_settings(_runtime_settings, {"permissions": {"mode": "full_access"}}).permissions
     calls = []
-    cfg = MCPServerConfig(name="Chrome", command="npx")
+    cfg = MCPServerConfig(name="Chrome", command="npx", trusted_tools=[tool_name])
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda tool, args: calls.append((tool, args)) or '{"ok":true}')
     tool = SimpleNamespace(name=tool_name, description="Control browser", inputSchema={"type": "object"})
     entry = build_tool_entries(cfg, manager, [tool])[0]
@@ -481,7 +493,7 @@ def test_full_access_executes_mcp_tools_without_approval_and_preserves_risk(_run
 
 
 def test_mcp_permission_mode_changes_apply_to_already_registered_tools(_runtime_settings):
-    cfg = MCPServerConfig(name="Chrome", command="npx")
+    cfg = MCPServerConfig(name="Chrome", command="npx", trusted_tools=["transform"])
     calls = []
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda tool, args: calls.append(tool) or '{"ok":true}')
     entry = build_tool_entries(cfg, manager, [SimpleNamespace(name="transform", description="Click a button")])[0]
@@ -500,7 +512,7 @@ def test_custom_mcp_confirmations_follow_matching_action_switch(_runtime_setting
     assert _runtime_settings.permissions.mode == "custom"
     calls = []
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda tool, args: calls.append(tool) or '{"ok":true}')
-    entry = build_tool_entries(MCPServerConfig(name="Chrome", command="npx"), manager, [SimpleNamespace(name=tool_name, description="Browser action")])[0]
+    entry = build_tool_entries(MCPServerConfig(name="Chrome", command="npx", trusted_tools=[tool_name]), manager, [SimpleNamespace(name=tool_name, description="Browser action")])[0]
     assert json.loads(entry["callable"]())["status"] == "pending_approval"
     _runtime_settings.permissions.confirmations.__setattr__(switch, False)
     assert json.loads(entry["callable"]())["ok"] is True
@@ -511,7 +523,7 @@ def test_mcp_deletion_follows_full_access_and_custom_rules(_runtime_settings):
     _runtime_settings.permissions = merge_agent_settings(_runtime_settings, {"permissions": {"mode": "full_access"}}).permissions
     calls = []
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda *_: calls.append("delete") or '{"ok":true}')
-    entry = build_tool_entries(MCPServerConfig(name="files", command="npx"), manager, [SimpleNamespace(name="delete_file", description="Delete")])[0]
+    entry = build_tool_entries(MCPServerConfig(name="files", command="npx", trusted_tools=["delete_file"]), manager, [SimpleNamespace(name="delete_file", description="Delete")])[0]
     assert json.loads(entry["callable"]())["ok"] is True
     assert calls == ["delete"]
     _runtime_settings.permissions.mode = "custom"
@@ -539,7 +551,7 @@ def test_full_access_runs_mcp_refresh_and_reconnect_without_approval(_runtime_se
     register_tools(registry, _settings_with_servers([{"name": "Chrome", "enabled": True, "command": "npx"}]))
     calls = []
     monkeypatch.setattr(mcp_tools_module, "_refresh_server_tools", lambda registry, cfg: calls.append("refresh") or {"ok": True})
-    monkeypatch.setattr(mcp_tools_module, "reconnect_runtime_mcp_server", lambda name: calls.append("reconnect") or {"connected": True})
+    monkeypatch.setattr(mcp_tools_module, "reconnect_runtime_mcp_server", lambda name, **_kw: calls.append("reconnect") or {"connected": True})
     assert json.loads(registry.get_tool("mcp_refresh_tools")["callable"](server_name="Chrome"))["ok"] is True
     assert json.loads(registry.get_tool("mcp_reconnect_server")["callable"](server_name="Chrome"))["ok"] is True
     assert calls == ["refresh", "reconnect", "refresh"]
@@ -577,7 +589,7 @@ def test_changed_mcp_schema_invalidates_existing_approval():
     resumed = resume_approved_ticket(approved)
 
     assert resumed.status.value == "failed"
-    assert "schema changed" in (resumed.execution_result or "")
+    assert "mcp_schema_changed" in (resumed.execution_result or "")
     assert calls == []
 
 
@@ -719,6 +731,7 @@ def test_register_tools_adds_entries_for_enabled_servers(monkeypatch):
                     "enabled": True,
                     "command": "npx",
                     "args": ["-y", "@modelcontextprotocol/server-filesystem", r"C:\Repo"],
+                    "trusted_tools": ["list_directory"],
                 }
             ]
         ),

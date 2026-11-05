@@ -29,6 +29,10 @@ from app.agent.run_context import (
     set_current_control_session_id,
     set_current_conversation_id,
     set_current_execution_source,
+    set_current_principal_id,
+    reset_current_principal_id,
+    set_current_permission_profile_id,
+    reset_current_permission_profile_id,
 )
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.iteration_budget import IterationBudget
@@ -1000,6 +1004,8 @@ def test_pause_revision_conflict_and_pending_approval_invalidation(runs_api_cont
         (reset_current_conversation_id, set_current_conversation_id(context["conversation_id"])),
         (reset_current_control_session_id, set_current_control_session_id(OLD_SESSION_ID)),
         (reset_current_execution_source, set_current_execution_source("desktop")),
+        (reset_current_principal_id, set_current_principal_id(PROFILE_ID)),
+        (reset_current_permission_profile_id, set_current_permission_profile_id("desktop-current")),
     ]
 
     async def wait_until_pause():

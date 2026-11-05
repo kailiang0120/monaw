@@ -36,10 +36,12 @@ def publish_ui_event(event: str, data: dict[str, Any] | None = None) -> UiEvent:
     """Publish a small invalidation event to connected renderers."""
 
     global _next_seq
-    payload = UiEvent(seq=0, event=event, data=dict(data or {}))
+    from app.agent.action_security.sensitive_data import redact_sensitive
+    safe_data = redact_sensitive(dict(data or {}))
+    payload = UiEvent(seq=0, event=event, data=safe_data)
     with _lock:
         _next_seq += 1
-        payload = UiEvent(seq=_next_seq, event=event, data=dict(data or {}))
+        payload = UiEvent(seq=_next_seq, event=event, data=safe_data)
         _history.append(payload)
         subscribers = list(_subscribers)
 

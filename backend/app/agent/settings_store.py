@@ -182,6 +182,8 @@ class MCPServerConfig(BaseModel):
     reconnect_on_unhealthy: bool = True
     allow_list: list[str] = Field(default_factory=list)
     trusted_tools: list[str] = Field(default_factory=list)
+    # Exact observable HTTP(S) origins. Empty keeps the configured trust boundary.
+    allowed_destinations: list[str] = Field(default_factory=list)
     tool_risk_overrides: dict[str, Literal["low", "medium", "high"]] = Field(default_factory=dict)
     description: str = ""
 
@@ -227,6 +229,10 @@ class BrowserUseSettings(BaseModel):
     # Local port the extension connects to.
     extension_port: int = Field(8436, ge=1024, le=65535)
     allowed_domains: list[str] = Field(default_factory=list)
+    # Empty uses the current conversation workspace; never the whole filesystem.
+    upload_workspace_roots: list[str] = Field(default_factory=list)
+    sensitive_paths: list[str] = Field(default_factory=list)
+    max_upload_bytes: int = Field(512 * 1024 * 1024, ge=1, le=4 * 1024 * 1024 * 1024)
 
 
 class MemorySettings(BaseModel):

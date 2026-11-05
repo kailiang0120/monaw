@@ -6,7 +6,8 @@ import pytest
 from app.skills.browser_use.extension.keys import key_events, parse_key_combo
 from app.skills.browser_use.extension.dom_inspection import ACTION_TARGET, READ_ELEMENT
 from app.skills.browser_use.extension.session import ToolError
-from app.skills.browser_use.extension.toolset import BrowserTools
+from app.skills.browser_use.extension.toolset import BrowserTools, _TARGET_FACTS
+from app.skills.browser_use.extension.page_state import PAGE_STATE
 from app.skills.browser_use.extension.tools_schema import TOOL_DEFINITIONS, TOOL_NAMES
 from app.skills.mcp_bridge.builtin import BUILTIN_TOOL_POLICIES, CHROME_DEVTOOLS_SERVER
 
@@ -75,9 +76,13 @@ class FakeChrome:
         cdp, args = params["method"], params["params"]
         self.calls.append((cdp, args))
         if cdp == "Page.getFrameTree":
-            return {"frameTree": {"frame": {"id": "F1", "loaderId": self.loader}}}
+            return {"frameTree": {"frame": {"id": "F1", "loaderId": self.loader, "url":self.tabs[0]["url"]}}}
+        if cdp == "Page.createIsolatedWorld":
+            return {"executionContextId":1}
         if cdp == "Accessibility.getFullAXTree":
             return {"nodes": self.tree}
+        if cdp == "Accessibility.getPartialAXTree":
+            return {"nodes":[node for node in self.tree if node.get("backendDOMNodeId") == args["backendNodeId"]]}
         if cdp == "DOM.getContentQuads":
             if args["backendNodeId"] in self.hidden_nodes:
                 return {"quads": [[5, 5, 5, 5, 5, 5, 5, 5]]}  # Visually hidden: no area.
@@ -86,6 +91,10 @@ class FakeChrome:
             return {"object": {"objectId": f"obj-{args['backendNodeId']}"}}
         if cdp == "Runtime.callFunctionOn":
             function = args["functionDeclaration"]
+            if "el.ownerDocument.activeElement === el" in function:
+                return {"result":{"value":True}}
+            if function == _TARGET_FACTS:
+                return {"result":{"value":{"tag":"input", "type":"text", "attached":True, "frame_url":self.tabs[0]["url"]}}}
             if function in {READ_ELEMENT, ACTION_TARGET}:
                 state = self.element_states[0]
                 if len(self.element_states) > 1:
@@ -95,6 +104,10 @@ class FakeChrome:
                 return {"result": {"value": self.label_point}}
             return {"result": {"value": self.fill_kind if "el.select" in function else 42}}
         if cdp == "Runtime.evaluate":
+            if args["expression"] == PAGE_STATE:
+                return {"result":{"value":{"document":self.loader, "revision":0, "url":self.tabs[0]["url"], "width":800, "height":600, "scale":1}}}
+            if args["expression"] == "location.href":
+                return {"result":{"value":self.tabs[0]["url"]}}
             if args["expression"] == "globalThis":
                 return {"result": {"objectId": "global"}}
             return {"result": {"value": "Hello Welcome"}}
@@ -285,7 +298,9 @@ def test_close_page_refuses_the_last_page():
 
 def test_screenshot_returns_an_image_block():
     tools, chrome = _tools()
-    output = _run(tools, "take_screenshot")
+    # A deliberately non-image payload still exercises ordinary screenshot
+    # transport without advertising a coordinate binding.
+    output = _run(tools, "take_screenshot", fullPage=True)
     assert output.images == [{"data": "aGVsbG8=", "mimeType": "image/png"}]
     assert ("tabs.activate", {"tabId": 7}) in chrome.calls
 
@@ -293,7 +308,7 @@ def test_screenshot_returns_an_image_block():
 def test_wait_for_and_evaluate_script():
     tools, chrome = _tools()
     assert "found" in _run(tools, "wait_for", text=["Welcome"]).lines[0]
-    output = _run(tools, "evaluate_script", function="() => 42")
+    output = _run(tools, "evaluate_script", pageId=1, function="() => 42")
     assert output.lines == ["Script ran on page and returned:\n```json\n42\n```"]
 
 
@@ -351,7 +366,7 @@ def test_upload_requires_existing_absolute_files(tmp_path):
         _run(tools, "upload_file", uid="1_5", filePaths=["relative.txt"])
     upload = tmp_path / "a.txt"
     upload.write_text("x", encoding="utf-8")
-    assert "File uploaded" in _run(tools, "upload_file", uid="1_5", filePaths=[str(upload)]).lines[0]
+    assert "Network upload completion has not been verified" in _run(tools, "upload_file", uid="1_5", filePaths=[str(upload)]).lines[0]
     assert ("DOM.setFileInputFiles", {"files": [str(upload)], "backendNodeId": 13}) in chrome.calls
 
 

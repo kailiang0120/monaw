@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app.agent.approval_review import AutoReviewState
+from app.agent.action_identity import action_invocation
+from app.agent.action_security.sensitive_data import public_tool_arguments, redact_sensitive
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.durable.operation_execution import prepare_tool_operation
 from app.agent.harness.tool_batch import ActiveToolCall, ToolBatchLedger, TrackedToolCall
@@ -42,6 +44,7 @@ class PreparedToolCall(TrackedToolCall):
     policy_decision: ToolPolicyDecision
     obs_tool_started_at: float = 0.0
     rejection: GuardedToolResult | None = None
+    action_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -187,6 +190,11 @@ class ToolBatchRunner:
 
 
     async def _invoke_prepared_tool(self, prepared: PreparedToolCall) -> ToolCallResult:
+        with action_invocation(prepared.tool_name, prepared.arguments) as invocation:
+            prepared.action_id = invocation.action_id
+            return await self._invoke_owned_tool(prepared)
+
+    async def _invoke_owned_tool(self, prepared: PreparedToolCall) -> ToolCallResult:
         """Invoke one preflighted tool and wait on any gate it raises.
 
         Waiting here instead of after the whole batch shows the prompt
@@ -362,8 +370,9 @@ class ToolBatchRunner:
         self.emit({
             "event": "tool_end",
             "data": {
+                "action_id": prepared.action_id,
                 "tool": tool_name,
-                "output": raw_tool_output,
+                "output": redact_sensitive(raw_tool_output),
                 "status": status,
                 "call_id": call_id,
                 "risk": policy_decision.risk,
@@ -406,8 +415,8 @@ class ToolBatchRunner:
         self.history.append(
             {
                 "tool_name": tool_name,
-                "input": json.dumps(arguments, ensure_ascii=False),
-                "output": raw_tool_output,
+                "input": json.dumps(public_tool_arguments(tool_name, arguments), ensure_ascii=False),
+                "output": redact_sensitive(raw_tool_output),
                 "status": "complete" if status == "ok" else status,
             }
         )

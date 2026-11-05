@@ -4,7 +4,8 @@ import importlib.util
 import json
 from typing import Any
 
-from app.agent.approval_broker import create_ticket
+from app.agent.action_security import attest_action, authorize_action
+from app.agent.action_security.sensitive_data import redact_sensitive
 from app.agent.execution_resume import register_executor
 from app.agent.settings_store import MCPServerConfig
 
@@ -13,10 +14,13 @@ from .builtin import builtin_mcp_servers, is_builtin_server
 from .connection import (
     ensure_mcp_manager,
     get_mcp_runtime_diagnostics,
+    validate_mcp_endpoint,
     reconnect_mcp_server as reconnect_runtime_mcp_server,
 )
 from .registry import (
     _runtime_approval_decision,
+    _server_identity,
+    _schema_hash,
     build_tool_entries,
     clear_reflected_tools_for_server,
     get_reflected_tool_map,
@@ -24,7 +28,7 @@ from .registry import (
 
 
 def _json(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False)
+    return json.dumps(redact_sensitive(payload), ensure_ascii=False)
 
 
 def _parse_input(input_str: str) -> dict[str, Any]:
@@ -140,50 +144,43 @@ def _mcp_status(settings) -> str:
 
 
 def register_tools(registry, settings) -> None:
+    def _control_configs():
+        # Reload the backend settings at both approval and dispatch, rather
+        # than launching from the runtime's potentially stale tool closure.
+        from app.agent import controller_policy
+        return _iter_enabled_servers(controller_policy._load_runtime_settings())
+
     def _control_approval(tool_name: str, action: str, reason: str, args: dict[str, Any]) -> str:
         decision = _runtime_approval_decision(
             {"requires_approval": True, "risk": "medium", "reason": reason}, "launch_mcp_server",
         )
         if decision.get("blocked"):
             return _json({"status": "blocked", "reason": decision["reason"], "reason_code": decision["reason_code"]})
-        if not decision["requires_approval"]:
-            if tool_name == "mcp_refresh_tools":
-                return _raw_mcp_refresh_tools(**args)
-            return _raw_mcp_reconnect_server(**args)
-        target = str(args.get("server_name", "") or "all")
-        payload = {"input_str": json.dumps(args, ensure_ascii=False, sort_keys=True), "args": args}
-        ticket = create_ticket(
-            action_type="mcp_control",
-            tool_name=tool_name,
-            target_app=target,
-            risk_level="medium",
-            reason=reason,
-            action_description=action,
-            payload=payload,
-        )
-        # Bind only the local control ticket produced here. The approval gate
-        # must not infer preflight from a reflected provider's output.
-        from app.agent.durable.operation_execution import current_operation_execution
-
-        operation_execution = current_operation_execution()
-        if operation_execution is not None:
-            operation_execution.attest_local_approval_preflight(
-                ticket,
-                expected_tool_name=tool_name,
-                expected_action_type="mcp_control",
-                expected_target_app=target,
-                expected_payload=payload,
-            )
-        return _json(
-            {
-                "status": "pending_approval",
-                "ticket_id": ticket.id,
-                "action": action,
-                "reason": reason,
-                "tool": tool_name,
-                "server_name": args.get("server_name", ""),
-            }
-        )
+        configs = _control_configs()
+        target_name = str(args.get("server_name") or "")
+        if target_name:
+            configs = [cfg for cfg in configs if cfg.name == target_name]
+        # Dispatch the same private snapshot that is hashed for authorization;
+        # a second settings read could select a different launch command.
+        configs = [cfg.model_copy(deep=True) for cfg in configs]
+        try:
+            for cfg in configs:
+                validate_mcp_endpoint(cfg)
+        except ValueError:
+            return _json({"status": "blocked", "reason_code": "mcp_destination_not_allowed",
+                          "error": "The configured MCP endpoint is outside its destination policy."})
+        identities = {cfg.name: _server_identity(cfg) for cfg in configs}
+        descriptor = attest_action(tool_name=tool_name, action_kind="mcp_control", parameters=args,
+            target={"server_id": target_name or "all", "configurations": identities},
+            destination=",".join(cfg.url for cfg in configs if cfg.url), context_version=_schema_hash(identities),
+            side_effect="unknown", runtime_facts={"target_verified": bool(configs), "context_verified": True,
+                "explicit_tool_trust": True, "adapter_permission_requires_confirmation": decision["requires_approval"]})
+        result = authorize_action(descriptor, replay_payload={"args": args})
+        if result is not None:
+            return _json(result)
+        if tool_name == "mcp_refresh_tools":
+            return _raw_mcp_refresh_tools(configs)
+        return _raw_mcp_reconnect_server(configs[0])
 
     def mcp_status() -> str:
         """Return runtime status for configured and active MCP servers."""
@@ -192,23 +189,19 @@ def register_tools(registry, settings) -> None:
     def mcp_list_tools(server_name: str = "") -> str:
         mapping = get_reflected_tool_map()
         tools = [
-            {"reflected_name": reflected_name, **details}
+            {"reflected_name": reflected_name, **{key: details[key] for key in
+                ("server_name", "original_tool_name", "annotations", "approval", "schema_hash") if key in details}}
             for reflected_name, details in sorted(mapping.items())
             if not server_name or details.get("server_name") == server_name
         ]
         return _json({"ok": True, "server_name": server_name, "tools": tools})
 
-    def _raw_mcp_refresh_tools(server_name: str = "") -> str:
-        configs = _iter_enabled_servers(settings)
-        if server_name:
-            configs = [cfg for cfg in configs if cfg.name == server_name]
-            if not configs:
-                return _json({"ok": False, "status": "error", "error": f"MCP server '{server_name}' not found"})
+    def _raw_mcp_refresh_tools(configs: list[MCPServerConfig]) -> str:
         results = [_refresh_server_tools(registry, cfg) for cfg in configs]
         return _json({"ok": all(item.get("ok") for item in results), "servers": results})
 
     def mcp_refresh_tools(server_name: str = "") -> str:
-        configs = _iter_enabled_servers(settings)
+        configs = _control_configs()
         if server_name:
             configs = [cfg for cfg in configs if cfg.name == server_name]
             if not configs:
@@ -222,16 +215,15 @@ def register_tools(registry, settings) -> None:
             {"server_name": server_name},
         )
 
-    def _raw_mcp_reconnect_server(server_name: str) -> str:
-        status = reconnect_runtime_mcp_server(server_name)
+    def _raw_mcp_reconnect_server(cfg: MCPServerConfig) -> str:
+        status = reconnect_runtime_mcp_server(cfg.name, expected_config=cfg)
         if status is None:
-            return _json({"ok": False, "status": "error", "error": f"MCP server '{server_name}' not found"})
-        cfg = next((item for item in _iter_enabled_servers(settings) if item.name == server_name), None)
-        refreshed = _refresh_server_tools(registry, cfg) if cfg is not None else {}
-        return _json({"ok": True, "status": status, "refresh": refreshed})
+            return _json({"ok": False, "status": "error", "error": f"MCP server '{cfg.name}' not found"})
+        refreshed = _refresh_server_tools(registry, cfg)
+        return _json({"ok": True, "status": "ok", "server": status, "refresh": refreshed})
 
     def mcp_reconnect_server(server_name: str) -> str:
-        if not any(cfg.name == server_name for cfg in _iter_enabled_servers(settings)):
+        if not any(cfg.name == server_name for cfg in _control_configs()):
             return _json({"ok": False, "status": "error", "error": f"MCP server '{server_name}' not found"})
         return _control_approval(
             "mcp_reconnect_server",
@@ -242,11 +234,11 @@ def register_tools(registry, settings) -> None:
 
     register_executor(
         "mcp_refresh_tools",
-        lambda input_str: _raw_mcp_refresh_tools(server_name=str(_parse_input(input_str).get("server_name", "") or "")),
+        lambda input_str: mcp_refresh_tools(server_name=str(_parse_input(input_str).get("server_name", "") or "")),
     )
     register_executor(
         "mcp_reconnect_server",
-        lambda input_str: _raw_mcp_reconnect_server(server_name=str(_parse_input(input_str).get("server_name", "") or "")),
+        lambda input_str: mcp_reconnect_server(server_name=str(_parse_input(input_str).get("server_name", "") or "")),
     )
 
     registry.extend(

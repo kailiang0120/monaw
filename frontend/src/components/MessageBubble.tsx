@@ -1,6 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { ActionApprovalCard } from './ActionApprovalCard'
+import { BrowserVerificationStatus } from './BrowserVerificationStatus'
+import { browserActionOutcome } from '../lib/browserAction'
 import {
   AlertTriangle,
   Check,
@@ -601,6 +604,11 @@ function toolInputSummary(toolCall: ToolCall): string {
   try {
     const parsed = JSON.parse(raw)
     if (typeof parsed === 'object' && parsed !== null) {
+      if (toolCall.tool.startsWith('mcp__chrome-devtools__')) {
+        // Keep typed values, script bodies and URL credentials out of row titles.
+        return [typeof parsed.pageId === 'number' ? `Tab ${parsed.pageId}` : '',
+          typeof parsed.uid === 'string' ? `Element ${parsed.uid}` : ''].filter(Boolean).join(' · ')
+      }
       const preview = parsed.command || parsed.cmd || parsed.code || parsed.url || parsed.path || parsed.query || parsed.content || parsed.selector || parsed.text || parsed.action || ''
       if (typeof preview === 'string' && preview.length > 0) {
         return preview.replace(/\s+/g, ' ').trim()
@@ -707,6 +715,7 @@ function ToolCallScroller({
         const label = toolCallActivityLabel(toolCall)
         const environment = toolCall.output !== undefined ? toolEnvironment(toolCall.output) : undefined
         const filePreview = isExpanded ? readFileChangePreview(toolCall.output) : null
+        const outcome = browserActionOutcome(toolCall.tool, toolCall.output)
 
         return (
             <li
@@ -725,7 +734,7 @@ function ToolCallScroller({
                   : <Wrench size={13} className="shrink-0 text-neutral-500" aria-hidden />}
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-400">{label}</span>
                 {callRanOnHost(toolCall) && <HostBadge />}
-                <ToolTabStatusIcon status={status} />
+                {outcome && !toolCall.pending ? <BrowserVerificationStatus outcome={outcome} /> : <ToolTabStatusIcon status={status} />}
                 <span className="shrink-0 text-neutral-600" aria-hidden>
                   {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 </span>
@@ -742,6 +751,7 @@ function ToolCallScroller({
                   {toolCall.output !== undefined ? (
                     <>
                       <ExecutionEnvironment environment={environment} />
+                      <BrowserVerificationStatus outcome={outcome} detail />
                       {filePreview && <FileChangePreview preview={filePreview} />}
                       <ToolPayloadInline label="Result" value={toolCall.output} />
                     </>
@@ -810,25 +820,30 @@ function toolEnvironment(value: string): Environment | undefined {
 
 function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
   const [localStatus, setLocalStatus] = useState<'idle' | 'approving' | 'rejecting' | 'approved' | 'rejected'>('idle')
+  const [error, setError] = useState('')
   const filePreview = useMemo(() => normalizeFileChangePreview(notice.file_preview), [notice.file_preview])
 
   const handleApprove = async () => {
     setLocalStatus('approving')
+    setError('')
     try {
       await approveTicket(notice.ticket_id)
       setLocalStatus('approved')
     } catch {
       setLocalStatus('idle')
+      setError('Could not approve. The request is still pending; try again.')
     }
   }
 
   const handleReject = async () => {
     setLocalStatus('rejecting')
+    setError('')
     try {
       await rejectTicket(notice.ticket_id)
       setLocalStatus('rejected')
     } catch {
       setLocalStatus('idle')
+      setError('Could not reject. The request is still pending; try again.')
     }
   }
 
@@ -851,6 +866,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           <span className="font-medium">{label}</span>
           <p className="mt-1 text-neutral-400">{notice.action}</p>
           <ExecutionEnvironment environment={notice.execution_environment} />
+          <ActionApprovalCard action={notice.action_descriptor} />
           {(denied || automatic) && notice.reason && <p className="mt-1 text-neutral-300">{notice.reason}</p>}
         </div>
       </div>
@@ -865,6 +881,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           <p className="text-xs font-semibold text-amber-200">Approval required</p>
           <p className="mt-1 text-[11px] leading-relaxed text-neutral-200">{notice.action}</p>
           <ExecutionEnvironment environment={notice.execution_environment} />
+          <ActionApprovalCard action={notice.action_descriptor} />
           {notice.reason && (
             <p className="mt-1 text-[10px] text-neutral-500">{notice.reason}</p>
           )}
@@ -875,6 +892,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           <FileChangePreview preview={filePreview} />
         </div>
       )}
+      {error && <p role="alert" className="mb-3 pl-7 text-xs text-red-300">{error}</p>}
       <div className="flex items-center gap-2 pl-7">
         <button
           type="button"
@@ -883,7 +901,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-400 disabled:opacity-50"
         >
           {localStatus === 'approving' ? <CircleDashed size={12} className="animate-spin" /> : <Check size={12} />}
-          {localStatus === 'approving' ? 'Approving' : 'Approve'}
+          {localStatus === 'approving' ? 'Approving' : notice.action_descriptor ? 'Approve once' : 'Approve'}
         </button>
         <button
           type="button"

@@ -89,9 +89,11 @@ test('file diff, approval, safe pause, real app/backend restart, Continue and Un
   }).toEqual(['file_write:verified'])
 
   const pause = desktop.page.getByRole('button', { name: 'Pause execution' })
+  const pauseResponse = desktop.page.waitForResponse((response) => response.url().endsWith(`/api/runs/${run.run_id}/pause`))
   await pause.focus()
   await desktop.page.keyboard.press('Enter')
   await expect.poll(() => pausePosts.length).toBe(1)
+  expect((await pauseResponse).status()).toBe(202)
   await desktop.signal('file-resume.release')
   await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.status).toBe('paused')
   const paused = (await desktop.api(`/api/runs/${run.run_id}`)).data
@@ -199,7 +201,9 @@ test('hard backend crash after a verified write exposes Continue without duplica
     (await desktop.events()).filter((event) => event.kind === 'backend_started').length,
     { timeout: 45_000 },
   ).toBeGreaterThan(backendStartsBeforeCrash)
-  await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.status).toBe('paused')
+  // Python startup is recorded before the new HTTP listener is ready.
+  await expect.poll(async () => desktop.api(`/api/runs/${run.run_id}`)
+    .then(({ data }) => data.status, () => 'starting')).toBe('paused')
   const recovered = (await desktop.api(`/api/runs/${run.run_id}`)).data
   expect(recovered.available_actions).toContain('resume')
 

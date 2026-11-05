@@ -15,6 +15,7 @@ from app.agent.run_context import (
     current_execution_source,
 )
 from app.agent.tool_cancellation import check_cancelled, ToolCancelled
+from app.agent.action_identity import ticket_ownership_error
 
 from app.agent.approval_broker import (
     ApprovalTicket,
@@ -41,6 +42,13 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
     """
     if ticket.status != TicketStatus.APPROVED:
         return ticket
+
+    ownership_error = ticket_ownership_error(ticket)
+    if ownership_error:
+        # Never consume or modify a ticket owned by a different live action.
+        return ticket.model_copy(update={"execution_result": json.dumps({
+            "status": "error", "reason_code": "approval_ticket_mismatch", "error": ownership_error,
+        })})
 
     validation_error = ticket_validation_error(
         ticket,
@@ -80,7 +88,19 @@ def resume_approved_ticket(ticket: ApprovalTicket) -> ApprovalTicket:
 
     try:
         check_cancelled()
-        result = executor(input_str)
+        from app.agent.action_security.approval_binding import approved_action_replay, claim_ticket
+        if not claim_ticket(ticket):
+            return ticket.model_copy(update={"execution_result": json.dumps({
+                "status": "error", "reason_code": "approval_already_used", "error": "Approval has already been consumed.",
+            })})
+        with approved_action_replay(ticket) as replay:
+            result = executor(input_str)
+            returned = json.loads(result) if isinstance(result, str) else result
+            rejected = isinstance(returned, dict) and returned.get("status") in {
+                "denied", "blocked", "error", "failed", "cancelled"}
+            if ticket.authorization_binding and not replay.consumed and not rejected:
+                result = json.dumps({"status": "denied", "reason_code": "action_approval_not_revalidated",
+                    "reason": "The adapter did not revalidate the approved runtime action."})
         result_data = json.loads(result) if isinstance(result, str) else result
         result_status = result_data.get("status") if isinstance(result_data, dict) else None
         if result_status in {

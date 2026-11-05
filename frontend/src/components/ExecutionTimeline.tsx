@@ -6,6 +6,8 @@ import type { AgentSettings } from '../lib/api/types'
 import { ApiError } from '../lib/api/client'
 import { Dropdown } from './Dropdown'
 import { RecoveryPanel } from './RecoveryPanel'
+import { BrowserVerificationStatus } from './BrowserVerificationStatus'
+import { browserOperationOutcome } from '../lib/browserAction'
 
 export type RunAction = Extract<ApiRunAction, 'pause' | 'resume' | 'stop'>
 
@@ -353,7 +355,7 @@ export function ExecutionTimeline({
                   <div className="min-w-0 flex-1">
                     <p className="break-words text-[11px] text-neutral-300">
                       {operation.sequence}. {humanize(operation.operation_kind)}
-                      <span className="ml-2 text-neutral-500">{OPERATION_STATUS_LABELS[operation.status]}</span>
+                      {!browserOperationOutcome(operation.evidence) && <span className="ml-2 text-neutral-500">{OPERATION_STATUS_LABELS[operation.status]}</span>}
                     </p>
                     {detailMode === 'developer' && (
                       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-[10px] text-neutral-500">
@@ -364,6 +366,7 @@ export function ExecutionTimeline({
                       </dl>
                     )}
                     {operation.reason_code && <p className="mt-1 text-[10px] text-neutral-500">{reasonText(operation.reason_code)}</p>}
+                    <BrowserVerificationStatus outcome={browserOperationOutcome(operation.evidence)} detail />
                     {Object.keys(operation.evidence).length > 0 && (
                       <details className="mt-1.5">
                         <summary className="cursor-pointer text-[10px] text-neutral-500 underline-offset-2 hover:text-neutral-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">Verification evidence</summary>

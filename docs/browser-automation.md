@@ -45,7 +45,7 @@ If the extension is not connected when a browser tool runs, Monaw opens Chrome n
 | `handle_dialog` | Accepts or dismisses an open `alert` / `confirm` / `prompt`. While a dialog is open, other page tools report it instead of hanging. |
 | `take_screenshot` | Brings the tab to the front, then captures the viewport, the full page, or one element (`uid`). |
 | `wait_for` | Wait for text or an element condition: attached, detached, visible, hidden, enabled, disabled, editable or ready. CSS selectors are rechecked across DOM replacements; uids refer to the original node. |
-| `evaluate_script`, `upload_file` | Scripts cover tasks the dedicated tools cannot express. `upload_file` takes `filePaths`, a list of absolute local paths. |
+| `evaluate_script`, `upload_file` | Scripts are arbitrary code execution, never read-only DOM inspection, and require an explicit `pageId`. They may read authenticated data, issue requests or trigger actions. `upload_file` takes `filePaths`, a list of absolute local paths. |
 | `list_console_messages`, `get_console_message` | Console messages and uncaught errors, kept for the last three navigations. |
 
 Snapshots and screenshots are returned in the chat and never written to arbitrary paths. Chrome blocks extensions from `chrome://` pages and the Chrome Web Store.
@@ -59,6 +59,8 @@ The harness provides at most four short workflow hints per turn when it sees opp
 ## Permissions
 
 Each browser tool has an explicit entry in Monaw's permission table (`BUILTIN_TOOL_POLICIES` in `builtin.py`) instead of a guess from its name:
+
+Unknown built-in tools are blocked until an explicit policy is added. A read-only annotation, trusted-tool setting or low-risk override cannot downgrade `evaluate_script` into an observation. The script and explicit target page are part of its exact approval payload. Default and Custom follow their execution confirmation settings; Auto Review evaluates the script's actual effects; Full Access permits scripts without an ordinary approval prompt. Existing hard blocks and always-confirm tools still apply. This classification is not a JavaScript sandbox or a proof that arbitrary code is harmless.
 
 | Tools | Treated as | Asks first? |
 | --- | --- | --- |

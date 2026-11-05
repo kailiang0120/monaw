@@ -810,7 +810,29 @@ export interface ExecutionEnvironment {
   scope: string
 }
 
+/** Safe runtime facts supplied by the backend; never script bodies or form values. */
+export interface ActionDescriptor {
+  action_id: string
+  run_id?: string
+  operation_id?: string
+  tool_name: string
+  action_kind: string
+  target?: { origin?: string; page_id?: number; app?: string; path?: string; server_id?: string }
+  destination?: string
+  data_scope?: {
+    files?: { name?: string; path?: string; size_bytes?: number; sensitivity?: string[] }[]
+    file_count?: number
+    size_bytes?: number
+    classification?: string
+  }
+  side_effect?: string
+  risk_level?: string
+  context_version?: string
+  human_only?: boolean
+}
+
 export interface ApprovalTicket {
+  action_descriptor?: ActionDescriptor
   review_decision?: 'approve' | 'deny' | 'ask' | ''
   review_reason?: string
   id: string
@@ -845,6 +867,7 @@ export interface ApprovalTicket {
 }
 
 export interface ApprovalEvent {
+  action_descriptor?: ActionDescriptor
   execution_environment?: ExecutionEnvironment
   /** Optional planner preview for a supported native file approval. */
   file_preview?: unknown

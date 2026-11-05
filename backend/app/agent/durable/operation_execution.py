@@ -136,6 +136,7 @@ class OperationExecution:
         self._active_approval_binding = ""
         self._native_transient_grant_candidate = ""
         self._native_transient_grant_approvals: dict[str, str] = {}
+        self._browser_outcome: dict[str, Any] | None = None
 
     @property
     def effect_started(self) -> bool:
@@ -529,6 +530,27 @@ class OperationExecution:
         )
         _block_run(self.run_id, self.lifecycle)
 
+    def attest_browser_outcome(self, outcome: dict[str, Any]) -> None:
+        """Trusted built-in browser adapter records its validated runtime result.
+
+        Never call for third-party MCP result metadata. Output JSON itself is
+        deliberately insufficient to establish this private attestation.
+        """
+        with self._lock:
+            if current_operation_execution() is not self or not self._effect_started or self._status != "executing":
+                raise OperationDispatchBlocked("unknown", "No executing browser operation is active.")
+            if not isinstance(outcome, dict) or outcome.get("status") not in {"executed", "verified", "failed", "uncertain"}:
+                raise ValueError("invalid browser outcome")
+            if not isinstance(outcome.get("action_executed"), bool) or not isinstance(outcome.get("action_id"), str):
+                raise ValueError("invalid browser dispatch evidence")
+            from app.agent.durable.models import sanitize_evidence
+            verification = outcome.get("verification") if isinstance(outcome.get("verification"), dict) else {}
+            recovery = outcome.get("recovery") if isinstance(outcome.get("recovery"), dict) else {}
+            self._browser_outcome = sanitize_evidence({"browser_status": outcome["status"],
+                "action_id": outcome["action_id"], "action_executed": outcome["action_executed"],
+                "verification_type": verification.get("type"), "verification_passed": verification.get("passed"),
+                "browser_reason_code": recovery.get("reason_code")})
+
     def settle(self, output: str | None = None, *, cancelled: bool = False) -> None:
         """Close read-only work; preserve uncertainty for unverified effects."""
         with self._lock:
@@ -549,6 +571,22 @@ class OperationExecution:
             return
 
         result_status = _result_status(output)
+        if self._browser_outcome is not None and self.effect_class != "read_only":
+            evidence = dict(self._browser_outcome)
+            status = evidence["browser_status"]
+            if status == "uncertain" or (status == "failed" and evidence.get("action_executed") is True):
+                self._transition("uncertain", reason_code="verification_failed",
+                    evidence={**evidence, "verification_result": "unknown"})
+                _block_run(self.run_id, self.lifecycle)
+            elif status == "failed":
+                self._transition("failed", reason_code="operation_failed",
+                    evidence={**evidence, "verification_result": "unchanged"})
+            else:
+                # Preserve Journal's opaque-effect invariant while reporting
+                # adapter dispatch/verification independently to the UI.
+                self._transition("returned", reason_code="unknown", evidence={**evidence,
+                    "verification_result": "completed" if status == "verified" else "not_checked"})
+            return
         if self.effect_class == "read_only":
             if cancelled or result_status in {
                 "error", "failed", "blocked", "denied", "cancelled",

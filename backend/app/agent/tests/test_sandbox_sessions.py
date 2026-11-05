@@ -43,7 +43,8 @@ def test_exec_start_uses_session_registry(monkeypatch, tmp_path):
     started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
     command_id = started["command_id"]
 
-    for _ in range(30):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
         polled = json.loads(exec_tools.exec_poll(command_id, return_mode="full"))
         if polled.get("exit_code") is not None:
             break
@@ -62,7 +63,8 @@ def test_exec_write_stdin_works_for_local_session(monkeypatch, tmp_path):
     command_id = started["command_id"]
     written = json.loads(exec_tools.exec_write_stdin(command_id, "hello\n", _bypass_gate=True))
 
-    for _ in range(30):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
         polled = json.loads(exec_tools.exec_poll(command_id, return_mode="full"))
         if polled.get("exit_code") is not None:
             break
@@ -89,7 +91,8 @@ def test_completed_session_output_remains_readable(monkeypatch, tmp_path):
     shell, command = _python_command("print('read-twice')")
     started = json.loads(exec_tools.exec_start(command, shell=shell, workdir=str(tmp_path), _bypass_gate=True))
 
-    for _ in range(30):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
         first = json.loads(exec_tools.exec_poll(started["command_id"], return_mode="full"))
         if first.get("exit_code") is not None:
             break

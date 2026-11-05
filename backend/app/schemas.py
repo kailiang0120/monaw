@@ -649,6 +649,7 @@ class MCPServerDiagnosticsOut(BaseModel):
 
 
 class ApprovalTicketOut(BaseModel):
+    action_descriptor: dict = Field(default_factory=dict)
     review_decision: str = ""
     review_reason: str = ""
     id: str

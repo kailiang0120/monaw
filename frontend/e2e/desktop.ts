@@ -1,6 +1,7 @@
 import { test as base, expect, _electron, type ElectronApplication, type Page } from '@playwright/test'
 import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { realpathSync } from 'node:fs'
 import { resolve, join, sep } from 'node:path'
 import { createServer, connect } from 'node:net'
 import { createRequire } from 'node:module'
@@ -8,6 +9,7 @@ import { execFileSync } from 'node:child_process'
 
 const require = createRequire(import.meta.url)
 const frontend = resolve(import.meta.dirname, '..')
+const temporaryRoot = realpathSync.native(tmpdir())
 // Playwright forces colour in workers; without --color never uv wraps these paths in escape codes.
 const uvCache = execFileSync('uv', ['--color', 'never', 'cache', 'dir'], { encoding: 'utf8', windowsHide: true }).trim()
 const python = execFileSync('uv', ['--color', 'never', 'python', 'find', '--project', resolve(frontend, '../backend')], { encoding: 'utf8', windowsHide: true }).trim()
@@ -31,7 +33,7 @@ async function portIsOpen(port: number): Promise<boolean> {
 }
 
 function assertDisposable(root: string) {
-  if (!root.startsWith(resolve(tmpdir()) + sep) || !root.split(sep).at(-1)?.startsWith('monaw-e2e-')) {
+  if (!root.startsWith(temporaryRoot + sep) || !root.split(sep).at(-1)?.startsWith('monaw-e2e-')) {
     throw new Error('Refusing to clean an application-test path outside its disposable directory')
   }
 }
@@ -128,7 +130,8 @@ export class Desktop {
 
 export const test = base.extend<{ desktop: Desktop }>({
   desktop: async ({}, use, testInfo) => {
-    const root = await mkdtemp(join(tmpdir(), 'monaw-e2e-'))
+    // Match the backend's canonical long Windows paths, including 8.3 TEMP aliases.
+    const root = await mkdtemp(join(temporaryRoot, 'monaw-e2e-'))
     assertDisposable(root)
     await Promise.all(['runtime', 'workspace', 'control', 'memory', 'appdata', 'localappdata'].map((dir) => mkdir(join(root, dir))))
     await writeFile(join(root, 'workspace', 'read.txt'), 'Completed sibling evidence\n')
@@ -160,7 +163,12 @@ export const test = base.extend<{ desktop: Desktop }>({
         }).catch(() => {})
         await testInfo.attach('renderer-errors', { body: JSON.stringify({ uncaught: desktop.errors, console: desktop.consoleErrors }), contentType: 'application/json' })
         for (const file of ['runtime/backend.log', 'control/events.jsonl']) {
-          await readFile(join(root, file)).then((body) => testInfo.attach(file.replace('/', '-'), { body: body.subarray(-40_000), contentType: 'text/plain' }), () => {})
+          await readFile(join(root, file)).then(async (body) => {
+            const name = file.replace('/', '-')
+            const path = testInfo.outputPath(name)
+            await writeFile(path, body.subarray(-200_000))
+            await testInfo.attach(name, { path, contentType: 'text/plain' })
+          }, () => {})
         }
       }
       try { await desktop.close() } finally {

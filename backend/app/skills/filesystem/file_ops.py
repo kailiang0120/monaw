@@ -24,7 +24,7 @@ from app.agent.approval_broker import create_ticket
 from app.agent.controller_policy import ActionType, blocked_roots_below, canonical, resolve_permission
 from app.agent.execution_resume import register_executor
 from app.agent.durable.operation_execution import current_operation_execution
-from app.agent.file_mutation.fingerprint import FingerprintError, fingerprint_path
+from app.agent.file_mutation.fingerprint import FingerprintError, fingerprint_path, _created_ns, _windows_handle_identity
 from app.agent.file_mutation.planner import MutationPlan, PathState, PlanOperand, build_plan
 from app.agent.response_attachments import ATTACHMENT_HANDLE_PREFIX, resolve_attachment_handle_path
 from app.agent.run_context import (
@@ -185,6 +185,9 @@ def _gate_path(
     payload_args: dict[str, Any],
 ) -> str | None:
     target_path = _policy_target_path(path)
+    if _sensitive_path_blocked(target_path):
+        return _json({"status": "blocked", "reason_code": "sensitive_file_blocked",
+                      "error": "Known credential files and user-designated sensitive paths require a dedicated trusted flow."})
     decision = resolve_permission(action, target_path=target_path)
     if decision.blocked:
         return _blocked_result(decision)
@@ -211,6 +214,13 @@ def _gate_path(
             payload_args=payload_args,
         )
     return None
+
+
+def _sensitive_path_blocked(path: str | Path) -> bool:
+    from app.agent.action_security.sensitive_data import sensitive_path_labels
+    from app.agent import controller_policy
+    sensitive = getattr(controller_policy._load_runtime_settings().browser, "sensitive_paths", [])
+    return bool(sensitive_path_labels(_resolve_path(str(path)), sensitive))
 
 
 def _resolve_path(path: str) -> Path:
@@ -348,7 +358,7 @@ def _walk(base: Path, budget: _WalkBudget, *, max_depth: int | None = None) -> I
             if is_link and not _within_base(Path(entry.path), base):
                 continue
             parts = (*parent_parts, entry.name)
-            restricted = os.path.normcase(entry.path) in restricted_dirs
+            restricted = os.path.normcase(entry.path) in restricted_dirs or _sensitive_path_blocked(entry.path)
             yield _WalkEntry(entry, parts, restricted)
             if is_link or restricted or (max_depth is not None and len(parts) >= max_depth):
                 continue
@@ -503,7 +513,7 @@ def _p3_metadata_state(path: Path) -> PathState:
         size=int(value.st_size),
         identity=(int(value.st_dev), int(value.st_ino)),
         modified_ns=int(getattr(value, "st_mtime_ns", 0)),
-        created_ns=int(getattr(value, "st_ctime_ns", 0)),
+        created_ns=_created_ns(value),
         parent_identity=(int(parent.st_dev), int(parent.st_ino)),
     )
 
@@ -522,6 +532,11 @@ def _p3_read_access(
     read_authorized = True
     for path in paths:
         target = str(path)
+        if _sensitive_path_blocked(target):
+            if dry_run:
+                read_authorized = False
+                continue
+            return False, _error("sensitive_file_blocked", "Known credential files require a dedicated trusted flow.")
         decision = resolve_permission(
             ActionType.READ, target_path=target, consume_once_grants=False
         )
@@ -1216,6 +1231,9 @@ def _p3_recheck_effect_boundary(
             execution.native_file_no_effect("operation_failed")
             return _error("stale_precondition", "File preconditions changed; no file change was made.")
         for action, path in action_targets:
+            if _sensitive_path_blocked(path):
+                execution.native_file_no_effect("operation_failed")
+                return _error("sensitive_file_blocked", "Known credential files require a dedicated trusted flow.")
             decision = resolve_permission(
                 action, target_path=path, consume_once_grants=False
             )
@@ -1261,7 +1279,7 @@ def _p3_write_bytes(path: Path, data: bytes, *, expected_before: PathState) -> N
                 or int(getattr(opened, "st_mtime_ns", 0)) != expected_before.modified_ns
                 or (
                     expected_before.created_ns is not None
-                    and int(getattr(opened, "st_ctime_ns", 0)) != expected_before.created_ns
+                    and _created_ns(opened) != expected_before.created_ns
                 )
             ):
                 raise FingerprintError("target identity changed before write")
@@ -1293,6 +1311,8 @@ def _p3_write_bytes(path: Path, data: bytes, *, expected_before: PathState) -> N
 
 
 def _tree_budget(path: Path) -> tuple[int, int, str | None]:
+    if _sensitive_path_blocked(path):
+        return 0, 0, "Sensitive path recursion is not allowed."
     if path.is_symlink():
         return 0, 0, f"Symlink or junction recursion is not allowed: {path}"
     if not path.is_dir():
@@ -1303,6 +1323,8 @@ def _tree_budget(path: Path) -> tuple[int, int, str | None]:
     count = 0
     total = 0
     for item in path.rglob("*"):
+        if _sensitive_path_blocked(item):
+            return count, total, "Sensitive path recursion is not allowed."
         if item.is_symlink():
             return count, total, f"Symlink or junction recursion is not allowed: {item}"
         count += 1
@@ -1321,7 +1343,7 @@ def _tree_budget(path: Path) -> tuple[int, int, str | None]:
 def _validate_recursive_budget(path: Path, *, operation: str) -> str | None:
     count, total, error = _tree_budget(path)
     if error:
-        reason = "symlink_target_rejected" if "Symlink" in error else "recursive_budget_exceeded"
+        reason = "sensitive_file_blocked" if "Sensitive" in error else "symlink_target_rejected" if "Symlink" in error else "recursive_budget_exceeded"
         return _error(
             reason,
             error,
@@ -1336,6 +1358,8 @@ def _validate_recursive_budget(path: Path, *, operation: str) -> str | None:
 
 def _revalidate_mutation_target(path: str, action: ActionType = ActionType.MUTATE) -> str | None:
     target = _filesystem_target(path)
+    if _sensitive_path_blocked(target.resolved):
+        return _error("sensitive_file_blocked", "Known credential files require a dedicated trusted flow.")
     # Re-check hard blocks against the resolved target right before mutating.
     # Grants were already settled by the gate (or by the approval that
     # replays this call), and a one-time grant is consumed there, so asking
@@ -1931,6 +1955,8 @@ def file_search(
 
 def _file_matches(file_path: Path, needle: str, *, case_sensitive: bool, limit: int) -> list[dict[str, Any]]:
     """Return up to ``limit`` line matches from the first read slice of one file."""
+    if _sensitive_path_blocked(file_path):
+        return []
     try:
         with file_path.open("rb") as handle:
             text = handle.read(_DEFAULT_READ_BYTES).decode("utf-8", errors="replace")
@@ -2326,7 +2352,7 @@ def _p3_move_metadata_state(path: Path) -> PathState:
         size=max(0, int(info.st_size)),
         identity=identity,
         modified_ns=int(getattr(info, "st_mtime_ns", 0)),
-        created_ns=int(getattr(info, "st_ctime_ns", 0)),
+        created_ns=_created_ns(info),
         parent_identity=parent_identity,
     )
 
@@ -3005,6 +3031,8 @@ def _p3_delete_regular_file(
             wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
         ]
         kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         invalid_handle = ctypes.c_void_p(-1).value
         parent_handle = kernel32.CreateFileW(
             str(path.parent),
@@ -3022,10 +3050,11 @@ def _p3_delete_regular_file(
             error = ctypes.get_last_error()
             kernel32.CloseHandle(parent_handle)
             raise OSError(error, "could not inspect the target parent directory")
-        parent_identity = (
-            int(parent_info.volume),
-            (int(parent_info.index_high) << 32) | int(parent_info.index_low),
-        )
+        try:
+            parent_identity = _windows_handle_identity(parent_handle)
+        except Exception:
+            kernel32.CloseHandle(parent_handle)
+            raise
         if (
             not parent_info.attributes & 0x00000010
             or parent_info.attributes & 0x00000400
@@ -3060,10 +3089,8 @@ def _p3_delete_regular_file(
             return info
 
         def check_info(info: _ByHandleInfo) -> None:
-            identity = (
-                int(info.volume),
-                (int(info.index_high) << 32) | int(info.index_low),
-            )
+            observed = os.fstat(descriptor)
+            identity = (int(observed.st_dev), int(observed.st_ino))
             size = (int(info.size_high) << 32) | int(info.size_low)
             if (
                 info.attributes & (0x00000010 | 0x00000400)

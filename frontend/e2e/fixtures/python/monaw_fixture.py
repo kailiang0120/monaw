@@ -99,6 +99,8 @@ class FixtureProvider:
                 return LLMResponse(content="", tool_calls=[call("exec", {
                     "command": "Write-Output 'fixture opaque action'", "shell": "powershell",
                 })], finish_reason="tool_calls")
+            elif scenario == "exact-action":
+                return LLMResponse(content="", tool_calls=[call("e2e_exact_action", {})], finish_reason="tool_calls")
             elif scenario == "parallel":
                 return LLMResponse(content="", tool_calls=[
                     call("fs_read", {"path": str(ROOT / "workspace" / "read.txt")}, "-read"),
@@ -134,6 +136,21 @@ class FixtureProvider:
 def configure_runtime(runtime) -> None:
     original = runtime.load_tools
 
+    def exact_action() -> str:
+        from app.agent.action_security import attest_action, authorize_action
+        action = attest_action(tool_name="e2e_exact_action", action_kind="upload", parameters={},
+            target={"origin": "https://fixture.example", "page_id": 7}, destination="https://fixture.example/upload",
+            context_version="fixture-document-1", side_effect="external_mutation",
+            data_scope={"file_count": 1, "size_bytes": 12, "files": [{"name": "report.pdf", "size_bytes": 12}]},
+            runtime_facts={"target_verified": True, "context_verified": True, "scope_allowed": True})
+        stopped = authorize_action(action)
+        if stopped is not None:
+            return json.dumps(stopped)
+        # The external side effect is replaced with a disposable fixture counter;
+        # policy, approval routes, exact replay, journal and UI remain production.
+        record("exact_action_dispatched")
+        return json.dumps({"status": "ok"})
+
     async def wait_tool(name: str) -> str:
         if name == "parallel":
             while not (CONTROL / "read.completed").exists():
@@ -143,6 +160,8 @@ def configure_runtime(runtime) -> None:
 
     def load_tools(*args, **kwargs):
         skills, registry = original(*args, **kwargs)
+        from app.agent.execution_resume import register_executor
+        register_executor("e2e_exact_action", lambda _input: exact_action())
         reader = registry.get_tool("fs_read")
         if reader:
             original_reader = reader["callable"]
@@ -153,6 +172,10 @@ def configure_runtime(runtime) -> None:
                 return result
             reader["callable"] = read
         registry.extend([{
+            "name": "e2e_exact_action", "description": "Controlled consequential action",
+            "parameters": {"type": "object", "properties": {}}, "callable": exact_action,
+            "metadata": {"parallel_safe": False, "mutates_state": True, "risk_level": "high"},
+        }, {
             "name": "e2e_barrier", "description": "Controlled application-test barrier",
             "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
             "callable": wait_tool,

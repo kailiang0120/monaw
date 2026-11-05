@@ -149,6 +149,9 @@ Approval ticket fields include:
 | `conversation_id` | Conversation that requested the action. |
 | `action_type` | Type of action. |
 | `tool_name` | Tool requesting approval. |
+| `action_id` | Server-generated identity of this concrete approval action. |
+| `parent_action_id`, `parent_tool_name` | Local invocation that created the action. |
+| `root_action_id`, `root_tool_name` | Original harness invocation that owns the continuation. |
 | `target_path` | Path target, if any. |
 | `target_app` | App target, if any. |
 | `risk_level` | Low, medium, or high risk. |
@@ -171,6 +174,10 @@ Ticket statuses:
 | `expired` | The ticket passed its expiry time. |
 
 Approval tickets are persisted as JSONL so pending and historical approvals survive restarts.
+
+The harness keeps a private binding from each live invocation to its exact approval and access-grant tickets. Ownership is checked before review, prompting, ticket retirement and replay; changed parent arguments, targets or payloads invalidate continuation. Calls to the same tool have different invocation identities and cannot reuse or supersede each other's tickets. Sharing a `computer_functions_` prefix grants no authority. Trusted adapter code must explicitly establish a delegated child invocation before creating a child action ticket; the child still applies its own permission checks.
+
+These identities are generated locally, not accepted from model arguments or returned tool text. Restarting loses the live binding, so an old bound ticket cannot execute without its original parent invocation; a fresh action must go through its current checks. Legacy direct callers retain exact-tool checks, with no family-wide exception.
 
 Files:
 

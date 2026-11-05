@@ -170,7 +170,7 @@ OPERATION_KINDS = frozenset(
     }
 )
 EVENT_TYPES = frozenset(
-    {"run.created", "run.updated", "operation.prepared", "operation.updated"}
+    {"run.created", "run.updated", "operation.prepared", "operation.updated", "action.security"}
 )
 REASON_CODES = frozenset(
     {
@@ -221,6 +221,8 @@ _BOOL_FIELDS = frozenset(
         "undo_available",
         "snapshot_available",
         "is_binary",
+        "action_executed",
+        "verification_passed",
     }
 )
 _INT_FIELDS = frozenset({"target_count", "byte_length", "line_count", "file_count"})
@@ -228,6 +230,7 @@ _HASH_FIELDS = frozenset(
     {"content_sha256", "source_sha256", "destination_sha256", "before_sha256", "after_sha256"}
 )
 _ENUM_FIELDS = {
+    "browser_status": frozenset({"executed", "verified", "failed", "uncertain"}),
     "verification_result": frozenset(
         {"completed", "unchanged", "mixed", "unknown", "conflict", "not_checked"}
     ),
@@ -252,6 +255,8 @@ def sanitize_evidence(value: object) -> dict[str, bool | int | str]:
         elif key in _HASH_FIELDS and isinstance(item, str) and _HASH_RE.fullmatch(item):
             result[key] = item
         elif key in _ENUM_FIELDS and isinstance(item, str) and item in _ENUM_FIELDS[key]:
+            result[key] = item
+        elif key in {"action_id", "verification_type", "browser_reason_code"} and isinstance(item, str) and _SAFE_ID_RE.fullmatch(item):
             result[key] = item
         if len(result) >= 24:
             break
@@ -284,6 +289,43 @@ def sanitize_event_payload(event_type: str, payload: object) -> dict[str, object
         value = payload.get(key)
         if isinstance(value, str) and value in choices:
             result[key] = value
+
+    if event_type == "action.security":
+        for key in ("action_id", "operation_id", "ticket_id", "action_kind", "reason_code"):
+            safe_id(key)
+        safe_enum("outcome", frozenset({"ALLOW", "DENY", "REQUIRE_HUMAN_APPROVAL"}))
+        safe_enum("side_effect", frozenset({"none", "local_mutation", "external_mutation", "irreversible", "unknown"}))
+        if isinstance(payload.get("human_only"), bool):
+            result["human_only"] = payload["human_only"]
+        binding = payload.get("authorization_binding")
+        if isinstance(binding, str) and _HASH_RE.fullmatch(binding):
+            result["authorization_binding"] = binding
+        descriptor = payload.get("action_descriptor")
+        if isinstance(descriptor, Mapping):
+            safe_descriptor: dict[str, object] = {}
+            for key in ("action_kind", "context_version", "tool_name"):
+                item = descriptor.get(key)
+                if isinstance(item, str) and _SAFE_ID_RE.fullmatch(item):
+                    safe_descriptor[key] = item
+            scope = descriptor.get("data_scope")
+            if isinstance(scope, Mapping):
+                safe_descriptor["data_scope"] = {key: item for key, item in scope.items()
+                    if key in {"file_count", "size_bytes", "estimated_bytes"}
+                    and isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 10**12}
+            # Audit records destination origin, never credentials, URL paths,
+            # query parameters, form values or file names.
+            from urllib.parse import urlsplit
+            for key, value in (("destination", descriptor.get("destination")),
+                ("origin", (descriptor.get("target") or {}).get("origin") if isinstance(descriptor.get("target"), Mapping) else None)):
+                if isinstance(value, str):
+                    try:
+                        parsed = urlsplit(value)
+                        if parsed.scheme in {"http", "https"} and parsed.hostname:
+                            safe_descriptor[key] = f"{parsed.scheme}://{parsed.hostname}" + (f":{parsed.port}" if parsed.port else "")
+                    except ValueError:
+                        pass
+            result["action_descriptor"] = safe_descriptor
+        return result
 
     if event_type in {"run.created", "run.updated"}:
         safe_enum("status", RUN_STATUSES)

@@ -98,7 +98,8 @@ export function useSettingsDraft() {
 
   /** Reflect keys already in the OS store, e.g. after syncing them to the backend on open. */
   const applyStoredCredentialStatus = (status: StoredCredentialStatus) => {
-    setDirtySecrets(new Set())
+    // Startup hydration may finish after the user edits a key. It updates
+    // stored-key indicators, but only a successful save clears those edits.
     setDraft((current) => (current ? withCredentialStatus(current, status, { merge: true }) : current))
   }
 

@@ -100,6 +100,30 @@ test('approved file action runs once through the real execution gate', async ({ 
   expect(rows.filter((row: { tool_name: string; status: string }) => row.tool_name === 'fs_append' && row.status === 'complete')).toHaveLength(1)
 })
 
+test('consequential approval displays exact scope and dispatches once through the real gate', async ({ desktop }) => {
+  await desktop.send('exact-action')
+  const approve = desktop.page.getByRole('button', { name: 'Approve once', exact: true })
+  await expect(approve).toBeVisible()
+  await expect(desktop.page.getByText('https://fixture.example', { exact: true })).toBeVisible()
+  await expect(desktop.page.getByRole('list', { name: 'Selected files' })).toContainText('report.pdf')
+  const pending = (await desktop.api('/api/approvals/pending')).data
+  expect(pending).toHaveLength(1)
+  expect(pending[0].action_descriptor).toMatchObject({ human_only: true, action_kind: 'upload', data_scope: { file_count: 1 } })
+  expect(pending[0].payload).toEqual({})
+  const dispatched = async () => (await readFile(join(desktop.root, 'control', 'events.jsonl'), 'utf8'))
+    .split('\n').filter((line) => line.includes('exact_action_dispatched')).length
+  expect(await dispatched()).toBe(0)
+  const decision = desktop.page.waitForResponse((response) => response.url().endsWith(`/approvals/${pending[0].id}/approve`))
+  await approve.click()
+  const response = await decision
+  expect(response.status(), await response.text()).toBe(200)
+  await expect(desktop.page.getByText('Fixture exact-action completed.', { exact: false }).last()).toBeVisible()
+  expect(await dispatched()).toBe(1)
+  expect((await desktop.api(`/api/approvals/${pending[0].id}/approve`, {})).status).not.toBe(200)
+  expect(await dispatched()).toBe(1)
+  expect(desktop.errors).toEqual([])
+})
+
 test('rejected file action is visible and leaves the disposable file unchanged', async ({ desktop }) => {
   const target = join(desktop.root, 'workspace', 'deny.txt')
   await writeFile(target, 'original\n')

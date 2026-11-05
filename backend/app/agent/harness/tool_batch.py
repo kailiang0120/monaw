@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, TypeVar
 
 from app.agent.harness.tool_protocol import ToolCallResult
+from app.agent.action_security.sensitive_data import public_tool_arguments, redact_sensitive
 
 PENDING_STATUSES = frozenset({"pending_approval", "pending_access_grant"})
 OBSERVED_OK_STATUSES = frozenset({"ok", "complete"})
@@ -67,7 +68,7 @@ class ToolBatchLedger:
         self._calls[key] = ActiveToolCall(
             call_id=call_id,
             tool_name=tool_name,
-            input=json.dumps(arguments, ensure_ascii=False),
+            input=json.dumps(public_tool_arguments(tool_name, arguments), ensure_ascii=False),
             output=json.dumps(
                 {
                     "status": "cancelled",
@@ -108,7 +109,7 @@ class ToolBatchLedger:
         self._calls.pop(key, None)
 
     def persistable_calls(self) -> list[dict]:
-        return [call.persistable() for call in self._calls.values()]
+        return [redact_sensitive(call.persistable()) for call in self._calls.values()]
 
     async def run(
         self,

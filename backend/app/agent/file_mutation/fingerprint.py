@@ -69,10 +69,49 @@ def _inspect_parent_chain(path: Path) -> os.stat_result:
 
 
 def _created_ns(value: os.stat_result) -> int | None:
+    # Windows Python 3.12 exposes birthtime explicitly. Its fstat ctime can
+    # describe metadata changes while path stat/lstat retain the legacy
+    # creation-time meaning; these two ctime values are not interchangeable.
+    birth_time = getattr(value, "st_birthtime_ns", None)
+    if birth_time is not None:
+        return int(birth_time)
     if os.name == "nt":
         return int(getattr(value, "st_ctime_ns", 0))
-    birth_time = getattr(value, "st_birthtime_ns", None)
-    return int(birth_time) if birth_time is not None else None
+    return None
+
+
+def _windows_handle_identity(handle: int) -> tuple[int, int]:
+    """Read a pinned handle using this Python's exact stat identity format.
+
+    Python 3.12 Windows st_dev uses the full volume serial rather than the
+    legacy 32-bit BY_HANDLE_FILE_INFORMATION volume field. Never truncate it
+    when comparing native handles with fingerprints from os.stat/os.fstat.
+    """
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.DuplicateHandle.argtypes = [wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.DuplicateHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    duplicate = wintypes.HANDLE()
+    process = kernel32.GetCurrentProcess()
+    if not kernel32.DuplicateHandle(process, handle, process, ctypes.byref(duplicate), 0, False, 2):
+        raise FingerprintError("file handle identity could not be inspected")
+    descriptor = -1
+    try:
+        descriptor = msvcrt.open_osfhandle(int(duplicate.value), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        return _identity(os.fstat(descriptor))
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        else:
+            kernel32.CloseHandle(duplicate)
 
 
 def canonical_path(path: str | os.PathLike[str]) -> Path:
@@ -186,8 +225,11 @@ def fingerprint_path(
             final_path_stat = os.lstat(absolute)
         except OSError as exc:
             raise FingerprintError("file path changed while being read") from exc
-        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if any(getattr(opened, name, None) != getattr(finished, name, None) for name in stable_fields):
+        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        # The same descriptor API must retain its change-time check across
+        # the read. Cross-API comparisons below use actual creation time.
+        if any(getattr(opened, name, None) != getattr(finished, name, None)
+               for name in (*stable_fields, "st_ctime_ns")) or _created_ns(opened) != _created_ns(finished):
             raise FingerprintError("file changed while being read")
         if (
             _is_reparse(final_path_stat)
@@ -199,6 +241,8 @@ def fingerprint_path(
                 getattr(finished, name, None) != getattr(final_path_stat, name, None)
                 for name in stable_fields
             )
+            or _created_ns(finished) != _created_ns(final_path_stat)
+            or (os.name != "nt" and getattr(finished, "st_ctime_ns", None) != getattr(final_path_stat, "st_ctime_ns", None))
             or total != size
         ):
             raise FingerprintError("file path changed while being read")

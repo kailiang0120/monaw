@@ -1,6 +1,9 @@
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+from app.agent.action_security.sensitive_data import install_logging_redaction
+
+install_logging_redaction()
 import uuid
 
 from fastapi import FastAPI, Request

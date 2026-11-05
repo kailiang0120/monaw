@@ -46,6 +46,16 @@ const runEvent: RunEvent = {
 describe('ExecutionTimeline', () => {
   afterEach(cleanup)
 
+  it('shows durable browser uncertainty without offering an external Undo', () => {
+    render(<ExecutionTimeline snapshot={{ ...runningSnapshot, status: 'needs_review' }} operations={[{
+      ...verifiedOperation, operation_kind: 'mcp_call', effect_class: 'opaque_effect', status: 'uncertain', snapshot_available: false,
+      evidence: { browser_status: 'uncertain', browser_reason_code: 'extension_disconnected', action_executed: true },
+    }]} />)
+    expect(screen.getByText('Outcome uncertain')).toBeInTheDocument()
+    expect(screen.getByText(/Inspect the current page before retrying/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Undo/ })).not.toBeInTheDocument()
+  })
+
   it('uses the shared execution dropdown to select an older run', () => {
     const completed = { ...runningSnapshot, status: 'completed' as const, available_actions: [] }
     const previous = { ...completed, run_id: 'previous-run', attempt: 1 }

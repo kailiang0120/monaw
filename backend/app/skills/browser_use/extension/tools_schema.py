@@ -268,8 +268,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "evaluate_script",
         "description": (
-            "Evaluate a JavaScript function inside the currently selected page. Returns the response as JSON, "
-            "so returned values have to be JSON-serializable."
+            "Execute arbitrary JavaScript in an explicitly identified browser page. This is code execution, NOT read-only DOM inspection: scripts can read authenticated data, send requests, submit forms or trigger other actions. "
+            "Prefer inspect_element for DOM details and wait_for for readiness. Permission mode governs execution approval. Returns JSON-serializable results."
         ),
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
@@ -286,7 +286,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "items": {"type": "string", "description": "The uid of an element on the page from the page content snapshot"},
                 "description": "An optional list of arguments (element uids from the page content snapshot) to pass to the function.",
             },
-        }, ["function"]),
+        }, ["pageId", "function"]),
+        "readOnly": False,
     },
     {
         "name": "list_console_messages",
@@ -319,3 +320,24 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 TOOL_NAMES = frozenset(tool["name"] for tool in TOOL_DEFINITIONS)
+
+# Conditions are observations, never caller-supplied executable verifier code.
+_EXPECTED_EFFECT = {
+    "type":"object", "additionalProperties":False,
+    "properties":{
+        "type":{"type":"string", "enum":["url_changed", "url_equals", "element_appeared", "element_disappeared", "value_equals", "dialog_opened", "dialog_closed", "download_started"]},
+        "selector":_SELECTOR, "value":{"type":"string"},
+        "timeout":{"type":"integer", "minimum":0, "maximum":10000, "default":2000},
+    }, "required":["type"],
+}
+for _tool in TOOL_DEFINITIONS:
+    if not _tool.get("readOnly"):
+        _tool["inputSchema"]["properties"]["expected_effect"] = _EXPECTED_EFFECT
+    if _tool["name"] == "click":
+        _tool["inputSchema"].pop("required", None)
+        _tool["inputSchema"]["properties"]["visual_target"] = {
+            "type":"object", "additionalProperties":False,
+            "description":"Controlled fallback after a fresh accessibility snapshot cannot identify the target. Use a current viewport screenshot binding. One click only, same policy gate, no automatic retries. Coordinates are viewport CSS pixels; inaccessible frames are unsupported.",
+            "properties":{"screenshot_id":{"type":"string"}, "x":{"type":"number", "minimum":0}, "y":{"type":"number", "minimum":0}},
+            "required":["screenshot_id", "x", "y"],
+        }

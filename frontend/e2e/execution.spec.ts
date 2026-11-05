@@ -1,6 +1,9 @@
 import { test, expect } from './desktop'
 
 test('execution UI reads the real Run routes and accepts a keyboard Stop once', async ({ desktop }) => {
+  expect((await desktop.api('/api/settings', { execution_detail: 'developer' }, 'PUT')).status).toBe(200)
+  await desktop.page.reload()
+  await expect(desktop.page.getByRole('textbox', { name: 'Message', exact: true })).toBeEnabled()
   // Create and finish a first turn so the next live Run belongs to an already
   // selected conversation, which exercises the renderer's route wiring.
   await desktop.send('recover')

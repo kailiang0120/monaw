@@ -120,6 +120,24 @@ describe('useSettingsDraft', () => {
     expect(result.current.isDirty).toBe(false)
   })
 
+  it('preserves a key edited before background credential hydration finishes', async () => {
+    const setCredential = vi.fn().mockResolvedValue(undefined)
+    const status = { openai: true, google: false, tavily: false, telegramBot: false }
+    window.electronAPI = {
+      setCredential, deleteCredential: vi.fn(),
+      applyStoredCredentials: vi.fn().mockResolvedValue(status),
+    } as unknown as NonNullable<typeof window.electronAPI>
+    const { result } = loaded()
+    mocks.updateSettings.mockResolvedValue(buildSettings({ settings_version: 'v2' }))
+    act(() => result.current.setSecret('openai', 'sk-edited-fixture'))
+    act(() => result.current.applyStoredCredentialStatus(status))
+    expect(result.current.isDirty).toBe(true)
+    expect(result.current.secrets.openai).toBe('sk-edited-fixture')
+    await act(async () => { expect(await result.current.save(FALLBACK_MODEL_OPTIONS)).toBe('saved') })
+    expect(setCredential).toHaveBeenCalledWith('openai', 'sk-edited-fixture')
+    expect(result.current.isDirty).toBe(false)
+  })
+
   it('keeps the draft and reports a failed save', async () => {
     const { result } = loaded()
     mocks.updateSettings.mockRejectedValue(new Error('Settings changed elsewhere.'))
