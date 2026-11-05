@@ -1,4 +1,4 @@
-import { test, expect, _electron, type ElectronApplication, type Page } from '@playwright/test'
+import { test, expect, _electron, chromium, type Browser, type ElectronApplication, type Page } from '@playwright/test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -223,28 +223,49 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
     } else { response.writeHead(404); response.end() }
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  let desktop: PackagedApp | undefined
+  let appOutput = ''
+  let browser: Browser | undefined
   const stopInstalled = () => execFileSync('powershell', ['-NoProfile', '-Command',
     "$p = [IO.Path]::GetFullPath($env:MONAW_PACKAGED_APP); Get-CimInstance Win32_Process -Filter \"Name='Monaw.exe' OR Name='monaw-backend.exe'\" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $p -or $_.ExecutablePath.StartsWith([IO.Path]::GetDirectoryName($p) + '\\', [StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { stdio: 'ignore' })
   try {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('No update test port')
-    desktop = track(new PackagedApp(home, await freePort()))
-    await desktop.start()
-    await expect.poll(() => health(desktop!.port), { timeout: 30_000 }).toBe(true)
-    expect((await desktop.api('/api/settings', { identity: { user_name: 'Update test' } }, 'PUT')).status).toBe(200)
-    await desktop.app.evaluate((_, url) => {
-      const updater = process.mainModule!.require('electron-updater').autoUpdater
-      updater.setFeedURL({ provider: 'generic', url })
-      updater.disableDifferentialDownload = true
-    }, `http://127.0.0.1:${address.port}`)
-    await desktop.page.getByRole('button', { name: 'Settings', exact: true }).click()
-    await desktop.page.getByRole('button', { name: 'About', exact: true }).click()
-    await desktop.page.getByRole('button', { name: 'Check for updates' }).click()
-    await expect(desktop.page.getByText('Version 1.1.1 is ready to install.')).toBeVisible({ timeout: 60_000 })
-    await desktop.page.getByRole('button', { name: 'Restart to update' }).click()
-    await desktop.page.getByRole('button', { name: 'Restart and install' }).click()
-    await expect.poll(() => desktop!.app.process().exitCode, { timeout: 45_000 }).not.toBeNull()
+    // Configure only this disposable installation; no production feed override.
+    await writeFile(join(appDir, 'resources', 'app-update.yml'), `provider: generic\nurl: http://127.0.0.1:${address.port}\nupdaterCacheDirName: monaw-agent-updater\n`)
+    const port = await freePort()
+    const debugPort = await freePort()
+    // CDP attaches to the renderer only. Playwright's Electron main-process
+    // inspector prevents normal process exit and can block the NSIS update.
+    const child = spawn(appExe, [`--remote-debugging-port=${debugPort}`], {
+      env: packagedEnv(home, port), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const capture = (chunk: Buffer) => { appOutput = (appOutput + chunk.toString()).slice(-20_000) }
+    child.stdout?.on('data', capture)
+    child.stderr?.on('data', capture)
+    await expect.poll(async () => {
+      try { browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`); return true } catch { return false }
+    }, { timeout: 45_000 }).toBe(true)
+    await expect.poll(() => browser?.contexts()[0]?.pages().length || 0, { timeout: 30_000 }).toBeGreaterThan(0)
+    const page = browser!.contexts()[0].pages()[0]
+    await expect.poll(() => health(port), { timeout: 30_000 }).toBe(true)
+    const saveStatus = await page.evaluate(async () => {
+      const session = await window.electronAPI!.getControlSession()
+      const response = await fetch(window.electronAPI!.backendBaseUrl + '/api/settings', {
+        method: 'PUT', headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identity: { user_name: 'Update test' } }),
+      })
+      return response.status
+    })
+    expect(saveStatus).toBe(200)
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await page.getByRole('button', { name: 'About', exact: true }).click()
+    await page.getByRole('button', { name: 'Check for updates' }).click()
+    await expect(page.getByText('Version 1.1.1 is ready to install.')).toBeVisible({ timeout: 60_000 })
+    await page.getByRole('button', { name: 'Restart to update' }).click()
+    await page.getByRole('button', { name: 'Restart and install' }).click()
+    await expect.poll(() => child.exitCode, { timeout: 45_000 }).not.toBeNull()
+    await browser?.close().catch(() => {})
+    browser = undefined
     await expect.poll(() => {
       try {
         return execFileSync('powershell', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:MONAW_PACKAGED_APP).VersionInfo.ProductVersion'], { encoding: 'utf8' }).trim()
@@ -261,7 +282,8 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
     await expect.poll(async () => updated.api('/api/settings').then(result => result.data.identity?.user_name, () => ''), { timeout: 30_000 }).toBe('Update test')
     await updated.quit()
   } finally {
-    if (desktop) await writeFile(testInfo.outputPath('updater-main.log'), desktop.output)
+    await browser?.close().catch(() => {})
+    await writeFile(testInfo.outputPath('updater-main.log'), appOutput)
     stopInstalled()
     server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))
