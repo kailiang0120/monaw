@@ -76,7 +76,13 @@ function getBackendRuntimeDir() {
 }
 
 function getBackendWorkspaceDir() {
-  return process.env.AGENT_WORKSPACE_DIR || path.join(app.getPath('documents'), 'monaw')
+  if (process.env.AGENT_WORKSPACE_DIR) return process.env.AGENT_WORKSPACE_DIR
+  try {
+    return path.join(app.getPath('documents'), 'monaw')
+  } catch (err) {
+    console.warn('[main] Documents folder unavailable; using the Monaw home workspace:', err.message)
+    return path.join(getMonawHomeDir(), 'workspace')
+  }
 }
 
 function rotateFileIfNeeded(filePath, maxBytes = 5 * 1024 * 1024) {
