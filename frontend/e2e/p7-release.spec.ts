@@ -57,7 +57,8 @@ test('file diff, approval, safe pause, real app/backend restart, Continue and Un
   test.setTimeout(150_000)
   await desktop.send('recover')
   await expect(desktop.page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
-  const target = join(desktop.root, 'workspace', 'file-resume.txt')
+  const workspace = (await desktop.api('/api/conversations')).data[0].workspace_dir as string
+  const target = join(workspace, 'file-resume.txt')
   await writeFile(target, 'before approval\n')
 
   await desktop.send('file-resume')
@@ -177,7 +178,8 @@ test('hard backend crash after a verified write exposes Continue without duplica
   test.setTimeout(150_000)
   await desktop.send('recover')
   await expect(desktop.page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
-  const target = join(desktop.root, 'workspace', 'file-resume.txt')
+  const workspace = (await desktop.api('/api/conversations')).data[0].workspace_dir as string
+  const target = join(workspace, 'file-resume.txt')
   await writeFile(target, 'before hard crash\n')
 
   await desktop.send('file-resume')
@@ -231,7 +233,8 @@ test('hard backend crash after a verified write exposes Continue without duplica
 test('Undo rechecks the file and preserves external edits on conflict', async ({ desktop }, testInfo) => {
   await desktop.send('recover')
   await expect(desktop.page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
-  const target = join(desktop.root, 'workspace', 'file-conflict.txt')
+  const workspace = (await desktop.api('/api/conversations')).data[0].workspace_dir as string
+  const target = join(workspace, 'file-conflict.txt')
   await writeFile(target, 'original conflict target\n')
   await desktop.send('file-conflict')
   const preview = desktop.page.getByRole('region', { name: 'File change preview' })

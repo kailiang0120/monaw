@@ -90,7 +90,7 @@ class FixtureProvider:
                 })], finish_reason="tool_calls")
             elif scenario in {"file-resume", "file-conflict"}:
                 return LLMResponse(content="", tool_calls=[call("fs_write", {
-                    "path": str(ROOT / "workspace" / f"{scenario}.txt"),
+                    "path": f"{scenario}.txt",
                     "content": "approved update\n",
                     "overwrite": True,
                     "create_parents": False,
