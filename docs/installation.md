@@ -54,13 +54,20 @@ Settings → Storage shows how much of this folder each kind of data uses and cl
 
 ## Upgrade
 
-There is no automatic update. To upgrade:
+Monaw checks GitHub Releases for a newer stable version after startup and
+periodically while it is running. Open **Settings > About** to see the installed
+version or check manually. An available update downloads in the background;
+choose **Restart to update** after finishing or pausing active work, and confirm
+the restart. Draft and prerelease versions are not installed. The existing v1.0
+installer has no updater and must be upgraded manually once.
+
+To upgrade manually:
 
 1. Close Monaw.
 2. Back up `%USERPROFILE%\.monaw` and your workspaces, including `Documents\monaw` (see [backup and restore](operations.md#backup-and-restore)).
 3. Run the newer installer. It replaces the app and leaves the Monaw home folder alone.
 
-A newer version may migrate the database when it starts. Older versions are not guaranteed to read a migrated database, so to go back, restore the backup from step 2 instead of only reinstalling the older version.
+A newer version may migrate the database when it starts. Older versions are not guaranteed to read a migrated database, so to go back, restore a backup instead of only reinstalling the older version. The current installer is unsigned: update downloads are checksum-verified, but publisher identity is not verified until code signing is configured.
 
 ## Uninstall
 

@@ -16,6 +16,11 @@ export interface SettingsPageCopy {
 }
 
 export const PAGE_COPY = {
+  about: {
+    label: 'About',
+    blurb: 'See the installed version and check for updates.',
+    keywords: 'version update upgrade release',
+  },
   model: {
     label: 'Model',
     blurb: 'Configure voice input and how much a message may use.',

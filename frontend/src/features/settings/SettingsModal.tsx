@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   HardDrive,
+  Info,
   AlertCircle,
   Bot,
   CheckCircle2,
@@ -28,6 +29,7 @@ import { McpSettings } from './McpSettings'
 import { MemoryRetrieval } from './MemoryRetrieval'
 import { SandboxSettings } from './SandboxSettings'
 import { ExecutionDetailSetting } from './ExecutionDetailSetting'
+import { AboutSettings } from './AboutSettings'
 import { StorageSettings } from './StorageSettings'
 import { useSettingsDraft } from './useSettingsDraft'
 import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
@@ -147,6 +149,7 @@ const TOOLS_TABS: Array<{ id: ToolsTab; label: string }> = [
 ]
 
 const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
+  about: Info,
   identity: UserRound,
   apiKeys: KeyRound,
   model: Bot,
@@ -163,7 +166,7 @@ const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
  * Group pages by what the user is trying to configure.
  */
 const NAV_GROUPS: Array<{ id: string; label: string; items: SettingsTab[] }> = [
-  { id: 'general', label: 'General', items: ['identity', 'apiKeys'] },
+  { id: 'general', label: 'General', items: ['identity', 'apiKeys', 'about'] },
   { id: 'intelligence', label: 'Intelligence', items: ['model'] },
   { id: 'capabilities', label: 'Capabilities', items: ['tools', 'browser'] },
   { id: 'safety', label: 'Safety', items: ['permissions', 'sandbox'] },
@@ -799,6 +802,7 @@ export function SettingsModal({
           {/* ---------------------------------------------------- page body */}
           <div ref={scrollRef} className="st-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
             <div className="mx-auto w-full max-w-[46rem]">
+              {activeTab === 'about' && <AboutSettings />}
               {activeTab === 'model' && (
                 <>
                   <PageHeader title={PAGE_COPY.model.label} />

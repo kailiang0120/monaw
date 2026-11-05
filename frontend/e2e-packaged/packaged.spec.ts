@@ -4,8 +4,9 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { createServer, type Server } from 'node:net'
+import { createServer as createHttpServer } from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 // Drives the packaged app (release/win-unpacked by default, or MONAW_PACKAGED_APP)
 // with no development tools on PATH. The model is never called: a frozen
@@ -143,6 +144,61 @@ test('starts without development tools and guides a first run', async () => {
   expect(existsSync(join(home, 'runtime', 'backend.log'))).toBe(true)
 
   await desktop.quit()
+})
+
+test('shows the installed version and update controls', async () => {
+  const desktop = track(new PackagedApp(home, await freePort()))
+  await desktop.start()
+  await desktop.page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await desktop.page.getByRole('button', { name: 'About', exact: true }).click()
+  const version = await desktop.app.evaluate(({ app }) => app.getVersion())
+  await expect(desktop.page.getByText(version, { exact: true })).toBeVisible()
+  await expect(desktop.page.getByRole('button', { name: 'Check for updates' })).toBeEnabled()
+  await desktop.quit()
+})
+
+for (const corrupted of [false, true]) test(corrupted ? 'rejects an update with the wrong checksum' : 'downloads an update from a controlled test feed', async () => {
+  const payload = Buffer.from('Monaw updater test payload; not an installer')
+  const checksum = createHash('sha512').update(corrupted ? Buffer.from('different bytes') : payload).digest('base64')
+  let payloadRequests = 0
+  const server = createHttpServer((request, response) => {
+    if (request.url?.split('?')[0] === '/latest.yml') {
+      response.writeHead(200, { 'Content-Type': 'text/yaml' })
+      response.end(`version: 1.99.0\nfiles:\n  - url: test-update.exe\n    sha512: ${checksum}\n    size: ${payload.length}\npath: test-update.exe\nsha512: ${checksum}\nreleaseDate: '2026-01-01T00:00:00.000Z'\n`)
+    } else if (request.url?.split('?')[0] === '/test-update.exe') {
+      payloadRequests++
+      response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length })
+      response.end(payload)
+    } else { response.writeHead(404); response.end() }
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('No update test port')
+    const desktop = track(new PackagedApp(home, await freePort()))
+    await desktop.start()
+    // Override the feed only in this isolated test process; production is pinned to GitHub.
+    await desktop.app.evaluate((_, url) => {
+      const requireFromApp = process.mainModule!.require.bind(process.mainModule)
+      const updater = requireFromApp('electron-updater').autoUpdater
+      updater.setFeedURL({ provider: 'generic', url })
+      updater.disableDifferentialDownload = true
+    }, `http://127.0.0.1:${address.port}`)
+    await desktop.page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await desktop.page.getByRole('button', { name: 'About', exact: true }).click()
+    await desktop.page.getByRole('button', { name: 'Check for updates' }).click()
+    if (corrupted) {
+      await expect(desktop.page.getByText('Could not check for or download the update. Please try again.')).toBeVisible({ timeout: 45_000 })
+      await expect(desktop.page.getByRole('button', { name: 'Restart to update' })).toHaveCount(0)
+    } else {
+      await expect(desktop.page.getByText('Version 1.99.0 is ready to install.')).toBeVisible({ timeout: 45_000 })
+      await expect(desktop.page.getByRole('button', { name: 'Restart to update' })).toBeVisible()
+    }
+    expect(payloadRequests).toBeGreaterThan(0)
+    await desktop.quit()
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
 })
 
 test('keeps settings across a restart', async () => {

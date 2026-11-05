@@ -66,6 +66,15 @@ function mcpCredential(input) {
 }
 
 const electronAPI = Object.freeze({
+  updateStatus: () => ipcRenderer.invoke('updates:status'),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  installUpdate: () => ipcRenderer.invoke('updates:install'),
+  onUpdateState: (listener) => {
+    if (typeof listener !== 'function') throw new TypeError('Invalid update listener')
+    const handler = (_event, state) => listener(state)
+    ipcRenderer.on('updates:state', handler)
+    return () => ipcRenderer.removeListener('updates:state', handler)
+  },
   getControlSession: () => ipcRenderer.invoke('control:get-session'),
   credentialStatus: () => ipcRenderer.invoke('credentials:status'),
   setCredential: (id, value) => ipcRenderer.invoke('credentials:set', credentialId(id), safeString(value, 'credential value')),

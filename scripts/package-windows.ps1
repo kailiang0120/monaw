@@ -56,3 +56,14 @@ try {
 finally {
     Pop-Location
 }
+
+if (-not $Unpacked) {
+    Push-Location (Join-Path $repoRoot "backend")
+    try {
+        uv run --locked --group packaging python ../scripts/verify-update-metadata.py
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    finally {
+        Pop-Location
+    }
+}

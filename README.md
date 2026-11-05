@@ -57,7 +57,7 @@ Monaw runs on your PC. Chat history, settings, memory, and artifacts are stored 
 
 You need Windows 10 or 11 (64-bit), an internet connection for model access, and a supported model connection. Google Chrome **125+** is needed for browser automation; Docker Desktop is optional for isolated shell execution.
 
-The installer is currently unsigned. Updates are installed manually: download the new installer, close Monaw, and install it over the existing version. See the [installation guide](docs/installation.md) for upgrades, backups, and uninstalling. macOS and Linux builds are not available.
+The installer is currently unsigned. Monaw checks for updates in the background; open **Settings > About** to check manually and restart to install an available update. See the [installation guide](docs/installation.md) for upgrades, backups, and uninstalling. macOS and Linux builds are not available.
 
 ## Getting started
 
