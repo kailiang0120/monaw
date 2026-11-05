@@ -4,6 +4,7 @@ import { ApiError } from '../lib/api/client'
 import { fetchUndoCapability, previewUndoFileMutation } from '../lib/api/fileMutations'
 import type { FileMutationUndoResult, UndoCapability, UndoPreview } from '../lib/api/fileMutations'
 import type { OperationResolution, RecoveryReport, RunOperation, RunSnapshot } from '../lib/api/runs'
+import { UnifiedDiff } from './UnifiedDiff'
 
 type CapabilityStatus = UndoCapability['status']
 
@@ -328,16 +329,17 @@ export function RecoveryPanel({
 
           return (
             <li key={operation.operation_id} className="rounded-lg border border-white/[0.06] bg-black/15 px-2.5 py-2">
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div className="flex min-w-0 items-start gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
                   {isUnresolved
-                    ? <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-300" aria-hidden="true" />
-                    : <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-300" aria-hidden="true" />}
+                    ? <AlertTriangle size={13} className="shrink-0 text-amber-300" aria-hidden="true" />
+                    : <CheckCircle2 size={13} className="shrink-0 text-emerald-300" aria-hidden="true" />}
                   <div className="min-w-0">
                     <p className="break-words text-[11px] text-neutral-300">
                       {humanize(operation.operation_kind)} <span className="text-neutral-500">· {humanize(operation.status)}</span>
                     </p>
-                    {operation.reason_code && <p className="mt-1 break-words text-[10px] text-neutral-500">{humanize(operation.reason_code)}</p>}
+                    {typeof operation.input_summary.path === 'string' && <p className="mt-1 break-all font-mono text-[10px] text-neutral-400">{operation.input_summary.path}</p>}
+                    {operation.reason_code && operation.reason_code !== operation.status && <p className="mt-1 break-words text-[10px] text-neutral-500">{humanize(operation.reason_code)}</p>}
                     {operation.effect_class === 'opaque_effect' && isUnresolved && (
                       <p className="mt-1 text-[10px] leading-relaxed text-amber-200">This action can’t be checked automatically. Review its effect before continuing.</p>
                     )}
@@ -387,14 +389,14 @@ export function RecoveryPanel({
                         : pendingUndoPreviewId === operation.operation_id
                         ? <span className="inline-flex items-center gap-1 text-[10px] text-amber-200" role="status"><Loader2 size={11} className="animate-spin" aria-hidden="true" />Preparing Undo preview…</span>
                         : undoPreview
-                        ? <span className="text-[10px] text-amber-200" role="status">Review the inverse below</span>
+                        ? <span className="text-[10px] text-amber-200" role="status">Review the changes below</span>
                         : <button
                             type="button"
                             disabled={pendingUndoId !== null || pendingUndoPreviewId !== null || pendingResolution !== null || hasOtherUndoPreview}
                             onClick={() => void prepareUndoPreview(operation)}
                             className="inline-flex items-center gap-1 rounded-md border border-red-400/20 px-2 py-1 text-[10px] font-medium text-red-200 hover:bg-red-400/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/40 disabled:cursor-not-allowed disabled:opacity-50"
                           >
-                            <RotateCcw size={11} aria-hidden="true" /> Review Undo
+                            <RotateCcw size={11} aria-hidden="true" /> Undo
                           </button>
                       : capability
                         ? <span className={`text-[10px] ${capability.status === 'conflict' ? 'text-amber-200' : 'text-neutral-500'}`} role={capability.status === 'conflict' ? 'status' : undefined}>
@@ -413,7 +415,7 @@ export function RecoveryPanel({
                   role="group"
                 >
                   <div>
-                    <h3 className="text-[10px] font-medium text-red-100">Review what Undo will change</h3>
+                    <h3 className="text-[10px] font-medium text-neutral-200">Review what Undo will change</h3>
                     <p className="mt-1 text-[10px] leading-relaxed text-neutral-400">
                       This preview is bound to the current file state and expires in {Math.max(0, Math.ceil(undoPreview.expires_in_seconds / 60))} minutes.
                     </p>
@@ -433,7 +435,7 @@ export function RecoveryPanel({
                             <dd className="text-neutral-400">{undoFileState(file.after)}</dd>
                           </dl>
                           {diff.kind === 'unified_diff' && diffText
-                            ? <pre aria-label={`Undo text diff for ${file.path}`} className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-white/[0.05] bg-black/25 p-2 font-mono text-[10px] leading-relaxed text-neutral-300">{diffText}</pre>
+                            ? <UnifiedDiff label={`Undo text diff for ${file.path}`} text={diffText} className="mt-2 max-h-48" />
                             : <p className="mt-2 text-[10px] text-neutral-500">A text diff is unavailable for this file; the byte sizes above show the change.</p>}
                         </li>
                       )
@@ -444,9 +446,9 @@ export function RecoveryPanel({
                       type="button"
                       disabled={pendingUndoId !== null || pendingResolution !== null}
                       onClick={() => void runUndo(operation)}
-                      className="rounded-md border border-red-400/30 bg-red-400/10 px-2.5 py-1.5 text-[10px] font-medium text-red-100 hover:bg-red-400/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/40 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-md border border-red-400/30 bg-red-400/10 px-2.5 py-1.5 text-[10px] font-medium text-red-200 hover:bg-red-400/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/40 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      Undo now
+                      Undo
                     </button>
                     <button
                       type="button"

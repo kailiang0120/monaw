@@ -207,6 +207,11 @@ class DurableTurnRun:
         current = str(dto["status"])
         if current == target:
             return True
+        if target in {"completed", "failed", "cancelled"}:
+            self._checkpoint_files("after")
+            # Checkpointing may take time; renew before committing the final state.
+            self.renew_lease()
+            dto = self._latest_owned()
         try:
             if target == "paused" and current in {"running", "waiting_approval"}:
                 pausing = self.journal.transition_run(
@@ -265,6 +270,18 @@ class DurableTurnRun:
         self.status = str(updated["status"])
         return self.status in {"paused", "completed", "failed", "cancelled"}
 
+    def _checkpoint_files(self, phase: str) -> None:
+        from app.agent.git_changes import checkpoint
+        scope = self.journal.load_run_internal(self.run_id)
+        if not scope or scope.get("execution_source") != "desktop":
+            return
+        overlap = self.journal.db.fetchone(
+            """SELECT run_id FROM agent_runs WHERE workspace_dir = ? AND run_id != ?
+               AND (finished_at IS NULL OR finished_at >= (SELECT created_at FROM agent_runs WHERE run_id = ?)) LIMIT 1""",
+            (scope["workspace_dir"], self.run_id, self.run_id),
+        )
+        checkpoint(self.run_id, scope["workspace_dir"], phase, overlapping=overlap is not None)
+
 
 def _owner_instance_id() -> str:
     from app.agent.durable.recovery import get_owner_instance_id
@@ -301,7 +318,7 @@ def create_durable_run(
         recovery_input_ref=None,
         lease_seconds=lease_seconds,
     )
-    return DurableTurnRun(
+    durable = DurableTurnRun(
         journal=journal,
         run_id=stable_run_id,
         owner_instance_id=owner,
@@ -312,6 +329,9 @@ def create_durable_run(
         status=str(dto["status"]),
         recovery_input_ref=f"turn_checkpoint:{checkpoint_turn_id}",
     )
+    durable._checkpoint_files("before")
+    durable.renew_lease()
+    return durable
 
 
 def resume_run(

@@ -152,22 +152,23 @@ test('file diff, approval, safe pause, real app/backend restart, Continue and Un
   expect((await desktop.events()).filter((event) => event.kind === 'model' && event.scenario === 'file-resume').map((event) => event.index)).toEqual([0, 1, 2])
   expect((await desktop.api('/api/settings')).data.permissions.mode).toBe('default')
 
-  await desktop.page.getByText('Review individual file changes', { exact: true }).click()
-  const reviewUndo = desktop.page.getByRole('button', { name: 'Review Undo', exact: true })
+  await desktop.page.getByRole('button', { name: 'Changes', exact: true }).click()
+  const reviewUndo = desktop.page.getByRole('button', { name: 'Undo', exact: true })
   await expect(reviewUndo).toBeVisible()
   await reviewUndo.focus()
   await desktop.page.keyboard.press('Enter')
-  const undoPreview = desktop.page.getByRole('group', { name: 'Undo confirmation preview' })
+  const undoPreview = desktop.page.getByRole('region', { name: 'Confirm Git Undo' })
   await expect(undoPreview).toBeVisible()
-  await expect(undoPreview.getByRole('list', { name: 'Files affected by Undo' })).toContainText(target)
+  await expect(undoPreview).toContainText('file-resume.txt')
   await expect(undoPreview.locator('pre')).toContainText('-approved update')
   await expect(undoPreview.locator('pre')).toContainText('+before approval')
-  // Confirmation initially focuses Cancel. Shift+Tab selects the destructive
+  // Focus Cancel, then Shift+Tab selects the destructive
   // action explicitly, then Enter exercises the keyboard path through Undo.
+  await undoPreview.getByRole('button', { name: 'Cancel', exact: true }).focus()
   await desktop.page.keyboard.press('Shift+Tab')
   await desktop.page.keyboard.press('Enter')
   await expect.poll(() => readFile(target, 'utf8')).toBe('before approval\n')
-  await expect(desktop.page.getByText('This change has already been undone', { exact: true })).toBeVisible()
+  await expect(desktop.page.getByText('Undone', { exact: true })).toBeVisible()
   expect(continuePosts).toHaveLength(1)
   expect(desktop.errors).toEqual([])
 })
@@ -227,7 +228,7 @@ test('hard backend crash after a verified write exposes Continue without duplica
   expect(desktop.errors).toEqual([])
 })
 
-test('Undo rechecks the file and preserves external edits on conflict', async ({ desktop }) => {
+test('Undo rechecks the file and preserves external edits on conflict', async ({ desktop }, testInfo) => {
   await desktop.send('recover')
   await expect(desktop.page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
   const target = join(desktop.root, 'workspace', 'file-conflict.txt')
@@ -257,16 +258,28 @@ test('Undo rechecks the file and preserves external edits on conflict', async ({
   await desktop.start()
   await desktop.page.getByText('[e2e:recover]', { exact: true }).last().click()
   expect((await desktop.api('/api/settings')).data.permissions.mode).toBe('default')
-  await desktop.page.getByText('Review individual file changes', { exact: true }).click()
-  const reviewUndo = desktop.page.getByRole('button', { name: 'Review Undo', exact: true })
+  await desktop.page.getByRole('button', { name: 'Changes', exact: true }).click()
+  const reviewUndo = desktop.page.getByRole('button', { name: 'Undo', exact: true })
   await expect(reviewUndo).toBeVisible()
   await reviewUndo.click()
-  const undoPreview = desktop.page.getByRole('group', { name: 'Undo confirmation preview' })
+  const undoPreview = desktop.page.getByRole('region', { name: 'Confirm Git Undo' })
   await expect(undoPreview).toBeVisible()
 
+  for (const theme of ['light', 'dark']) {
+    await desktop.page.getByRole('button', { name: 'Back to chat', exact: true }).click()
+    const toggle = desktop.page.getByRole('button', { name: `Switch to ${theme} mode`, exact: true }).last()
+    if (await toggle.isVisible()) await toggle.click()
+    await desktop.page.screenshot({ path: testInfo.outputPath(`chat-${theme}.png`) })
+    await desktop.page.getByRole('button', { name: 'Changes', exact: true }).click()
+    await desktop.page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await expect(undoPreview).toBeVisible()
+    await desktop.page.getByRole('dialog', { name: 'Workspace changes' })
+      .screenshot({ path: testInfo.outputPath(`undo-${theme}.png`) })
+  }
+
   await writeFile(target, 'external edit must stay\n')
-  await undoPreview.getByRole('button', { name: 'Undo now', exact: true }).click()
-  await expect(desktop.page.getByRole('alert').filter({ hasText: 'File changed after this operation. Undo was not applied.' })).toBeVisible()
+  await undoPreview.getByRole('button', { name: 'Undo', exact: true }).click()
+  await expect(desktop.page.getByRole('alert').filter({ hasText: 'Undo is unavailable: the file changed or needs review.' })).toBeVisible()
   expect(await readFile(target, 'utf8')).toBe('external edit must stay\n')
   await expect.poll(async () => (await desktop.api(capabilityPath)).data.status).toBe('conflict')
   expect(desktop.errors).toEqual([])

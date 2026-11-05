@@ -7,6 +7,7 @@ import { ApprovalToast } from './components/ApprovalToast'
 import { AccessGrantCard } from './components/AccessGrantCard'
 import { ExecutionTimeline } from './components/ExecutionTimeline'
 import { RecoveryPanel } from './components/RecoveryPanel'
+import { ChangesReview } from './components/ChangesReview'
 import type { RunAction } from './components/ExecutionTimeline'
 import { useChat } from './hooks/useChat'
 import { useRunController } from './hooks/useRunController'
@@ -669,8 +670,26 @@ export default function App() {
         status={!isBackendReady ? 'starting' : isStreaming ? 'working' : 'ready'}
         approvalMode={approvalMode}
         onOpenPermissions={() => openSettings('permissions')}
+        actions={activeConvId && <ChangesReview key={activeConvId} conversationId={activeConvId} runs={runController.runs} snapshot={runController.snapshot}
+          legacyUndo={(() => {
+                const run = runController.snapshot
+                const lastMessage = messages[messages.length - 1]
+                const hasUndo = runController.operations.some((operation) => operation.run_id === run?.run_id
+                  && operation.status === 'verified' && operation.effect_class === 'verifiable_write'
+                  && ['file_write', 'file_move', 'file_delete'].includes(operation.operation_kind))
+                if (!run || run.status !== 'completed' || isStreaming || lastMessage?.role !== 'assistant'
+                    || (lastMessage.runId !== run.run_id && String(run.assistant_message_id ?? '') !== lastMessage.id) || !hasUndo) return null
+                return (
+                  <details className="mb-4 text-xs text-neutral-400">
+                    <summary className="inline-flex cursor-pointer rounded-md border border-white/[0.08] px-2 py-1 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">Review individual file changes</summary>
+                    <p className="mt-2 text-[11px] text-neutral-500">These controls undo individual supported file operations. They do not restore the entire Run.</p>
+                    <div className="mt-2"><RecoveryPanel snapshot={run} operations={runController.operations} onUndo={handleUndoOperation} onRefresh={runController.refreshRun} /></div>
+                  </details>
+                )
+              })()}
+        />}
       />
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <Sidebar
           conversations={conversations}
           activeId={activeConvId}
@@ -708,22 +727,6 @@ export default function App() {
               agentName={agentName}
               onLoadOlderMessages={loadOlderMessages}
               onPromptSelect={handleSend}
-              afterMessages={(() => {
-                const run = runController.snapshot
-                const lastMessage = messages[messages.length - 1]
-                const hasUndo = runController.operations.some((operation) => operation.run_id === run?.run_id
-                  && operation.status === 'verified' && operation.effect_class === 'verifiable_write'
-                  && ['file_write', 'file_move', 'file_delete'].includes(operation.operation_kind))
-                if (!run || run.status !== 'completed' || isStreaming || lastMessage?.role !== 'assistant'
-                    || (lastMessage.runId !== run.run_id && String(run.assistant_message_id ?? '') !== lastMessage.id) || !hasUndo) return null
-                return (
-                  <details className="mb-4 text-xs text-neutral-400">
-                    <summary className="inline-flex cursor-pointer rounded-md border border-white/[0.08] px-2 py-1 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">Review individual file changes</summary>
-                    <p className="mt-2 text-[11px] text-neutral-500">These controls undo individual supported file operations. They do not restore the entire Run.</p>
-                    <div className="mt-2"><RecoveryPanel snapshot={run} operations={runController.operations} onUndo={handleUndoOperation} onRefresh={runController.refreshRun} /></div>
-                  </details>
-                )
-              })()}
               emptyState={showGuide ? (
                 <FirstRunGuide
                   required={readiness.required}

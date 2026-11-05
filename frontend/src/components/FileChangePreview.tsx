@@ -1,4 +1,5 @@
 import { FileText, Loader2, ShieldCheck } from 'lucide-react'
+import { UnifiedDiff } from './UnifiedDiff'
 
 export interface FileChangePreviewFile {
   path: string
@@ -96,7 +97,7 @@ export function FileChangePreview({
         {kind === 'unified_diff' && diffText ? (
           <div>
             <p className="mb-1 text-[10px] font-medium text-neutral-500">Text diff</p>
-            <pre aria-label="Text diff" className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-white/[0.05] bg-black/25 p-2.5 font-mono text-[10px] leading-relaxed text-neutral-300">{diffText}</pre>
+            <UnifiedDiff label="Text diff" text={diffText} className="max-h-72" />
           </div>
         ) : (
           <div className="rounded-md bg-white/[0.025] px-2.5 py-2">

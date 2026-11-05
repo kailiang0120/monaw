@@ -75,6 +75,9 @@ unauthenticated runtime endpoint.
 | `POST` | `/api/privacy/delete-data` | `agent:run` | `DataDeletionResult` |
 | `GET` | `/api/runs` | `runs:read` | `stream/file/none` |
 | `GET` | `/api/runs/{run_id}` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/changes` | `files:read` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/changes/undo` | `files:mutate` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/changes/undo-preview` | `files:mutate` | `stream/file/none` |
 | `GET` | `/api/runs/{run_id}/events` | `runs:read` | `stream/file/none` |
 | `GET` | `/api/runs/{run_id}/events/stream` | `runs:read` | `stream/file/none` |
 | `GET` | `/api/runs/{run_id}/operations` | `runs:read` | `stream/file/none` |

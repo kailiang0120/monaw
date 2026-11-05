@@ -36,7 +36,7 @@
 
 | Capability | What it means for you |
 | --- | --- |
-| **Work with files and code** | Read and edit project files, run shell commands, and give each conversation its own workspace and `AGENTS.md` instructions. |
+| **Work with files and code** | Read and edit project files, run shell commands, and give each conversation its own workspace and `AGENTS.md` instructions. Review Git-tracked changes and Undo from the [Changes page](docs/file-changes.md). |
 | **Use your browser and desktop** | Automate Chrome through the Monaw extension and interact with Windows apps. [Browser automation](docs/browser-automation.md) · [Computer use](docs/computer-use.md) |
 | **Choose your model** | Connect an OpenAI API key, sign in with your ChatGPT account, or use a Google Gemini API key. Switch providers and models from the chat composer. |
 | **Keep context across tasks** | Save global preferences and workspace memory, and steer or stop an active task. [Memory guide](docs/memory.md) |

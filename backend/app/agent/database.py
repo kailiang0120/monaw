@@ -238,6 +238,11 @@ class Database:
                     "snapshot reclamation deferred after conversation deletion error_type=%s",
                     type(exc).__name__,
                 )
+        try:
+            from app.agent.git_changes import reclaim_checkpoints
+            reclaim_checkpoints(self)
+        except Exception as exc:
+            logger.warning("Git checkpoint reclamation deferred error_type=%s", type(exc).__name__)
         return True
 
     # Scheduled task CRUD

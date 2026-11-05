@@ -21,6 +21,7 @@ TEST_GROUPS = {
         "test_mcp_credentials.py",
         "test_response_attachments.py",
         "test_file_mutations_api.py",
+        "test_git_changes.py",
         "test_profile_attachment_api.py",
         "test_runs_api.py",
     },
@@ -192,6 +193,9 @@ def isolate_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """
     import app.agent.database as database
     import app.agent.durable.recovery as durable_recovery
+    import app.agent.git_changes as git_changes
+
+    monkeypatch.setattr(git_changes, "STORE", tmp_path / "git-checkpoints")
 
     database.reset_db()
     monkeypatch.setattr(database, "_RUNTIME_DIR", tmp_path)

@@ -104,6 +104,8 @@ def _required_scope(method: str, path: str) -> str:
         return "files:read"
     if path.startswith("/api/file-mutations"):
         return "files:mutate"
+    if path.startswith("/api/runs/") and "/changes" in path:
+        return "files:read" if method == "GET" else "files:mutate"
     if path == "/api/runs" or path.startswith("/api/runs/"):
         return "runs:read" if method == "GET" else "runs:control"
     return "agent:run"

@@ -206,6 +206,8 @@ def enforce_runtime_retention() -> dict[str, int]:
         )
     )
     counts.update(_delete_stale_database_backups())
+    from app.agent.git_changes import reclaim_checkpoints
+    counts.update(reclaim_checkpoints(get_db()))
     counts.update(approval_broker.enforce_retention(max_age_days=RETENTION_DAYS))
     counts.update(access_grant_broker.enforce_retention(max_age_days=RETENTION_DAYS))
     counts.update(get_db().enforce_scheduled_task_run_retention(max_age_days=RETENTION_DAYS))
@@ -232,6 +234,8 @@ def delete_runtime_data() -> dict[str, object]:
     deleted.update(get_db().clear_scheduled_task_outputs())
     deleted.update(_delete_memory_root())
     deleted.update(_delete_stale_database_backups())
+    from app.agent.git_changes import reclaim_checkpoints
+    deleted.update(reclaim_checkpoints(get_db(), clear_terminal=True))
     deleted.update({"backend_logs_deleted": 0})
     for path in RUNTIME_DIR.glob("backend.log*"):
         deleted["backend_logs_deleted"] += _delete_file(path)

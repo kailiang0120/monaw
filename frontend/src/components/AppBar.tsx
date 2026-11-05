@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Copy, Minus, PanelLeftClose, PanelLeftOpen, ShieldAlert, ShieldCheck, ShieldHalf, Square, X } from 'lucide-react'
 import type { AgentSettings } from '../lib/api/types'
 import { resolveAgentName } from '../lib/identity'
@@ -19,6 +19,7 @@ interface Props {
   status: AgentStatus
   approvalMode: ApprovalMode
   onOpenPermissions?: () => void
+  actions?: ReactNode
 }
 
 const STATUS_LABEL: Record<AgentStatus, string> = {
@@ -85,6 +86,7 @@ export function AppBar({
   status,
   approvalMode,
   onOpenPermissions,
+  actions,
 }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -201,6 +203,7 @@ export function AppBar({
       </div>
 
       <div className="app-bar-actions">
+        {actions}
         <WindowControls />
       </div>
 

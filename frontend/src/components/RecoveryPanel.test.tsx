@@ -97,7 +97,8 @@ describe('RecoveryPanel Undo controls', () => {
     const onUndo = vi.fn().mockResolvedValue(undoResult('undone'))
     render(<RecoveryPanel snapshot={snapshot} operations={[operation]} onUndo={onUndo} />)
 
-    const review = await screen.findByRole('button', { name: 'Review Undo' })
+    const review = await screen.findByRole('button', { name: 'Undo' })
+    expect(screen.getAllByText(/Verified/)).toHaveLength(1)
     fireEvent.click(review)
     const confirmation = await screen.findByRole('group', { name: 'Undo confirmation preview' })
     expect(screen.getByText('C:/workspace/report.txt')).toBeInTheDocument()
@@ -105,13 +106,14 @@ describe('RecoveryPanel Undo controls', () => {
     expect(screen.getByText(/expires in 5 minutes/)).toBeInTheDocument()
     const cancel = screen.getByRole('button', { name: 'Cancel' })
     expect(document.activeElement).toBe(cancel)
-    expect(screen.getByRole('button', { name: 'Undo now' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
+    expect(onUndo).not.toHaveBeenCalled()
 
     fireEvent.click(cancel)
     expect(screen.queryByRole('group', { name: 'Undo confirmation preview' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Review Undo' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
     await screen.findByRole('group', { name: 'Undo confirmation preview' })
-    fireEvent.click(screen.getByRole('button', { name: 'Undo now' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
 
     await waitFor(() => expect(onUndo).toHaveBeenCalledWith(
       operation,
@@ -144,13 +146,13 @@ describe('RecoveryPanel Undo controls', () => {
     const onRefresh = vi.fn()
     const { rerender } = render(<RecoveryPanel snapshot={snapshot} operations={[operation]} onUndo={onUndo} onRefresh={onRefresh} />)
 
-    await screen.findByRole('button', { name: 'Review Undo' })
+    await screen.findByRole('button', { name: 'Undo' })
     rerender(<RecoveryPanel snapshot={snapshot} operations={[{ ...operation, snapshot_available: false }]} onUndo={onUndo} onRefresh={onRefresh} />)
-    expect(screen.getByRole('button', { name: 'Review Undo' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Review Undo' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
     await screen.findByRole('group', { name: 'Undo confirmation preview' })
-    fireEvent.click(screen.getByRole('button', { name: 'Undo now' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('File changed after this operation. Undo was not applied.')
     expect(screen.getByText('File write')).toBeInTheDocument()
@@ -172,7 +174,7 @@ describe('RecoveryPanel Undo controls', () => {
       <RecoveryPanel snapshot={snapshot} operations={[operation]} onUndo={vi.fn().mockResolvedValue(undoResult('undone'))} />,
     )
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Review Undo' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }))
     expect(previewUndoFileMutation).toHaveBeenCalledTimes(1)
 
     rerender(
@@ -182,7 +184,7 @@ describe('RecoveryPanel Undo controls', () => {
         onUndo={vi.fn().mockResolvedValue(undoResult('undone'))}
       />,
     )
-    await screen.findByRole('button', { name: 'Review Undo' })
+    await screen.findByRole('button', { name: 'Undo' })
 
     await act(async () => {
       resolvePreview(undoPreview() as UndoPreview)
@@ -196,7 +198,7 @@ describe('RecoveryPanel Undo controls', () => {
     render(<RecoveryPanel snapshot={snapshot} operations={[operation]} onUndo={vi.fn().mockResolvedValue(undoResult('undone'))} />)
 
     expect(await screen.findByText('Undo is unavailable for this operation')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Review Undo' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument()
   })
 
   it.each(['needs_review', 'in_progress'])('does not report an HTTP 200 %s Undo result as completed', async (status) => {
@@ -205,10 +207,10 @@ describe('RecoveryPanel Undo controls', () => {
     const onUndo = vi.fn().mockResolvedValue(undoResult(status))
     render(<RecoveryPanel snapshot={snapshot} operations={[operation]} onUndo={onUndo} />)
 
-    await screen.findByRole('button', { name: 'Review Undo' })
-    fireEvent.click(screen.getByRole('button', { name: 'Review Undo' }))
+    await screen.findByRole('button', { name: 'Undo' })
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
     await screen.findByRole('group', { name: 'Undo confirmation preview' })
-    fireEvent.click(screen.getByRole('button', { name: 'Undo now' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
 
     expect(await screen.findByText(
       `Undo returned ${status === 'needs_review' ? 'Needs review' : 'In progress'}. Check the latest status before retrying.`,

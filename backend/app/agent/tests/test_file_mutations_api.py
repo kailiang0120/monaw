@@ -138,6 +138,46 @@ def _preview_body(context, path: Path, *, content: str = "after image\n") -> dic
     }
 
 
+def test_git_changes_preview_confirmation_and_conflict(file_mutation_api_context, monkeypatch):
+    from app.agent import git_changes
+    context = file_mutation_api_context
+    monkeypatch.setattr(git_changes, "STORE", context["root"].parent / "git-api")
+    target = context["root"] / "patched.txt"
+    target.write_bytes(b"user edit\n")
+    git_changes.checkpoint(context["run_id"], str(context["root"]), "before")
+    target.write_bytes(b"agent edit\n")
+    (context["root"] / "command.txt").write_bytes(b"command created this\n")
+    context["run"].finalize("error")
+    url = f'/api/runs/{context["run_id"]}/changes'
+    client, headers = context["client"], context["headers"]
+    params = {"conversation_id": context["conversation_id"]}
+    result = client.get(url, params=params, headers=headers)
+    assert result.status_code == 200, result.text
+    assert {f["path"] for f in result.json()["files"]} == {"patched.txt", "command.txt"}, result.text
+    other_token = mint_control_token(os.environ["MONAW_CONTROL_SECRET"], scopes=ALL_SCOPES, session_id="another-owner")
+    assert client.get(url, params=params, headers={"Authorization": f"Bearer {other_token}"}).status_code == 403
+    limited_token = mint_control_token(os.environ["MONAW_CONTROL_SECRET"], scopes=["runs:read", "runs:control"], session_id=context["session_id"])
+    assert client.get(url, params=params, headers={"Authorization": f"Bearer {limited_token}"}).status_code == 403
+    body = {**params, "path": "patched.txt"}
+    preview = client.post(url + "/undo-preview", json=body, headers=headers)
+    assert preview.status_code == 200, preview.text
+    assert "+user edit" in preview.json()["file"]["diff"]
+    assert target.read_bytes() == b"agent edit\n"
+    forged = client.post(url + "/undo", json={**body, "confirmation_id": "fake"}, headers=headers)
+    assert forged.status_code == 409
+    result = client.post(url + "/undo", json={**body, "confirmation_id": preview.json()["confirmation_id"]}, headers=headers)
+    assert result.status_code == 200, result.text
+    assert target.read_bytes() == b"user edit\n"
+    body["path"] = "command.txt"
+    preview = client.post(url + "/undo-preview", json=body, headers=headers)
+    if os.name == "nt":
+        assert preview.status_code == 200, preview.text
+        (context["root"] / "command.txt").write_bytes(b"external edit\n")
+        result = client.post(url + "/undo", json={**body, "confirmation_id": preview.json()["confirmation_id"]}, headers=headers)
+        assert result.status_code == 409
+        assert (context["root"] / "command.txt").read_bytes() == b"external edit\n"
+
+
 def test_preview_then_external_edit_makes_apply_stale_without_overwriting(
     file_mutation_api_context,
 ):
