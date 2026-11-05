@@ -2094,14 +2094,29 @@ class Journal:
             return False
 
         operations = conn.execute(
-            """SELECT effect_class, status, evidence_json FROM run_operations
-               WHERE run_id = ? ORDER BY sequence_no""",
-            (run_row["run_id"],),
+            """SELECT effect_class, status, evidence_json,
+                      EXISTS (
+                          SELECT 1 FROM run_attempts AS a
+                          JOIN turn_checkpoints AS c ON c.turn_id = a.turn_id
+                          JOIN messages AS m ON m.id = c.assistant_message_id
+                          WHERE a.run_id = o.run_id AND a.attempt = o.attempt
+                            AND c.conversation_id = ? AND c.finalized = 1
+                            AND m.conversation_id = c.conversation_id AND m.role = 'assistant'
+                            AND m.created_at >= o.updated_at
+                      ) AS result_checkpointed
+               FROM run_operations AS o WHERE run_id = ? ORDER BY sequence_no""",
+            (run_row["conversation_id"], run_row["run_id"]),
         ).fetchall()
         for operation in operations:
             effect = str(operation["effect_class"])
             status = str(operation["status"])
             evidence = _decode_json(operation["evidence_json"])
+            # A clean pause continues from persisted results; it does not replay
+            # completed browser/shell actions. Keep their effects unverified, but
+            # allow continuation when this attempt sealed its transcript AFTER
+            # the call returned. Interrupted or uncheckpointed calls still block.
+            if effect == "opaque_effect" and status == "returned" and operation["result_checkpointed"]:
+                continue
             if effect == "opaque_effect" and status != "cancelled":
                 return False
             if effect != "read_only" and status not in {"verified", "cancelled"}:

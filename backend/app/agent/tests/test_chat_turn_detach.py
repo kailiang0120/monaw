@@ -311,7 +311,8 @@ def test_resume_claim_keeps_original_input_across_empty_synthetic_checkpoint(tmp
     assert user_rows[0]["content"] == "Original instruction"
 
 
-def test_opaque_returned_effect_does_not_advertise_resume(tmp_path, monkeypatch):
+@pytest.mark.parametrize("checkpoint_after_return", [False, True])
+def test_opaque_returned_effect_requires_a_final_checkpoint_before_resume(tmp_path, monkeypatch, checkpoint_after_return):
     from app.agent.database import Database
     from app.agent.durable import turn_run
     from app.agent.durable.models import InvalidTransitionError
@@ -329,10 +330,13 @@ def test_opaque_returned_effect_does_not_advertise_resume(tmp_path, monkeypatch)
         run_id="opaque-run",
         db=database,
     )
-    database.persist_turn_messages(handle.turn_id, "opaque-chat", [
+    messages = [
         {"role": "user", "content": "Run a command", "attachments": []},
-        {"role": "assistant", "content": "Command returned", "status": "paused", "attachments": []},
-    ])
+        {"role": "assistant", "content": "Command returned", "status": "paused", "attachments": [],
+         "tool_calls": [{"tool_name": "shell_command", "input": "{}", "output": "Done", "status": "complete"}]},
+    ]
+    if not checkpoint_after_return:
+        database.persist_turn_messages(handle.turn_id, "opaque-chat", messages)
     handle.journal.prepare_operation(
         handle.run_id,
         operation_id="opaque-op",
@@ -351,11 +355,28 @@ def test_opaque_returned_effect_does_not_advertise_resume(tmp_path, monkeypatch)
             attempt=handle.attempt,
             reason_code="unknown" if status == "returned" else None,
         )
+    if checkpoint_after_return:
+        database.persist_turn_messages(handle.turn_id, "opaque-chat", messages)
     handle.begin_pause()
     assert handle.finalize("paused", "user_pause")
 
     snapshot = handle.journal.snapshot(handle.run_id)
     assert snapshot is not None
+    if checkpoint_after_return:
+        assert "resume" in snapshot["available_actions"]
+        continued, _ = turn_run.resume_run(
+            handle.run_id,
+            execution_source="desktop",
+            principal_id="session-1",
+            control_session_id="session-1",
+            workspace_dir="",
+            db=database,
+        )
+        assert continued.attempt == 2
+        # Continuing claims a new attempt without replaying or reclassifying the action.
+        operations = database.fetchall("SELECT status FROM run_operations WHERE run_id = ?", (handle.run_id,))
+        assert [row["status"] for row in operations] == ["returned"]
+        return
     assert "resume" not in snapshot["available_actions"]
     with pytest.raises(InvalidTransitionError):
         turn_run.resume_run(

@@ -135,7 +135,7 @@ def test_policy_table_covers_exactly_the_extension_tools():
 
 def test_devtools_reads_never_prompt_and_are_observations(runtime_settings):
     calls = []
-    reads = ["list_pages", "select_page", "take_snapshot", "take_screenshot", "wait_for", "list_console_messages",
+    reads = ["list_pages", "select_page", "take_snapshot", "inspect_element", "take_screenshot", "wait_for", "list_console_messages",
              "get_console_message"]
     entries = _devtools_entries(*reads, calls=calls)
 

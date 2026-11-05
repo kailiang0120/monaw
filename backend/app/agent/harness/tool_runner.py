@@ -12,6 +12,7 @@ from app.agent.approval_review import AutoReviewState
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.durable.operation_execution import prepare_tool_operation
 from app.agent.harness.tool_batch import ActiveToolCall, ToolBatchLedger, TrackedToolCall
+from app.agent.harness.browser_workflow import BrowserWorkflow
 from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.harness.tool_policy import ToolPolicy, ToolPolicyDecision
 from app.agent.harness.tool_recovery import ToolRecovery, GuardedToolResult
@@ -75,6 +76,7 @@ class ToolBatchRunner:
         self._call_states: dict[str, str] = {}
         self.pause: TurnOutcome | None = None
         self.recovery = ToolRecovery(observer, stuck_rounds_limit=stuck_rounds_limit, guard_blocks_limit=guard_blocks_limit)
+        self.browser_workflow = BrowserWorkflow()
         self._execution_plan: ExecutionPlan | None = None
         self._sync_plan_progress = getattr(memory, "sync_plan_progress", None)
 
@@ -413,6 +415,9 @@ class ToolBatchRunner:
         self.transcript.add_tool_result(tool_result, images=image_attachments)
         if recovery_prompt:
             self.transcript.messages.append({"role": "user", "content": recovery_prompt})
+        workflow_hint = self.browser_workflow.observe(tool_name, arguments, raw_tool_output, status)
+        if workflow_hint and not recovery_prompt:
+            self.transcript.messages.append({"role": "user", "content": workflow_hint})
 
 
     async def _flush_prepared_tool_calls(self, prepared_calls: list[PreparedToolCall]) -> None:

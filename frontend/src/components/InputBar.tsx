@@ -254,9 +254,12 @@ export function InputBar({
 
   useEffect(() => {
     if (previousFocusRequestKeyRef.current === focusRequestKey) return
-    previousFocusRequestKeyRef.current = focusRequestKey
-    textareaRef.current?.focus()
-  }, [focusRequestKey])
+    const textarea = textareaRef.current
+    // Keep the request pending while uploads/startup or voice input hide or disable it.
+    if (!textarea || textarea.disabled) return
+    textarea.focus()
+    if (document.activeElement === textarea) previousFocusRequestKeyRef.current = focusRequestKey
+  }, [focusRequestKey, disabled, uploading, recording])
 
   useEffect(() => () => {
     if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current)

@@ -28,7 +28,6 @@ import mascotThinkingStill from '../assets/mascots/thinking.png'
 import { ImagePreviewDialog } from './ImagePreviewDialog'
 import { FileChangePreview, type FileChangePreviewData } from './FileChangePreview'
 import { TurnChanges } from './TurnChanges'
-import { PlanProgress } from './PlanProgress'
 import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
 import { fetchMessageToolCalls } from '../lib/api/conversations'
@@ -177,7 +176,6 @@ export const MessageBubble = memo(function MessageBubble({
     () => (hasBody ? cachedFormatAgentResponse(message) : ''),
     [hasBody, message],
   )
-  const steps = message.stepProgress ?? []
   const runStatus = message.streaming ? 'streaming' : message.runStatus ?? 'complete'
   const mascotSrc = runStatus === 'streaming' ? mascotThinking
     : runStatus === 'complete' ? mascotSuccess
@@ -209,9 +207,7 @@ export const MessageBubble = memo(function MessageBubble({
 
       {displayActivities.map((item) => item.type === 'progress'
         ? <p key={item.id} className="text-sm leading-relaxed text-neutral-300" role="status" aria-live="polite">{item.content}</p>
-        : <ToolActivityGroup key={item.id} messageId={message.id} toolCalls={item.toolCalls} streaming={message.streaming === true} />)}
-
-      {steps.length > 0 && <PlanActivity steps={steps} />}
+        : <ToolActivityGroup key={item.id} messageId={message.id} toolCalls={item.toolCalls} />)}
 
       {(runStatus === 'paused' || runStatus === 'error') && (
         <p className={runStatus === 'error' ? 'text-xs text-red-300' : 'text-xs text-amber-300'}>
@@ -370,29 +366,6 @@ function WorkDuration({
   )
 }
 
-function PlanActivity({ steps }: { steps: NonNullable<Message['stepProgress']> }) {
-  const [expanded, setExpanded] = useState(false)
-  const activeStep = steps.find((step) => step.status === 'active' || step.status === 'retrying')
-  const completed = steps.filter((step) => step.status === 'done').length
-  const label = activeStep?.description || `Plan · ${completed}/${steps.length} done`
-
-  return (
-    <div className="text-xs">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 rounded-md py-1 text-left text-neutral-400 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/30"
-      >
-        <CircleDashed size={14} className="shrink-0" aria-hidden />
-        <span className="min-w-0 flex-1 truncate">{label}</span>
-        {expanded ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
-      </button>
-      {expanded && <div className="ml-5 pt-2"><PlanProgress steps={steps} title="Plan" /></div>}
-    </div>
-  )
-}
-
 function AttachmentStrip({
   attachments,
   compact = false,
@@ -541,11 +514,9 @@ function ImageAttachmentCard({
 function ToolActivityGroup({
   messageId,
   toolCalls,
-  streaming,
 }: {
   messageId: string
   toolCalls: ToolCall[]
-  streaming: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const pendingTool = toolCalls.find((call) => call.pending)
@@ -558,10 +529,6 @@ function ToolActivityGroup({
     : allCommands ? `Ran ${toolCalls.length === 1 ? 'command' : 'commands'}`
       : allBrowser ? 'Used browser'
         : `Used ${toolCalls.length === 1 ? 'tool' : 'tools'}`
-
-  useEffect(() => {
-    if (streaming && pendingTool) setExpanded(true)
-  }, [streaming, Boolean(pendingTool)])
 
   return (
     <div className="text-xs">

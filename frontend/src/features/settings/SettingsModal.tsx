@@ -241,6 +241,20 @@ export function SettingsModal({
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
+  const saveDiagnosticsRef = useRef<AbortController | null>(null)
+  const mountedRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      saveDiagnosticsRef.current?.abort()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (isDirty) setSaved(false)
+  }, [isDirty])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -323,7 +337,8 @@ export function SettingsModal({
 
   const loadMcpDiagnostics = async (signal?: AbortSignal) => {
     try {
-      storeMcpDiagnostics(await fetchMCPDiagnostics(signal))
+      const diagnostics = await fetchMCPDiagnostics(signal)
+      if (!signal?.aborted) storeMcpDiagnostics(diagnostics)
     } catch {
       if (signal?.aborted) return
       setMcpDiagnostics({})
@@ -332,7 +347,8 @@ export function SettingsModal({
 
   const loadBrowserDiagnostics = async (signal?: AbortSignal) => {
     try {
-      setBrowserDiagnostics(await fetchBrowserDiagnostics(signal))
+      const diagnostics = await fetchBrowserDiagnostics(signal)
+      if (!signal?.aborted) setBrowserDiagnostics(diagnostics)
     } catch {
       if (signal?.aborted) return
       setBrowserDiagnostics(null)
@@ -341,7 +357,8 @@ export function SettingsModal({
 
   const loadSandboxStatus = async (signal?: AbortSignal) => {
     try {
-      setSandboxStatus(await fetchSandboxStatus(signal))
+      const status = await fetchSandboxStatus(signal)
+      if (!signal?.aborted) setSandboxStatus(status)
     } catch {
       if (signal?.aborted) return
       setSandboxStatus(null)
@@ -524,15 +541,21 @@ export function SettingsModal({
   }
 
   const handleSave = async () => {
-    if (!draft) return
+    if (!draft || !isDirty || saving) return
     if (duplicateMcpServerNames(draft.mcp.servers).length > 0) return
     keepEditing()
     const outcome = await saveDraft(modelOptions)
-    if (outcome === 'failed') return
-    await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
-    if (outcome !== 'saved') return
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+    if (!mountedRef.current || outcome === 'failed') return
+    setSaved(outcome === 'saved')
+    // Saving is complete. Diagnostics must not delay success or outlive the dialog.
+    saveDiagnosticsRef.current?.abort()
+    const controller = new AbortController()
+    saveDiagnosticsRef.current = controller
+    void Promise.all([
+      loadMcpDiagnostics(controller.signal),
+      loadBrowserDiagnostics(controller.signal),
+      loadSandboxStatus(controller.signal),
+    ])
   }
 
   const updatePermissionMode = (mode: AgentSettings['permissions']['mode']) => {
@@ -1548,11 +1571,11 @@ export function SettingsModal({
                   <button
                     type="button"
                     onClick={handleSave}
-                    disabled={saving || duplicateMcpNames.length > 0}
+                    disabled={!isDirty || saving || duplicateMcpNames.length > 0}
                     className="st-btn st-btn-primary"
                   >
                     <Save size={13} />
-                    {saved ? 'Saved' : saving ? 'Saving…' : 'Save changes'}
+                    {saving ? 'Saving…' : saved && !isDirty ? 'Saved' : 'Save changes'}
                   </button>
                 </div>
               </>

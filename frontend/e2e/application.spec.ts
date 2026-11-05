@@ -8,6 +8,44 @@ async function toolRows(desktop: import('./desktop').Desktop) {
   return messages.flatMap((message: { tool_calls?: unknown[] }) => message.tool_calls || [])
 }
 
+test('typing resumes after saving a model API key and closing settings', async ({ desktop }) => {
+  const { page } = desktop
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Draft before settings')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+  await settings.getByRole('button', { name: /Connections/ }).click()
+  await settings.getByPlaceholder('OpenAI API Key').fill('sk-monaw-e2e-updated-fixture-only')
+  // Simulate slow post-save checks and the settings refresh after closing.
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/diagnostics/**', async (route) => { await pending; await route.fallback() })
+  await page.route('**/api/settings', async (route) => {
+    if (route.request().method() === 'GET') await pending
+    await route.fallback()
+  })
+  const refresh = page.waitForResponse((response) => response.url().endsWith('/api/settings')
+    && response.request().method() === 'GET')
+  try {
+    await settings.getByRole('button', { name: 'Save changes', exact: true }).click()
+    await expect(settings.getByRole('button', { name: 'Saved', exact: true })).toBeDisabled()
+    await settings.getByRole('button', { name: 'Close settings', exact: true }).click()
+    await expect(settings).toHaveCount(0)
+    await expect(composer).toBeFocused()
+    await page.keyboard.press('End')
+    await page.keyboard.type(' and after settings')
+    await expect(composer).toHaveValue('Draft before settings and after settings')
+  } finally {
+    release()
+  }
+  // Finishing the refresh must not steal focus or replace the user's draft.
+  await refresh
+  await expect(composer).toBeFocused()
+  await page.keyboard.type(' after refresh')
+  await expect(composer).toHaveValue('Draft before settings and after settings after refresh')
+  expect(desktop.errors).toEqual([])
+})
+
 test('authenticated startup, streamed response, and persistence after reopening', async ({ desktop }) => {
   const { page, port } = desktop
   expect((await page.request.get(`http://127.0.0.1:${port}/api/settings`)).status()).toBe(401)

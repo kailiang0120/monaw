@@ -38,7 +38,22 @@ def _default_workspace_dir() -> Path:
     explicit = _explicit_path("AGENT_WORKSPACE_DIR")
     if explicit:
         return explicit
-    return MONAW_HOME_DIR / "workspace"
+    # Desktop launches pass Electron's Documents path explicitly. Resolve the
+    # redirected Windows folder for standalone backend launches as well.
+    if os.name == "nt":
+        import winreg
+
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            ) as key:
+                documents, _ = winreg.QueryValueEx(key, "Personal")
+            if isinstance(documents, str) and documents:
+                return Path(os.path.expandvars(documents)) / "monaw"
+        except OSError:
+            pass
+    return Path.home() / "Documents" / "monaw"
 
 
 MONAW_HOME_DIR = _default_monaw_home_dir()

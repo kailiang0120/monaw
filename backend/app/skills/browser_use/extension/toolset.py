@@ -11,6 +11,7 @@ from typing import Any
 
 from .bridge import ExtensionBridge, ExtensionError
 from .chrome import ensure_extension_connected
+from .dom_inspection import ACTION_TARGET, READ_ELEMENT
 from .keys import key_events
 from .session import PageRegistry, SnapshotNode, TabSession, ToolError
 from .snapshot import take_snapshot
@@ -18,11 +19,12 @@ from .tools_schema import TOOL_NAMES
 
 DEFAULT_NAVIGATION_TIMEOUT_S = 30.0
 DEFAULT_WAIT_FOR_TIMEOUT_S = 15.0
+DEFAULT_ACTION_TIMEOUT_S = 5.0
 MAX_SCRIPT_RESULT_CHARS = 20_000
 CLOSE_PAGE_ERROR = "The last open page cannot be closed. It is fine to keep it open."
 # These tools would hang while a JavaScript dialog blocks the page.
 _DIALOG_BLOCKED = {
-    "take_snapshot", "take_screenshot", "wait_for", "click", "hover", "drag", "fill", "fill_form",
+    "take_snapshot", "inspect_element", "take_screenshot", "wait_for", "click", "hover", "drag", "fill", "fill_form",
     "type_text", "press_key", "upload_file", "evaluate_script",
 }
 
@@ -104,19 +106,6 @@ _LABEL_CENTER = r"""function() {
   return null;
 }"""
 
-# Last resort for a control with no size and no visible label.
-_SCRIPT_CLICK = r"""function(double) {
-  const el = this.nodeType === Node.TEXT_NODE ? this.parentElement : this;
-  if (!el || typeof el.click !== 'function') return false;
-  if (typeof el.focus === 'function') el.focus({preventScroll: true});
-  el.click();
-  if (double) {
-    el.click();
-    el.dispatchEvent(new MouseEvent('dblclick', {bubbles: true, cancelable: true, detail: 2}));
-  }
-  return true;
-}"""
-
 _SELECT_OPTION = r"""function() {
   const select = this.closest && this.closest('select');
   if (!select) return false;
@@ -136,6 +125,7 @@ class ElementNotVisible(ToolError):
 class ToolOutput:
     lines: list[str] = field(default_factory=list)
     images: list[dict[str, str]] = field(default_factory=list)
+    is_error: bool = False
 
     def add(self, line: str) -> None:
         if line:
@@ -216,16 +206,19 @@ class BrowserTools:
 
     async def _call_on(self, session: TabSession, node: SnapshotNode, function: str, *args: Any) -> Any:
         object_id = await self._object_id(session, node)
-        result = await session.send("Runtime.callFunctionOn", {
-            "objectId": object_id,
-            "functionDeclaration": function,
-            "arguments": [{"value": arg} for arg in args],
-            "returnByValue": True,
-            "awaitPromise": True,
-        })
-        if result.get("exceptionDetails"):
-            raise ToolError(_exception_text(result["exceptionDetails"]))
-        return (result.get("result") or {}).get("value")
+        try:
+            result = await session.send("Runtime.callFunctionOn", {
+                "objectId": object_id,
+                "functionDeclaration": function,
+                "arguments": [{"value": arg} for arg in args],
+                "returnByValue": True,
+                "awaitPromise": True,
+            })
+            if result.get("exceptionDetails"):
+                raise ToolError(_exception_text(result["exceptionDetails"]))
+            return (result.get("result") or {}).get("value")
+        finally:
+            await self._release_dom_target(session, object_id)
 
     async def _center(self, session: TabSession, node: SnapshotNode) -> tuple[float, float]:
         """Where to point the mouse: the element, or its label when the element is hidden."""
@@ -288,8 +281,42 @@ class BrowserTools:
 
     async def _with_snapshot(self, output: ToolOutput, session: TabSession, include: bool) -> ToolOutput:
         if include and session.dialog is None:
-            output.add(await take_snapshot(session))
+            try:
+                output.add(await take_snapshot(session))
+            except (ToolError, ExtensionError) as exc:
+                # The action already happened. A read failure must not turn it
+                # into a failed action that the model might submit again.
+                output.add(f"Updated snapshot unavailable: {exc}. Inspect the current page before taking another action; do not repeat the completed action just to get a snapshot.")
         return output
+
+    async def _wait_actionable(self, session: TabSession, node: SnapshotNode, action: str,
+                               deadline: float) -> None:
+        """Wait before dispatch, never replay an action or substitute a stale uid."""
+        observed: dict[str, Any] = {}
+        previous_bounds = None
+        previous_ready = False
+        try:
+            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                while True:
+                    if session.dialog is not None:
+                        raise ToolError(self._dialog_message(session))
+                    self._node(session, node.uid)
+                    observed = await self._call_on(session, node, ACTION_TARGET, action) or {}
+                    self._node(session, node.uid)
+                    if not observed.get("attached"):
+                        raise ToolError(f"Element uid {node.uid} was replaced or removed. Take a new snapshot and choose its current uid; the action was not dispatched.")
+                    bounds = observed.get("bounds")
+                    if observed.get("ready") and previous_ready and bounds == previous_bounds:
+                        return
+                    previous_ready = bool(observed.get("ready"))
+                    previous_bounds = bounds if observed.get("ready") else None
+                    await asyncio.sleep(0.1)
+        except TimeoutError as exc:
+            raise ToolError(f"Element uid {node.uid} was not ready for {action}; the action was not dispatched. Last state: {json.dumps(observed)}. Inspect the element or wait for the blocking condition before trying again.") from exc
+
+    @staticmethod
+    def _action_deadline(arguments: dict[str, Any]) -> float:
+        return time.monotonic() + min(_timeout_seconds(arguments.get("timeout"), DEFAULT_ACTION_TIMEOUT_S), 30.0)
 
     async def _wait_for_navigation(self, session: TabSession, loads: int, navigations: int, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
@@ -362,7 +389,7 @@ class BrowserTools:
         elif not loaded:
             output.add(f"Opened {url}; the page is still loading.")
         output.add(await self.pages.format_pages())
-        return output
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_navigate_page(self, arguments: dict[str, Any]) -> ToolOutput:
         page_id, session = await self._page(arguments, "navigate_page")
@@ -406,7 +433,7 @@ class BrowserTools:
         if session.dialog is not None:
             output.add(self._dialog_message(session))
         output.add(await self.pages.format_pages())
-        return output
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_close_page(self, arguments: dict[str, Any]) -> ToolOutput:
         tabs = await self.pages.list_tabs()
@@ -427,6 +454,55 @@ class BrowserTools:
     async def _tool_take_snapshot(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "take_snapshot")
         return ToolOutput([await take_snapshot(session)])
+
+    async def _dom_target(self, session: TabSession, arguments: dict[str, Any]) -> tuple[str, str | None]:
+        uid, selector = arguments.get("uid"), arguments.get("selector")
+        if (uid is None) == (selector is None):
+            raise ToolError("Provide exactly one uid from the latest snapshot or a specific CSS selector.")
+        if uid is not None:
+            if not isinstance(uid, str) or not uid.strip():
+                raise ToolError("uid must be a non-empty string from the latest snapshot.")
+            return await self._object_id(session, self._node(session, uid)), None
+        if not isinstance(selector, str) or not selector.strip() or len(selector) > 1000:
+            raise ToolError("selector must be a non-empty CSS selector of at most 1000 characters.")
+        result = await session.send("Runtime.evaluate", {"expression": "globalThis"}, timeout=5.0)
+        object_id = (result.get("result") or {}).get("objectId")
+        if not object_id:
+            raise ToolError("The page is not ready for DOM inspection. Take a new snapshot.")
+        return str(object_id), selector
+
+    async def _read_element(self, session: TabSession, object_id: str, selector: str | None,
+                            *, details: bool) -> dict[str, Any]:
+        result = await session.send("Runtime.callFunctionOn", {
+            "objectId": object_id, "functionDeclaration": READ_ELEMENT,
+            "arguments": [{"value": selector}, {"value": details}],
+            "returnByValue": True,
+        }, timeout=5.0)
+        if result.get("exceptionDetails"):
+            raise ToolError(_exception_text(result["exceptionDetails"]))
+        value = (result.get("result") or {}).get("value")
+        if not isinstance(value, dict):
+            raise ToolError("DOM inspection returned no element state.")
+        if value.get("error"):
+            raise ToolError(str(value["error"]))
+        return value
+
+    async def _release_dom_target(self, session: TabSession, object_id: str) -> None:
+        try:
+            await session.send("Runtime.releaseObject", {"objectId": object_id}, timeout=1.0)
+        except (ToolError, ExtensionError):
+            pass  # Navigation or a disconnected tab already released the object.
+
+    async def _tool_inspect_element(self, arguments: dict[str, Any]) -> ToolOutput:
+        _, session = await self._page(arguments, "inspect_element")
+        object_id, selector = await self._dom_target(session, arguments)
+        try:
+            result = await self._read_element(session, object_id, selector, details=True)
+            if not result.get("attached"):
+                raise ToolError("The element is no longer attached or the selector has no matches. Take a new snapshot.")
+            return ToolOutput(["## Element inspection\n" + json.dumps(result, ensure_ascii=False, indent=2)])
+        finally:
+            await self._release_dom_target(session, object_id)
 
     async def _tool_take_screenshot(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "take_screenshot")
@@ -465,10 +541,14 @@ class BrowserTools:
 
     async def _tool_wait_for(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "wait_for")
+        if "uid" in arguments or "selector" in arguments or "state" in arguments:
+            if "text" in arguments:
+                raise ToolError("Wait for text OR an element state, not both in one call.")
+            return await self._wait_for_element(session, arguments)
         texts = [str(text) for text in arguments.get("text") or [] if str(text)]
         if not texts:
             raise ToolError("Provide at least one text to wait for.")
-        timeout = _timeout_seconds(arguments.get("timeout"), DEFAULT_WAIT_FOR_TIMEOUT_S)
+        timeout = min(_timeout_seconds(arguments.get("timeout"), DEFAULT_WAIT_FOR_TIMEOUT_S), 60.0)
         deadline = time.monotonic() + timeout
         expression = "document.body ? document.body.innerText : ''"
         while True:
@@ -478,10 +558,44 @@ class BrowserTools:
             body = str((result.get("result") or {}).get("value") or "")
             found = next((text for text in texts if text in body), None)
             if found is not None:
-                return ToolOutput([f"Element matching one of {json.dumps(texts)} found.", await take_snapshot(session)])
+                output = ToolOutput([f"Element matching one of {json.dumps(texts)} found."])
+                return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
             if time.monotonic() >= deadline:
                 raise ToolError(f"Timed out after {int(timeout * 1000)} ms waiting for {json.dumps(texts)}.")
             await asyncio.sleep(0.25)
+
+    async def _wait_for_element(self, session: TabSession, arguments: dict[str, Any]) -> ToolOutput:
+        state = arguments.get("state", "visible")
+        if state not in {"attached", "detached", "visible", "hidden", "enabled", "disabled", "editable", "ready"}:
+            raise ToolError("Unknown element state. Use attached, detached, visible, hidden, enabled, disabled, editable, or ready.")
+        timeout = min(_timeout_seconds(arguments.get("timeout"), DEFAULT_WAIT_FOR_TIMEOUT_S), 60.0)
+        object_id = None
+        observed: dict[str, Any] = {}
+        loader_id = session.loader_id
+        try:
+            async with asyncio.timeout(timeout):
+                object_id, selector = await self._dom_target(session, arguments)
+                while True:
+                    if session.dialog is not None:
+                        raise ToolError(self._dialog_message(session))
+                    if session.loader_id != loader_id:
+                        raise ToolError("The page navigated while waiting. Take a new snapshot before choosing another target.")
+                    observed = await self._read_element(session, object_id, selector, details=False)
+                    matched = (
+                        not observed.get("attached") if state == "detached"
+                        else not observed.get("visible") if state == "hidden"
+                        else observed.get("attached") and not observed.get("enabled") if state == "disabled"
+                        else observed.get(state) is True
+                    )
+                    if matched:
+                        output = ToolOutput([f"Element reached state: {state}."])
+                        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
+                    await asyncio.sleep(0.1)
+        except TimeoutError as exc:
+            raise ToolError(f"Timed out waiting for element state {state}. Last observed state: {json.dumps(observed)}") from exc
+        finally:
+            if object_id:
+                await self._release_dom_target(session, object_id)
 
     async def _tool_list_console_messages(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "list_console_messages")
@@ -519,35 +633,20 @@ class BrowserTools:
         node = self._node(session, str(arguments.get("uid")))
         double = bool(arguments.get("dblClick"))
         output = ToolOutput()
+        await self._wait_actionable(session, node, "click", self._action_deadline(arguments))
         # A native <select> option cannot be clicked once its popup is drawn by Chrome.
         if node.role == "option" and await self._call_on(session, node, _SELECT_OPTION):
             output.add("Successfully clicked on the element")
-            return await self._with_snapshot(output, session, bool(arguments.get("includeSnapshot")))
-        note = ""
-        try:
-            x, y = await self._center(session, node)
-            opened_dialog = await self._click_point(session, x, y, 2 if double else 1)
-        except ElementNotVisible:
-            opened_dialog = await self._script_click(session, node, double)
-            note = " (it is hidden on screen, so it was clicked directly)"
+            return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
+        x, y = await self._center(session, node)
+        opened_dialog = await self._click_point(session, x, y, 2 if double else 1)
         if opened_dialog:
             output.add("The element was clicked and it opened a dialog.")
             output.add(self._dialog_message(session))
             return output
         await session.settle_after_action()
-        output.add(("Successfully double clicked on the element" if double else "Successfully clicked on the element") + note)
-        return await self._with_snapshot(output, session, bool(arguments.get("includeSnapshot")))
-
-    async def _script_click(self, session: TabSession, node: SnapshotNode, double: bool) -> bool:
-        """Click with element.click(); returns whether a dialog opened."""
-        object_id = await self._object_id(session, node)
-        return await session.send_until_dialog("Runtime.callFunctionOn", {
-            "objectId": object_id,
-            "functionDeclaration": _SCRIPT_CLICK,
-            "arguments": [{"value": double}],
-            "returnByValue": True,
-            "userGesture": True,
-        })
+        output.add("Successfully double clicked on the element" if double else "Successfully clicked on the element")
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_hover(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "hover")
@@ -556,7 +655,7 @@ class BrowserTools:
         await self._mouse(session, "mouseMoved", x, y)
         await asyncio.sleep(0.1)
         output = ToolOutput(["Successfully hovered over the element"])
-        return await self._with_snapshot(output, session, bool(arguments.get("includeSnapshot")))
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_drag(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "drag")
@@ -575,11 +674,12 @@ class BrowserTools:
         await self._mouse(session, "mouseReleased", *end, button="left", buttons=0, clickCount=1)
         await session.settle_after_action()
         output = ToolOutput(["Successfully dragged an element"])
-        return await self._with_snapshot(output, session, bool(arguments.get("includeSnapshot")))
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
-    async def _fill_one(self, session: TabSession, uid: str, value: str) -> bool:
+    async def _fill_one(self, session: TabSession, uid: str, value: str, deadline: float) -> bool:
         """Fill one element; returns whether it opened a dialog."""
         node = self._node(session, uid)
+        await self._wait_actionable(session, node, "fill", deadline)
         prepared = await self._call_on(session, node, _FILL_PREPARE, value) or {}
         kind = prepared.get("kind") if isinstance(prepared, dict) else None
         if kind == "error":
@@ -592,27 +692,42 @@ class BrowserTools:
 
     async def _tool_fill(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "fill")
-        if await self._fill_one(session, str(arguments.get("uid")), str(arguments.get("value") or "")):
+        if await self._fill_one(session, str(arguments.get("uid")), str(arguments.get("value") or ""), self._action_deadline(arguments)):
             return ToolOutput(["The element was filled out and it opened a dialog.", self._dialog_message(session)])
         output = ToolOutput(["Successfully filled out the element"])
-        return await self._with_snapshot(output, session, bool(arguments.get("includeSnapshot")))
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_fill_form(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "fill_form")
         elements = [item for item in arguments.get("elements") or [] if isinstance(item, dict)]
         if not elements:
             raise ToolError("Provide at least one element to fill.")
+        deadline = self._action_deadline(arguments)
+        completed: list[str] = []
         for position, element in enumerate(elements):
             uid = str(element.get("uid"))
-            if await self._fill_one(session, uid, str(element.get("value") or "")):
+            try:
+                opened_dialog = await self._fill_one(session, uid, str(element.get("value") or ""), deadline)
+            except (ToolError, ExtensionError) as exc:
+                if not completed:
+                    raise
+                output = ToolOutput([
+                    f"Form filling stopped at uid {uid}: {exc}",
+                    f"Completed uids: {', '.join(completed)}. Remaining uids after this field: "
+                    + (', '.join(str(item.get('uid')) for item in elements[position + 1:]) or 'none')
+                    + ". Inspect the current field before retrying it; do not repeat completed fields.",
+                ], is_error=True)
+                return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
+            if opened_dialog:
                 remaining = len(elements) - position - 1
                 return ToolOutput([
                     f"Filling out the element with uid {uid} opened a dialog."
                     + (f" {remaining} element(s) were not filled." if remaining else ""),
                     self._dialog_message(session),
                 ])
+            completed.append(uid)
         output = ToolOutput(["Successfully filled out the form"])
-        return await self._with_snapshot(output, session, bool(arguments.get("includeSnapshot")))
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_type_text(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "type_text")
@@ -622,7 +737,8 @@ class BrowserTools:
             return ToolOutput([f'Typed text "{text}" and it opened a dialog.', self._dialog_message(session)])
         if submit:
             await session.settle_after_action()
-        return ToolOutput([f'Typed text "{text}{f" + {submit}" if submit else ""}"'])
+        output = ToolOutput([f'Typed text "{text}{f" + {submit}" if submit else ""}"'])
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_press_key(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "press_key")
@@ -631,7 +747,7 @@ class BrowserTools:
             return ToolOutput([f"Pressed key {key} and it opened a dialog.", self._dialog_message(session)])
         await session.settle_after_action()
         output = ToolOutput([f"Successfully pressed key: {key}"])
-        return await self._with_snapshot(output, session, bool(arguments.get("includeSnapshot")))
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_handle_dialog(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "handle_dialog")
@@ -648,7 +764,7 @@ class BrowserTools:
         session.dialog = None
         output = ToolOutput(["Successfully accepted the dialog" if accept else "Successfully dismissed the dialog"])
         output.add(await self.pages.format_pages())
-        return output
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_upload_file(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "upload_file")
@@ -664,7 +780,7 @@ class BrowserTools:
                 f"Could not upload through uid {node.uid}: {exc}. Choose the page's <input type=file> element from the snapshot."
             ) from exc
         output = ToolOutput([f"File uploaded from {', '.join(paths)}."])
-        return await self._with_snapshot(output, session, bool(arguments.get("includeSnapshot")))
+        return await self._with_snapshot(output, session, arguments.get("includeSnapshot", True) is not False)
 
     async def _tool_evaluate_script(self, arguments: dict[str, Any]) -> ToolOutput:
         _page_id_value, session = await self._page(arguments, "evaluate_script")

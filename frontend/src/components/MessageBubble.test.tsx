@@ -412,6 +412,7 @@ const answer = 42
     expect(screen.getByText('Opening the browser.')).toBeInTheDocument()
     expect(screen.getByText('Inspecting the page.')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Used browser' }))
+    fireEvent.click(screen.getByRole('button', { name: /Using browser_snapshot/ }))
     const lists = screen.getAllByRole('list', { name: 'Tool calls' })
     expect(lists).toHaveLength(2)
     expect(screen.getAllByRole('listitem')).toHaveLength(2)
@@ -446,11 +447,39 @@ const answer = 42
       />,
     )
 
+    fireEvent.click(screen.getByRole('button', { name: 'Using tool_4' }))
     expect(screen.getByRole('list', { name: 'Tool calls' })).toBeInTheDocument()
     expect(screen.getAllByRole('listitem')).toHaveLength(4)
     const calls = screen.getByRole('list', { name: 'Tool calls' })
     expect(within(calls).getByRole('button', { name: /Used tool_1/ })).toBeInTheDocument()
     expect(within(calls).getByRole('button', { name: /Using tool_4/ })).toBeInTheDocument()
+  })
+
+  it('keeps the user chosen tool expansion state as calls start and finish', () => {
+    const message: Message = {
+      id: 'stable-tool-expansion', role: 'assistant', content: '', streaming: true,
+      toolCalls: [{ id: 'first', tool: 'fs_read', input: '{}', pending: true }],
+    }
+    const { rerender } = render(<MessageBubble message={message} />)
+    const heading = screen.getByRole('button', { name: 'Using fs_read' })
+    expect(heading).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument()
+
+    fireEvent.click(heading)
+    const completed = { ...message.toolCalls![0], pending: false, output: 'Done' }
+    rerender(<MessageBubble message={{ ...message, toolCalls: [completed] }} />)
+    expect(heading).toHaveAttribute('aria-expanded', 'true')
+    const next = { id: 'second', tool: 'fs_read', input: '{}', pending: true }
+    rerender(<MessageBubble message={{ ...message, toolCalls: [completed, next] }} />)
+    expect(heading).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+
+    fireEvent.click(heading)
+    const finished = [completed, { ...next, pending: false, output: 'Done' }]
+    rerender(<MessageBubble message={{ ...message, toolCalls: finished }} />)
+    rerender(<MessageBubble message={{ ...message, toolCalls: [...finished, { ...next, id: 'third' }] }} />)
+    expect(heading).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument()
   })
 
   it('shows expandable command activity below plain progress', () => {
@@ -569,7 +598,7 @@ const answer = 42
     expect(screen.queryByText('Checked the available context.')).not.toBeInTheDocument()
   })
 
-  it('keeps active plan progress visible after answer playback starts', () => {
+  it('omits the redundant plan display while the answer streams', () => {
     render(
       <MessageBubble
         message={{
@@ -591,7 +620,8 @@ const answer = 42
     )
 
     expect(screen.getByText('The answer is now typing.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Prepare response' })).toBeInTheDocument()
+    expect(screen.queryByText('Prepare response')).not.toBeInTheDocument()
+    expect(screen.queryByText('Plan')).not.toBeInTheDocument()
   })
 
   it('shows progress before a simple answer without repeating its text', () => {

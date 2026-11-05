@@ -120,6 +120,58 @@ def test_turn_loop_checks_live_tool_context_and_preserves_full_history(monkeypat
     assert memory.persisted_turns[0]["tool_calls"][0]["output"] == output
 
 
+def test_browser_workflow_guides_snapshot_reuse_and_batching_without_rewriting_calls():
+    prefix = "mcp__chrome-devtools__"
+    output = json.dumps({"status": "ok", "content": [{"type": "text", "text":
+        'Completed\n## Latest page snapshot\nuid=1_1 textbox "Email"\nuid=1_2 textbox "Name"'}]})
+    script = [
+        ("fill", {"pageId": 1, "uid": "1_1", "value": "person@example.com"}),
+        ("fill", {"pageId": 1, "uid": "1_2", "value": "Person"}),
+        ("take_snapshot", {"pageId": 1}),
+        ("take_snapshot", {"pageId": 1}),
+    ]
+    invoked = []
+
+    class WorkflowLLM:
+        calls = 0
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            if self.calls == len(script):
+                hints = [message["content"] for message in messages
+                         if str(message.get("content", "")).startswith("Browser workflow guidance:")]
+                assert len(hints) == 3
+                assert any("already includes an updated snapshot" in hint for hint in hints)
+                assert any("one fill_form call" in hint for hint in hints)
+                assert any("instead of polling take_snapshot" in hint for hint in hints)
+                return final_answer_response("Verified")
+            name, arguments = script[self.calls]
+            self.calls += 1
+            return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                call_id=f"browser-{self.calls}", tool_name=prefix + name, arguments=arguments,
+            )], finish_reason="tool_calls")
+
+    def tool(**arguments):
+        invoked.append(arguments)
+        return output
+
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(llm_client=WorkflowLLM(), registry=ToolRegistry([{
+        "name": prefix + name, "callable": tool,
+        "parameters": {"type": "object", "properties": {
+            "pageId": {"type": "integer"}, "uid": {"type": "string"}, "value": {"type": "string"},
+        }},
+        "metadata": {"repeat_safe": True, "risk_level": "low"},
+    } for name in ("fill", "take_snapshot")]), memory=memory, observability=FakeObservability())
+    async def collect():
+        return [event async for event in loop.run("Fill the form", "browser-workflow", system_prompt="")]
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert events[-1]["data"]["summary"] == "Verified"
+    assert invoked == [arguments for _, arguments in script]
+    assert all(call["output"] == output for call in memory.persisted_turns[0]["tool_calls"])
+
+
 def test_cooperative_pause_during_model_wait_stops_before_tool_dispatch():
     from app.agent.durable.turn_run import pause_run
 

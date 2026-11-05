@@ -37,7 +37,7 @@ class FixtureProvider:
         self.calls = {}
 
     def _next_call_index(self, conversation: str, scenario: str) -> int:
-        if scenario not in {"file-resume", "file-conflict"}:
+        if scenario not in {"file-resume", "file-conflict", "opaque-resume"}:
             key = (conversation, scenario)
             index = self.calls.get(key, 0)
             self.calls[key] = index + 1
@@ -95,6 +95,10 @@ class FixtureProvider:
                     "overwrite": True,
                     "create_parents": False,
                 })], finish_reason="tool_calls")
+            elif scenario == "opaque-resume":
+                return LLMResponse(content="", tool_calls=[call("exec", {
+                    "command": "Write-Output 'fixture opaque action'", "shell": "powershell",
+                })], finish_reason="tool_calls")
             elif scenario == "parallel":
                 return LLMResponse(content="", tool_calls=[
                     call("fs_read", {"path": str(ROOT / "workspace" / "read.txt")}, "-read"),
@@ -119,8 +123,8 @@ class FixtureProvider:
             if stream_callback:
                 await stream_callback("Fixture interrupt started. ")
             await barrier("interrupt")
-        if scenario == "file-resume" and index == 1:
-            await barrier("file-resume")
+        if scenario in {"file-resume", "opaque-resume"} and index == 1:
+            await barrier(scenario)
         # Opt-in: hold the resumed call so a test can watch the continued Run live.
         if scenario == "file-resume" and index == 2 and (CONTROL / "file-resume-continue.hold").exists():
             await barrier("file-resume-continue")

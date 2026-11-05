@@ -27,6 +27,32 @@ async function fileWriteRunFor(desktop: Desktop, conversationId: string) {
   throw new Error('No file write Run was created')
 }
 
+test('Continue resumes a clean pause after an opaque action without replaying it', async ({ desktop }) => {
+  expect((await desktop.api('/api/settings', { permissions: { mode: 'full_access' } }, 'PUT')).status).toBe(200)
+  await desktop.send('recover')
+  await expect(desktop.page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
+  await desktop.send('opaque-resume')
+  await desktop.started('opaque-resume')
+  const conversation = (await desktop.api('/api/conversations')).data[0]
+  const run = await runFor(desktop, conversation.id)
+  const operations = async () => (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations
+  expect(await operations()).toEqual([expect.objectContaining({ effect_class: 'opaque_effect', status: 'returned' })])
+  await desktop.page.getByRole('button', { name: 'Pause execution' }).click()
+  await desktop.signal('opaque-resume.release')
+  const continueButton = desktop.page.getByRole('button', { name: 'Continue execution' })
+  await expect(continueButton).toBeVisible()
+  expect((await desktop.api(`/api/runs/${run.run_id}`)).data).toMatchObject({
+    status: 'paused', available_actions: expect.arrayContaining(['resume']),
+  })
+  await continueButton.click()
+  await expect(desktop.page.getByText('Fixture opaque-resume completed.', { exact: false }).last()).toBeVisible()
+  await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.status).toBe('completed')
+  expect(await operations()).toHaveLength(1)
+  expect((await desktop.events()).filter((event) => event.kind === 'model' && event.scenario === 'opaque-resume')
+    .map((event) => event.index)).toEqual([0, 1, 2])
+  expect(desktop.errors).toEqual([])
+})
+
 test('file diff, approval, safe pause, real app/backend restart, Continue and Undo', async ({ desktop }) => {
   test.setTimeout(150_000)
   await desktop.send('recover')

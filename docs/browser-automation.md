@@ -39,14 +39,22 @@ If the extension is not connected when a browser tool runs, Monaw opens Chrome n
 | --- | --- |
 | `list_pages`, `select_page`, `new_page`, `navigate_page`, `close_page` | Pages have small numeric ids that stay stable while the tab is open. `navigate_page` takes `type` `url`, `back`, `forward`, or `reload`. The last open page cannot be closed. |
 | `take_snapshot` | The main frame's accessibility tree as lines such as `uid=1_5 button "Submit"`. A node keeps its `uid` until the page navigates. Content inside iframes is not listed. |
-| `click`, `hover`, `drag` | Real mouse events at the element's centre. When a control is visually hidden behind its label (custom radios and checkboxes, such as colour swatches), Monaw clicks the label; with no visible label, `click` calls the element's own `click()` and says so. |
+| `inspect_element` | Read one element's attributes, labels, visibility, validation errors and nearby elements by snapshot `uid` or a unique main-document CSS selector. Password and hidden-input values are redacted. |
+| `click`, `hover`, `drag` | Real mouse events at the element's centre. Click automatically waits for an enabled, unobstructed, stable target. Hidden checkboxes and radios can use a visible label; hidden controls without a usable label are not force-clicked. |
 | `fill`, `fill_form`, `type_text`, `press_key` | `fill` types into text fields, picks a `<select>` option by text or value, and takes `"true"` / `"false"` for checkboxes, radios, and switches. |
 | `handle_dialog` | Accepts or dismisses an open `alert` / `confirm` / `prompt`. While a dialog is open, other page tools report it instead of hanging. |
 | `take_screenshot` | Brings the tab to the front, then captures the viewport, the full page, or one element (`uid`). |
-| `wait_for`, `evaluate_script`, `upload_file` | `upload_file` takes `filePaths`, a list of absolute local paths. |
+| `wait_for` | Wait for text or an element condition: attached, detached, visible, hidden, enabled, disabled, editable or ready. CSS selectors are rechecked across DOM replacements; uids refer to the original node. |
+| `evaluate_script`, `upload_file` | Scripts cover tasks the dedicated tools cannot express. `upload_file` takes `filePaths`, a list of absolute local paths. |
 | `list_console_messages`, `get_console_message` | Console messages and uncaught errors, kept for the last three navigations. |
 
 Snapshots and screenshots are returned in the chat and never written to arbitrary paths. Chrome blocks extensions from `chrome://` pages and the Chrome Web Store.
+
+Opening/navigating pages and actions that support `includeSnapshot` return a fresh snapshot by default. Set it to `false` when another observation is unnecessary. Reuse returned snapshots for verification and the next target instead of immediately calling `take_snapshot` again. If the action completed but its snapshot failed, the result preserves completion and reports the read failure separately.
+
+Click and fill scroll the target into view and wait for readiness before dispatch. Filling also waits for read-only fields to unlock. The default readiness budget is 5000 ms, configurable per call with `timeout` up to 30000 ms. `fill_form` shares that budget across its fields and returns one final snapshot. If it stops partway through, its error reports completed uids and the field where it stopped; completed fields are not replayed. Replaced nodes require a fresh snapshot rather than guessing a replacement. Use explicit `wait_for` for longer dynamic transitions (up to 60000 ms).
+
+The harness provides at most four short workflow hints per turn when it sees opportunities to reuse a returned snapshot, replace repeated reads with a condition wait, batch independent fields, or use dedicated tools instead of repeated scripts. Each hint type appears at most once. Guidance does not rewrite calls, skip fresh observations, replay actions, or alter saved tool results.
 
 ## Permissions
 
@@ -54,7 +62,7 @@ Each browser tool has an explicit entry in Monaw's permission table (`BUILTIN_TO
 
 | Tools | Treated as | Asks first? |
 | --- | --- | --- |
-| `list_pages`, `select_page`, `take_snapshot`, `take_screenshot`, `wait_for`, console readers | Read | No |
+| `list_pages`, `select_page`, `take_snapshot`, `inspect_element`, `take_screenshot`, `wait_for`, console readers | Read | No |
 | `click`, `hover`, `drag`, `handle_dialog` | Click | Follows your permission mode (no prompt in the default interactive mode) |
 | `fill`, `fill_form`, `type_text`, `press_key` | Type | Follows your permission mode |
 | `navigate_page`, `new_page`, `close_page` | Navigation | Follows your permission mode |

@@ -9,6 +9,7 @@ const BROWSER_ACTIONS: Record<string, string> = {
   list_pages: 'list tabs',
   close_page: 'close tab',
   take_snapshot: 'read page',
+  inspect_element: 'inspect element',
   take_screenshot: 'take screenshot',
   click: 'click',
   hover: 'hover',

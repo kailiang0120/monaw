@@ -76,7 +76,7 @@ function getBackendRuntimeDir() {
 }
 
 function getBackendWorkspaceDir() {
-  return process.env.AGENT_WORKSPACE_DIR || path.join(getMonawHomeDir(), 'workspace')
+  return process.env.AGENT_WORKSPACE_DIR || path.join(app.getPath('documents'), 'monaw')
 }
 
 function rotateFileIfNeeded(filePath, maxBytes = 5 * 1024 * 1024) {

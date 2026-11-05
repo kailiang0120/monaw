@@ -160,10 +160,15 @@ describe('InputBar model picker', () => {
     expect(common.onApprovalModeChange).toHaveBeenCalledWith('full_access')
     expect(screen.queryByRole('listbox', { name: 'Permission mode' })).not.toBeInTheDocument()
 
-    rerender(<InputBar {...common} focusRequestKey={1} modelSelection={{
+    rerender(<InputBar {...common} disabled focusRequestKey={1} modelSelection={{
       provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'none',
     }} />)
     const composer = screen.getByPlaceholderText('Enter to send · Shift+Enter for newline')
+    expect(composer).not.toHaveFocus()
+    // Closing Settings can request focus while another operation still disables the input.
+    rerender(<InputBar {...common} focusRequestKey={1} modelSelection={{
+      provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'none',
+    }} />)
     expect(composer).toHaveFocus()
     fireEvent.change(composer, { target: { value: 'Typing after Settings closes' } })
     expect(composer).toHaveValue('Typing after Settings closes')

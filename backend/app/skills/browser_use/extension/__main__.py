@@ -45,7 +45,7 @@ def _result(output: ToolOutput) -> types.CallToolResult:
     content: list[Any] = [types.TextContent(type="text", text="\n".join(output.lines) or "Done.")]
     content += [types.ImageContent(type="image", data=image["data"], mimeType=image["mimeType"])
                 for image in output.images]
-    return types.CallToolResult(content=content, isError=False)
+    return types.CallToolResult(content=content, isError=output.is_error)
 
 
 def _error(message: str) -> types.CallToolResult:
