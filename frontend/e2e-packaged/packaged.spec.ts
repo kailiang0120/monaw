@@ -82,16 +82,16 @@ class PackagedApp {
   }
 
   /** An authenticated call from the renderer, as the app makes it. */
-  async api(path: string, body?: unknown) {
-    return this.page.evaluate(async ({ path, body }) => {
+  async api(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST') {
+    return this.page.evaluate(async ({ path, body, method }) => {
       const session = await window.electronAPI!.getControlSession()
       const response = await fetch(window.electronAPI!.backendBaseUrl + path, {
-        method: body === undefined ? 'GET' : 'POST',
+        method,
         headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
       })
       return { status: response.status, data: await response.json() }
-    }, { path, body })
+    }, { path, body, method })
   }
 
   async quit() {
@@ -197,6 +197,66 @@ for (const corrupted of [false, true]) test(corrupted ? 'rejects an update with 
     expect(payloadRequests).toBeGreaterThan(0)
     await desktop.quit()
   } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('installs a newer version and preserves settings', async () => {
+  const installer = process.env.MONAW_UPDATE_TEST_INSTALLER
+  test.skip(!installer, 'Run only on a disposable Windows runner with an installed test build')
+  test.setTimeout(180_000)
+  const installRoot = resolve(appDir).toLowerCase()
+  if (!installRoot.startsWith(resolve(tmpdir()).toLowerCase() + '\\')) throw new Error('Installed-update test must use a temporary install directory')
+  const payload = await readFile(installer!)
+  const checksum = createHash('sha512').update(payload).digest('base64')
+  const server = createHttpServer((request, response) => {
+    if (request.url?.split('?')[0] === '/latest.yml') {
+      response.writeHead(200, { 'Content-Type': 'text/yaml' })
+      response.end(`version: 1.1.1\nfiles:\n  - url: test-update.exe\n    sha512: ${checksum}\n    size: ${payload.length}\npath: test-update.exe\nsha512: ${checksum}\nreleaseDate: '2026-01-01T00:00:00.000Z'\n`)
+    } else if (request.url?.split('?')[0] === '/test-update.exe') {
+      response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length })
+      response.end(payload)
+    } else { response.writeHead(404); response.end() }
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const stopInstalled = () => execFileSync('powershell', ['-NoProfile', '-Command',
+    "$p = [IO.Path]::GetFullPath($env:MONAW_PACKAGED_APP); Get-CimInstance Win32_Process -Filter \"Name='Monaw.exe' OR Name='monaw-backend.exe'\" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $p -or $_.ExecutablePath.StartsWith([IO.Path]::GetDirectoryName($p) + '\\', [StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { stdio: 'ignore' })
+  try {
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('No update test port')
+    const desktop = track(new PackagedApp(home, await freePort()))
+    await desktop.start()
+    expect((await desktop.api('/api/settings', { identity: { user_name: 'Update test' } }, 'PUT')).status).toBe(200)
+    await desktop.app.evaluate((_, url) => {
+      const updater = process.mainModule!.require('electron-updater').autoUpdater
+      updater.setFeedURL({ provider: 'generic', url })
+      updater.disableDifferentialDownload = true
+    }, `http://127.0.0.1:${address.port}`)
+    await desktop.page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await desktop.page.getByRole('button', { name: 'About', exact: true }).click()
+    await desktop.page.getByRole('button', { name: 'Check for updates' }).click()
+    await expect(desktop.page.getByText('Version 1.1.1 is ready to install.')).toBeVisible({ timeout: 60_000 })
+    await desktop.page.getByRole('button', { name: 'Restart to update' }).click()
+    const closed = desktop.app.waitForEvent('close', { timeout: 45_000 })
+    await desktop.page.getByRole('button', { name: 'Restart and install' }).click()
+    await closed
+    await expect.poll(() => {
+      try {
+        return execFileSync('powershell', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:MONAW_PACKAGED_APP).VersionInfo.ProductVersion'], { encoding: 'utf8' }).trim()
+      } catch { return '' }
+    }, { timeout: 90_000 }).toMatch(/^1\.1\.1/)
+    await expect.poll(() => packagedProcesses('Monaw.exe').length, { timeout: 60_000 }).toBeGreaterThan(0)
+    // The installer relaunches the app. Stop only this temporary installation,
+    // then attach a fresh inspector session and verify persisted data.
+    stopInstalled()
+    await expect.poll(() => packagedProcesses().length, { timeout: 30_000 }).toBe(0)
+    const updated = track(new PackagedApp(home, await freePort()))
+    await updated.start()
+    expect(await updated.app.evaluate(({ app }) => app.getVersion())).toBe('1.1.1')
+    await expect.poll(async () => updated.api('/api/settings').then(result => result.data.identity?.user_name, () => ''), { timeout: 30_000 }).toBe('Update test')
+    await updated.quit()
+  } finally {
+    stopInstalled()
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 })

@@ -87,3 +87,64 @@ jobs:
             ${{ runner.temp }}/monaw-upgrade/home/runtime/*.log
             candidate-checksum.txt
           if-no-files-found: warn
+
+  update:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: '3.11'
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Build the initial installer
+        shell: pwsh
+        run: |
+          ./scripts/package-windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Initial build failed' }
+          Copy-Item frontend/release/Monaw-Setup-1.1.0-x64.exe "$env:RUNNER_TEMP/monaw-initial.exe"
+      - name: Build a newer test installer
+        shell: pwsh
+        run: |
+          Push-Location frontend
+          try { npm version 1.1.1 --no-git-tag-version --ignore-scripts; if ($LASTEXITCODE -ne 0) { throw 'Version change failed' } }
+          finally { Pop-Location }
+          ./scripts/package-windows.ps1 -SkipBackend
+          if ($LASTEXITCODE -ne 0) { throw 'Update build failed' }
+      - name: Install the initial version into a disposable folder
+        shell: pwsh
+        run: |
+          $existing = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Monaw*' }
+          if ($existing) { throw 'This test requires a clean runner without Monaw installed.' }
+          $installDir = Join-Path $env:TEMP "monaw-update-test-$([guid]::NewGuid().ToString('N'))"
+          $process = Start-Process "$env:RUNNER_TEMP/monaw-initial.exe" -ArgumentList '/S', "/D=$installDir" -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0 -or -not (Test-Path (Join-Path $installDir 'Monaw.exe'))) { throw 'Initial install failed' }
+          "MONAW_PACKAGED_APP=$(Join-Path $installDir 'Monaw.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MONAW_UPDATE_TEST_INSTALLER=$((Resolve-Path frontend/release/Monaw-Setup-1.1.1-x64.exe).Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Download, install, restart and verify retained settings
+        working-directory: frontend
+        run: npx playwright test -c playwright.packaged.config.ts -g 'installs a newer version and preserves settings'
+      - name: Upload update-test evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-update-test
+          path: frontend/test-results/packaged
+          if-no-files-found: warn
+      - name: Uninstall the test app
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:MONAW_PACKAGED_APP) {
+            $uninstaller = Join-Path (Split-Path -Parent $env:MONAW_PACKAGED_APP) 'Uninstall Monaw.exe'
+            if (Test-Path $uninstaller) { Start-Process $uninstaller -ArgumentList '/S' -Wait -WindowStyle Hidden }
+          }
