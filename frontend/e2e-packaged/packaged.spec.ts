@@ -1,6 +1,6 @@
 import { test, expect, _electron, chromium, type Browser, type ElectronApplication, type Page } from '@playwright/test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { createServer, type Server } from 'node:net'
@@ -14,7 +14,9 @@ import { createHash, randomUUID } from 'node:crypto'
 // checks cover installation-level behavior. See docs/packaging.md.
 
 const frontend = resolve(import.meta.dirname, '..')
-const appExe = process.env.MONAW_PACKAGED_APP || join(frontend, 'release', 'win-unpacked', 'Monaw.exe')
+const configuredAppExe = process.env.MONAW_PACKAGED_APP || join(frontend, 'release', 'win-unpacked', 'Monaw.exe')
+// Windows CI may provide an 8.3 path while process inventory reports long paths.
+const appExe = existsSync(configuredAppExe) ? realpathSync.native(configuredAppExe) : configuredAppExe
 const appDir = dirname(appExe)
 const windows = process.env.SystemRoot || 'C:\\Windows'
 
@@ -210,7 +212,7 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
   test.skip(!installer, 'Run only on a disposable Windows runner with an installed test build')
   test.setTimeout(180_000)
   const installRoot = resolve(appDir).toLowerCase()
-  if (!installRoot.startsWith(resolve(tmpdir()).toLowerCase() + '\\')) throw new Error('Installed-update test must use a temporary install directory')
+  if (!installRoot.startsWith(realpathSync.native(tmpdir()).toLowerCase() + '\\')) throw new Error('Installed-update test must use a temporary install directory')
   const payload = await readFile(installer!)
   const checksum = createHash('sha512').update(payload).digest('base64')
   const server = createHttpServer((request, response) => {
@@ -226,7 +228,7 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
   let appOutput = ''
   let browser: Browser | undefined
   const stopInstalled = () => execFileSync('powershell', ['-NoProfile', '-Command',
-    "$p = [IO.Path]::GetFullPath($env:MONAW_PACKAGED_APP); Get-CimInstance Win32_Process -Filter \"Name='Monaw.exe' OR Name='monaw-backend.exe'\" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $p -or $_.ExecutablePath.StartsWith([IO.Path]::GetDirectoryName($p) + '\\', [StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { stdio: 'ignore' })
+    "$p = [IO.Path]::GetFullPath($env:MONAW_TEST_REAL_APP); Get-CimInstance Win32_Process -Filter \"Name='Monaw.exe' OR Name='monaw-backend.exe'\" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $p -or $_.ExecutablePath.StartsWith([IO.Path]::GetDirectoryName($p) + '\\', [StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { stdio: 'ignore', env: { ...process.env, MONAW_TEST_REAL_APP: appExe } })
   try {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('No update test port')
