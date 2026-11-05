@@ -20,6 +20,11 @@ def clean_states():
 
 @pytest.fixture
 def desktop(monkeypatch):
+    from app.agent import controller_policy
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "full_access"
+    monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: settings)
     window = {"hwnd": 123, "pid": 10, "process_name": "notepad.exe", "title": "Notes",
               "process_create_time": 10.5, "dpi": 144, "rect": {"x": -500, "y": 20, "width": 400, "height": 300}}
     uia = {"status": "ok", "limit": 100, "elements": [

@@ -10,6 +10,11 @@ from app.skills.exec import tools as exec_tools
 
 
 def _allow_exec(monkeypatch):
+    from app.agent import controller_policy
+    from app.agent.settings_store import AgentSettings
+    runtime_settings = AgentSettings()
+    runtime_settings.permissions.mode = "full_access"
+    monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: runtime_settings)
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",

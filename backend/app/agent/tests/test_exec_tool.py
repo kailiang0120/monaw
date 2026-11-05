@@ -7,11 +7,11 @@ from app.agent.sandbox.models import SandboxDecision
 from app.skills.exec import tools as exec_tools
 
 
-def _central_default_permissions(monkeypatch):
+def _central_permissions(monkeypatch, mode="default"):
     from app.agent.settings_store import AgentSettings
     from app.agent import controller_policy
     settings = AgentSettings()
-    settings.permissions.mode = "default"
+    settings.permissions.mode = mode
     monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: settings)
 
 
@@ -22,7 +22,7 @@ def test_exec_default_workdir_uses_agent_workspace(monkeypatch, tmp_path):
 
 
 def test_exec_tool_returns_pending_approval(monkeypatch):
-    _central_default_permissions(monkeypatch)
+    _central_permissions(monkeypatch)
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",
@@ -49,7 +49,7 @@ def test_exec_tool_returns_pending_approval(monkeypatch):
 
 
 def test_host_tool_approval_preserves_sandbox_reason(monkeypatch, tmp_path):
-    _central_default_permissions(monkeypatch)
+    _central_permissions(monkeypatch)
     import app.agent.approval_broker as broker
     real_create = broker.create_ticket
     captured = {}
@@ -104,7 +104,7 @@ def test_host_tool_approval_preserves_sandbox_reason(monkeypatch, tmp_path):
 
 
 def test_exec_approval_ticket_redacts_env_values(monkeypatch):
-    _central_default_permissions(monkeypatch)
+    _central_permissions(monkeypatch)
     import app.agent.approval_broker as broker
     real_create = broker.create_ticket
     monkeypatch.setattr(
@@ -142,6 +142,7 @@ def test_exec_approval_ticket_redacts_env_values(monkeypatch):
 
 
 def test_exec_tool_runs_command(monkeypatch, tmp_path):
+    _central_permissions(monkeypatch, "full_access")
     from app.agent.settings_store import AgentSettings
     from app.agent.sandbox.models import SandboxCapabilities, SandboxBackendCapability
     settings = AgentSettings()
@@ -194,7 +195,12 @@ def test_exec_tool_runs_command(monkeypatch, tmp_path):
     assert result["duration_ms"] >= 0
 
 
-def test_exec_resume_bypasses_confirmation_gate(monkeypatch, tmp_path):
+def test_legacy_bypass_argument_does_not_bypass_central_confirmation(monkeypatch, tmp_path):
+    _central_permissions(monkeypatch)
+    class NoExecutionManager:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("An unapproved legacy bypass must not reach execution")
+    monkeypatch.setattr(exec_tools, "SandboxManager", NoExecutionManager)
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",
@@ -216,11 +222,13 @@ def test_exec_resume_bypasses_confirmation_gate(monkeypatch, tmp_path):
         )
     )
 
-    assert result["status"] == "ok"
-    assert result["stdout"] == "approved\n"
+    assert result["status"] == "pending_approval"
+    from app.agent.approval_broker import get_ticket
+    assert get_ticket(result["ticket_id"]).authorization_binding
 
 
 def test_exec_session_start_poll_and_stop(monkeypatch, tmp_path):
+    _central_permissions(monkeypatch, "full_access")
     monkeypatch.setattr(
         exec_tools,
         "build_sandbox_decision",

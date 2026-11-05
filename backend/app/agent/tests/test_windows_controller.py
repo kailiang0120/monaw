@@ -6,6 +6,12 @@ from app.skills.computer_use.session import store_state
 
 
 def _state_for_window(monkeypatch, window):
+    from app.agent import controller_policy
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "full_access"
+    settings.permissions.allow_screen_fallback = True
+    monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: settings)
     uia = {"status": "ok", "elements": [], "limit": 100}
     monkeypatch.setattr(computer_tools.window_ops, "_uia_interact_app", lambda *a, **k: json.dumps(uia))
     monkeypatch.setattr(computer_tools, "_computer_functions_get_window_state", lambda **k: '{"status":"error","reason_code":"observation_failed"}')
