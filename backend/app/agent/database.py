@@ -111,9 +111,18 @@ class Database:
 
     # Conversation CRUD
 
-    def create_conversation(self, conv_id: str, title: str, workspace_dir: str = "") -> dict:
+    def create_conversation(
+        self, conv_id: str, title: str, workspace_dir: str = "", *, default_chat_workspace: bool = False,
+    ) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
+            existing = self.get_conversation(conv_id)
+            if existing is not None:
+                return existing
+            if default_chat_workspace and not workspace_dir:
+                from app.agent.conversation_workspace import create_default_chat_workspace
+
+                workspace_dir = create_default_chat_workspace(conv_id, now)
             self.conn.execute(
                 "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, workspace_dir) VALUES (?, ?, ?, ?, ?)",
                 (conv_id, title, now, now, workspace_dir),

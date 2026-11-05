@@ -113,15 +113,24 @@ runtime\agent.db          conversations, scheduled tasks, and app state
 runtime\settings.json     local settings
 runtime\file_mutation\snapshots\  private before-images for supported file Undo/recovery
 memory\                   long-term memory markdown files
-workspace\                default agent workspace
 skills\                   skills you created with the skill creator
 browser\                  browser screenshots
 ```
 
+New desktop chats without a project use separate folders under
+`Documents\monaw\YYYY-MM-DD\chat-<id>`. The Documents location follows Windows
+folder redirection; `AGENT_WORKSPACE_DIR` can override the root. The date is the
+chat's local creation date, and its saved folder remains stable across restarts
+and title changes. Existing chats keep their saved workspace (an empty legacy
+workspace continues to use the shared root). Back up `Documents\monaw` and any
+selected project folders separately from application data.
+If Windows cannot provide Documents, the desktop app falls back to the
+`workspace` folder inside Monaw home.
+
 To restore, close Monaw, replace the target `.monaw` folder with the backup,
-then start Monaw again. For partial restore, prefer copying `memory\`,
-`workspace\`, and selected settings while leaving current credentials managed by
-the local OS-backed store.
+then start Monaw again. For partial restore, prefer copying `memory\`, your
+workspace folders, and selected settings while leaving current credentials
+managed by the local OS-backed store.
 
 Windows file snapshots use DPAPI for the current Windows user. A full backup
 does not make them portable to another Windows account or machine. Treat them
@@ -210,8 +219,9 @@ observability artifacts, memory files, approval/access-grant history,
 attachment registry entries, browser/MCP diagnostics, and scheduled-task
 outputs. It does not delete conversation messages, Run/operation/event history,
 workspace files, saved settings or credentials, or file-mutation snapshots.
-Deleting the `.monaw` folder manually also removes the default workspace and
-snapshots; workspace folders outside `.monaw` are not deleted by that action.
+Deleting the `.monaw` folder manually also removes snapshots and any older
+workspace stored inside it. It does not remove `Documents\monaw` or selected
+project folders outside `.monaw`.
 
 ## Retention And Full Local Deletion
 

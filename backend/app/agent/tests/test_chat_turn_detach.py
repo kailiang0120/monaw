@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -240,10 +241,11 @@ def test_runtime_creates_default_conversation_before_durable_run(tmp_path, monke
 
     assert events[-1]["event"] == "done"
     assert conversation is not None
-    assert conversation["workspace_dir"] == ""
+    assert Path(conversation["workspace_dir"]).is_dir()
     assert conversation["title"] == "Summarize this task"
     assert run is not None
     assert run["conversation_id"] == "new-default-chat"
+    assert run["workspace_dir"] == conversation["workspace_dir"]
     assert run["owner_principal_id"] == "session-1"
     assert run["control_session_id"] == "session-1"
 

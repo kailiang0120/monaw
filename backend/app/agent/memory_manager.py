@@ -73,7 +73,7 @@ def list_conversation_metadata() -> list[dict]:
 
 def create_conversation_file(conversation_id: str, title: str, workspace_dir: str = "") -> dict:
     """Create a new conversation and return its metadata dict."""
-    result = get_db().create_conversation(conversation_id, title, workspace_dir)
+    result = get_db().create_conversation(conversation_id, title, workspace_dir, default_chat_workspace=True)
     manager = peek_memory_manager()
     if manager is not None:
         manager._ensure_state(conversation_id, title)

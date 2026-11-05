@@ -441,6 +441,7 @@ async def run_agent_stream(
                     conversation_id,
                     conversation_title_from_prompt(message),
                     "",
+                    default_chat_workspace=execution_source == "desktop",
                 )
                 conversation = database.get_conversation(conversation_id) or {}
             stable_id = durable_run_id or (getattr(steering, "run_id", "") if steering is not None else "")

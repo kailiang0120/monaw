@@ -65,21 +65,24 @@ def _runtime_attachments(req: ChatRequest, *, control_session_id: str, conversat
 
 
 def _prepare_conversation_workspace(req: ChatRequest, conv_id: str) -> None:
+    from app.agent.database import get_db
+    from app.agent.memory_manager import create_conversation_file
+    from app.agent.turn_text import conversation_title_from_prompt
+
+    db = get_db()
+    existing = db.get_conversation(conv_id)
+    workspace_dir = ""
     if req.workspace_dir is not None:
         from app.agent.conversation_workspace import validate_workspace_dir
-        from app.agent.database import get_db
-        from app.agent.turn_text import conversation_title_from_prompt
 
         try:
             workspace_dir = validate_workspace_dir(req.workspace_dir)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        db = get_db()
-        existing = db.get_conversation(conv_id)
-        if existing is None:
-            db.create_conversation(conv_id, conversation_title_from_prompt(req.message), workspace_dir)
-        elif existing.get("workspace_dir", "") != workspace_dir:
+        if existing is not None and existing.get("workspace_dir", "") != workspace_dir:
             raise HTTPException(status_code=409, detail="Change the working folder before starting a task.")
+    if existing is None:
+        create_conversation_file(conv_id, conversation_title_from_prompt(req.message), workspace_dir)
 
 
 @router.post("/chat")

@@ -194,8 +194,10 @@ def isolate_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import app.agent.database as database
     import app.agent.durable.recovery as durable_recovery
     import app.agent.git_changes as git_changes
+    import app.agent.conversation_workspace as conversation_workspace
 
     monkeypatch.setattr(git_changes, "STORE", tmp_path / "git-checkpoints")
+    monkeypatch.setattr(conversation_workspace, "DEFAULT_CHAT_WORKSPACE_ROOT", tmp_path / "chat-workspaces")
 
     database.reset_db()
     monkeypatch.setattr(database, "_RUNTIME_DIR", tmp_path)
