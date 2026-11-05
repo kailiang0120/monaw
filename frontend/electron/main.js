@@ -550,6 +550,7 @@ app.whenReady().then(async () => {
   const updater = updatesEnabled ? require('electron-updater').autoUpdater : null
   updateController = createUpdateController({
     updater, version: app.getVersion(), enabled: updatesEnabled,
+    installDirectory: updatesEnabled ? path.dirname(process.execPath) : undefined,
     publish: (state) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updates:state', state)
       if (state.status === 'ready' && Notification.isSupported()) {

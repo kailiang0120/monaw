@@ -1,6 +1,6 @@
 // All network and installer operations stay in the main process. The renderer
 // can request a check or a restart, but cannot choose an update URL or file.
-function createUpdateController({ updater, version, enabled, publish = () => {} }) {
+function createUpdateController({ updater, version, enabled, installDirectory, publish = () => {} }) {
   let state = { currentVersion: version, status: enabled ? 'idle' : 'unavailable' }
   let checking = null
   const setState = (next) => {
@@ -12,6 +12,7 @@ function createUpdateController({ updater, version, enabled, publish = () => {} 
     updater.autoInstallOnAppQuit = false
     updater.allowPrerelease = false
     updater.allowDowngrade = false
+    if (installDirectory) updater.installDirectory = installDirectory
     updater.on('checking-for-update', () => setState({ status: 'checking', error: undefined }))
     updater.on('update-available', (info) => setState({ status: 'downloading', latestVersion: info.version, progress: 0, error: undefined }))
     updater.on('update-not-available', () => setState({ status: 'up-to-date', latestVersion: undefined, progress: undefined, error: undefined }))

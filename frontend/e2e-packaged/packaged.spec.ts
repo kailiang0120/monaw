@@ -124,7 +124,11 @@ test.afterEach(async () => {
     try { app.kill() } catch { /* already gone */ }
   }
   await expect.poll(() => packagedProcesses().length, { timeout: 20_000 }).toBe(0)
-  if (home.startsWith(tmpdir()) && home.includes('monaw-e2e-packaged')) await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 })
+  // The installed-update workflow runs on an ephemeral runner; its detached
+  // NSIS process can still be releasing files after the app exits.
+  if (!process.env.MONAW_UPDATE_TEST_INSTALLER && home.startsWith(tmpdir()) && home.includes('monaw-e2e-packaged')) {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 })
+  }
 })
 
 function track(app: PackagedApp) {
@@ -257,7 +261,7 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
     await expect.poll(async () => updated.api('/api/settings').then(result => result.data.identity?.user_name, () => ''), { timeout: 30_000 }).toBe('Update test')
     await updated.quit()
   } finally {
-    if (desktop) await testInfo.attach('updater-main.log', { body: desktop.output, contentType: 'text/plain' })
+    if (desktop) await writeFile(testInfo.outputPath('updater-main.log'), desktop.output)
     stopInstalled()
     server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))

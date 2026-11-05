@@ -11,10 +11,11 @@ class FakeUpdater extends EventEmitter {
 test('checks releases and installs only after a download completes', async () => {
   const updater = new FakeUpdater()
   const events = []
-  const controller = createUpdateController({ updater, enabled: true, version: '1.1.0', publish: state => events.push(state) })
+  const controller = createUpdateController({ updater, enabled: true, version: '1.1.0', installDirectory: 'C:\\Monaw Install', publish: state => events.push(state) })
   assert.equal(updater.autoDownload, true)
   assert.equal(updater.autoInstallOnAppQuit, false)
   assert.equal(updater.allowPrerelease, false)
+  assert.equal(updater.installDirectory, 'C:\\Monaw Install')
   assert.equal(controller.install(), false)
   assert.equal((await controller.check()).status, 'up-to-date')
   updater.emit('update-available', { version: '1.2.0' })
