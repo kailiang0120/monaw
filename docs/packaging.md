@@ -21,6 +21,29 @@ From the repository root on Windows, with the development prerequisites installe
 
 The installer is per-user by default, lets the user choose the folder, and keeps user data on uninstall.
 
+## Update releases
+
+The Windows app uses electron-updater with the public `kailiang0120/monaw`
+GitHub Releases feed. It checks after startup and every six hours, downloads a
+new stable version, and waits for the user to confirm **Restart to update** in
+Settings > About. Checks and downloads never interrupt active work. The updater
+is disabled in development and does not accept an update URL from the renderer.
+
+Build with `scripts/package-windows.ps1`; it does not upload anything. Attach
+all three files from the *same build* to each published release: the versioned
+`Monaw-Setup-<version>-x64.exe`, its `.blockmap`, and `latest.yml`. The metadata
+contains the installer SHA-512; mismatches reject the download. Do not publish a
+release until its matching files have been attached and checked. Draft releases
+and prereleases are not the stable update feed. Existing v1.0 installs need one
+manual upgrade to an updater-enabled version.
+
+The current builds have no Windows code-signing certificate or configured
+publisher identity. A checksum detects corruption but does not authenticate the
+publisher if the release feed is compromised. Obtain a code-signing certificate,
+configure the verified publisher name and signing in the release pipeline, and
+test signed installed updates before relying on publisher verification. Keep
+the signing key out of the repository.
+
 ## Layout and runtime differences
 
 ```text
@@ -112,7 +135,7 @@ The GPLv3 ffmpeg build that `imageio-ffmpeg` used to bundle is gone with local s
 ## Not yet verified
 
 - Installing on a clean Windows machine. The packaged-app checks below run the unpacked build, not an installed one.
-- Upgrading from one installed version to the next. The upgrade check below covers settings, conversations and scheduled tasks; memory and stored credentials are not seeded. There is no automatic update.
+- Upgrading with the user's own memory and stored credentials. The upgrade check below covers settings, conversations and scheduled tasks; memory and credentials are not seeded. The new automatic updater also requires an installed-version end-to-end check against a published update.
 - Code signing. The installer and executables are unsigned, so Windows SmartScreen will warn.
 - Model-driven workflows in the packaged app, except through the live ChatGPT check below, which a person runs. The source workflows (`npm run test:app`) substitute the model provider through the Python path, which a frozen backend does not load, and the packaged build has no test hooks.
 
@@ -133,10 +156,10 @@ Startup failures are also written to `runtime/backend.log`.
 Run the **Upgrade check** workflow (Actions > Upgrade check > Run workflow) on the branch to release, with the tag users have now. On a clean Windows runner it builds the installer, downloads the older one from that release, and runs `scripts/check-upgrade.ps1`, which:
 
 1. installs the older release silently into a folder with a space in its name;
-2. starts its backend against a fresh Monaw home and saves a user name, a conversation and a disabled scheduled task;
+2. starts its backend against a fresh Monaw home and saves a user name, a conversation with workspace and historical message, and a disabled scheduled task;
 3. starts `Monaw.exe` until its backend is healthy;
-4. installs the new build over it, as a user would, and checks `THIRD_PARTY_NOTICES.txt` arrived and `app.asar` changed;
-5. checks the settings, conversation and scheduled task are still there and the new `Monaw.exe` starts;
+4. checks the downloaded release against its published SHA-256, records the candidate SHA-256 and commit, installs the new build over it, and verifies the installed version, `THIRD_PARTY_NOTICES.txt` and changed `app.asar`;
+5. checks the settings, history, workspace and disabled scheduled task are still there and the new `Monaw.exe` starts;
 6. uninstalls and checks the Monaw home is kept.
 
 First run, 1 November 2026, from the published v1.0.0 installer to `e1fb59b` ([run 41295028277](https://github.com/kailiang0120/monaw/actions/runs/41295028277)): passed. The v1.0.0 install took 29 s and the upgrade 13 s; both versions started from the installed folder, the seeded data survived, and uninstalling kept the Monaw home.

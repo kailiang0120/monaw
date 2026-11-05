@@ -24,13 +24,16 @@ from app.agent.approval_broker import (
     get_resume_decision as get_approval_resume_decision,
     get_ticket as get_approval_ticket,
     register_pending_resume as register_approval_resume,
+    mark_failed as mark_approval_failed,
     reject_ticket,
     signal_resume as signal_approval_resume,
 )
 from app.agent.approval_review import AutoReviewState, requires_user_review, review_action
 from app.agent.settings_store import load_agent_settings
 from app.agent.execution_resume import resume_approved_ticket
+from app.agent.action_identity import action_invocation, ticket_ownership_error
 from app.agent.iteration_budget import IterationBudget
+from app.agent.durable.operation_execution import OperationExecution
 from app.agent.harness.tool_executor import ToolExecutor
 from app.agent.run_context import (
     current_control_session_id,
@@ -53,12 +56,8 @@ def _format_timeout(seconds: float) -> str:
     return f"{seconds:g} seconds"
 
 
-def _ticket_belongs_to_tool(ticket_tool: str, tool_name: str) -> bool:
-    # Desktop tools raise tickets for the inner action they dispatch to, e.g.
-    # computer_functions_act launching an app files a computer_functions_launch_app
-    # ticket, so the desktop family shares tickets.
-    desktop = "computer_functions_"
-    return ticket_tool == tool_name or (ticket_tool.startswith(desktop) and tool_name.startswith(desktop))
+def _ticket_belongs_to_tool(ticket, tool_name: str) -> bool:
+    return not ticket_ownership_error(ticket, tool_name)
 
 
 class ExecutionGateService:
@@ -85,6 +84,8 @@ class ExecutionGateService:
         review_state: AutoReviewState | None = None,
         review_is_current: Callable[[], bool] | None = None,
         call_id: str = "",
+        operation_execution: OperationExecution | None = None,
+        pause_requested: Callable[[], bool] | None = None,
     ) -> str:
         """Wait on each gate the output raises and return the final tool output.
 
@@ -96,18 +97,63 @@ class ExecutionGateService:
             pending_event = self.check_pending_status(tool_output)
             if pending_event is None:
                 return tool_output
+            pending_ticket = (get_approval_ticket if pending_event["event"] == "approval_required" else get_grant_ticket)(pending_event["data"]["ticket_id"])
+            ownership_error = "ticket missing" if pending_ticket is None else ticket_ownership_error(
+                pending_ticket, str(tool_dict.get("name") or ""), arguments)
+            if ownership_error:
+                return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch",
+                                   "error": ownership_error})
+            if pending_ticket.action_id:
+                pending_event["data"].update({key: getattr(pending_ticket, key) for key in (
+                    "action_id", "parent_action_id", "parent_tool_name", "root_action_id", "root_tool_name",
+                )})
+            if pending_event["event"] == "approval_required" and pending_ticket.action_descriptor:
+                pending_event["data"].update({"action_descriptor": pending_ticket.action_descriptor,
+                    "human_only": pending_ticket.human_only,
+                    "authorization_binding": pending_ticket.authorization_binding,
+                    "run_id": pending_ticket.run_id, "operation_id": pending_ticket.operation_id})
+            if operation_execution is not None and not operation_execution.note_pending_preflight(tool_output):
+                self._retire_matching_pending_ticket(
+                    pending_event,
+                    str(tool_dict.get("name") or ""),
+                    reason_code="external_effect_unknown",
+                )
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "reason_code": "external_effect_unknown",
+                        "error": "This tool returned a permission request after an opaque handler began. Inspect its current state before retrying.",
+                    }
+                )
             auto_approved = False
             if pending_event["event"] == "approval_required":
                 ticket = get_approval_ticket(pending_event["data"]["ticket_id"])
                 # Tool content can name a ticket, but cannot route another
                 # tool's action into review or replay.
-                if ticket is not None and not _ticket_belongs_to_tool(ticket.tool_name, str(tool_dict.get("name") or "")):
+                if ticket is not None and not _ticket_belongs_to_tool(ticket, str(tool_dict.get("name") or "")):
                     return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch",
                                        "error": "Approval ticket does not belong to this tool."})
                 validation_error = "ticket missing" if ticket is None else ticket_validation_error(
                     ticket, expected_session_id=current_control_session_id(),
                     expected_conversation_id=current_conversation_id(),
                     expected_execution_source=current_execution_source())
+                # Native file planners attach a bounded, read-authorized
+                # preview to the transient gate output. Surface it before the
+                # user decides; never copy arbitrary external tool output or
+                # persist it in the durable event journal.
+                if (ticket is not None and not validation_error
+                    and operation_execution is not None
+                    and getattr(operation_execution, "trusted_builtin", False)
+                    and getattr(operation_execution, "tool_name", "") in {"fs_write", "file_write", "fs_move", "move", "fs_delete", "delete"}):
+                    try:
+                        preflight = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
+                        preview = preflight.get("preview") if isinstance(preflight, dict) else None
+                        if (isinstance(preview, dict) and isinstance(preview.get("files"), list)
+                            and isinstance(preview.get("preview"), dict)
+                            and len(json.dumps(preview, ensure_ascii=False)) <= 100_000):
+                            pending_event["data"]["file_preview"] = preview
+                    except (TypeError, ValueError):
+                        pass
                 blocked = review_state.blocked_output(str(tool_dict.get("name", "")), arguments, ticket)
                 if ticket is not None and blocked and not validation_error:
                     reason = json.loads(blocked)["reason"]
@@ -172,6 +218,8 @@ class ExecutionGateService:
                 arguments=arguments,
                 execute_tool=execute_tool,
                 call_id=call_id,
+                operation_execution=operation_execution,
+                pause_requested=pause_requested,
             ):
                 if "_result" in resolution_event:
                     resolved_output = resolution_event["_result"]
@@ -191,12 +239,77 @@ class ExecutionGateService:
         return tool_output
 
     @staticmethod
+    def _retire_matching_pending_ticket(
+        pending_event: dict[str, Any], tool_name: str, *, reason_code: str = "unsafe_durable_resume"
+    ) -> None:
+        """Withdraw only a ticket proven to belong to this tool and request scope."""
+        ticket_id = str(pending_event.get("data", {}).get("ticket_id") or "")
+        if not ticket_id:
+            return
+        expected_session_id = current_control_session_id()
+        expected_conversation_id = current_conversation_id()
+        expected_execution_source = current_execution_source()
+        if pending_event.get("event") == "approval_required":
+            ticket = get_approval_ticket(ticket_id)
+            if ticket is None or not _ticket_belongs_to_tool(ticket, tool_name):
+                return
+            if (
+                ticket.control_session_id != expected_session_id
+                or ticket.conversation_id != expected_conversation_id
+                or ticket.execution_source != expected_execution_source
+            ):
+                return
+            approved = ticket.status.value == "approved"
+            if ticket_validation_error(
+                ticket,
+                expected_session_id=expected_session_id,
+                expected_conversation_id=expected_conversation_id,
+                expected_execution_source=expected_execution_source,
+                require_approved=approved,
+            ):
+                return
+            if ticket.status.value == "pending":
+                reject_ticket(ticket_id, resolved_by="system:unsafe_durable_resume")
+                signal_approval_resume(ticket_id, "rejected")
+                cleanup_approval_resume(ticket_id)
+            elif approved:
+                mark_approval_failed(
+                    ticket_id,
+                    error=json.dumps({
+                        "status": "cancelled",
+                        "reason_code": reason_code,
+                        "error": "The approved action was withdrawn before execution.",
+                    }),
+                )
+            return
+
+        ticket = get_grant_ticket(ticket_id)
+        if ticket is None or ticket_ownership_error(ticket, tool_name) or (
+            ticket.control_session_id != expected_session_id
+            or ticket.conversation_id != expected_conversation_id
+            or ticket.execution_source != expected_execution_source
+        ) or grant_validation_error(
+            ticket,
+            expected_session_id=expected_session_id,
+            expected_conversation_id=expected_conversation_id,
+            expected_execution_source=expected_execution_source,
+        ):
+            return
+        if ticket.status == "pending":
+            resolve_grant(ticket_id, "deny")
+            signal_grant_resume(ticket_id, "deny")
+            retire_grant(ticket_id)
+
+    @staticmethod
     def _reject_pending_ticket(pending_event: dict[str, Any] | None) -> None:
         """Retire a ticket that cannot be safely awaited after hop exhaustion."""
         if not pending_event:
             return
         ticket_id = str(pending_event.get("data", {}).get("ticket_id") or "")
         if not ticket_id:
+            return
+        ticket = (get_grant_ticket if pending_event.get("event") == "access_grant_required" else get_approval_ticket)(ticket_id)
+        if ticket is None or ticket_ownership_error(ticket):
             return
         if pending_event.get("event") == "access_grant_required":
             resolve_grant(ticket_id, "deny")
@@ -254,7 +367,15 @@ class ExecutionGateService:
         execute_tool: ToolExecute,
         timeout: float | None = None,
         call_id: str = "",
+        operation_execution: OperationExecution | None = None,
+        pause_requested: Callable[[], bool] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        ticket = (get_grant_ticket if event_kind == "access_grant_required" else get_approval_ticket)(ticket_id)
+        ownership_error = "ticket missing" if ticket is None else ticket_ownership_error(
+            ticket, str(tool_dict.get("name") or ""), arguments)
+        if ownership_error:
+            yield {"_result": json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch", "error": ownership_error})}
+            return
         if event_kind == "access_grant_required":
             event = register_grant_resume(ticket_id)
             get_decision = lambda: get_grant_resume_decision(ticket_id)
@@ -283,6 +404,7 @@ class ExecutionGateService:
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + (self.default_timeout_seconds if timeout is None else timeout)
+        last_ping_at = loop.time()
 
         try:
             # A decision already delivered to this gate needs no wait budget.
@@ -291,6 +413,21 @@ class ExecutionGateService:
             # merely waiting to be scheduled. Replay still revalidates the
             # stored ticket, expiry, identity and current policy.
             while not event.is_set():
+                if pause_requested is not None and pause_requested():
+                    self._retire_matching_pending_ticket({
+                        "event": event_kind,
+                        "data": {"ticket_id": ticket_id},
+                    }, str(tool_dict.get("name") or ""), reason_code="pause_requested")
+                    if operation_execution is not None:
+                        operation_execution.preflight_rejected("pause_requested")
+                    yield {
+                        "_result": json.dumps({
+                            "status": "cancelled",
+                            "reason_code": "pause_requested",
+                            "error": "The permission request was withdrawn because the run is pausing.",
+                        })
+                    }
+                    return
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     yield {
@@ -307,13 +444,35 @@ class ExecutionGateService:
                     return
 
                 try:
-                    await asyncio.wait_for(event.wait(), timeout=min(15.0, remaining))
+                    poll_interval = 0.25 if pause_requested is not None else 15.0
+                    await asyncio.wait_for(event.wait(), timeout=min(poll_interval, remaining))
                     break
                 except asyncio.TimeoutError:
-                    yield {"event": "ping", "data": {}}
+                    now = loop.time()
+                    if now - last_ping_at >= 15.0:
+                        last_ping_at = now
+                        yield {"event": "ping", "data": {}}
 
             decision = get_decision()
+            if pause_requested is not None and pause_requested():
+                self._retire_matching_pending_ticket(
+                    {"event": event_kind, "data": {"ticket_id": ticket_id}},
+                    str(tool_dict.get("name") or ""),
+                    reason_code="pause_requested",
+                )
+                if operation_execution is not None:
+                    operation_execution.preflight_rejected("pause_requested")
+                yield {
+                    "_result": json.dumps({
+                        "status": "cancelled",
+                        "reason_code": "pause_requested",
+                        "error": "The permission request was withdrawn because the run is pausing.",
+                    })
+                }
+                return
             if decision in (None, "deny", "rejected", "superseded", "expired", "cancelled"):
+                if operation_execution is not None:
+                    operation_execution.preflight_rejected("approval_rejected")
                 yield {
                     "_result": json.dumps(
                         {
@@ -326,7 +485,10 @@ class ExecutionGateService:
 
             try:
                 if event_kind == "approval_required":
-                    resumed_output = await self._resume_approved_ticket(ticket_id, tool_dict=tool_dict, budget=budget, call_id=call_id)
+                    resumed_output = await self._resume_approved_ticket(
+                        ticket_id, tool_dict=tool_dict, budget=budget, call_id=call_id,
+                        operation_execution=operation_execution,
+                    )
                 else:
                     resumed_output = await self._resume_access_grant(
                         ticket_id=ticket_id,
@@ -334,6 +496,7 @@ class ExecutionGateService:
                         tool_dict=tool_dict,
                         arguments=arguments,
                         execute_tool=execute_tool,
+                        operation_execution=operation_execution,
                     )
             except Exception as exc:
                 resumed_output = json.dumps({"status": "error", "error": str(exc)})
@@ -351,16 +514,26 @@ class ExecutionGateService:
                 # the UI stops offering a prompt that can no longer be answered.
                 retire_grant(ticket_id)
 
-    async def _resume_approved_ticket(self, ticket_id: str, *, tool_dict: dict | None = None,
-                                      budget: IterationBudget | None = None, call_id: str = "") -> str:
+    async def _resume_approved_ticket(
+        self, ticket_id: str, *, tool_dict: dict | None = None,
+        budget: IterationBudget | None = None, call_id: str = "",
+        operation_execution: OperationExecution | None = None,
+    ) -> str:
         ticket = get_approval_ticket(ticket_id)
         if ticket is None:
             return json.dumps(
                 {"status": "error", "error": f"Approval ticket {ticket_id} not found after approval."}
             )
+        ownership_error = ticket_ownership_error(ticket, str((tool_dict or {}).get("name") or ""))
+        if ownership_error:
+            return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch", "error": ownership_error})
 
         def replay() -> str:
-            updated = resume_approved_ticket(ticket)
+            if ticket.action_id and ticket.tool_name != ticket.root_tool_name:
+                with action_invocation(ticket.tool_name, ticket.payload, delegated=True):
+                    updated = resume_approved_ticket(ticket)
+            else:
+                updated = resume_approved_ticket(ticket)
             return updated.execution_result or json.dumps({"status": "error", "error": "Approved action produced no result."})
 
         # Replays need the same locks, call identity, Stop handling and timeout
@@ -372,7 +545,9 @@ class ExecutionGateService:
             resumed_tool["metadata"] = {"resource_locks": ["desktop"] if ticket.tool_name.startswith("computer_functions_") else [ticket.tool_name]}
         try:
             result = await executor.execute(tool_dict=resumed_tool, arguments={},
-                                            budget=budget or IterationBudget(max_iterations=1), call_id=call_id or f"resume-{ticket.id}")
+                                            budget=budget or IterationBudget(max_iterations=1),
+                                            call_id=call_id or f"resume-{ticket.id}",
+                                            operation_execution=operation_execution)
             return result.output
         finally:
             if self.executor is None:
@@ -386,8 +561,13 @@ class ExecutionGateService:
         tool_dict: dict[str, Any],
         arguments: dict[str, Any],
         execute_tool: ToolExecute,
+        operation_execution: OperationExecution | None = None,
     ) -> str:
         grant_ticket = get_grant_ticket(ticket_id)
+        ownership_error = "ticket missing" if grant_ticket is None else ticket_ownership_error(
+            grant_ticket, str(tool_dict.get("name") or ""), arguments)
+        if ownership_error:
+            return json.dumps({"status": "error", "reason_code": "approval_ticket_mismatch", "error": ownership_error})
         validation_error = (
             "ticket not found"
             if grant_ticket is None
@@ -400,6 +580,8 @@ class ExecutionGateService:
             )
         )
         if validation_error:
+            if operation_execution is not None:
+                operation_execution.preflight_rejected("approval_rejected")
             return json.dumps({"status": "error", "error": f"Access grant invalidated: {validation_error}"})
 
         return await execute_tool(budget, tool_dict, dict(arguments))

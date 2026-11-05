@@ -48,13 +48,14 @@ def _act(action: ActionType, reason: str = "builtin_browser_interaction") -> Bui
     return BuiltinToolPolicy(action, "medium", reason)
 
 
-# Keyed by the server's original tool name. Tools missing here fall back to the
-# generic keyword classification in registry._approval_decision.
+# Keyed by the server's original tool name. Unlisted built-in tools are blocked
+# until their specific capability and permission policy are defined.
 BUILTIN_TOOL_POLICIES: dict[str, dict[str, BuiltinToolPolicy]] = {
     CHROME_DEVTOOLS_SERVER: {
         "list_pages": _read(),
         "select_page": _read(),
         "take_snapshot": _read(),
+        "inspect_element": _read(),
         "take_screenshot": _read(),
         "wait_for": _read(),
         "list_console_messages": _read(),

@@ -1308,8 +1308,8 @@ class ObservabilityLoggingHandler(logging.Handler):
         try:
             if getattr(record, "_monaw_observed", False):
                 return
-            exc_type = ""
-            tb = ""
+            exc_type = str(getattr(record, "_monaw_error_type", ""))
+            tb = str(record.exc_text or "")
             if record.exc_info:
                 exc_type = str(getattr(record.exc_info[0], "__name__", "") or "")
                 tb = "".join(traceback_mod.format_exception(*record.exc_info))

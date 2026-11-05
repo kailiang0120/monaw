@@ -7,6 +7,7 @@ import {
 } from '../lib/api/approvals'
 import type { ApprovalTicket } from '../lib/api/types'
 import { ExecutionEnvironment } from './ExecutionEnvironment'
+import { ActionApprovalCard } from './ActionApprovalCard'
 
 interface Props {
   conversationId: string | null
@@ -18,6 +19,7 @@ export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: P
   const [toast, setToast] = useState<ApprovalTicket | null>(null)
   const [seenIds, setSeenIds] = useState<Set<string>>(new Set())
   const [acting, setActing] = useState(false)
+  const [error, setError] = useState('')
 
   const poll = useCallback(async () => {
     if (isStreaming) return
@@ -56,24 +58,26 @@ export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: P
   const handleApprove = async () => {
     if (!toast) return
     setActing(true)
+    setError('')
     try {
       await approveTicket(toast.id)
+      setToast(null)
     } catch {
-      // Keep UX non-blocking; the backend will continue to expose pending items.
+      setError('Could not approve. The request is still pending; try again.')
     }
-    setToast(null)
     setActing(false)
   }
 
   const handleReject = async () => {
     if (!toast) return
     setActing(true)
+    setError('')
     try {
       await rejectTicket(toast.id)
+      setToast(null)
     } catch {
-      // Keep UX non-blocking; the backend will continue to expose pending items.
+      setError('Could not reject. The request is still pending; try again.')
     }
-    setToast(null)
     setActing(false)
   }
 
@@ -96,6 +100,8 @@ export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: P
         </p>
         <p className="mb-3 text-[10px] leading-relaxed text-neutral-500">{toast.reason}</p>
         <ExecutionEnvironment environment={toast.payload.args?.sandbox?.execution_environment} />
+        <ActionApprovalCard action={toast.action_descriptor} />
+        {error && <p role="alert" className="mb-3 text-xs text-red-300">{error}</p>}
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -103,7 +109,7 @@ export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: P
             disabled={acting}
             className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-400 disabled:opacity-50"
           >
-            <Check size={12} /> Approve
+            <Check size={12} /> {toast.action_descriptor ? 'Approve once' : 'Approve'}
           </button>
           <button
             type="button"

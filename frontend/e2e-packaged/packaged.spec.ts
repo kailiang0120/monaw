@@ -1,11 +1,12 @@
-import { test, expect, _electron, type ElectronApplication, type Page } from '@playwright/test'
+import { test, expect, _electron, chromium, type Browser, type ElectronApplication, type Page } from '@playwright/test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { createServer, type Server } from 'node:net'
+import { createServer as createHttpServer } from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 // Drives the packaged app (release/win-unpacked by default, or MONAW_PACKAGED_APP)
 // with no development tools on PATH. The model is never called: a frozen
@@ -13,7 +14,9 @@ import { randomUUID } from 'node:crypto'
 // checks cover installation-level behavior. See docs/packaging.md.
 
 const frontend = resolve(import.meta.dirname, '..')
-const appExe = process.env.MONAW_PACKAGED_APP || join(frontend, 'release', 'win-unpacked', 'Monaw.exe')
+const configuredAppExe = process.env.MONAW_PACKAGED_APP || join(frontend, 'release', 'win-unpacked', 'Monaw.exe')
+// Windows CI may provide an 8.3 path while process inventory reports long paths.
+const appExe = existsSync(configuredAppExe) ? realpathSync.native(configuredAppExe) : configuredAppExe
 const appDir = dirname(appExe)
 const windows = process.env.SystemRoot || 'C:\\Windows'
 
@@ -81,16 +84,16 @@ class PackagedApp {
   }
 
   /** An authenticated call from the renderer, as the app makes it. */
-  async api(path: string, body?: unknown) {
-    return this.page.evaluate(async ({ path, body }) => {
+  async api(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST') {
+    return this.page.evaluate(async ({ path, body, method }) => {
       const session = await window.electronAPI!.getControlSession()
       const response = await fetch(window.electronAPI!.backendBaseUrl + path, {
-        method: body === undefined ? 'GET' : 'POST',
+        method,
         headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
       })
       return { status: response.status, data: await response.json() }
-    }, { path, body })
+    }, { path, body, method })
   }
 
   async quit() {
@@ -123,7 +126,11 @@ test.afterEach(async () => {
     try { app.kill() } catch { /* already gone */ }
   }
   await expect.poll(() => packagedProcesses().length, { timeout: 20_000 }).toBe(0)
-  if (home.startsWith(tmpdir()) && home.includes('monaw-e2e-packaged')) await rm(home, { recursive: true, force: true })
+  // The installed-update workflow runs on an ephemeral runner; its detached
+  // NSIS process can still be releasing files after the app exits.
+  if (!process.env.MONAW_UPDATE_TEST_INSTALLER && home.startsWith(tmpdir()) && home.includes('monaw-e2e-packaged')) {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 })
+  }
 })
 
 function track(app: PackagedApp) {
@@ -143,6 +150,151 @@ test('starts without development tools and guides a first run', async () => {
   expect(existsSync(join(home, 'runtime', 'backend.log'))).toBe(true)
 
   await desktop.quit()
+})
+
+test('shows the installed version and update controls', async () => {
+  const desktop = track(new PackagedApp(home, await freePort()))
+  await desktop.start()
+  await desktop.page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await desktop.page.getByRole('button', { name: 'About', exact: true }).click()
+  const version = await desktop.app.evaluate(({ app }) => app.getVersion())
+  await expect(desktop.page.getByText(version, { exact: true })).toBeVisible()
+  await expect(desktop.page.getByRole('button', { name: 'Check for updates' })).toBeEnabled()
+  await desktop.quit()
+})
+
+for (const corrupted of [false, true]) test(corrupted ? 'rejects an update with the wrong checksum' : 'downloads an update from a controlled test feed', async () => {
+  const payload = Buffer.from('Monaw updater test payload; not an installer')
+  const checksum = createHash('sha512').update(corrupted ? Buffer.from('different bytes') : payload).digest('base64')
+  let payloadRequests = 0
+  const server = createHttpServer((request, response) => {
+    if (request.url?.split('?')[0] === '/latest.yml') {
+      response.writeHead(200, { 'Content-Type': 'text/yaml' })
+      response.end(`version: 1.99.0\nfiles:\n  - url: test-update.exe\n    sha512: ${checksum}\n    size: ${payload.length}\npath: test-update.exe\nsha512: ${checksum}\nreleaseDate: '2026-01-01T00:00:00.000Z'\n`)
+    } else if (request.url?.split('?')[0] === '/test-update.exe') {
+      payloadRequests++
+      response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length })
+      response.end(payload)
+    } else { response.writeHead(404); response.end() }
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('No update test port')
+    const desktop = track(new PackagedApp(home, await freePort()))
+    await desktop.start()
+    // Override the feed only in this isolated test process; production is pinned to GitHub.
+    await desktop.app.evaluate((_, url) => {
+      const requireFromApp = process.mainModule!.require.bind(process.mainModule)
+      const updater = requireFromApp('electron-updater').autoUpdater
+      updater.setFeedURL({ provider: 'generic', url })
+      updater.disableDifferentialDownload = true
+    }, `http://127.0.0.1:${address.port}`)
+    await desktop.page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await desktop.page.getByRole('button', { name: 'About', exact: true }).click()
+    await desktop.page.getByRole('button', { name: 'Check for updates' }).click()
+    if (corrupted) {
+      await expect(desktop.page.getByText('Could not check for or download the update. Please try again.')).toBeVisible({ timeout: 45_000 })
+      await expect(desktop.page.getByRole('button', { name: 'Restart to update' })).toHaveCount(0)
+    } else {
+      await expect(desktop.page.getByText('Version 1.99.0 is ready to install.')).toBeVisible({ timeout: 45_000 })
+      await expect(desktop.page.getByRole('button', { name: 'Restart to update' })).toBeVisible()
+    }
+    expect(payloadRequests).toBeGreaterThan(0)
+    await desktop.quit()
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('installs a newer version and preserves settings', async ({}, testInfo) => {
+  const installer = process.env.MONAW_UPDATE_TEST_INSTALLER
+  test.skip(!installer, 'Run only on a disposable Windows runner with an installed test build')
+  test.setTimeout(180_000)
+  const installRoot = resolve(appDir).toLowerCase()
+  if (!installRoot.startsWith(realpathSync.native(tmpdir()).toLowerCase() + '\\')) throw new Error('Installed-update test must use a temporary install directory')
+  const payload = await readFile(installer!)
+  const checksum = createHash('sha512').update(payload).digest('base64')
+  const server = createHttpServer((request, response) => {
+    if (request.url?.split('?')[0] === '/latest.yml') {
+      response.writeHead(200, { 'Content-Type': 'text/yaml' })
+      response.end(`version: 1.1.1\nfiles:\n  - url: test-update.exe\n    sha512: ${checksum}\n    size: ${payload.length}\npath: test-update.exe\nsha512: ${checksum}\nreleaseDate: '2026-01-01T00:00:00.000Z'\n`)
+    } else if (request.url?.split('?')[0] === '/test-update.exe') {
+      response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length })
+      response.end(payload)
+    } else { response.writeHead(404); response.end() }
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  let appOutput = ''
+  let browser: Browser | undefined
+  const stopInstalled = () => execFileSync('powershell', ['-NoProfile', '-Command',
+    "$p = [IO.Path]::GetFullPath($env:MONAW_TEST_REAL_APP); Get-CimInstance Win32_Process -Filter \"Name='Monaw.exe' OR Name='monaw-backend.exe'\" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $p -or $_.ExecutablePath.StartsWith([IO.Path]::GetDirectoryName($p) + '\\', [StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { stdio: 'ignore', env: { ...process.env, MONAW_TEST_REAL_APP: appExe } })
+  try {
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('No update test port')
+    // Configure only this disposable installation; no production feed override.
+    await writeFile(join(appDir, 'resources', 'app-update.yml'), `provider: generic\nurl: http://127.0.0.1:${address.port}\nupdaterCacheDirName: monaw-agent-updater\n`)
+    const port = await freePort()
+    const debugPort = await freePort()
+    const workspace = join(home, 'workspace')
+    await mkdir(workspace, { recursive: true })
+    // CDP attaches to the renderer only. Playwright's Electron main-process
+    // inspector prevents normal process exit and can block the NSIS update.
+    const child = spawn(appExe, [`--remote-debugging-port=${debugPort}`], {
+      // This test runs only on a clean Windows runner. Keep its real Windows
+      // profile for NSIS while isolating Monaw's own data and workspace.
+      env: { ...process.env, MONAW_HOME: home, MONAW_BACKEND_PORT: String(port), AGENT_WORKSPACE_DIR: workspace },
+      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const capture = (chunk: Buffer) => { appOutput = (appOutput + chunk.toString()).slice(-20_000) }
+    child.stdout?.on('data', capture)
+    child.stderr?.on('data', capture)
+    await expect.poll(async () => {
+      try { browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`); return true } catch { return false }
+    }, { timeout: 45_000 }).toBe(true)
+    await expect.poll(() => browser?.contexts()[0]?.pages().length || 0, { timeout: 30_000 }).toBeGreaterThan(0)
+    const page = browser!.contexts()[0].pages()[0]
+    await expect.poll(() => health(port), { timeout: 30_000 }).toBe(true)
+    const saveStatus = await page.evaluate(async () => {
+      const session = await window.electronAPI!.getControlSession()
+      const response = await fetch(window.electronAPI!.backendBaseUrl + '/api/settings', {
+        method: 'PUT', headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identity: { user_name: 'Update test' } }),
+      })
+      return response.status
+    })
+    expect(saveStatus).toBe(200)
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await page.getByRole('button', { name: 'About', exact: true }).click()
+    await page.getByRole('button', { name: 'Check for updates' }).click()
+    await expect(page.getByText('Version 1.1.1 is ready to install.')).toBeVisible({ timeout: 60_000 })
+    await page.getByRole('button', { name: 'Restart to update' }).click()
+    await page.getByRole('button', { name: 'Restart and install' }).click()
+    await expect.poll(() => child.exitCode, { timeout: 45_000 }).not.toBeNull()
+    await browser?.close().catch(() => {})
+    browser = undefined
+    await expect.poll(() => {
+      try {
+        return execFileSync('powershell', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:MONAW_PACKAGED_APP).VersionInfo.ProductVersion'], { encoding: 'utf8' }).trim()
+      } catch { return '' }
+    }, { timeout: 90_000 }).toMatch(/^1\.1\.1/)
+    await expect.poll(() => packagedProcesses('Monaw.exe').length, { timeout: 60_000 }).toBeGreaterThan(0)
+    // The installer relaunches the app. Stop only this temporary installation,
+    // then attach a fresh inspector session and verify persisted data.
+    stopInstalled()
+    await expect.poll(() => packagedProcesses().length, { timeout: 30_000 }).toBe(0)
+    const updated = track(new PackagedApp(home, await freePort()))
+    await updated.start()
+    expect(await updated.app.evaluate(({ app }) => app.getVersion())).toBe('1.1.1')
+    await expect.poll(async () => updated.api('/api/settings').then(result => result.data.identity?.user_name, () => ''), { timeout: 30_000 }).toBe('Update test')
+    await updated.quit()
+  } finally {
+    await browser?.close().catch(() => {})
+    await writeFile(testInfo.outputPath('updater-main.log'), appOutput)
+    stopInstalled()
+    server.closeAllConnections()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
 })
 
 test('keeps settings across a restart', async () => {

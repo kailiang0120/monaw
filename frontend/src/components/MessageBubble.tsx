@@ -1,6 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { ActionApprovalCard } from './ActionApprovalCard'
+import { BrowserVerificationStatus } from './BrowserVerificationStatus'
+import { browserActionOutcome } from '../lib/browserAction'
 import {
   AlertTriangle,
   Check,
@@ -26,7 +29,8 @@ import mascotAlertStill from '../assets/mascots/curious.png'
 import mascotSuccessStill from '../assets/mascots/good.png'
 import mascotThinkingStill from '../assets/mascots/thinking.png'
 import { ImagePreviewDialog } from './ImagePreviewDialog'
-import { PlanProgress } from './PlanProgress'
+import { FileChangePreview, type FileChangePreviewData } from './FileChangePreview'
+import { TurnChanges } from './TurnChanges'
 import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
 import { fetchMessageToolCalls } from '../lib/api/conversations'
@@ -73,6 +77,71 @@ function formatResponseDuration(durationMs: number): string {
   return `${minutes}m ${seconds}s`
 }
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function normalizeFileChangePreview(value: unknown): FileChangePreviewData | null {
+  const payload = recordValue(value)
+  if (!payload) return null
+
+  // Agent file tools return their planner preview under `preview`; the
+  // file-mutation HTTP endpoint returns the same fields at the top level.
+  const nestedPreview = recordValue(payload.preview)
+  const candidate = nestedPreview && Array.isArray(nestedPreview.files)
+    ? nestedPreview
+    : payload
+  const diff = recordValue(candidate.preview)
+  if (!Array.isArray(candidate.files) || candidate.files.length === 0 || candidate.files.length > 20
+    || !diff || (diff.kind !== 'unified_diff' && diff.kind !== 'summary')) return null
+  if (!payload.mutation_id && candidate.version !== 1) return null
+  if (diff.reason !== undefined && !['binary_or_undecodable', 'input_limit', 'line_limit', 'output_limit'].includes(String(diff.reason))) return null
+  if (diff.truncated !== undefined && typeof diff.truncated !== 'boolean') return null
+
+  const files = candidate.files.flatMap((item) => {
+    const file = recordValue(item)
+    if (!file || typeof file.path !== 'string' || file.path.length === 0 || file.path.length > 4096 || /[\u0000-\u001f\u007f]/.test(file.path)) return []
+    const before = recordValue(file.before)
+    const after = recordValue(file.after)
+    const stateIsSafe = (state: Record<string, unknown> | null) => state !== null
+      && typeof state.exists === 'boolean'
+      && typeof state.kind === 'string'
+      && (state.size === null || (typeof state.size === 'number' && Number.isInteger(state.size) && state.size >= 0 && state.size <= 1_000_000_000_000))
+    if (!stateIsSafe(before) || !stateIsSafe(after)) return []
+    return [{
+      path: file.path,
+      role: typeof file.role === 'string' && file.role.length <= 40 && !/[\u0000-\u001f\u007f]/.test(file.role) ? file.role : undefined,
+      before: before ?? undefined,
+      after: after ?? undefined,
+    }]
+  })
+  if (files.length === 0 || files.length !== candidate.files.length || (typeof diff.text === 'string' && diff.text.length > 48 * 1024)
+    || (diff.kind === 'unified_diff' && typeof diff.text !== 'string')) return null
+
+  return {
+    mutation_id: typeof payload.mutation_id === 'string' && payload.mutation_id.length <= 128 ? payload.mutation_id : undefined,
+    revision: typeof payload.revision === 'number' ? payload.revision : undefined,
+    operation: typeof candidate.operation === 'string' && candidate.operation.length <= 40 ? candidate.operation : undefined,
+    files,
+    preview: diff,
+    undo_capability: candidate.undo_capability === 'available' || candidate.undo_capability === 'unavailable' ? candidate.undo_capability : undefined,
+    apply_available: typeof payload.apply_available === 'boolean' ? payload.apply_available : undefined,
+    reason_code: typeof payload.reason_code === 'string' && payload.reason_code.length <= 128 ? payload.reason_code : null,
+    expires_in_seconds: typeof payload.expires_in_seconds === 'number' ? payload.expires_in_seconds : undefined,
+  }
+}
+
+function readFileChangePreview(output?: string): FileChangePreviewData | null {
+  if (!output || output.length > 100_000) return null
+  try {
+    return normalizeFileChangePreview(JSON.parse(output))
+  } catch {
+    return null
+  }
+}
+
 export const MessageBubble = memo(function MessageBubble({
   message,
   agentName = DEFAULT_AGENT_NAME,
@@ -110,7 +179,6 @@ export const MessageBubble = memo(function MessageBubble({
     () => (hasBody ? cachedFormatAgentResponse(message) : ''),
     [hasBody, message],
   )
-  const steps = message.stepProgress ?? []
   const runStatus = message.streaming ? 'streaming' : message.runStatus ?? 'complete'
   const mascotSrc = runStatus === 'streaming' ? mascotThinking
     : runStatus === 'complete' ? mascotSuccess
@@ -142,9 +210,7 @@ export const MessageBubble = memo(function MessageBubble({
 
       {displayActivities.map((item) => item.type === 'progress'
         ? <p key={item.id} className="text-sm leading-relaxed text-neutral-300" role="status" aria-live="polite">{item.content}</p>
-        : <ToolActivityGroup key={item.id} messageId={message.id} toolCalls={item.toolCalls} streaming={message.streaming === true} />)}
-
-      {steps.length > 0 && <PlanActivity steps={steps} />}
+        : <ToolActivityGroup key={item.id} messageId={message.id} toolCalls={item.toolCalls} />)}
 
       {(runStatus === 'paused' || runStatus === 'error') && (
         <p className={runStatus === 'error' ? 'text-xs text-red-300' : 'text-xs text-amber-300'}>
@@ -253,6 +319,8 @@ export const MessageBubble = memo(function MessageBubble({
       )}
 
       <AttachmentStrip attachments={message.attachments} onPreview={setPreviewAttachment} />
+      {/* The reply's summary of what it wrote, once its work is done. */}
+      {!message.streaming && <TurnChanges toolCalls={message.toolCalls} />}
       {previewDialog}
     </article>
   )
@@ -297,29 +365,6 @@ function WorkDuration({
   return (
     <div className="text-xs text-neutral-500" role="status" aria-live="off">
       {label}
-    </div>
-  )
-}
-
-function PlanActivity({ steps }: { steps: NonNullable<Message['stepProgress']> }) {
-  const [expanded, setExpanded] = useState(false)
-  const activeStep = steps.find((step) => step.status === 'active' || step.status === 'retrying')
-  const completed = steps.filter((step) => step.status === 'done').length
-  const label = activeStep?.description || `Plan · ${completed}/${steps.length} done`
-
-  return (
-    <div className="text-xs">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 rounded-md py-1 text-left text-neutral-400 hover:text-neutral-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/30"
-      >
-        <CircleDashed size={14} className="shrink-0" aria-hidden />
-        <span className="min-w-0 flex-1 truncate">{label}</span>
-        {expanded ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
-      </button>
-      {expanded && <div className="ml-5 pt-2"><PlanProgress steps={steps} title="Plan" /></div>}
     </div>
   )
 }
@@ -472,11 +517,9 @@ function ImageAttachmentCard({
 function ToolActivityGroup({
   messageId,
   toolCalls,
-  streaming,
 }: {
   messageId: string
   toolCalls: ToolCall[]
-  streaming: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const pendingTool = toolCalls.find((call) => call.pending)
@@ -489,10 +532,6 @@ function ToolActivityGroup({
     : allCommands ? `Ran ${toolCalls.length === 1 ? 'command' : 'commands'}`
       : allBrowser ? 'Used browser'
         : `Used ${toolCalls.length === 1 ? 'tool' : 'tools'}`
-
-  useEffect(() => {
-    if (streaming && pendingTool) setExpanded(true)
-  }, [streaming, Boolean(pendingTool)])
 
   return (
     <div className="text-xs">
@@ -565,6 +604,11 @@ function toolInputSummary(toolCall: ToolCall): string {
   try {
     const parsed = JSON.parse(raw)
     if (typeof parsed === 'object' && parsed !== null) {
+      if (toolCall.tool.startsWith('mcp__chrome-devtools__')) {
+        // Keep typed values, script bodies and URL credentials out of row titles.
+        return [typeof parsed.pageId === 'number' ? `Tab ${parsed.pageId}` : '',
+          typeof parsed.uid === 'string' ? `Element ${parsed.uid}` : ''].filter(Boolean).join(' · ')
+      }
       const preview = parsed.command || parsed.cmd || parsed.code || parsed.url || parsed.path || parsed.query || parsed.content || parsed.selector || parsed.text || parsed.action || ''
       if (typeof preview === 'string' && preview.length > 0) {
         return preview.replace(/\s+/g, ' ').trim()
@@ -670,6 +714,8 @@ function ToolCallScroller({
         const isExpanded = expandedId === key
         const label = toolCallActivityLabel(toolCall)
         const environment = toolCall.output !== undefined ? toolEnvironment(toolCall.output) : undefined
+        const filePreview = isExpanded ? readFileChangePreview(toolCall.output) : null
+        const outcome = browserActionOutcome(toolCall.tool, toolCall.output)
 
         return (
             <li
@@ -688,7 +734,7 @@ function ToolCallScroller({
                   : <Wrench size={13} className="shrink-0 text-neutral-500" aria-hidden />}
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-400">{label}</span>
                 {callRanOnHost(toolCall) && <HostBadge />}
-                <ToolTabStatusIcon status={status} />
+                {outcome && !toolCall.pending ? <BrowserVerificationStatus outcome={outcome} /> : <ToolTabStatusIcon status={status} />}
                 <span className="shrink-0 text-neutral-600" aria-hidden>
                   {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 </span>
@@ -705,6 +751,8 @@ function ToolCallScroller({
                   {toolCall.output !== undefined ? (
                     <>
                       <ExecutionEnvironment environment={environment} />
+                      <BrowserVerificationStatus outcome={outcome} detail />
+                      {filePreview && <FileChangePreview preview={filePreview} />}
                       <ToolPayloadInline label="Result" value={toolCall.output} />
                     </>
                   ) : toolCall.pending ? (
@@ -772,24 +820,30 @@ function toolEnvironment(value: string): Environment | undefined {
 
 function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
   const [localStatus, setLocalStatus] = useState<'idle' | 'approving' | 'rejecting' | 'approved' | 'rejected'>('idle')
+  const [error, setError] = useState('')
+  const filePreview = useMemo(() => normalizeFileChangePreview(notice.file_preview), [notice.file_preview])
 
   const handleApprove = async () => {
     setLocalStatus('approving')
+    setError('')
     try {
       await approveTicket(notice.ticket_id)
       setLocalStatus('approved')
     } catch {
       setLocalStatus('idle')
+      setError('Could not approve. The request is still pending; try again.')
     }
   }
 
   const handleReject = async () => {
     setLocalStatus('rejecting')
+    setError('')
     try {
       await rejectTicket(notice.ticket_id)
       setLocalStatus('rejected')
     } catch {
       setLocalStatus('idle')
+      setError('Could not reject. The request is still pending; try again.')
     }
   }
 
@@ -812,6 +866,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           <span className="font-medium">{label}</span>
           <p className="mt-1 text-neutral-400">{notice.action}</p>
           <ExecutionEnvironment environment={notice.execution_environment} />
+          <ActionApprovalCard action={notice.action_descriptor} />
           {(denied || automatic) && notice.reason && <p className="mt-1 text-neutral-300">{notice.reason}</p>}
         </div>
       </div>
@@ -826,11 +881,18 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           <p className="text-xs font-semibold text-amber-200">Approval required</p>
           <p className="mt-1 text-[11px] leading-relaxed text-neutral-200">{notice.action}</p>
           <ExecutionEnvironment environment={notice.execution_environment} />
+          <ActionApprovalCard action={notice.action_descriptor} />
           {notice.reason && (
             <p className="mt-1 text-[10px] text-neutral-500">{notice.reason}</p>
           )}
         </div>
       </div>
+      {filePreview && (
+        <div className="mb-3 pl-7">
+          <FileChangePreview preview={filePreview} />
+        </div>
+      )}
+      {error && <p role="alert" className="mb-3 pl-7 text-xs text-red-300">{error}</p>}
       <div className="flex items-center gap-2 pl-7">
         <button
           type="button"
@@ -839,7 +901,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-400 disabled:opacity-50"
         >
           {localStatus === 'approving' ? <CircleDashed size={12} className="animate-spin" /> : <Check size={12} />}
-          {localStatus === 'approving' ? 'Approving' : 'Approve'}
+          {localStatus === 'approving' ? 'Approving' : notice.action_descriptor ? 'Approve once' : 'Approve'}
         </button>
         <button
           type="button"

@@ -35,6 +35,8 @@ export interface ChatRun {
   message: string
   attachments: UploadedAttachment[]
   started_at: number
+  /** A resumed Run: it continues the paused reply and has no user message of its own. */
+  continuation?: boolean
 }
 
 export interface TurnStartedEvent {
@@ -646,6 +648,7 @@ export interface AgentSettings {
     user_identity: string
     communication_style: string
   }
+  execution_detail: 'simple' | 'detailed' | 'developer'
   settings_version: string
   available_skills: SkillDescriptor[]
   api_keys: {
@@ -729,6 +732,7 @@ export interface SettingsUpdatePayload {
   permissions?: AgentSettings['permissions']
   sandbox?: AgentSettings['sandbox']
   identity?: AgentSettings['identity']
+  execution_detail?: AgentSettings['execution_detail']
   openai_api_key?: string
   google_api_key?: string
   tavily_api_key?: string
@@ -806,7 +810,29 @@ export interface ExecutionEnvironment {
   scope: string
 }
 
+/** Safe runtime facts supplied by the backend; never script bodies or form values. */
+export interface ActionDescriptor {
+  action_id: string
+  run_id?: string
+  operation_id?: string
+  tool_name: string
+  action_kind: string
+  target?: { origin?: string; page_id?: number; app?: string; path?: string; server_id?: string }
+  destination?: string
+  data_scope?: {
+    files?: { name?: string; path?: string; size_bytes?: number; sensitivity?: string[] }[]
+    file_count?: number
+    size_bytes?: number
+    classification?: string
+  }
+  side_effect?: string
+  risk_level?: string
+  context_version?: string
+  human_only?: boolean
+}
+
 export interface ApprovalTicket {
+  action_descriptor?: ActionDescriptor
   review_decision?: 'approve' | 'deny' | 'ask' | ''
   review_reason?: string
   id: string
@@ -841,7 +867,10 @@ export interface ApprovalTicket {
 }
 
 export interface ApprovalEvent {
+  action_descriptor?: ActionDescriptor
   execution_environment?: ExecutionEnvironment
+  /** Optional planner preview for a supported native file approval. */
+  file_preview?: unknown
   ticket_id: string
   action: string
   reason: string

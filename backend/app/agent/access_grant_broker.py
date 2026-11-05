@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.database import get_db
 from app.agent.ui_events import publish_ui_event
+from app.agent.action_identity import bind_ticket, ticket_identity
 from app.agent.run_context import (
     current_control_session_id,
     current_conversation_id,
@@ -59,6 +60,11 @@ class AccessGrantTicket(BaseModel):
     principal_id: str = ""
     permission_profile_id: str = ""
     interactive: bool = True
+    action_id: str = ""
+    parent_action_id: str = ""
+    parent_tool_name: str = ""
+    root_action_id: str = ""
+    root_tool_name: str = ""
     target_type: str = ""  # "app" | "path"
     target_identifier: str = ""
     display_name: str = ""
@@ -78,6 +84,9 @@ class AccessGrantTicket(BaseModel):
 
     def compute_hash(self) -> str:
         payload = {
+            "action_id": self.action_id, "parent_action_id": self.parent_action_id,
+            "parent_tool_name": self.parent_tool_name, "root_action_id": self.root_action_id,
+            "root_tool_name": self.root_tool_name,
             "conversation_id": self.conversation_id,
             "control_session_id": self.control_session_id,
             "execution_source": self.execution_source,
@@ -122,6 +131,7 @@ def create_grant_ticket(
 ) -> AccessGrantTicket:
     """Create a pending access grant ticket."""
     ticket = AccessGrantTicket(
+        **ticket_identity(),
         conversation_id=conversation_id or current_conversation_id(),
         control_session_id=control_session_id or current_control_session_id(),
         execution_source=execution_source or current_execution_source(),
@@ -135,6 +145,7 @@ def create_grant_ticket(
         requested_access=(requested_access if requested_access in {"read", "write", "delete", "launch"} else "read"),
     )
     ticket.payload_hash = ticket.compute_hash()
+    bind_ticket(ticket)
     superseded_ids: list[str] = []
     with _state_lock:
         for existing in list(_pending.values()):
@@ -146,6 +157,7 @@ def create_grant_ticket(
                 and existing.principal_id == ticket.principal_id
                 and existing.target_type == ticket.target_type
                 and existing.target_identifier == ticket.target_identifier
+                and existing.root_action_id == ticket.root_action_id
             ):
                 existing.status = "superseded"
                 existing.superseded_by = ticket.id
@@ -243,6 +255,10 @@ def grant_validation_error(
         return "ticket belongs to another execution source"
     if ticket.compute_hash() != ticket.payload_hash:
         return "ticket payload hash mismatch"
+    if ticket.principal_id != current_principal_id():
+        return "ticket belongs to another principal"
+    if ticket.permission_profile_id != current_permission_profile_id():
+        return "ticket permission profile changed"
     return ""
 
 
@@ -342,8 +358,14 @@ def resolve_grant(
     return ticket
 
 
-def check_session_grant(target_type: str, identifier: str, access: str = "read") -> bool:
-    """Check (and for "once", atomically consume) a grant for this run's scope."""
+def check_session_grant(
+    target_type: str,
+    identifier: str,
+    access: str = "read",
+    *,
+    consume_once: bool = True,
+) -> bool:
+    """Check a grant for this run's scope; by default consume a one-time grant."""
     db = get_db()
     if target_type == "path":
         stored_access = _SATISFYING_PATH_ACCESS.get(access, (access,))
@@ -354,9 +376,25 @@ def check_session_grant(target_type: str, identifier: str, access: str = "read")
         grant = db.check_session_grant(target_type, scoped_identifier)
         if grant == "session":
             return True
-        if grant == "once" and db.consume_once_grant(target_type, scoped_identifier):
-            return True
+        if grant == "once":
+            if not consume_once or db.consume_once_grant(target_type, scoped_identifier):
+                return True
     return False
+
+
+def session_grant_kind(target_type: str, identifier: str, access: str = "read") -> str | None:
+    """Peek without consuming and return the narrowest active grant kind."""
+    db = get_db()
+    if target_type == "path":
+        stored_access = _SATISFYING_PATH_ACCESS.get(access, (access,))
+    else:
+        stored_access = ("",)
+    for candidate in stored_access:
+        scoped_identifier = _session_grant_identifier(identifier, candidate)
+        grant = db.check_session_grant(target_type, scoped_identifier)
+        if grant in {"session", "once"}:
+            return str(grant)
+    return None
 
 
 def clear_session_grants() -> None:

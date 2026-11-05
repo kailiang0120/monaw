@@ -34,6 +34,11 @@ class SnapshotNode:
     backend_node_id: int
     role: str
     name: str
+    frame_id: str = ""
+    document_id: str = ""
+    snapshot_revision: int = 0
+    connection_epoch: int = 0
+    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -59,12 +64,23 @@ class TabSession:
     # of the same document.
     uid_by_key: dict[str, str] = field(default_factory=dict)
     nodes: dict[str, SnapshotNode] = field(default_factory=dict)
+    frames: dict[str, dict[str, Any]] = field(default_factory=dict)
+    current_url: str = ""
+    connection_epoch: int = 0
+    download_count: int = 0
+    visual_targets: dict[str, Any] = field(default_factory=dict)
+    inaccessible_frames: set[str] = field(default_factory=set)
 
     async def send(self, method: str, params: dict[str, Any] | None = None, *, timeout: float = 30.0) -> dict[str, Any]:
         await self.prepare()
         return await self._raw(method, params, timeout=timeout)
 
     async def _raw(self, method: str, params: dict[str, Any] | None = None, *, timeout: float = 30.0) -> dict[str, Any]:
+        if (method in {"Input.dispatchKeyEvent", "Input.insertText", "DOM.setFileInputFiles",
+                       "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry", "Page.handleJavaScriptDialog"}
+                or method == "Input.dispatchMouseEvent" and (params or {}).get("type") != "mouseMoved"):
+            from .action_executor import before_dispatch
+            await before_dispatch(method, params)
         try:
             result = await self.bridge.request(
                 "cdp", {"tabId": self.tab_id, "method": method, "params": params or {}}, timeout=timeout,
@@ -84,7 +100,31 @@ class TabSession:
         frame = (tree.get("frameTree") or {}).get("frame") or {}
         self.main_frame_id = str(frame.get("id") or "")
         self.loader_id = str(frame.get("loaderId") or "")
+        self._remember_frames(tree.get("frameTree") or {})
         self.prepared = True
+
+    def _remember_frames(self, tree: dict[str, Any]) -> None:
+        frame = tree.get("frame") or {}
+        if frame.get("id"):
+            self.frames[str(frame["id"])] = dict(frame)
+            if frame.get("id") == self.main_frame_id and frame.get("url"):
+                self.current_url = str(frame["url"])
+        for child in tree.get("childFrames") or []:
+            self._remember_frames(child)
+
+    async def refresh_frames(self) -> None:
+        tree = await self.send("Page.getFrameTree")
+        previous = self.frames
+        self.frames = {}
+        self._remember_frames(tree.get("frameTree") or {})
+        for frame_id, frame in self.frames.items():
+            old = previous.get(frame_id) or {}
+            if frame.get("loaderId") and frame.get("loaderId") == old.get("loaderId") and old.get("_monaw_effective_origin"):
+                frame["_monaw_effective_origin"] = old["_monaw_effective_origin"]
+        main = self.frames.get(self.main_frame_id) or {}
+        if main.get("loaderId") and main["loaderId"] != self.loader_id:
+            self.loader_id = str(main["loaderId"])
+            self.navigation += 1
 
     async def send_until_dialog(self, method: str, params: dict[str, Any] | None = None,
                                 *, timeout: float = 30.0) -> bool:
@@ -111,8 +151,15 @@ class TabSession:
         if method == "Page.frameNavigated":
             frame = params.get("frame") or {}
             if not frame.get("parentId"):
+                self.frames.clear()
+                self.inaccessible_frames.clear()
+            if frame.get("id"):
+                self.frames[str(frame["id"])] = dict(frame)
+                self.inaccessible_frames.discard(str(frame["id"]))
+            if not frame.get("parentId"):
                 self.main_frame_id = str(frame.get("id") or self.main_frame_id)
                 self.loader_id = str(frame.get("loaderId") or "")
+                self.current_url = str(frame.get("url") or self.current_url)
                 self.navigation += 1
                 self._trim_console()
         elif method in {"Page.frameStartedLoading", "Page.frameRequestedNavigation"}:
@@ -124,6 +171,16 @@ class TabSession:
         elif method == "Page.navigatedWithinDocument":
             if params.get("frameId") == self.main_frame_id:
                 self.same_document += 1
+                self.current_url = str(params.get("url") or self.current_url)
+        elif method == "Page.frameDetached":
+            frame_id = str(params.get("frameId") or "")
+            self.frames.pop(frame_id, None)
+            if params.get("reason") == "swap":
+                self.inaccessible_frames.add(frame_id)
+            else:
+                self.inaccessible_frames.discard(frame_id)
+        elif method in {"Page.downloadWillBegin", "Browser.downloadWillBegin"}:
+            self.download_count += 1
         elif method == "Page.loadEventFired":
             self.load_count += 1
         elif method == "Page.javascriptDialogOpening":
@@ -142,6 +199,8 @@ class TabSession:
     def on_detached(self) -> None:
         self.prepared = False
         self.dialog = None
+        self.connection_epoch += 1
+        self.visual_targets.clear()
 
     def _add_console(self, kind: str, text: str, stack: str) -> None:
         self.console.append(ConsoleMessage(self.next_msgid, kind, text[:4000], self.navigation, stack))
@@ -282,6 +341,10 @@ class PageRegistry:
             for tab in raw or []
             if isinstance(tab, dict) and isinstance(tab.get("id"), int)
         ]
+        for tab in tabs:
+            session = self.sessions.get(tab.tab_id)
+            if session is not None:
+                session.current_url = tab.url
         live = {tab.tab_id for tab in tabs}
         for tab_id in list(self._page_by_tab):
             if tab_id not in live:
@@ -305,7 +368,9 @@ class PageRegistry:
             page_id = self.page_id_for(current.tab_id)
         self.selected_page = page_id
         tab_id = self._tab_by_page[page_id]
-        return page_id, self.session(tab_id)
+        session = self.session(tab_id)
+        session.current_url = next((tab.url for tab in tabs if tab.tab_id == tab_id), session.current_url)
+        return page_id, session
 
     def tab_for_page(self, page_id: int) -> int | None:
         return self._tab_by_page.get(page_id)

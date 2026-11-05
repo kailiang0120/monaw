@@ -1,12 +1,25 @@
 """Conversation workspaces without changing the process-wide working directory."""
 
 import os
+import uuid
 from contextvars import ContextVar, Token
+from datetime import datetime
 from pathlib import Path
 
 from app.agent.runtime_paths import WORKSPACE_DIR
 
 _WORKSPACE: ContextVar[str] = ContextVar("conversation_workspace", default="")
+DEFAULT_CHAT_WORKSPACE_ROOT = WORKSPACE_DIR
+
+
+def create_default_chat_workspace(conversation_id: str, created_at: str) -> str:
+    """Give a chat a stable, date-grouped folder without using its editable title."""
+    day = datetime.fromisoformat(created_at).astimezone().date().isoformat()
+    # Conversation IDs may also come from integrations: never use raw path input.
+    chat_id = uuid.uuid5(uuid.NAMESPACE_URL, conversation_id).hex
+    path = DEFAULT_CHAT_WORKSPACE_ROOT / day / f"chat-{chat_id}"
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path.resolve())
 
 
 def selected_workspace_dir() -> str:

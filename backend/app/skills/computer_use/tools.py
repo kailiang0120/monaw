@@ -10,6 +10,7 @@ from typing import Any
 
 from app.agent.access_grant_broker import create_grant_ticket
 from app.agent.approval_broker import create_ticket
+from app.agent.action_identity import delegated_action
 from app.agent.audit import AuditLogger
 from app.agent.controller_policy import (
     ActionType,
@@ -271,18 +272,11 @@ def _computer_functions_get_window_state(
     uia: dict[str, Any] = {"status": "skipped"}
     if include_text:
         uia_app = app or selected.get("process_name") or selected.get("app") or selected.get("title") or ""
-        uia = _json_loads(
-            window_ops._uia_interact_app(
-                str(uia_app),
-                "get_elements",
-                {
-                    "window_title": selected.get("title") or "",
-                    "hwnd": int(selected.get("hwnd") or 0),
-                    "limit": max(1, min(int(limit or 100), 200)),
-                },
-            ),
-            {"status": "error", "error": "Invalid UIA response."},
-        )
+        params = {"window_title": selected.get("title") or "", "hwnd": int(selected.get("hwnd") or 0),
+                  "limit": max(1, min(int(limit or 100), 200))}
+        with delegated_action("ctrl_interact_app", {"app": str(uia_app), "action": "get_elements", "params": params}):
+            uia = _json_loads(window_ops._uia_interact_app(str(uia_app), "get_elements", params),
+                             {"status": "error", "error": "Invalid UIA response."})
 
     for observation in (screenshot, uia):
         if observation.get("status") in {"pending_approval", "pending_access_grant", "blocked", "cancelled"}:
@@ -507,29 +501,22 @@ def _permission_for_batch(
         if decision.requires_confirmation and confirmation is None:
             confirmation = decision
 
-    if confirmation is not None and not skip_confirmation:
-        args = {"window": window, "actions": actions, "state_id": state_id}
-        description = f"Computer action batch on {target_app}"
-        if launch_aliases:
-            description += f" (launches: {', '.join(dict.fromkeys(launch_aliases))})"
-        ticket = create_ticket(
-            action_type="computer_functions_act",
-            tool_name="computer_functions_act",
-            target_app=target_app,
-            risk_level="medium",
-            reason=confirmation.reason,
-            action_description=description,
-            payload={"input_str": json.dumps(args, ensure_ascii=False, sort_keys=True), "args": args},
-        )
-        return {
-            "status": "pending_approval",
-            "ticket_id": ticket.id,
-            "action": description,
-            "reason": confirmation.reason,
-            "reason_code": confirmation.reason_code,
-            "policy_source": confirmation.policy_source,
-        }
-    return None
+    from app.agent.action_security import attest_action, authorize_action
+    from app.agent.action_security.models import digest
+    args = {"window": window, "actions": actions, "state_id": state_id}
+    kinds = {str(action.get("type") or "").lower() for action in actions}
+    # A control label cannot establish whether a click sends/pays/deletes.
+    # Unknown generic dispatch is reviewed by ordinary modes; Full Access
+    # permits ordinary desktop interaction. Live state validation follows.
+    opaque = bool(kinds & {"click", "invoke", "secondary_action", "press_key", "type_text"})
+    kind = "click" if opaque else "type" if kinds & {"set_value", "select_option"} else "navigate"
+    descriptor = attest_action(tool_name="computer_functions_act", action_kind=kind, parameters=args,
+        target={"app": target_app, "hwnd": window.get("hwnd"), "pid": window.get("pid")},
+        context_version=state_id or digest(window or {"launch_targets": launch_aliases}),
+        side_effect="unknown" if opaque else "local_mutation",
+        runtime_facts={"target_verified": bool(target_app), "context_verified": bool(state_id or window or launch_aliases),
+            "adapter_permission_requires_confirmation": confirmation is not None})
+    return authorize_action(descriptor, replay_payload={"args": args})
 
 
 def _live_window_error(selected: dict, *, check_title: bool = True) -> dict | None:
@@ -617,15 +604,11 @@ def _dispatch_batch_action(kind: str, action: dict, selected: dict, state_id: st
         if _is_blocked_app(alias):
             result = {"status": "blocked", "reason_code": "blocked_app", "error": f"Blocked app target: {alias}"}
         else:
-            result = _json_loads(
-                desktop_runtime.launch_app(
-                    alias,
-                    str(action.get("url") or ""),
-                    str(action.get("args") or ""),
-                    _bypass_gate=_bypass_gate,
-                ),
-                {},
-            )
+            launch_args = {"alias": alias, "url": str(action.get("url") or ""), "args": str(action.get("args") or "")}
+            with delegated_action("computer_functions_launch_app", launch_args):
+                result = _json_loads(desktop_runtime.launch_app(
+                    alias, launch_args["url"], launch_args["args"], _bypass_gate=_bypass_gate,
+                ), {})
     elif kind == "click":
         mode = str(action.get("coordinate_mode") or "window")
         result = _json_loads(
@@ -909,7 +892,7 @@ def _process_name_key(name: str) -> str:
     return os.path.basename(str(name or "").strip().lower()).removesuffix(".exe")
 
 
-def _terminate_process(name_or_pid: str, force: bool = False) -> str:
+def _terminate_process(name_or_pid: str, force: bool = False, *, expected_processes: list | None = None) -> str:
     target = str(name_or_pid or "").strip()
     if not target:
         return json.dumps({"status": "error", "error": "name_or_pid is required"})
@@ -937,6 +920,12 @@ def _terminate_process(name_or_pid: str, force: bool = False) -> str:
                 # process name against the blocked list before terminating.
                 if _is_blocked_app(name) or pid in protected_pids:
                     refused.append({"pid": pid, "name": name, "reason_code": "blocked_app"})
+                    continue
+                if expected_processes is not None and not any(
+                    item["pid"] == pid and item["name"] == name and item["create_time"] == proc.create_time()
+                    for item in expected_processes
+                ):
+                    refused.append({"pid": pid, "name": name, "reason_code": "process_identity_changed"})
                     continue
                 proc.kill() if force else proc.terminate()
                 killed.append({"pid": pid, "name": name})
@@ -977,28 +966,31 @@ def _computer_functions_kill_process(name_or_pid: str, force: bool = False) -> s
                 "policy_source": decision.policy_source,
             }
         )
-    if decision.requires_confirmation:
-        args = {"name_or_pid": name_or_pid, "force": bool(force)}
-        ticket = create_ticket(
-            action_type="process_kill",
-            tool_name="computer_functions_kill_process",
-            target_app=name_or_pid,
-            risk_level="high",
-            reason=decision.reason,
-            action_description=f"Kill process: {name_or_pid}",
-            payload={"input_str": json.dumps(args, ensure_ascii=False, sort_keys=True), "args": args},
-        )
-        return json.dumps(
-            {
-                "status": "pending_approval",
-                "ticket_id": ticket.id,
-                "action": f"Kill process: {name_or_pid}",
-                "reason": decision.reason,
-                "reason_code": decision.reason_code,
-                "policy_source": decision.policy_source,
-            }
-        )
-    return _terminate_process(name_or_pid, bool(force))
+    from app.agent.action_security import attest_action, authorize_action
+    from app.agent.action_security.models import digest
+    try:
+        import psutil
+        target = str(name_or_pid).strip()
+        targets = []
+        for proc in psutil.process_iter(["pid", "name", "create_time"]):
+            if (str(proc.info["pid"]) == target if target.isdigit() else
+                    _process_name_key(proc.info.get("name") or "") == _process_name_key(target)):
+                if _is_blocked_app(proc.info.get("name") or "") or proc.info["pid"] in {os.getpid(), os.getppid()}:
+                    return json.dumps({"status": "blocked", "reason_code": "blocked_app"})
+                targets.append({"pid": proc.info["pid"], "name": proc.info.get("name") or "",
+                    "create_time": proc.info["create_time"]})
+    except Exception:
+        return json.dumps({"status": "denied", "reason_code": "unknown_process_identity",
+            "reason": "The process identity could not be established."})
+    args = {"name_or_pid": name_or_pid, "force": bool(force)}
+    action = attest_action(tool_name="computer_functions_kill_process", action_kind="process_kill",
+        parameters=args, target={"app": "process_manager", "processes": targets},
+        context_version=digest(targets), side_effect="irreversible",
+        runtime_facts={"target_verified": bool(targets), "context_verified": bool(targets)})
+    pending = authorize_action(action, replay_payload={"args": {**args, "_security_action": True}})
+    if pending:
+        return json.dumps(pending)
+    return _terminate_process(name_or_pid, bool(force), expected_processes=targets)
 
 
 def _computer_functions_diagnose(app: str = "") -> str:
@@ -1032,6 +1024,8 @@ def _resume_computer_functions_act(input_str: str) -> str:
 
 def _resume_computer_functions_kill_process(input_str: str) -> str:
     args = _json_loads(input_str, {})
+    if args.get("_security_action") is True:
+        return _computer_functions_kill_process(str(args.get("name_or_pid", "")), bool(args.get("force", False)))
     return _terminate_process(str(args.get("name_or_pid", args.get("pid", ""))), bool(args.get("force", False)))
 
 

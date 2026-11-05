@@ -7,6 +7,14 @@ from app.agent.sandbox.models import SandboxDecision
 from app.skills.exec import tools as exec_tools
 
 
+def _central_permissions(monkeypatch, mode="default"):
+    from app.agent.settings_store import AgentSettings
+    from app.agent import controller_policy
+    settings = AgentSettings()
+    settings.permissions.mode = mode
+    monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: settings)
+
+
 def test_exec_default_workdir_uses_agent_workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(exec_tools, "WORKSPACE_DIR", tmp_path)
 
@@ -14,6 +22,7 @@ def test_exec_default_workdir_uses_agent_workspace(monkeypatch, tmp_path):
 
 
 def test_exec_tool_returns_pending_approval(monkeypatch):
+    _central_permissions(monkeypatch)
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",
@@ -35,10 +44,14 @@ def test_exec_tool_returns_pending_approval(monkeypatch):
     result = json.loads(exec_tools.exec_tool("Write-Host hi"))
 
     assert result["status"] == "pending_approval"
-    assert result["ticket_id"] == "ticket-123"
+    from app.agent.approval_broker import get_ticket
+    assert get_ticket(result["ticket_id"]).authorization_binding
 
 
 def test_host_tool_approval_preserves_sandbox_reason(monkeypatch, tmp_path):
+    _central_permissions(monkeypatch)
+    import app.agent.approval_broker as broker
+    real_create = broker.create_ticket
     captured = {}
     monkeypatch.setattr(
         exec_tools,
@@ -76,21 +89,24 @@ def test_host_tool_approval_preserves_sandbox_reason(monkeypatch, tmp_path):
 
     def fake_create_ticket(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(id="ticket-host-tool")
+        return real_create(**kwargs)
 
-    monkeypatch.setattr(exec_tools, "create_ticket", fake_create_ticket)
+    monkeypatch.setattr(broker, "create_ticket", fake_create_ticket)
 
     result = json.loads(
         exec_tools.exec_tool("git status", workdir=str(tmp_path))
     )
 
     assert result["status"] == "pending_approval"
-    assert result["reason_code"] == "docker_host_tool_fallback_requires_approval"
-    assert "'git'" in result["reason"]
+    assert result["sandbox"]["reason_code"] == "docker_host_tool_fallback_requires_approval"
+    assert "'git'" in result["sandbox"]["reason"]
     assert captured["reason"] == result["reason"]
 
 
 def test_exec_approval_ticket_redacts_env_values(monkeypatch):
+    _central_permissions(monkeypatch)
+    import app.agent.approval_broker as broker
+    real_create = broker.create_ticket
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",
@@ -107,9 +123,9 @@ def test_exec_approval_ticket_redacts_env_values(monkeypatch):
 
     def fake_create_ticket(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(id="ticket-123")
+        return real_create(**kwargs)
 
-    monkeypatch.setattr(exec_tools, "create_ticket", fake_create_ticket)
+    monkeypatch.setattr(broker, "create_ticket", fake_create_ticket)
 
     result = json.loads(
         exec_tools.exec_tool(
@@ -118,16 +134,15 @@ def test_exec_approval_ticket_redacts_env_values(monkeypatch):
         )
     )
     ticket_args = captured["payload"]["args"]
-    ticket_input = json.loads(captured["payload"]["input_str"])
 
     assert result["env_keys"] == ["MONAW_TEST_VALUE"]
     assert ticket_args["env"] == {"MONAW_TEST_VALUE": "<redacted>"}
-    assert ticket_input["env"] == {"MONAW_TEST_VALUE": "<redacted>"}
     assert ticket_args["sandbox"]["env_inheritance"] == "scrubbed"
     assert "super-secret" not in json.dumps(captured["payload"])
 
 
 def test_exec_tool_runs_command(monkeypatch, tmp_path):
+    _central_permissions(monkeypatch, "full_access")
     from app.agent.settings_store import AgentSettings
     from app.agent.sandbox.models import SandboxCapabilities, SandboxBackendCapability
     settings = AgentSettings()
@@ -180,7 +195,12 @@ def test_exec_tool_runs_command(monkeypatch, tmp_path):
     assert result["duration_ms"] >= 0
 
 
-def test_exec_resume_bypasses_confirmation_gate(monkeypatch, tmp_path):
+def test_legacy_bypass_argument_does_not_bypass_central_confirmation(monkeypatch, tmp_path):
+    _central_permissions(monkeypatch)
+    class NoExecutionManager:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("An unapproved legacy bypass must not reach execution")
+    monkeypatch.setattr(exec_tools, "SandboxManager", NoExecutionManager)
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",
@@ -202,11 +222,13 @@ def test_exec_resume_bypasses_confirmation_gate(monkeypatch, tmp_path):
         )
     )
 
-    assert result["status"] == "ok"
-    assert result["stdout"] == "approved\n"
+    assert result["status"] == "pending_approval"
+    from app.agent.approval_broker import get_ticket
+    assert get_ticket(result["ticket_id"]).authorization_binding
 
 
 def test_exec_session_start_poll_and_stop(monkeypatch, tmp_path):
+    _central_permissions(monkeypatch, "full_access")
     monkeypatch.setattr(
         exec_tools,
         "build_sandbox_decision",
@@ -249,7 +271,9 @@ def test_exec_session_start_poll_and_stop(monkeypatch, tmp_path):
     assert started["command_id"]
 
     command_id = started["command_id"]
-    for _ in range(20):
+    # Windows PowerShell process startup can exceed one second on loaded CI.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
         polled = json.loads(exec_tools.exec_poll(command_id, return_mode="full"))
         if polled.get("exit_code") is not None:
             break

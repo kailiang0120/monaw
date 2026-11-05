@@ -20,11 +20,17 @@ class RunEvent:
 
 def event_dict(event: Mapping[str, Any] | RunEvent) -> dict[str, Any]:
     if isinstance(event, RunEvent):
-        return event.to_dict()
-    payload = dict(event)
+        payload = event.to_dict()
+    else:
+        payload = dict(event)
     payload["event"] = str(payload.get("event") or "")
     data = payload.get("data")
     payload["data"] = dict(data) if isinstance(data, Mapping) else {}
+    if payload["event"] in {"tool_start", "tool_end", "observation", "approval_required", "approval_resolved", "error"}:
+        from app.agent.action_security.sensitive_data import public_tool_input, redact_sensitive
+        if payload["event"] == "tool_start" and "input" in payload["data"]:
+            payload["data"]["input"] = public_tool_input(str(payload["data"].get("tool") or ""), payload["data"]["input"])
+        payload["data"] = redact_sensitive(payload["data"])
     return payload
 
 

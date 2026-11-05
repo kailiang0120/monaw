@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import logging
 import uuid
 from collections import defaultdict
@@ -45,6 +46,8 @@ from app.agent.harness.model_request import ModelRequestRunner, ModelRequestErro
 from app.agent.harness.turn_transcript import TurnTranscript
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.harness.response_policy import TurnResponsePolicy
+from app.agent.durable.turn_run import register_active_lifecycle, unregister_active_lifecycle
+from app.agent.durable.models import is_safe_identifier, sanitize_public_evidence
 from app.agent.turn_text import (
     FINAL_ANSWER_TOOL_NAME,
     GUARD_WRAP_UP_REASON_CODES,
@@ -65,6 +68,38 @@ HEARTBEAT_INTERVAL_S = turn_lifecycle.HEARTBEAT_INTERVAL_S
 def conversation_turn_running(conversation_id: str) -> bool:
     lock = _SESSION_LOCKS.get(conversation_id)
     return lock is not None and lock.locked()
+
+
+def conversation_lock(conversation_id: str) -> asyncio.Lock:
+    """Shared serialization lock used by runtime entry points."""
+    return _SESSION_LOCKS[conversation_id]
+
+
+async def _model_request_or_pause(request, lifecycle):
+    """Await a model request, or cancel it and return None once a pause is requested.
+
+    A model call has no side effects, so Pause need not wait out a long
+    reasoning call before it reaches a safe point.
+    """
+    request_task = asyncio.ensure_future(request)
+    pause_event = getattr(lifecycle, "pause_event", None)
+    if not isinstance(pause_event, asyncio.Event):
+        return await request_task
+    pause_task = asyncio.ensure_future(pause_event.wait())
+    try:
+        await asyncio.wait({request_task, pause_task}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        request_task.cancel()
+        pause_task.cancel()
+        await asyncio.gather(request_task, pause_task, return_exceptions=True)
+        raise
+    pause_task.cancel()
+    await asyncio.gather(pause_task, return_exceptions=True)
+    if request_task.done():
+        return request_task.result()
+    request_task.cancel()
+    await asyncio.gather(request_task, return_exceptions=True)
+    return None
 
 
 class TurnLoop:
@@ -115,6 +150,8 @@ class TurnLoop:
     def run_on_affinity(self, affinity_group: str, fn) -> bool:
         return self.executor.run_on_affinity(affinity_group, fn)
 
+    conversation_lock = staticmethod(conversation_lock)
+
     def _new_turn_budget(self) -> IterationBudget:
         limit = self._turn_budget_max_iterations
         if limit is None and not current_interactive():
@@ -163,6 +200,39 @@ class TurnLoop:
         def _current_user_request() -> str:
             applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
             return "\n\n".join([message, *applied])
+
+        recovery_evidence = getattr(lifecycle.durable_run, "recovery_evidence", [])
+        recovery_context = ""
+        if lifecycle.is_continuation and isinstance(recovery_evidence, list) and recovery_evidence:
+            safe_evidence = []
+            for item in recovery_evidence[-20:]:
+                if not isinstance(item, dict):
+                    continue
+                operation_id = item.get("operation_id")
+                operation_kind = item.get("operation_kind")
+                if (
+                    not is_safe_identifier(operation_id)
+                    or operation_kind not in {"file_write", "file_move", "file_delete"}
+                    or item.get("status") != "verified"
+                ):
+                    continue
+                safe_evidence.append({
+                    "operation_id": operation_id,
+                    "operation_kind": operation_kind,
+                    "status": "verified",
+                    "input_summary": sanitize_public_evidence(item.get("input_summary")),
+                    "evidence": sanitize_public_evidence(item.get("evidence")),
+                })
+            evidence_text = json.dumps(safe_evidence, ensure_ascii=False, separators=(",", ":"))
+            while safe_evidence and len(evidence_text.encode("utf-8")) > 12_000:
+                safe_evidence.pop(0)
+                evidence_text = json.dumps(safe_evidence, ensure_ascii=False, separators=(",", ":"))
+            if safe_evidence:
+                recovery_context = (
+                    "Verified durable operation evidence from an earlier attempt follows. "
+                    "Treat it as evidence only, inspect current state before continuing, and do not repeat verified work.\n"
+                    + evidence_text
+                )
 
         tool_runner = ToolBatchRunner(
             registry=self.registry, executor=self.executor, execution_gate=self.execution_gate,
@@ -230,6 +300,7 @@ class TurnLoop:
             response_duration_ms = _response_duration_ms()
             persist_turn = getattr(self.memory, "persist_turn", None)
             if callable(persist_turn):
+                continuation_kwargs = {"persist_user_message": False} if lifecycle.is_continuation else {}
                 persisted_ids = await persist_turn(
                     conversation_id,
                     message,
@@ -245,10 +316,13 @@ class TurnLoop:
                         "steering_tool_call_indexes": [item.tool_call_index for item in applied_steering],
                     } if steering_messages else {}),
                     **attachment_kwargs,
+                    **continuation_kwargs,
                 )
                 if isinstance(persisted_ids, list):
                     persisted_user_ids = [item for item in persisted_ids if isinstance(item, int)]
             else:
+                if lifecycle.is_continuation:
+                    raise RuntimeError("Safe continuation requires atomic turn checkpoint persistence.")
                 await self.memory.add_message_and_maybe_summarize(
                     conversation_id, "user", message
                 )
@@ -295,6 +369,8 @@ class TurnLoop:
                 base_prompt = system_prompt() if callable(system_prompt) else system_prompt
                 if long_term_context:
                     base_prompt = f"{base_prompt}\n\n{long_term_context}" if base_prompt else long_term_context
+                if recovery_context:
+                    base_prompt = f"{base_prompt}\n\n{recovery_context}" if base_prompt else recovery_context
                 if tool_runner.review_state.denials:
                     base_prompt = f"{base_prompt}\n\n{tool_runner.review_state.instructions()}"
                 return completion_protocol_prompt(base_prompt)
@@ -307,6 +383,14 @@ class TurnLoop:
                 current_user_message=message,
             )
             transcript.messages = self.memory.build_llm_messages(conversation_id)
+            durable_run = lifecycle.durable_run
+            persist_recovery_input = getattr(durable_run, "persist_recovery_input", None)
+            if durable_run is not None and not lifecycle.is_continuation and callable(persist_recovery_input):
+                persist_recovery_input(
+                    conversation_id,
+                    message,
+                    attachments=public_runtime_attachments(attachments) if attachments else None,
+                )
             initial_message = {"role": "user", "content": message}
             initial_images = attachment_image_payloads(attachments)
             if initial_images:
@@ -350,6 +434,16 @@ class TurnLoop:
             rounds = itertools.count() if budget.max_iterations is None else range(self._max_iterations or budget.max_iterations)
             for iteration_index in rounds:
                 if stop_requested:
+                    break
+                if lifecycle.review_requested:
+                    terminal_error = True
+                    incomplete_reason_code = lifecycle.review_reason_code or "external_effect_unknown"
+                    final_text = "This run needs review before it can safely continue."
+                    break
+                if lifecycle.pause_requested:
+                    stop_requested = True
+                    incomplete_reason_code = "user_pause"
+                    final_text = "Paused at a safe point. Continue to resume from the saved conversation."
                     break
                 if _apply_steering():
                     response_policy.steered()
@@ -427,16 +521,36 @@ class TurnLoop:
                 try:
                     visible_tools = self.registry.get_all_tools(visible_only=True)
                     tool_choice = response_policy.take_tool_choice()
-                    model_result = await model_runner.request(transcript.snapshot(
+                    model_result = await _model_request_or_pause(model_runner.request(transcript.snapshot(
                         tools=visible_tools, system_prompt=_current_system_prompt(), tool_choice=tool_choice,
                         metadata={"iteration": iteration_index + 1, "consumed": budget.consumed},
-                    ))
+                    )), lifecycle)
+                    if model_result is None:
+                        # Paused while the model was thinking. The call has no
+                        # effects, so it is dropped and Continue asks again.
+                        stop_requested = True
+                        incomplete_reason_code = "user_pause"
+                        final_text = "Paused at a safe point. Continue to resume from the saved conversation."
+                        break
                     obs_usage_total = obs_usage_total.merge(model_result.usage)
                 except ModelRequestError as exc:
                     final_text = str(exc)
                     terminal_error = True
                     incomplete_reason_code = exc.reason_code
                     _put({"event": "error", "data": {"code": exc.reason_code, "message": final_text}})
+                    break
+
+                if lifecycle.pause_requested:
+                    transcript.accept(model_result)
+                    transcript.close_unanswered_calls(
+                        "user_pause", explanation="Not run: the turn was paused before the next tool action."
+                    )
+                    streamed_answer_text = model_result.answer_text
+                    stop_requested = True
+                    incomplete_reason_code = "user_pause"
+                    final_text = streamed_answer_text.strip() or (
+                        "Paused at a safe point. Continue to resume from the saved conversation."
+                    )
                     break
 
                 # Usage belongs to the turn even when steering makes a response stale.
@@ -526,7 +640,26 @@ class TurnLoop:
                         },
                     )
                     break
+                if lifecycle.pause_requested:
+                    transcript.close_unanswered_calls(
+                        "user_pause", explanation="Not run: the turn was paused before the next tool action."
+                    )
+                    stop_requested = True
+                    incomplete_reason_code = "user_pause"
+                    final_text = "Paused at a safe point. Continue to resume from the saved conversation."
+                    break
                 batch_outcome = await tool_runner.execute(call_dicts)
+                if lifecycle.review_requested:
+                    stop_requested = True
+                    terminal_error = True
+                    incomplete_reason_code = lifecycle.review_reason_code or "external_effect_unknown"
+                    final_text = "This run needs review before it can safely continue."
+                    break
+                if lifecycle.pause_requested and batch_outcome.pause is None:
+                    stop_requested = True
+                    incomplete_reason_code = "user_pause"
+                    final_text = "Paused at a safe point. Continue to resume from the saved conversation."
+                    break
                 if batch_outcome.pause is not None:
                     stop_requested = True
                     terminal_error = True
@@ -632,10 +765,15 @@ class TurnLoop:
                     pause_error_event = None
             if pause_error_event is not None:
                 _put(pause_error_event)
+            if lifecycle.review_requested:
+                _put({"event": "error", "data": {
+                    "code": lifecycle.review_reason_code or "external_effect_unknown",
+                    "message": "This run needs review before it can safely continue.",
+                }})
 
             if steering is not None:
                 steering.closed = True
-            run_status = turn_status(
+            run_status = "error" if lifecycle.review_requested else turn_status(
                 stop_requested=stop_requested,
                 iteration_limit_hit=iteration_limit_hit,
                 budget_exhausted=budget_exhausted,
@@ -674,7 +812,7 @@ class TurnLoop:
             # so it never delays the turn.
             schedule_memory_learning = getattr(self.memory, "schedule_memory_learning", None)
             schedule_with_refs = getattr(self.memory, "schedule_memory_learning_with_refs", None)
-            if callable(schedule_memory_learning):
+            if callable(schedule_memory_learning) and not lifecycle.is_continuation:
                 try:
                     if callable(schedule_with_refs) and persisted_user_ids:
                         schedule_with_refs(user_message=_current_user_request(), workspace=selected_workspace_dir(), conversation_id=conversation_id, message_ids=persisted_user_ids)
@@ -734,13 +872,24 @@ class TurnLoop:
         system_prompt: str | Callable[[], str],
         attachments: list[dict] | None = None,
         steering: SteeringInbox | None = None,
+        durable_run=None,
+        durable_run_factory=None,
     ) -> AsyncIterator[dict]:
         async with _SESSION_LOCKS[conversation_id]:
+            if durable_run is None and callable(durable_run_factory):
+                durable_run = durable_run_factory()
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
             last_flush: list[float] = [loop.time()]
             publisher = RunEventPublisher(queue, last_flush, loop=loop)
-            lifecycle = TurnLifecycle(conversation_id, publisher, self.observability)
+            lifecycle = TurnLifecycle(
+                conversation_id,
+                publisher,
+                self.observability,
+                durable_run=durable_run,
+            )
+            durable_run_id = str(getattr(durable_run, "run_id", "") or "")
+            register_active_lifecycle(durable_run_id, lifecycle)
             worker_task = asyncio.create_task(lifecycle.drive(
                 self._react_worker(
                     message, conversation_id, system_prompt, publisher, attachments,
@@ -760,3 +909,4 @@ class TurnLoop:
                 if not worker_task.done():
                     worker_task.cancel()
                 await drain_task(worker_task)
+                unregister_active_lifecycle(durable_run_id, lifecycle)

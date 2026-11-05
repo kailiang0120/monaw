@@ -184,12 +184,17 @@
     background: var(--st-surface);
   }
 
+  .chat-surface {
+    --chat-background: var(--st-bg-nav);
+    background: var(--chat-background);
+  }
+
   .chat-title-fade {
     background: linear-gradient(
       180deg,
-      var(--st-bg) 0%,
-      color-mix(in srgb, var(--st-bg) 82%, transparent) 42%,
-      color-mix(in srgb, var(--st-bg) 34%, transparent) 72%,
+      var(--chat-background) 0%,
+      color-mix(in srgb, var(--chat-background) 82%, transparent) 42%,
+      color-mix(in srgb, var(--chat-background) 34%, transparent) 72%,
       transparent 100%
     );
   }

@@ -27,10 +27,11 @@ _DEVTOOLS_MUTATING_TOOLS = {
     )
 }
 _DEVTOOLS_OBSERVATION_TOOLS = {
-    f"{DEVTOOLS_PREFIX}{name}" for name in ("take_snapshot", "take_screenshot", "list_pages", "wait_for")
+    f"{DEVTOOLS_PREFIX}{name}" for name in ("take_snapshot", "inspect_element", "take_screenshot", "list_pages", "wait_for")
 }
 DEVTOOLS_STEP_DESCRIPTIONS = {
     "take_snapshot": "Inspect the current browser page",
+    "inspect_element": "Inspect a browser element",
     "list_pages": "Inspect open browser tabs",
     "select_page": "Switch to the relevant browser tab",
     "take_screenshot": "Capture a screenshot of the browser page",
@@ -44,7 +45,7 @@ DEVTOOLS_STEP_DESCRIPTIONS = {
     "fill_form": "Fill the identified browser form fields",
     "press_key": "Press a key in the browser page",
     "handle_dialog": "Handle the browser dialog",
-    "wait_for": "Wait for the expected text on the browser page",
+    "wait_for": "Wait for the browser page or element to be ready",
     "upload_file": "Upload a file through the browser page",
     "evaluate_script": "Run a script in the browser page",
 }

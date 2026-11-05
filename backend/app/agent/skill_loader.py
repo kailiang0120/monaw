@@ -367,6 +367,15 @@ def _invoke_register_tools(register_tools, registry: ToolRegistry, settings) -> 
         register_tools(registry)
 
 
+def _is_bundled_skill(skill_path: Path) -> bool:
+    """Identify shipped skill code without trusting its own metadata."""
+    try:
+        skill_path.resolve().relative_to(SKILLS_DIR.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def load_tools(settings, *, skills_dir: Path | None = None) -> tuple[list[SkillSpec], ToolRegistry]:
     skill_specs = discover_skills(settings, skills_dir=skills_dir, include_disabled=False)
     registry = ToolRegistry()
@@ -383,8 +392,18 @@ def load_tools(settings, *, skills_dir: Path | None = None) -> tuple[list[SkillS
 
             staged_registry = ToolRegistry()
             _invoke_register_tools(register_tools, staged_registry, settings)
+            bundled_source = _is_bundled_skill(skill.path)
             registry.extend(
-                {**tool, "metadata": {**(tool.get("metadata") or {}), "skill": skill.name}}
+                {
+                    **tool,
+                    "metadata": {
+                        **(tool.get("metadata") or {}),
+                        "skill": skill.name,
+                        # Always override tool supplied metadata; user skills
+                        # must not opt themselves into trusted classification.
+                        "durable_builtin": bundled_source,
+                    },
+                }
                 for tool in staged_registry.get_all_tools()
             )
             _LAST_LOAD_ERRORS.pop(skill.name, None)

@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent.approval_broker import get_ticket
+from app.agent.approval_broker import approve_ticket
+from app.agent.execution_resume import resume_approved_ticket
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.sandbox.capabilities import get_sandbox_status
 from app.agent.sandbox.manager import SandboxManager
@@ -14,6 +16,11 @@ from app.skills.exec import tools
 
 @pytest.fixture
 def environment(monkeypatch, tmp_path):
+    from app.agent.execution_resume import _EXECUTORS
+    # Other focused registry tests intentionally clear replay registrations.
+    # Establish the real adapter boundary this integration fixture exercises.
+    monkeypatch.setitem(_EXECUTORS, "exec", tools._resume_exec)
+    monkeypatch.setitem(_EXECUTORS, "exec_start", tools._resume_exec_start)
     settings = AgentSettings()
     settings.sandbox.allowed_bind_roots = [str(tmp_path)]
     capabilities = SandboxCapabilities(
@@ -24,6 +31,7 @@ def environment(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(tools, "_ACTIVE_SETTINGS", settings)
     monkeypatch.setattr(tools, "load_agent_settings", lambda: settings)
+    monkeypatch.setattr("app.agent.controller_policy._load_runtime_settings", lambda: settings)
     monkeypatch.setattr("app.agent.sandbox.policy.probe_capabilities", lambda _: capabilities)
     monkeypatch.setattr("app.agent.sandbox.manager.probe_capabilities", lambda _: capabilities)
     monkeypatch.setattr(tools, "resolve_permission", lambda *a, **kw: SimpleNamespace(
@@ -42,7 +50,7 @@ def environment(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("change", ["backend", "workspace", "network", "writes", "image", "root"])
-def test_approved_exec_reprompts_when_its_disclosed_environment_changes(environment, monkeypatch, change):
+def test_approved_exec_rejects_when_its_disclosed_environment_changes(environment, monkeypatch, change):
     settings, capabilities, dispatched, workdir = environment
     pending = json.loads(tools.exec_tool("echo hi", shell="bash", workdir=str(workdir)))
     ticket = get_ticket(pending["ticket_id"])
@@ -59,19 +67,19 @@ def test_approved_exec_reprompts_when_its_disclosed_environment_changes(environm
         settings.sandbox.docker.image = "python@sha256:" + "b" * 64
     else:
         settings.sandbox.docker.read_only_root = False
-    result = json.loads(tools._resume_exec(ticket.payload["input_str"]))
-    assert result["status"] == "pending_approval"
-    assert result["ticket_id"] != ticket.id
+    approve_ticket(ticket.id)
+    result = json.loads(resume_approved_ticket(ticket).execution_result)
+    assert result["status"] in {"denied", "blocked"}
+    assert result["reason_code"] in {"action_approval_invalidated", "docker_unavailable", "workdir_not_found"}
     assert not dispatched
-    current = result["sandbox"]["execution_environment"]
-    assert current != pending["sandbox"]["execution_environment"] or change == "root"
 
 
 def test_unchanged_approval_discloses_same_environment_in_event_and_result(environment):
     _, _, dispatched, workdir = environment
     pending = json.loads(tools.exec_tool("echo hi", shell="bash", workdir=str(workdir)))
     ticket = get_ticket(pending["ticket_id"])
-    result = json.loads(tools._resume_exec(ticket.payload["input_str"]))
+    approve_ticket(ticket.id)
+    result = json.loads(resume_approved_ticket(ticket).execution_result)
     assert result["status"] == "ok"
     assert len(dispatched) == 1
     expected = pending["sandbox"]["execution_environment"]
@@ -112,6 +120,7 @@ def test_host_disclosure_does_not_claim_configured_deny_or_discard(environment, 
 
 def test_final_dispatch_refuses_changed_container_policy(environment, monkeypatch):
     settings, capabilities, dispatched, workdir = environment
+    settings.permissions.mode = "full_access"
     monkeypatch.setattr(tools, "resolve_permission", lambda *a, **kw: SimpleNamespace(
         blocked=False, requires_access_grant=False, requires_confirmation=False))
     original = SandboxManager.run
@@ -133,7 +142,8 @@ def test_long_running_host_session_keeps_its_disclosure_when_polled(environment)
     settings.sandbox.mode = "host"
     pending = json.loads(tools.exec_start("Write-Output hi", shell="powershell", workdir=str(workdir)))
     ticket = get_ticket(pending["ticket_id"])
-    started = json.loads(tools._resume_exec_start(ticket.payload["input_str"]))
+    approve_ticket(ticket.id)
+    started = json.loads(resume_approved_ticket(ticket).execution_result)
     assert started["status"] == "running"
     try:
         polled = json.loads(tools.exec_poll(started["command_id"]))

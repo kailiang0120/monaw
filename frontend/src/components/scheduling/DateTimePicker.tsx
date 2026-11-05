@@ -133,7 +133,7 @@ export function DateTimePicker({ value, onChange }: Props) {
       <button
         type="button"
         onClick={open ? () => setOpen(false) : openPicker}
-        className="control flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm"
+        className="st-select"
       >
         <Calendar size={13} className="shrink-0 text-neutral-500" />
         <span className={`flex-1 text-left ${display ? 'text-neutral-200' : 'text-neutral-600'}`}>
@@ -226,7 +226,7 @@ export function DateTimePicker({ value, onChange }: Props) {
                 max={23}
                 value={String(h).padStart(2, '0')}
                 onChange={(e) => updateTime(+e.target.value, mi)}
-                className="control w-11 rounded-md px-1 py-1 text-center text-sm [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                className="st-input st-time-input [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 aria-label="Hour"
               />
               <span className="font-semibold text-neutral-500">:</span>
@@ -237,14 +237,14 @@ export function DateTimePicker({ value, onChange }: Props) {
                 step={5}
                 value={String(mi).padStart(2, '0')}
                 onChange={(e) => updateTime(h, +e.target.value)}
-                className="control w-11 rounded-md px-1 py-1 text-center text-sm [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                className="st-input st-time-input [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 aria-label="Minute"
               />
             </div>
             <button
               type="button"
               onClick={() => setOpen(false)}
-              className="ml-auto rounded-lg bg-accent/20 px-3 py-1 text-xs font-medium text-accent-light transition-colors hover:bg-accent/30"
+              className="st-btn st-btn-secondary ml-auto"
             >
               Done
             </button>

@@ -965,6 +965,11 @@ describe('SettingsModal', () => {
     fireEvent.click((await screen.findAllByRole('button', { name: /Permissions/i }))[0])
     fireEvent.click(screen.getByRole('button', { name: 'Full Access' }))
     fireEvent.click(screen.getByRole('button', { name: 'Custom' }))
+    // Returning to the saved profile leaves nothing to save. Make an unrelated
+    // edit to verify the restored profile is also preserved in the next save.
+    expect(screen.getByRole('button', { name: /Save/i })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Identity' }))
+    fireEvent.change(screen.getByLabelText('Your name'), { target: { value: 'Kai' } })
     fireEvent.click(screen.getByRole('button', { name: /Save/i }))
 
     await waitFor(() => {

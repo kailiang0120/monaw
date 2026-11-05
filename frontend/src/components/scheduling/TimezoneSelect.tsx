@@ -114,7 +114,7 @@ export function TimezoneSelect({ value, onChange }: Props) {
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search timezone…"
               aria-label="Search timezone"
-              className="w-full border-0 bg-transparent text-sm outline-none"
+              className="st-input"
               style={{ color: 'var(--st-text)' }}
               onKeyDown={(e) => {
                 if (e.key !== 'Escape') return

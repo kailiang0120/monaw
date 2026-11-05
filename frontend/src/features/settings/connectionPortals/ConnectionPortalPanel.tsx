@@ -35,7 +35,7 @@ export function ConnectionPortalPanel({
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
-        <span className="section-label">Service</span>
+        <span className="st-group-label">Service</span>
         <Dropdown<ConnectionPortalId>
           value={portal.id}
           options={CONNECTION_PORTAL_OPTIONS}
@@ -93,7 +93,7 @@ function SecretField({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-1.5">
-        <span className="section-label">{label}</span>
+        <span className="st-group-label">{label}</span>
         {saved ? (
           <Check size={11} className="text-emerald-400" strokeWidth={3} />
         ) : (
@@ -107,12 +107,13 @@ function SecretField({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
-          className="control w-full rounded-xl px-3 py-2 pr-10 text-sm"
+          aria-label={label}
+          className="st-input st-input-with-action"
         />
         <button
           type="button"
           onClick={onToggle}
-          className="ghost-button absolute right-2 top-1/2 h-7 w-7 -translate-y-1/2 rounded-lg"
+          className="st-btn st-btn-ghost st-btn-icon st-input-action"
           aria-label={show ? 'Hide secret' : 'Show secret'}
         >
           {show ? <EyeOff size={14} /> : <Eye size={14} />}

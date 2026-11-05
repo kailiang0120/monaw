@@ -1,6 +1,6 @@
 {
   "name": "monaw-agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "main": "electron/main.js",
@@ -23,12 +23,13 @@
     "typecheck:app": "tsc --noEmit -p tsconfig.e2e.json",
     "test:app": "npm run build:renderer && npm run typecheck:app && playwright test",
     "preview": "vite preview",
-    "package:win": "npm run build:renderer && electron-builder --win --x64",
-    "package:win:dir": "npm run build:renderer && electron-builder --win --x64 --dir",
+    "package:win": "npm run build:renderer && electron-builder --win --x64 --publish never",
+    "package:win:dir": "npm run build:renderer && electron-builder --win --x64 --dir --publish never",
     "test:packaged": "npm run typecheck:app && playwright test -c playwright.packaged.config.ts"
   },
   "dependencies": {
-    "electron-store": "^8.2.0"
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.8.11"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
@@ -56,6 +57,12 @@
   "build": {
     "appId": "com.monaw.agent",
     "productName": "Monaw",
+    "publish": {
+      "provider": "github",
+      "owner": "kailiang0120",
+      "repo": "monaw",
+      "releaseType": "release"
+    },
     "directories": {
       "output": "release",
       "buildResources": "assets"

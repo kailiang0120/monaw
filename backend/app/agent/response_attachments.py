@@ -15,6 +15,7 @@ from typing import Any
 from app.agent.run_context import (
     current_control_session_id,
     current_conversation_id,
+    current_execution_source,
     current_principal_id,
 )
 from app.agent.runtime_paths import RUNTIME_DIR
@@ -71,6 +72,20 @@ _RETURNABLE_EXTENSIONS = {
     ".xml",
     ".zip",
 }
+
+
+def _attachment_principal_id() -> str:
+    """Keep desktop attachments scoped to the live session that issued them.
+
+    Durable Run ownership now follows the signed desktop profile across app
+    restarts. Uploads and response files remain process/session capabilities,
+    so they deliberately use the current control-session ID instead.
+    """
+    if current_execution_source() in {"desktop", "desktop_stream", "desktop_job"}:
+        session_id = current_control_session_id()
+        if session_id:
+            return session_id
+    return current_principal_id()
 
 
 @dataclass(slots=True)
@@ -469,7 +484,7 @@ def resolve_attachment_handle_path(value: str) -> Path | None:
     return resolve_attachment_path(
         text,
         control_session_id=current_control_session_id(),
-        principal_id=current_principal_id(),
+        principal_id=_attachment_principal_id(),
         conversation_id=current_conversation_id(),
     )
 
@@ -544,7 +559,7 @@ def _attachment_from_resolved_path(
         attachment_id,
         path,
         control_session_id=current_control_session_id() if control_session_id is None else control_session_id,
-        principal_id=current_principal_id() if principal_id is None else principal_id,
+        principal_id=_attachment_principal_id() if principal_id is None else principal_id,
         conversation_id=current_conversation_id() if conversation_id is None else conversation_id,
         mime_type=mime_type,
         width=image_dimensions[0] if image_dimensions is not None else None,

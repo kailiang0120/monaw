@@ -11,11 +11,14 @@ from typing import Any
 
 _PAGE_ID = {"type": "number", "description": "Targets a specific page by ID from list_pages. Defaults to the selected page."}
 _UID = {"type": "string", "description": "The uid of an element on the page from the page content snapshot"}
+_SELECTOR = {"type": "string", "maxLength": 1000, "description": "CSS selector for one element in the main document. Use observed IDs/attributes; multiple matches are an error. Prefer uid for elements in snapshots or frames."}
 _TIMEOUT = {
     "type": "integer",
     "description": "Maximum wait time in milliseconds. If set to 0, the default timeout will be used.",
 }
-_INCLUDE_SNAPSHOT = {"type": "boolean", "description": "Whether to include a snapshot in the response. Default is false."}
+_INCLUDE_SNAPSHOT = {"type": "boolean", "default": True, "description": "Return the updated page snapshot with the action. Enabled by default; reuse this snapshot instead of calling take_snapshot again. Set false only when the result is not needed."}
+
+_ACTION_TIMEOUT = {"type": "integer", "minimum": 0, "maximum": 30000, "description": "Readiness wait budget in milliseconds, default 5000. For fill_form, shared across all fields. Waits before dispatch; never retries a submitted action."}
 
 
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -51,6 +54,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "description": "Whether to open the page in the background without bringing it to the front. Default is false (foreground).",
             },
             "timeout": _TIMEOUT,
+            "includeSnapshot": _INCLUDE_SNAPSHOT,
         }, ["url"]),
     },
     {
@@ -58,6 +62,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": "Go to a URL, or back, forward, or reload.",
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
+            "includeSnapshot": _INCLUDE_SNAPSHOT,
             "type": {
                 "type": "string",
                 "enum": ["url", "back", "forward", "reload"],
@@ -94,6 +99,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "readOnly": True,
     },
     {
+        "name": "inspect_element",
+        "description": "Read one element's DOM attributes, labels, value, visibility, interaction readiness, validation errors and nearby elements. No scripts to write and no page mutations. Supply exactly one uid or CSS selector; password/hidden input values are redacted.",
+        "inputSchema": _schema({"pageId": _PAGE_ID, "uid": _UID, "selector": _SELECTOR}),
+        "readOnly": True,
+    },
+    {
         "name": "take_screenshot",
         "description": "Take a screenshot of the page or element.",
         "inputSchema": _schema({
@@ -122,7 +133,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "wait_for",
-        "description": "Wait for the specified text to appear on the selected page.",
+        "description": "Wait for page text OR a specific element state. Use selector + hidden for loading overlays, editable for fields, or ready for a visible enabled element without a covering overlay. Returns a fresh snapshot by default. CSS targets are rechecked as the DOM changes; uid targets track the original node.",
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
             "text": {
@@ -131,15 +142,20 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "minItems": 1,
                 "description": "Non-empty list of texts. Resolves when any value appears on the page.",
             },
-            "timeout": _TIMEOUT,
-        }, ["text"]),
+            "uid": _UID,
+            "selector": _SELECTOR,
+            "state": {"type": "string", "enum": ["attached", "detached", "visible", "hidden", "enabled", "disabled", "editable", "ready"], "description": "Element condition, default visible. Supply exactly one uid or selector; do not combine with text. ready requires the element's center in the viewport, enabled, not busy and unobstructed."},
+            "timeout": {**_TIMEOUT, "minimum": 0, "maximum": 60000},
+            "includeSnapshot": {"type": "boolean", "description": "Return the updated page snapshot when the condition is met. Default true."},
+        }),
         "readOnly": True,
     },
     {
         "name": "click",
-        "description": "Clicks on the provided element",
+        "description": "Click an element after automatically waiting for it to be enabled, unobstructed and stable. Returns an updated snapshot by default.",
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
+            "timeout": _ACTION_TIMEOUT,
             "uid": _UID,
             "dblClick": {"type": "boolean", "description": "Set to true for double clicks. Default is false."},
             "includeSnapshot": _INCLUDE_SNAPSHOT,
@@ -162,9 +178,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "fill",
-        "description": "Type text into a input, text area or select an option from a <select> element.",
+        "description": "Fill a field or select an option after automatically waiting for the control to be usable. Returns an updated snapshot by default.",
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
+            "timeout": _ACTION_TIMEOUT,
             "uid": _UID,
             "value": {
                 "type": "string",
@@ -175,9 +192,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "fill_form",
-        "description": "Fill out multiple form elements at once",
+        "description": "Fill independent form fields in one call, waiting for each to be usable. Returns one final snapshot; if interrupted, reports completed fields so they are not repeated.",
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
+            "timeout": _ACTION_TIMEOUT,
             "elements": {
                 "type": "array",
                 "description": "Elements from snapshot to fill out.",
@@ -202,6 +220,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": "Type text using keyboard into a previously focused input",
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
+            "includeSnapshot": _INCLUDE_SNAPSHOT,
             "text": {"type": "string", "description": "The text to type"},
             "submitKey": {"type": "string", "description": 'Optional key to press after typing. E.g., "Enter", "Tab", "Escape"'},
         }, ["text"]),
@@ -226,6 +245,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": "If a browser dialog was opened, use this command to handle it",
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
+            "includeSnapshot": _INCLUDE_SNAPSHOT,
             "action": {"type": "string", "enum": ["accept", "dismiss"], "description": "Whether to dismiss or accept the dialog"},
             "promptText": {"type": "string", "description": "Optional prompt text to enter into the dialog."},
         }, ["action"]),
@@ -248,8 +268,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "evaluate_script",
         "description": (
-            "Evaluate a JavaScript function inside the currently selected page. Returns the response as JSON, "
-            "so returned values have to be JSON-serializable."
+            "Execute arbitrary JavaScript in an explicitly identified browser page. This is code execution, NOT read-only DOM inspection: scripts can read authenticated data, send requests, submit forms or trigger other actions. "
+            "Prefer inspect_element for DOM details and wait_for for readiness. Permission mode governs execution approval. Returns JSON-serializable results."
         ),
         "inputSchema": _schema({
             "pageId": _PAGE_ID,
@@ -266,7 +286,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "items": {"type": "string", "description": "The uid of an element on the page from the page content snapshot"},
                 "description": "An optional list of arguments (element uids from the page content snapshot) to pass to the function.",
             },
-        }, ["function"]),
+        }, ["pageId", "function"]),
+        "readOnly": False,
     },
     {
         "name": "list_console_messages",
@@ -299,3 +320,24 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 TOOL_NAMES = frozenset(tool["name"] for tool in TOOL_DEFINITIONS)
+
+# Conditions are observations, never caller-supplied executable verifier code.
+_EXPECTED_EFFECT = {
+    "type":"object", "additionalProperties":False,
+    "properties":{
+        "type":{"type":"string", "enum":["url_changed", "url_equals", "element_appeared", "element_disappeared", "value_equals", "dialog_opened", "dialog_closed", "download_started"]},
+        "selector":_SELECTOR, "value":{"type":"string"},
+        "timeout":{"type":"integer", "minimum":0, "maximum":10000, "default":2000},
+    }, "required":["type"],
+}
+for _tool in TOOL_DEFINITIONS:
+    if not _tool.get("readOnly"):
+        _tool["inputSchema"]["properties"]["expected_effect"] = _EXPECTED_EFFECT
+    if _tool["name"] == "click":
+        _tool["inputSchema"].pop("required", None)
+        _tool["inputSchema"]["properties"]["visual_target"] = {
+            "type":"object", "additionalProperties":False,
+            "description":"Controlled fallback after a fresh accessibility snapshot cannot identify the target. Use a current viewport screenshot binding. One click only, same policy gate, no automatic retries. Coordinates are viewport CSS pixels; inaccessible frames are unsupported.",
+            "properties":{"screenshot_id":{"type":"string"}, "x":{"type":"number", "minimum":0}, "y":{"type":"number", "minimum":0}},
+            "required":["screenshot_id", "x", "y"],
+        }

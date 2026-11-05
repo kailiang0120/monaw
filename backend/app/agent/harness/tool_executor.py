@@ -11,6 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.agent.iteration_budget import IterationBudget
+from app.agent.durable.operation_execution import (
+    OperationDispatchBlocked,
+    reset_current_operation_execution,
+    set_current_operation_execution,
+)
 from app.agent.tool_cancellation import (
     cancel_call,
     reset_current_call_id,
@@ -95,6 +100,7 @@ class ToolExecutor:
         arguments: dict,
         budget: IterationBudget,
         call_id: str,
+        operation_execution=None,
     ) -> ToolCallResult:
         fn = tool_dict["callable"]
         execution_mode = tool_dict.get("execution_mode", "sync_stateless")
@@ -115,9 +121,13 @@ class ToolExecutor:
         cancellation_id = current_call_id()
         try:
             if execution_mode == "async":
-                output = await self._run_async(fn, arguments, timeout_seconds, tool_dict)
+                output = await self._run_async(
+                    fn, arguments, timeout_seconds, tool_dict, operation_execution
+                )
             else:
-                output = await self._run_sync(fn, arguments, tool_dict, timeout_seconds)
+                output = await self._run_sync(
+                    fn, arguments, tool_dict, timeout_seconds, operation_execution
+                )
             output = str(output)
             status = _status_from_output(output)
             normalized = _normalized_output(output)
@@ -162,6 +172,21 @@ class ToolExecutor:
                 retryable=retryable,
                 metadata={"execution_mode": execution_mode, "timeout_seconds": timeout_seconds},
             )
+        except OperationDispatchBlocked as exc:
+            status = "cancelled" if exc.reason_code == "pause_requested" else "blocked"
+            output = json.dumps(
+                {"status": status, "reason_code": exc.reason_code, "error": str(exc)}
+            )
+            return ToolCallResult(
+                call_id=call_id,
+                name=tool_name,
+                status=status,  # type: ignore[arg-type]
+                output=output,
+                normalized_output=_normalized_output(output),
+                error=str(exc),
+                retryable=False,
+                metadata={"execution_mode": execution_mode},
+            )
         except Exception as exc:
             output = json.dumps(
                 {
@@ -186,9 +211,22 @@ class ToolExecutor:
             if scope_context is not None:
                 reset_tool_scope(scope_context)
 
-    async def _run_async(self, fn, arguments: dict, timeout_seconds: float | None, tool_dict: dict):
+    async def _run_async(
+        self, fn, arguments: dict, timeout_seconds: float | None, tool_dict: dict,
+        operation_execution=None,
+    ):
         cancellation_id = current_call_id()
-        task = asyncio.create_task(fn(**arguments))
+
+        async def invoke():
+            if operation_execution is not None:
+                operation_execution.begin_effect()
+            operation_token = set_current_operation_execution(operation_execution)
+            try:
+                return await fn(**arguments)
+            finally:
+                reset_current_operation_execution(operation_token)
+
+        task = asyncio.create_task(invoke())
         task.add_done_callback(lambda _task: finish_cancellation(cancellation_id))
         try:
             if timeout_seconds is not None:
@@ -221,7 +259,10 @@ class ToolExecutor:
                         pass
             raise
 
-    async def _run_sync(self, fn, arguments: dict, tool_dict: dict, timeout_seconds: float | None):
+    async def _run_sync(
+        self, fn, arguments: dict, tool_dict: dict, timeout_seconds: float | None,
+        operation_execution=None,
+    ):
         loop = asyncio.get_running_loop()
         if tool_dict.get("execution_mode") == "sync_thread_affine":
             affinity_group = tool_dict.get("affinity_group") or tool_dict.get("name", "tool")
@@ -244,7 +285,13 @@ class ToolExecutor:
                     acquired.append(lock)
                 if cancelled.is_set():
                     return json.dumps({"status": "cancelled", "reason_code": "user_stopped"})
-                return fn(**arguments)
+                if operation_execution is not None:
+                    operation_execution.begin_effect()
+                operation_token = set_current_operation_execution(operation_execution)
+                try:
+                    return fn(**arguments)
+                finally:
+                    reset_current_operation_execution(operation_token)
             finally:
                 for lock in reversed(acquired):
                     lock.release()

@@ -45,6 +45,7 @@ interface Props {
   onPromptSelect?: (prompt: string) => void // kept for API compat
   /** Shown in an empty chat in place of the idle line, e.g. the first-run guide. */
   emptyState?: ReactNode
+  afterMessages?: ReactNode
 }
 
 export function ChatWindow({
@@ -56,6 +57,7 @@ export function ChatWindow({
   agentName = DEFAULT_AGENT_NAME,
   onLoadOlderMessages,
   emptyState,
+  afterMessages,
 }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -140,7 +142,7 @@ export function ChatWindow({
 
 
   return (
-    <section className="relative flex min-h-0 flex-1 flex-col bg-[#11100f]">
+    <section className="chat-surface relative flex min-h-0 flex-1 flex-col">
       {/* The title lives in the app bar; this only fades the transcript under it. */}
       <div className="chat-title-fade pointer-events-none absolute inset-x-0 top-0 z-20 h-8" aria-hidden="true" />
 
@@ -196,6 +198,7 @@ export function ChatWindow({
               scrollContainerRef={scrollContainerRef}
               viewport={transcriptViewport}
             />
+            {afterMessages}
           </div>
         </div>
       )}

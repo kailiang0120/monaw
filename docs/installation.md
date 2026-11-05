@@ -17,7 +17,7 @@ The installer is published with each [release](https://github.com/kailiang0120/m
 1. Check the download against the published SHA-256 checksum:
 
    ```powershell
-   Get-FileHash .\Monaw-Setup-1.0.0-x64.exe -Algorithm SHA256
+   Get-FileHash .\Monaw-Setup-1.1.0-x64.exe -Algorithm SHA256
    ```
 
 2. Run the installer. Because it is unsigned, Windows SmartScreen may warn that it is from an unknown publisher; choose **More info** > **Run anyway** only if the checksum matches.
@@ -26,7 +26,7 @@ The installer is published with each [release](https://github.com/kailiang0120/m
 
 ## Where your data lives
 
-Everything you create stays in the Monaw home folder, not in the install folder:
+Monaw keeps application data in the Monaw home folder, not in the install folder:
 
 ```text
 %USERPROFILE%\.monaw\
@@ -34,10 +34,19 @@ Everything you create stays in the Monaw home folder, not in the install folder:
   runtime\settings.json   settings
   runtime\backend.log     the local service log
   memory\                 long-term memory
-  workspace\              the default working folder
   skills\                 skills you created with the skill creator
   browser\                the copy of the Monaw extension that Chrome loads
 ```
+
+New chats without a selected project save their work in
+`Documents\monaw\YYYY-MM-DD\chat-<id>`, using your Windows Documents location
+(including redirected or OneDrive Documents folders). Each chat has its own
+folder, saved before the first task starts and reused after reopening or renaming
+the chat. Resetting a selected project returns to that chat's default folder.
+Existing chats keep their current workspace and files; no files are moved.
+`AGENT_WORKSPACE_DIR` overrides the root under which new dated chat folders are created.
+If Windows cannot provide the Documents location, the desktop app uses
+`%USERPROFILE%\.monaw\workspace` as the root instead.
 
 API keys are stored with Windows data protection for your user account, not in these files.
 
@@ -45,13 +54,20 @@ Settings → Storage shows how much of this folder each kind of data uses and cl
 
 ## Upgrade
 
-There is no automatic update. To upgrade:
+Monaw checks GitHub Releases for a newer stable version after startup and
+periodically while it is running. Open **Settings > About** to see the installed
+version or check manually. An available update downloads in the background;
+choose **Restart to update** after finishing or pausing active work, and confirm
+the restart. Draft and prerelease versions are not installed. The existing v1.0
+installer has no updater and must be upgraded manually once.
+
+To upgrade manually:
 
 1. Close Monaw.
-2. Back up `%USERPROFILE%\.monaw` (see [backup and restore](operations.md#backup-and-restore)).
+2. Back up `%USERPROFILE%\.monaw` and your workspaces, including `Documents\monaw` (see [backup and restore](operations.md#backup-and-restore)).
 3. Run the newer installer. It replaces the app and leaves the Monaw home folder alone.
 
-A newer version may migrate the database when it starts. Older versions are not guaranteed to read a migrated database, so to go back, restore the backup from step 2 instead of only reinstalling the older version.
+A newer version may migrate the database when it starts. Older versions are not guaranteed to read a migrated database, so to go back, restore a backup instead of only reinstalling the older version. The current installer is unsigned: update downloads are checksum-verified, but publisher identity is not verified until code signing is configured.
 
 ## Uninstall
 

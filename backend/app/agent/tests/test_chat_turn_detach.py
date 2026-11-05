@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,10 +11,18 @@ import pytest
 from app.agent.steering import RunStream, _inboxes, conversation_is_running, sse_chunk
 from app.api.routes import chat as chat_routes
 from app.schemas import ChatRequest, ChatStopRequest
+from app.security.control_plane import ALL_SCOPES, TOKEN_ISSUER, ControlSession
 
 
-def _request(session_id: str = "session-1"):
-    return SimpleNamespace(state=SimpleNamespace(control_session=SimpleNamespace(session_id=session_id)))
+def _request(session_id: str = "session-1", *, profile_id: str | None = None):
+    control_session = ControlSession(
+        session_id=session_id,
+        scopes=ALL_SCOPES,
+        expires_at=4_000_000_000,
+        issuer=TOKEN_ISSUER,
+        profile_id=profile_id,
+    )
+    return SimpleNamespace(state=SimpleNamespace(control_session=control_session))
 
 
 @pytest.fixture
@@ -190,3 +199,299 @@ def test_a_run_id_already_in_use_is_refused(turn):
             pass
 
     asyncio.run(scenario())
+
+
+def test_runtime_creates_default_conversation_before_durable_run(tmp_path, monkeypatch):
+    from app.agent import runtime
+    from app.agent.database import Database
+    from app.agent.durable import turn_run
+
+    database = Database(tmp_path / "runtime.sqlite")
+    database.init_db()
+
+    class FakeRuntime:
+        async def run(
+            self, message, conversation_id, *, attachments=None, steering=None,
+            durable_run=None, durable_run_factory=None,
+        ):  # noqa: ARG002
+            if durable_run is None and callable(durable_run_factory):
+                durable_run = durable_run_factory()
+            assert durable_run is not None
+            yield {"event": "done", "data": {"conversation_id": conversation_id, "summary": message}}
+
+    monkeypatch.setattr(runtime, "get_db", lambda: database)
+    monkeypatch.setattr(runtime, "get_runtime", lambda _settings: FakeRuntime())
+    monkeypatch.setattr(turn_run, "get_db", lambda: database)
+    monkeypatch.setattr(turn_run, "_owner_instance_id", lambda: "owner-test")
+
+    async def collect():
+        return [event async for event in runtime.run_agent_stream(
+            message="Summarize this task",
+            conversation_id="new-default-chat",
+            settings=object(),
+            control_session_id="session-1",
+            principal_id="session-1",
+            execution_source="desktop",
+            durable_run_id="new-default-run",
+        )]
+
+    events = asyncio.run(collect())
+    conversation = database.get_conversation("new-default-chat")
+    run = database.fetchone("SELECT * FROM agent_runs WHERE run_id = ?", ("new-default-run",))
+
+    assert events[-1]["event"] == "done"
+    assert conversation is not None
+    assert Path(conversation["workspace_dir"]).is_dir()
+    assert conversation["title"] == "Summarize this task"
+    assert run is not None
+    assert run["conversation_id"] == "new-default-chat"
+    assert run["workspace_dir"] == conversation["workspace_dir"]
+    assert run["owner_principal_id"] == "session-1"
+    assert run["control_session_id"] == "session-1"
+
+
+def test_resume_claim_keeps_original_input_across_empty_synthetic_checkpoint(tmp_path, monkeypatch):
+    from app.agent.database import Database
+    from app.agent.durable import turn_run
+    from types import SimpleNamespace
+    from app.agent.memory_manager import MemoryManager
+
+    database = Database(tmp_path / "resume.sqlite")
+    database.init_db()
+    database.create_conversation("resume-chat", "Original task", "")
+    monkeypatch.setattr(turn_run, "_owner_instance_id", lambda: "owner-test")
+
+    scope = {
+        "conversation_id": "resume-chat",
+        "execution_source": "desktop",
+        "principal_id": "session-1",
+        "control_session_id": "session-1",
+        "workspace_dir": "",
+    }
+    resume_scope = {key: value for key, value in scope.items() if key != "conversation_id"}
+    first = turn_run.create_durable_run(**scope, run_id="resume-run", db=database)
+    original_ids, _ = database.persist_turn_messages(first.turn_id, "resume-chat", [
+        {"role": "user", "content": "Original instruction", "attachments": []},
+        {"role": "assistant", "content": "Stopped before finishing", "status": "paused", "attachments": []},
+    ])
+    assert first.finalize("paused", "iteration_budget_exhausted")
+    statuses = [event["payload"].get("status") for event in first.journal.read_events("resume-run")["events"]]
+    assert statuses[-2:] == ["pausing", "paused"]
+
+    second, original_checkpoint = turn_run.resume_run("resume-run", **resume_scope, db=database)
+    assert second.attempt == 2
+    assert second.turn_id != first.turn_id
+    assert original_checkpoint["user_message_ids"] == original_ids
+
+    # Continuation text goes to the transcript only. Its checkpoint can have an
+    # empty user-ID list while the recovery reference still resolves the
+    # original saved instruction.
+    memory = MemoryManager.__new__(MemoryManager)
+    memory._db = database
+    memory.memory_store = None
+    state = SimpleNamespace(recent_messages=[], all_messages=[], updated_at=None)
+    memory.get_or_create = lambda _conversation_id: state
+    memory.estimate_context_tokens = lambda _conversation_id: 10
+    continuation_ids = asyncio.run(memory.persist_turn(
+        "resume-chat",
+        "synthetic continuation prompt",
+        "Continued safely",
+        tool_calls=[],
+        status="paused",
+        turn_id=second.turn_id,
+        persist_user_message=False,
+    ))
+    assert continuation_ids == []
+    second.begin_pause()
+    assert second.finalize("paused", "user_pause")
+    third, checkpoint = turn_run.resume_run("resume-run", **resume_scope, db=database)
+
+    user_rows = [row for row in database.get_messages("resume-chat", limit=20) if row["role"] == "user"]
+    assert third.attempt == 3
+    assert checkpoint["user_message_ids"] == original_ids
+    assert len(user_rows) == 1
+    assert user_rows[0]["content"] == "Original instruction"
+
+
+@pytest.mark.parametrize("checkpoint_after_return", [False, True])
+def test_opaque_returned_effect_requires_a_final_checkpoint_before_resume(tmp_path, monkeypatch, checkpoint_after_return):
+    from app.agent.database import Database
+    from app.agent.durable import turn_run
+    from app.agent.durable.models import InvalidTransitionError
+
+    database = Database(tmp_path / "opaque.sqlite")
+    database.init_db()
+    database.create_conversation("opaque-chat", "Opaque task", "")
+    monkeypatch.setattr(turn_run, "_owner_instance_id", lambda: "owner-test")
+    handle = turn_run.create_durable_run(
+        conversation_id="opaque-chat",
+        execution_source="desktop",
+        principal_id="session-1",
+        control_session_id="session-1",
+        workspace_dir="",
+        run_id="opaque-run",
+        db=database,
+    )
+    messages = [
+        {"role": "user", "content": "Run a command", "attachments": []},
+        {"role": "assistant", "content": "Command returned", "status": "paused", "attachments": [],
+         "tool_calls": [{"tool_name": "shell_command", "input": "{}", "output": "Done", "status": "complete"}]},
+    ]
+    if not checkpoint_after_return:
+        database.persist_turn_messages(handle.turn_id, "opaque-chat", messages)
+    handle.journal.prepare_operation(
+        handle.run_id,
+        operation_id="opaque-op",
+        owner_instance_id=handle.owner_instance_id,
+        attempt=handle.attempt,
+        operation_kind="shell_command",
+        effect_class="opaque_effect",
+        tool_name="shell_command",
+    )
+    for status in ("authorized", "executing", "returned"):
+        handle.journal.transition_operation(
+            handle.run_id,
+            "opaque-op",
+            to_status=status,
+            owner_instance_id=handle.owner_instance_id,
+            attempt=handle.attempt,
+            reason_code="unknown" if status == "returned" else None,
+        )
+    if checkpoint_after_return:
+        database.persist_turn_messages(handle.turn_id, "opaque-chat", messages)
+    handle.begin_pause()
+    assert handle.finalize("paused", "user_pause")
+
+    snapshot = handle.journal.snapshot(handle.run_id)
+    assert snapshot is not None
+    if checkpoint_after_return:
+        assert "resume" in snapshot["available_actions"]
+        continued, _ = turn_run.resume_run(
+            handle.run_id,
+            execution_source="desktop",
+            principal_id="session-1",
+            control_session_id="session-1",
+            workspace_dir="",
+            db=database,
+        )
+        assert continued.attempt == 2
+        # Continuing claims a new attempt without replaying or reclassifying the action.
+        operations = database.fetchall("SELECT status FROM run_operations WHERE run_id = ?", (handle.run_id,))
+        assert [row["status"] for row in operations] == ["returned"]
+        return
+    assert "resume" not in snapshot["available_actions"]
+    with pytest.raises(InvalidTransitionError):
+        turn_run.resume_run(
+            handle.run_id,
+            execution_source="desktop",
+            principal_id="session-1",
+            control_session_id="session-1",
+            workspace_dir="",
+            db=database,
+        )
+
+
+def test_resume_rejects_workspace_change_and_newer_conversation_turn(tmp_path, monkeypatch):
+    from app.agent.database import Database
+    from app.agent.durable import turn_run
+    from app.agent.durable.models import InvalidTransitionError
+
+    database = Database(tmp_path / "stale-resume.sqlite")
+    database.init_db()
+    database.create_conversation("stale-chat", "Old task", "C:/workspace")
+    monkeypatch.setattr(turn_run, "_owner_instance_id", lambda: "owner-test")
+    handle = turn_run.create_durable_run(
+        conversation_id="stale-chat",
+        execution_source="desktop",
+        principal_id="session-1",
+        control_session_id="session-1",
+        workspace_dir="C:/workspace",
+        run_id="stale-run",
+        db=database,
+    )
+    database.persist_turn_messages(handle.turn_id, "stale-chat", [
+        {"role": "user", "content": "Old instruction", "attachments": []},
+        {"role": "assistant", "content": "Stopped", "status": "paused", "attachments": []},
+    ])
+    handle.begin_pause()
+    assert handle.finalize("paused", "user_pause")
+
+    database.update_conversation("stale-chat", workspace_dir="C:/new-workspace")
+    stale_snapshot = handle.journal.snapshot("stale-run")
+    assert stale_snapshot is not None
+    assert "resume" not in stale_snapshot["available_actions"]
+    with pytest.raises(InvalidTransitionError):
+        turn_run.resume_run(
+            "stale-run",
+            execution_source="desktop",
+            principal_id="session-1",
+            control_session_id="session-1",
+            workspace_dir="C:/new-workspace",
+            db=database,
+        )
+
+    # A workspace restored to its original value is still stale once a newer
+    # user turn has been added to the conversation.
+    database.update_conversation("stale-chat", workspace_dir="C:/workspace")
+    database.add_message("stale-chat", "user", "A newer unrelated request")
+    newer_snapshot = handle.journal.snapshot("stale-run")
+    assert newer_snapshot is not None
+    assert "resume" not in newer_snapshot["available_actions"]
+    with pytest.raises(InvalidTransitionError):
+        turn_run.resume_run(
+            "stale-run",
+            execution_source="desktop",
+            principal_id="session-1",
+            control_session_id="session-1",
+            workspace_dir="C:/workspace",
+            db=database,
+        )
+    database.close()
+
+
+def test_active_scope_conflict_is_rejected_before_a_second_run_row(tmp_path, monkeypatch):
+    from app.agent.database import Database
+    from app.agent.durable import turn_run
+    from app.agent.durable.models import LeaseConflictError
+
+    database = Database(tmp_path / "active-conflict.sqlite")
+    database.init_db()
+    database.create_conversation("active-chat", "Active", "C:/shared")
+    database.create_conversation("other-chat", "Other", "C:/shared")
+    owner = ["owner-one"]
+    monkeypatch.setattr(turn_run, "_owner_instance_id", lambda: owner[0])
+    first = turn_run.create_durable_run(
+        conversation_id="active-chat",
+        execution_source="desktop",
+        principal_id="session-1",
+        control_session_id="session-1",
+        workspace_dir="C:/shared",
+        run_id="active-first",
+        db=database,
+    )
+
+    owner[0] = "owner-two"
+    with pytest.raises(LeaseConflictError):
+        turn_run.create_durable_run(
+            conversation_id="active-chat",
+            execution_source="desktop",
+            principal_id="session-2",
+            control_session_id="session-2",
+            workspace_dir="C:/shared",
+            run_id="active-same-conversation",
+            db=database,
+        )
+    with pytest.raises(LeaseConflictError):
+        turn_run.create_durable_run(
+            conversation_id="other-chat",
+            execution_source="desktop",
+            principal_id="session-2",
+            control_session_id="session-2",
+            workspace_dir="C:/shared",
+            run_id="active-same-workspace",
+            db=database,
+        )
+
+    assert first.journal.snapshot("active-first")["status"] == "running"
+    assert database.fetchone("SELECT COUNT(*) FROM agent_runs")[0] == 1
+    database.close()

@@ -42,6 +42,11 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/diagnostics/summary` | `diagnostics:read` | `DiagnosticsSummaryPayload` |
 | `GET` | `/api/diagnostics/support-report` | `diagnostics:read` | `stream/file/none` |
 | `GET` | `/api/events` | `agent:run` | `stream/file/none` |
+| `POST` | `/api/file-mutations/preview` | `files:mutate` | `stream/file/none` |
+| `POST` | `/api/file-mutations/{mutation_id}/apply` | `files:mutate` | `stream/file/none` |
+| `GET` | `/api/file-mutations/{operation_id}/undo-capability` | `files:mutate` | `stream/file/none` |
+| `POST` | `/api/file-mutations/{operation_or_mutation_id}/undo` | `files:mutate` | `stream/file/none` |
+| `POST` | `/api/file-mutations/{operation_or_mutation_id}/undo-preview` | `files:mutate` | `stream/file/none` |
 | `GET` | `/api/files/{attachment_id}` | `files:read` | `stream/file/none` |
 | `GET` | `/api/files/{attachment_id}/preview` | `files:read` | `stream/file/none` |
 | `GET` | `/api/memories` | `agent:run` | `list` |
@@ -68,6 +73,19 @@ unauthenticated runtime endpoint.
 | `POST` | `/api/openai-account/logout` | `settings:write` | `dict` |
 | `GET` | `/api/openai-account/status` | `settings:read` | `dict` |
 | `POST` | `/api/privacy/delete-data` | `agent:run` | `DataDeletionResult` |
+| `GET` | `/api/runs` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/changes` | `files:read` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/changes/undo` | `files:mutate` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/changes/undo-preview` | `files:mutate` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/events` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/events/stream` | `runs:read` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/operations` | `runs:read` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/operations/{operation_id}/resolve` | `runs:control` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/pause` | `runs:control` | `stream/file/none` |
+| `GET` | `/api/runs/{run_id}/recovery` | `runs:read` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/resume` | `runs:control` | `stream/file/none` |
+| `POST` | `/api/runs/{run_id}/stop` | `runs:control` | `stream/file/none` |
 | `POST` | `/api/sandbox/docker/resolve-image` | `settings:write` | `SandboxResolveImageResponse` |
 | `GET` | `/api/sandbox/status` | `settings:read` | `SandboxStatusPayload` |
 | `GET` | `/api/scheduled-tasks` | `agent:run` | `list` |
@@ -102,3 +120,19 @@ unauthenticated runtime endpoint.
 | `POST` | `/api/speech-to-text/transcribe` | `agent:run` | `SpeechToTextTranscriptionResponse` |
 | `POST` | `/api/uploads` | `agent:run` | `AttachmentUploadResponse` |
 | `GET` | `/health` | `unauthenticated` | `stream/file/none` |
+
+## Run and recovery routes
+
+Run routes apply to desktop Runs owned by the signed Monaw profile. Each request checks the current profile and the conversation's workspace; `runs:read` and `runs:control` are separate scopes. Use `available_actions` and the current revision returned by the server as the authority for controls. Historical conversations are not backfilled into Runs during an upgrade.
+
+Recovery verifies persisted state before offering Continue. It does not replay an interrupted tool call. Supported native file effects can be checked against private snapshots; Shell, Browser, MCP, and other opaque effects can remain `needs_review` until the user inspects them. A `verify` request is read-only. Run events and operation evidence are projected onto bounded public fields; file paths, file contents, snapshot references, and raw content hashes are not returned.
+
+Run events are stored in `agent.db` and currently have no automatic age-based retention. The `410 events_expired` response means the requested sequence has a gap in the rows that remain; it is not evidence of a configured retention period. Deleting a conversation cascades its Run, operation, and event rows, while old unreferenced snapshot files are reclaimed separately by snapshot cleanup.
+
+## File-mutation routes
+
+Preview and Apply currently cover one ordinary file write in an active desktop Run. Preview records and their idempotency results are in memory, bound to the current control session, and expire after 15 minutes; they cannot be replayed after a backend restart. Apply checks current permissions and the preview's file identity and fingerprint before writing.
+
+Undo is available only for a completed, verified, supported native file operation with live evidence and matching current file state. The current permission decision must allow the inverse without confirmation or an access grant; the API has no second approval path and does not reuse once/session grants from the forward operation. A conflict leaves the changed file untouched; a missing or expired snapshot makes Undo unavailable. Undo for deleting a newly created file is unavailable outside Windows. The routes do not provide general-purpose restore or Undo for Shell, Browser, MCP, Copy, the separate `fs_rename` tool, directory-tree, link, or unsupported metadata changes. See [operations.md](operations.md) for snapshot storage and retention limits.
+
+`POST /api/privacy/delete-data` clears diagnostics and other retained runtime artifacts described in [operations.md](operations.md). It does not delete conversations, Run history, workspaces, settings, saved credentials, or recovery snapshots.

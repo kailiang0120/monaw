@@ -350,6 +350,7 @@ export function normalizeDraft(
 
   return {
     ...settings,
+    execution_detail: (['simple', 'detailed', 'developer'] as const).find((mode) => mode === settings.execution_detail) ?? 'simple',
     settings_version: settings.settings_version || '',
     telegram_allowed_user_ids: (settings.telegram_allowed_user_ids ?? '').trim(),
     telegram_allowed_chat_ids: (settings.telegram_allowed_chat_ids ?? '').trim(),

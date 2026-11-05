@@ -1,6 +1,9 @@
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+from app.agent.action_security.sensitive_data import install_logging_redaction
+
+install_logging_redaction()
 import uuid
 
 from fastapi import FastAPI, Request
@@ -70,6 +73,16 @@ async def _start_mcp_runtime(app: FastAPI) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_startup_security()
+    # Recovery must establish process ownership and hand off provably dead
+    # durable runs before any background worker can dispatch new work.
+    from app.agent.durable.recovery import get_owner_instance_id, recover_startup_runs
+
+    owner_instance_id = get_owner_instance_id()
+    app.state.durable_recovery_status = {
+        "state": "complete",
+        "owner_instance_id": owner_instance_id,
+        "report": recover_startup_runs(recovery_owner_instance_id=owner_instance_id),
+    }
     ensure_workspace_instruction_file()
     try:
         configured_screenshots_dir()
@@ -149,7 +162,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Monaw Agent API",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -162,9 +175,9 @@ app.add_middleware(
     allow_origin_regex=settings.cors_allow_origin_regex or None,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    # Idempotency-Key (scheduled Run now) and Last-Event-ID (resuming the event
-    # stream) are sent by the app; a header missing here fails the preflight and
-    # the browser reports "Failed to fetch".
+    # Idempotency-Key (scheduled Run now and file mutations) and Last-Event-ID
+    # (resuming the event stream) are sent by the app; a missing header fails
+    # the preflight and the browser reports "Failed to fetch".
     allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "Last-Event-ID"],
 )
 app.add_middleware(RequestSizeLimitMiddleware)

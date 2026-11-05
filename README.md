@@ -36,7 +36,7 @@
 
 | Capability | What it means for you |
 | --- | --- |
-| **Work with files and code** | Read and edit project files, run shell commands, and give each conversation its own workspace and `AGENTS.md` instructions. |
+| **Work with files and code** | Read and edit project files, run shell commands, and give each conversation its own workspace and `AGENTS.md` instructions. Review Git-tracked changes and Undo from the [Changes page](docs/file-changes.md). |
 | **Use your browser and desktop** | Automate Chrome through the Monaw extension and interact with Windows apps. [Browser automation](docs/browser-automation.md) · [Computer use](docs/computer-use.md) |
 | **Choose your model** | Connect an OpenAI API key, sign in with your ChatGPT account, or use a Google Gemini API key. Switch providers and models from the chat composer. |
 | **Keep context across tasks** | Save global preferences and workspace memory, and steer or stop an active task. [Memory guide](docs/memory.md) |
@@ -57,7 +57,7 @@ Monaw runs on your PC. Chat history, settings, memory, and artifacts are stored 
 
 You need Windows 10 or 11 (64-bit), an internet connection for model access, and a supported model connection. Google Chrome **125+** is needed for browser automation; Docker Desktop is optional for isolated shell execution.
 
-The installer is currently unsigned. Updates are installed manually: download the new installer, close Monaw, and install it over the existing version. See the [installation guide](docs/installation.md) for upgrades, backups, and uninstalling. macOS and Linux builds are not available.
+The installer is currently unsigned. Monaw checks for updates in the background; open **Settings > About** to check manually and restart to install an available update. See the [installation guide](docs/installation.md) for upgrades, backups, and uninstalling. macOS and Linux builds are not available.
 
 ## Getting started
 
@@ -97,7 +97,7 @@ Browser profiles and allowed domains are configured under **Settings > Browser**
 
 ## Workspaces, Memory, and Local Data
 
-Each conversation can use its own project folder. That workspace determines relative file paths, command locations, and project `AGENTS.md` instructions. Change it while the agent is idle, or reset it to the default workspace.
+Each conversation can use its own project folder. Chats without a selected project get a separate folder under `Documents\monaw\YYYY-MM-DD\chat-<id>` (using your Windows Documents location, including redirection). The saved workspace determines relative file paths, command locations, and project `AGENTS.md` instructions. Change it while the agent is idle, or reset it to that chat's default folder. Existing chats keep their saved workspace.
 
 Memory has two scopes: **global** for your preferences and **workspace** for project context. Manage it under **Settings > Identity**. See the [memory guide](docs/memory.md).
 

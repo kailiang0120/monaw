@@ -6,6 +6,12 @@ from app.skills.computer_use.session import store_state
 
 
 def _state_for_window(monkeypatch, window):
+    from app.agent import controller_policy
+    from app.agent.settings_store import AgentSettings
+    settings = AgentSettings()
+    settings.permissions.mode = "full_access"
+    settings.permissions.allow_screen_fallback = True
+    monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: settings)
     uia = {"status": "ok", "elements": [], "limit": 100}
     monkeypatch.setattr(computer_tools.window_ops, "_uia_interact_app", lambda *a, **k: json.dumps(uia))
     monkeypatch.setattr(computer_tools, "_computer_functions_get_window_state", lambda **k: '{"status":"error","reason_code":"observation_failed"}')
@@ -182,6 +188,10 @@ def test_window_discovery_hydrates_geometry_and_identity(monkeypatch):
 
 
 def test_computer_functions_act_approval_payload_contains_batch(monkeypatch):
+    from app.agent.settings_store import AgentSettings
+    import app.agent.approval_broker as broker
+    real_create = broker.create_ticket
+    monkeypatch.setattr("app.agent.controller_policy._load_runtime_settings", lambda: AgentSettings())
     window = {"hwnd": 123, "title": "Notepad", "process_name": "notepad.exe"}
     captured = {}
     monkeypatch.setattr(computer_tools, "_resolve_window", lambda **_kwargs: {"status": "ok", "window": window})
@@ -199,9 +209,9 @@ def test_computer_functions_act_approval_payload_contains_batch(monkeypatch):
 
     def fake_create_ticket(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(id="ticket-1")
+        return real_create(**kwargs)
 
-    monkeypatch.setattr(computer_tools, "create_ticket", fake_create_ticket)
+    monkeypatch.setattr(broker, "create_ticket", fake_create_ticket)
 
     result = json.loads(
         computer_tools._computer_functions_act(
@@ -217,6 +227,10 @@ def test_computer_functions_act_approval_payload_contains_batch(monkeypatch):
 
 
 def test_computer_functions_act_launch_uses_batch_approval(monkeypatch):
+    from app.agent.settings_store import AgentSettings
+    import app.agent.approval_broker as broker
+    real_create = broker.create_ticket
+    monkeypatch.setattr("app.agent.controller_policy._load_runtime_settings", lambda: AgentSettings())
     captured = {}
     launch_calls = []
     monkeypatch.setattr(
@@ -237,9 +251,9 @@ def test_computer_functions_act_launch_uses_batch_approval(monkeypatch):
 
     def fake_create_ticket(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(id="ticket-2")
+        return real_create(**kwargs)
 
-    monkeypatch.setattr(computer_tools, "create_ticket", fake_create_ticket)
+    monkeypatch.setattr(broker, "create_ticket", fake_create_ticket)
 
     result = json.loads(
         computer_tools._computer_functions_act(

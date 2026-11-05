@@ -135,14 +135,14 @@ export function ScheduleEditor({
       {scheduleKind === 'interval' && (
         <div className="flex flex-wrap items-center gap-2">
           <div
-            className="flex items-center overflow-hidden rounded-lg"
+            className="st-stepper"
             style={{ border: '1px solid var(--st-border-strong)', background: 'var(--st-surface-sunken)' }}
           >
             <button
               type="button"
               onClick={() => adjustValue(-1)}
               aria-label="Decrease interval"
-              className="st-btn st-btn-ghost h-9 w-9 rounded-none"
+              className="st-btn st-btn-ghost st-btn-icon"
             >
               −
             </button>
@@ -155,14 +155,14 @@ export function ScheduleEditor({
                 const next = Math.max(1, Number(event.target.value) || 1)
                 onIntervalSecondsChange(intervalToSeconds(next, interval.unit))
               }}
-              className="w-14 border-0 bg-transparent py-1.5 text-center text-sm outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+              className="st-stepper-input [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
               style={{ color: 'var(--st-text)' }}
             />
             <button
               type="button"
               onClick={() => adjustValue(1)}
               aria-label="Increase interval"
-              className="st-btn st-btn-ghost h-9 w-9 rounded-none"
+              className="st-btn st-btn-ghost st-btn-icon"
             >
               +
             </button>

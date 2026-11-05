@@ -111,24 +111,129 @@ Important data:
 ```text
 runtime\agent.db          conversations, scheduled tasks, and app state
 runtime\settings.json     local settings
+runtime\file_mutation\snapshots\  private before-images for supported file Undo/recovery
 memory\                   long-term memory markdown files
-workspace\                default agent workspace
 skills\                   skills you created with the skill creator
 browser\                  browser screenshots
 ```
 
+New desktop chats without a project use separate folders under
+`Documents\monaw\YYYY-MM-DD\chat-<id>`. The Documents location follows Windows
+folder redirection; `AGENT_WORKSPACE_DIR` can override the root. The date is the
+chat's local creation date, and its saved folder remains stable across restarts
+and title changes. Existing chats keep their saved workspace (an empty legacy
+workspace continues to use the shared root). Back up `Documents\monaw` and any
+selected project folders separately from application data.
+If Windows cannot provide Documents, the desktop app falls back to the
+`workspace` folder inside Monaw home.
+
 To restore, close Monaw, replace the target `.monaw` folder with the backup,
-then start Monaw again. For partial restore, prefer copying `memory\`,
-`workspace\`, and selected settings while leaving current credentials managed by
-the local OS-backed store.
+then start Monaw again. For partial restore, prefer copying `memory\`, your
+workspace folders, and selected settings while leaving current credentials
+managed by the local OS-backed store.
 
-## Retention And Complete Deletion
+Windows file snapshots use DPAPI for the current Windows user. A full backup
+does not make them portable to another Windows account or machine. Treat them
+as private file contents when storing or sharing a backup.
 
-Monaw enforces runtime retention on startup for observability data, debug
-bundles, backend logs, approval/access-grant history, attachment registry data,
-browser/MCP diagnostics, and scheduled-task output.
+## Run Recovery And File Snapshots
 
-For complete runtime deletion from the app, use:
+The database migration is forward-only. An existing schema-17 database keeps
+its conversations, message history, workspace assignments, checkpoints, and
+scheduled tasks as schema versions 18–22 are added. The migration does not
+create durable Runs for historical conversations, so old chats have no Run
+recovery timeline. Runs created by the new version are available to their
+signed desktop profile only; the current profile and workspace are checked
+again before reading recovery details, continuing, verifying, or undoing work.
+
+After an unexpected exit, Monaw first checks that the previous Run owner is no
+longer active. It then reads the journal and verifies supported file effects
+without replaying tool calls. Continue is offered only when the checkpoint and
+current scope are safe to restore. Shell, Browser, MCP, and other opaque effects
+may remain `needs_review`; inspect their external state before starting another
+action that could repeat them. A file operation can be verified only while its
+private evidence is valid and the current file still matches the expected
+identity and fingerprint.
+
+Undo is limited to verified native operations on ordinary files: creating or
+overwriting a file, deleting a file, or moving a file on the same volume with
+`fs_move`. It is not a general file restore. Copy, the separate `fs_rename`
+tool, folders and folder trees, links, cross-volume moves, shell commands,
+browser actions, MCP calls, and unsupported metadata changes do not have Undo
+through the current API. Undo checks the current read/write/delete permissions
+and the file's current identity, contents, and parent scope. If the file was
+edited, replaced, moved, or its permissions changed, Monaw leaves it untouched
+and reports a conflict or unavailable Undo. Restored bytes and supported
+modified time do not guarantee the original file identity, creation time, or
+all metadata.
+
+The current permission decision must allow the inverse directly, without a
+confirmation or access-grant prompt. Undo does not start a second approval
+request and does not reuse `once` or `session` grants from the original file
+change. In Default mode, where MUTATE or DELETE requires confirmation, Undo is
+unavailable even if the forward change was approved. A policy decision that
+allows the inverse without confirmation or a grant is required. On platforms
+other than Windows, Undo that would delete a newly created file is unavailable;
+the filesystem does not provide the conditional delete-by-identity operation
+Monaw requires for that case.
+
+Manual preview and Apply currently handle one ordinary file write in a live
+desktop Run. Preview state is kept in backend memory for 15 minutes and is lost
+on restart. Durable operation evidence and eligible Undo snapshots are kept
+separately in the database and snapshot store.
+
+The private snapshot store is:
+
+```text
+%USERPROFILE%\.monaw\runtime\file_mutation\snapshots\
+```
+
+The current limits are 4 MiB of before-image data per file, 8 MiB total
+before-image data per operation, and 512 MiB for the snapshot store. A snapshot
+expires for Undo after 30 days. Cleanup preserves snapshots referenced by active
+or unresolved Runs; old unreferenced files are removed after the 30-day orphan
+grace period. A missing, expired, unreadable, or quota-rejected snapshot does
+not permit best-effort Undo. File changes are still subject to path policy and
+approval before they run.
+
+Run state, operation evidence, and events are stored in `runtime\agent.db`.
+Terminal Run events are kept for up to 90 days, capped at the newest 500 events
+per Run and 50,000 terminal events total. Events for active, paused, interrupted,
+and `needs_review` Runs are retained. When a client cursor falls behind pruned
+events, the API returns `410 events_expired`; Monaw reloads the atomic Run
+snapshot and operation list. That restores the current status and operation
+timeline, though older intermediate state changes may be gone.
+
+Deleting a conversation removes its Run, operation, and event rows. Monaw
+returns `409` while the conversation has an active, paused, interrupted, or
+`needs_review` Run, or an unresolved operation. Stop or resolve it before
+deleting the conversation so recovery evidence is not lost. After deletion,
+Monaw immediately queues snapshots that have no remaining Run reference for
+safe reclamation. A snapshot shared by multiple Runs remains while any Run
+still references it; a filesystem lock or unsafe file type can defer deletion
+until the next retention pass. Deleting a conversation removes its Undo history,
+but does not change workspace files.
+
+`Settings -> Observability -> Delete Data` clears diagnostics, logs,
+observability artifacts, memory files, approval/access-grant history,
+attachment registry entries, browser/MCP diagnostics, and scheduled-task
+outputs. It does not delete conversation messages, Run/operation/event history,
+workspace files, saved settings or credentials, or file-mutation snapshots.
+Deleting the `.monaw` folder manually also removes snapshots and any older
+workspace stored inside it. It does not remove `Documents\monaw` or selected
+project folders outside `.monaw`.
+
+## Retention And Full Local Deletion
+
+Monaw enforces runtime retention on startup and every six hours for
+observability data, debug bundles, backend logs, approval/access-grant history,
+attachment registry data, browser/MCP diagnostics, scheduled-task output,
+terminal Run events, pending snapshot deletions, and old unreferenced file
+snapshots. Active/recoverable snapshots are preserved. Snapshot Undo evidence
+expires after 30 days; once a conversation is deleted, its Run-scoped Undo
+history is gone even if a shared snapshot file remains for another Run.
+
+For app-managed deletion of retained diagnostics and support data, use:
 
 ```text
 Settings -> Observability -> Delete Data
@@ -140,10 +245,11 @@ For manual deletion, close Monaw and remove:
 %USERPROFILE%\.monaw\
 ```
 
-Manual deletion removes runtime data, memory, browser screenshots, workspace
-files, and local settings. Your Chrome profile lives in Chrome's own folder and
-is not affected. Revoke external provider keys and Telegram tokens separately
-because local deletion cannot revoke third-party credentials.
+Manual deletion removes runtime data, memory, browser screenshots, the default
+workspace files, and local settings. Workspaces outside `.monaw` remain on
+their own paths. Your Chrome profile lives in Chrome's own folder and is not
+affected. Revoke external provider keys and Telegram tokens separately because
+local deletion cannot revoke third-party credentials.
 
 ## Generated API Reference
 

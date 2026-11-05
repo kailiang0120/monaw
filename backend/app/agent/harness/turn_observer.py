@@ -7,6 +7,7 @@ import time
 
 from app.agent.observability.ports import ObservabilityPort
 from app.agent.observability.recorder import infer_source
+from app.agent.action_security.sensitive_data import public_tool_arguments, redact_sensitive
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class TurnObserver:
 
     def tool_started(self, name: str, arguments: dict, call_id: str, risk: str = "") -> float:
         started = time.perf_counter()
-        self.event("tool_call_started", tool_name=name, input={"arguments": arguments, "call_id": call_id, "risk": risk})
+        self.event("tool_call_started", tool_name=name, input={"arguments": public_tool_arguments(name, arguments), "call_id": call_id, "risk": risk})
         return started
 
     def tool_finished(
@@ -51,7 +52,7 @@ class TurnObserver:
     ) -> None:
         self.event(
             "tool_call_finished", tool_name=name, status=status, error_code=error_code,
-            error_message=output if status not in {"ok", "complete", "success"} else "",
+            error_message=redact_sensitive(output) if status not in {"ok", "complete", "success"} else "",
             duration_ms=duration_ms if duration_ms is not None else round((time.perf_counter() - started) * 1000),
-            output={"output": output, "call_id": call_id, "risk": risk}, metadata=metadata or {},
+            output={"output": redact_sensitive(output), "call_id": call_id, "risk": risk}, metadata=metadata or {},
         )

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -40,8 +41,35 @@ def test_saved_folder_survives_reopen_and_can_be_reset(db, tmp_path):
     assert renamed.json()["workspace_dir"] == str(project.resolve())
     reset = client.patch(f"/api/conversations/{conv_id}", json={"workspace_dir": ""})
     assert reset.status_code == 200
-    assert reset.json()["workspace_dir"] == ""
+    assert Path(reset.json()["workspace_dir"]).is_dir()
+    assert reset.json()["workspace_dir"] != str(project.resolve())
     assert reset.json()["title"] == "Renamed"
+
+
+def test_default_chats_have_separate_dated_workspaces_and_reuse_them(db, tmp_path, monkeypatch):
+    root = tmp_path / "Documents" / "monaw"
+    monkeypatch.setattr(workspace, "DEFAULT_CHAT_WORKSPACE_ROOT", root)
+    client = TestClient(app)
+    first = client.post("/api/conversations", json={"title": "First"}).json()
+    second = client.post("/api/conversations", json={"title": "Second"}).json()
+    folder = Path(first["workspace_dir"])
+    assert folder.parent == root / datetime.fromisoformat(first["created_at"]).astimezone().date().isoformat()
+    assert folder.name.startswith("chat-")
+    assert folder.is_dir() and Path(second["workspace_dir"]).is_dir()
+    assert folder != Path(second["workspace_dir"])
+    (folder / "notes.txt").write_text("Keep this chat's files")
+    saved = db.get_conversation(first["id"])
+    client.patch(f"/api/conversations/{first['id']}", json={"workspace_dir": ""})
+    assert db.get_conversation(first["id"])["updated_at"] == saved["updated_at"]
+    client.patch(f"/api/conversations/{first['id']}", json={"title": "Renamed"})
+    db.close()
+    assert db.get_conversation(first["id"])["workspace_dir"] == str(folder)
+    project = tmp_path / "project"
+    project.mkdir()
+    client.patch(f"/api/conversations/{first['id']}", json={"workspace_dir": str(project)})
+    reset = client.patch(f"/api/conversations/{first['id']}", json={"workspace_dir": ""})
+    assert reset.json()["workspace_dir"] == str(folder)
+    assert (folder / "notes.txt").read_text() == "Keep this chat's files"
 
 
 def test_older_conversations_keep_default_after_migration(db):
@@ -105,6 +133,27 @@ def test_first_message_saves_folder_before_starting_agent(db, tmp_path, monkeypa
     response = client.post("/api/chat", json={"message": "Continue", "conversation_id": conv_id, "workspace_dir": ""})
     assert response.status_code == 409
     assert len(calls) == 2
+
+
+def test_first_message_without_project_saves_default_before_starting_agent(db, monkeypatch):
+    from app.agent import runtime
+
+    calls = []
+
+    async def fake_stream(**kwargs):
+        calls.append(db.get_conversation(kwargs["conversation_id"]))
+        yield {"event": "done", "data": {"conversation_id": kwargs["conversation_id"]}}
+
+    monkeypatch.setattr(runtime, "run_agent_stream", fake_stream)
+    client = TestClient(app)
+    response = client.post("/api/chat", json={"message": "Write notes"})
+    assert response.status_code == 200
+    folder = Path(calls[0]["workspace_dir"])
+    assert folder.is_dir()
+    assert workspace.DEFAULT_CHAT_WORKSPACE_ROOT in folder.parents
+    response = client.post("/api/chat", json={"message": "Continue", "conversation_id": calls[0]["id"]})
+    assert response.status_code == 200
+    assert calls[1]["workspace_dir"] == str(folder)
 
 
 def test_concurrent_runtime_turns_keep_commands_files_and_instructions_in_their_folder(db, tmp_path, monkeypatch):

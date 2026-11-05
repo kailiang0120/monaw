@@ -24,6 +24,10 @@ from app.skills.exec import tools as exec_tools
 
 
 def _allow_exec(monkeypatch, *, confirmation=False):
+    from app.agent import controller_policy
+    runtime_settings = AgentSettings()
+    runtime_settings.permissions.mode = "default" if confirmation else "full_access"
+    monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: runtime_settings)
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",
@@ -133,7 +137,7 @@ def test_trusted_host_command_follows_full_access_when_host_is_chosen_or_docker_
     assert not decision.always_ask and not decision.explicit_approval_required
 
 
-def test_exec_tool_asks_for_host_fallback_although_permission_mode_does_not(monkeypatch, tmp_path):
+def test_exec_tool_full_access_allows_host_fallback_without_ordinary_prompt(monkeypatch, tmp_path):
     _allow_exec(monkeypatch, confirmation=False)
     monkeypatch.setattr(exec_tools, "_ACTIVE_SETTINGS", _settings_with_sandbox())
     monkeypatch.setattr(
@@ -145,10 +149,10 @@ def test_exec_tool_asks_for_host_fallback_although_permission_mode_does_not(monk
 
     result = json.loads(exec_tools.exec_tool("Write-Output hi", shell="powershell", workdir=str(tmp_path)))
 
-    assert result["status"] == "pending_approval"
-    assert result["sandbox"]["always_ask"] is True
+    assert result["status"] == "ok"
+    assert result["sandbox"]["always_ask"] is False
     assert result["sandbox"]["execution_environment"]["on_host"] is True
-    assert result["sandbox"]["execution_environment"]["always_ask"] is True
+    assert result["sandbox"]["execution_environment"]["always_ask"] is False
 
 
 def _settings_with_sandbox(**patch):
@@ -301,29 +305,10 @@ def test_exec_tool_offers_approval_for_untrusted_when_strong_backend_unavailable
 
 
 def test_approval_preview_matches_execution_decision(monkeypatch, tmp_path):
-    captured_ticket = {}
+    from app.agent.approval_broker import get_ticket, approve_ticket
+    from app.agent.execution_resume import resume_approved_ticket
+    _allow_exec(monkeypatch, confirmation=True)
     captured_run = {}
-    permission_decisions = [
-        SimpleNamespace(
-            blocked=False,
-            requires_access_grant=False,
-            requires_confirmation=True,
-            reason="approval required",
-            reason_code="confirmation_required",
-            policy_source="settings.json",
-        ),
-        SimpleNamespace(
-            blocked=False,
-            requires_access_grant=False,
-            requires_confirmation=False,
-            reason="",
-            reason_code="allowed",
-            policy_source="settings.json",
-        ),
-    ]
-
-    def fake_permission(*_args, **_kwargs):
-        return permission_decisions.pop(0)
 
     class FakeManager:
         def __init__(self, _settings):
@@ -340,19 +325,16 @@ def test_approval_preview_matches_execution_decision(monkeypatch, tmp_path):
                 sandbox=dict(request.env_metadata),
             )
 
-    def fake_create_ticket(**kwargs):
-        captured_ticket["kwargs"] = kwargs
-        return SimpleNamespace(id="ticket-123")
-
-    monkeypatch.setattr(exec_tools, "resolve_permission", fake_permission)
-    monkeypatch.setattr(exec_tools, "create_ticket", fake_create_ticket)
     monkeypatch.setattr(exec_tools, "SandboxManager", FakeManager)
     monkeypatch.setattr(exec_tools, "_ACTIVE_SETTINGS", _settings_with_sandbox())
 
     pending = json.loads(exec_tools.exec_tool("Write-Host hi", workdir=str(tmp_path)))
-    completed = json.loads(exec_tools.exec_tool("Write-Host hi", workdir=str(tmp_path), _bypass_gate=True))
+    assert pending["status"] == "pending_approval"
+    ticket = get_ticket(pending["ticket_id"])
+    approve_ticket(ticket.id)
+    completed = json.loads(resume_approved_ticket(ticket).execution_result)
 
-    preview = captured_ticket["kwargs"]["payload"]["args"]["sandbox"]
+    preview = ticket.payload["args"]["sandbox"]
     actual = captured_run["sandbox"]
 
     assert pending["status"] == "pending_approval"

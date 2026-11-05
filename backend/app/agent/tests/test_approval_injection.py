@@ -234,10 +234,13 @@ def test_tool_cannot_send_another_tools_ticket_to_auto_review(gate_setup):
 
 
 def test_desktop_tool_keeps_tickets_for_the_inner_action_it_dispatches(gate_setup):
-    ticket = create_ticket(tool_name="computer_functions_launch_app", payload={"input_str": "{}"})
-    reviewer = Reviewer('{"decision":"ask","reason":"Confirm the launch."}')
-    result, events = resolve(json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
-                             reviewer, tool_name="computer_functions_act")
+    from app.agent.action_identity import action_invocation, delegated_action
+    with action_invocation("computer_functions_act", {}):
+        with delegated_action("computer_functions_launch_app", {}):
+            ticket = create_ticket(tool_name="computer_functions_launch_app", payload={"input_str": "{}"})
+        reviewer = Reviewer('{"decision":"ask","reason":"Confirm the launch."}')
+        result, events = resolve(json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
+                                 reviewer, tool_name="computer_functions_act")
     assert json.loads(result).get("reason_code") != "approval_ticket_mismatch"
     assert events[0]["event"] == "approval_required"
 

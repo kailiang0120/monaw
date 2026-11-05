@@ -43,6 +43,15 @@ describe('new chat', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'New chat' }).find((button) => button.tabIndex === 0)!)
     expect(props.onNewChat).toHaveBeenCalledTimes(1)
   })
+
+  it('places New chat between scheduled tasks and chat history', () => {
+    renderSidebar()
+    const button = screen.getAllByRole('button', { name: 'New chat' }).find((item) => item.tabIndex === 0)!
+    const scheduled = screen.getByText('Scheduled')
+    const conversation = historyRow()
+    expect(scheduled.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(button.compareDocumentPosition(conversation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
 })
 
 describe('conversation history from the keyboard', () => {

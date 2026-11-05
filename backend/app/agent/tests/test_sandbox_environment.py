@@ -10,6 +10,11 @@ from app.skills.exec import tools as exec_tools
 
 
 def _allow_exec(monkeypatch):
+    from app.agent import controller_policy
+    from app.agent.settings_store import AgentSettings
+    runtime_settings = AgentSettings()
+    runtime_settings.permissions.mode = "full_access"
+    monkeypatch.setattr(controller_policy, "_load_runtime_settings", lambda: runtime_settings)
     monkeypatch.setattr(
         exec_tools,
         "resolve_permission",
@@ -192,7 +197,8 @@ def test_exec_start_uses_sanitized_env(monkeypatch, tmp_path):
     assert started["sandbox"]["env_inheritance"] == "scrubbed"
 
     command_id = started["command_id"]
-    for _ in range(20):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
         polled = json.loads(exec_tools.exec_poll(command_id, return_mode="full"))
         if polled.get("exit_code") is not None:
             break

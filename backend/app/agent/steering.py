@@ -38,6 +38,8 @@ class SteeringInbox:
     display_message: str = ""
     public_attachments: list[dict] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
+    # A resumed Run continues the paused reply; it has no new user message to show.
+    continuation: bool = False
     stream: RunStream = field(default_factory=RunStream, repr=False, compare=False)
 
     @property

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.agent.approval_broker import (
     approve_ticket,
@@ -10,9 +10,25 @@ from app.agent.approval_broker import (
     ticket_validation_error,
 )
 from app.agent.ui_events import publish_ui_event
+from app.agent.action_security.audit import public_ticket
 from app.schemas import ApprovalDecisionIn, ApprovalTicketOut
 
-router = APIRouter()
+async def _authenticated_approval_scope(request: Request):
+    from app.agent.run_context import (
+        set_current_principal_id, reset_current_principal_id,
+        set_current_permission_profile_id, reset_current_permission_profile_id,
+    )
+    session = request.state.control_session
+    principal = set_current_principal_id(session.profile_id or session.session_id)
+    profile = set_current_permission_profile_id("desktop-current")
+    try:
+        yield
+    finally:
+        reset_current_permission_profile_id(profile)
+        reset_current_principal_id(principal)
+
+
+router = APIRouter(dependencies=[Depends(_authenticated_approval_scope)])
 PENDING_APPROVAL_LIMIT_MAX = 100
 APPROVAL_HISTORY_LIMIT_MAX = 200
 
@@ -82,27 +98,4 @@ async def approval_history(
 
 
 def _ticket_to_out(t) -> ApprovalTicketOut:
-    return ApprovalTicketOut(
-        id=t.id,
-        conversation_id=t.conversation_id,
-        control_session_id=t.control_session_id,
-        execution_source=t.execution_source,
-        action_type=t.action_type,
-        tool_name=t.tool_name,
-        target_path=t.target_path,
-        target_app=t.target_app,
-        risk_level=t.risk_level,
-        reason=t.reason,
-        action_description=t.action_description,
-        payload=t.payload,
-        payload_hash=t.payload_hash,
-        status=t.status.value,
-        created_at=t.created_at,
-        expires_at=t.expires_at,
-        superseded_by=t.superseded_by,
-        resolved_at=t.resolved_at,
-        resolved_by=t.resolved_by,
-        execution_result=t.execution_result,
-        review_decision=t.review_decision,
-        review_reason=t.review_reason,
-    )
+    return ApprovalTicketOut.model_validate(public_ticket(t))

@@ -110,6 +110,12 @@ def test_settings_patch_from_body_includes_llm_fields():
     assert "vision_fallback_model" not in patch["llm"]
 
 
+def test_settings_patch_from_body_includes_execution_detail():
+    body = SettingsUpdate.model_validate({"execution_detail": "developer"})
+
+    assert _settings_patch_from_body(body) == {"execution_detail": "developer"}
+
+
 def test_settings_update_rejects_duplicate_mcp_server_names():
     with pytest.raises(ValidationError, match="MCP server names must be unique"):
         SettingsUpdate.model_validate(

@@ -4,8 +4,19 @@ type CredentialId = 'openai' | 'google' | 'tavily' | 'telegramBot'
 type CredentialStatus = Record<CredentialId, boolean>
 
 declare global {
+  type UpdateState = {
+    currentVersion: string
+    status: 'unavailable' | 'idle' | 'checking' | 'up-to-date' | 'downloading' | 'ready' | 'error'
+    latestVersion?: string
+    progress?: number
+    error?: string
+  }
   interface Window {
     electronAPI?: {
+      updateStatus?: () => Promise<UpdateState>
+      checkForUpdates?: () => Promise<UpdateState>
+      installUpdate?: () => Promise<boolean>
+      onUpdateState?: (listener: (state: UpdateState) => void) => () => void
       getControlSession: () => Promise<{ token: string; expiresAt: number }>
       credentialStatus: () => Promise<CredentialStatus>
       setCredential: (id: CredentialId, value: string) => Promise<CredentialStatus>

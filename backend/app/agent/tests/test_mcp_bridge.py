@@ -14,7 +14,6 @@ from app.agent.settings_store import MCPServerConfig
 from app.agent.settings_store import AgentSettings, merge_agent_settings
 from app.agent.tool_registry import ToolRegistry
 from app.skills.mcp_bridge import tools as mcp_tools_module
-from app.skills.mcp_bridge import registry as mcp_registry_module
 from app.skills.mcp_bridge.connection import ServerManager, _TailBuffer
 from app.skills.mcp_bridge.registry import (
     build_tool_entries,
@@ -107,7 +106,55 @@ def _run_loop(loop: asyncio.AbstractEventLoop):
 
 
 def _settings_with_servers(servers: list[dict]) -> SimpleNamespace:
+    from app.agent import controller_policy
+    controller_policy._load_runtime_settings().mcp.servers = [MCPServerConfig.model_validate(cfg) for cfg in servers]
     return SimpleNamespace(mcp=SimpleNamespace(servers=servers))
+
+
+def _prepare_mcp_durable_operation(monkeypatch, tool_name: str):
+    from app.agent.durable import recovery
+    from app.agent.durable.operation_execution import prepare_tool_operation
+
+    class FakeDB:
+        def fetchone(self, *_args):
+            return None
+
+    class Journal:
+        db = FakeDB()
+
+        def __init__(self):
+            self.transitions = []
+
+        def prepare_operation(self, *_args, **_kwargs):
+            return None
+
+        def transition_operation(self, _run_id, _operation_id, *, to_status, **_kwargs):
+            self.transitions.append(to_status)
+
+        def record_action_security(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(recovery, "assert_run_dispatch_allowed", lambda _run: None)
+    journal = Journal()
+    lifecycle = SimpleNamespace(
+        pause_requested=False,
+        review_requested=False,
+        request_review=lambda _reason: setattr(lifecycle, "review_requested", True),
+    )
+    operation = prepare_tool_operation(
+        SimpleNamespace(
+            journal=journal,
+            run_id="run-mcp-preflight",
+            owner_instance_id="owner-test",
+            attempt=1,
+            pause_requested=False,
+            lease_lost=False,
+        ),
+        tool_name=tool_name,
+        trusted_builtin=False,
+        lifecycle=lifecycle,
+    )
+    return operation, journal, lifecycle
 
 
 def test_reflected_tool_name_sanitizes_dedupes_and_caps_length():
@@ -148,7 +195,7 @@ def test_build_tool_entries_prefixes_names_uses_affinity_and_maps_original_tool(
     assert manager.reflected_tool_names == ["mcp__filesystem__list_directory"]
 
 
-def test_read_like_mcp_tool_runs_without_approval():
+def test_read_like_mcp_tool_requires_review_without_explicit_trust():
     cfg = MCPServerConfig(name="filesystem", command="npx")
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda _tool, _args: "{}")
     tool = SimpleNamespace(
@@ -161,7 +208,8 @@ def test_read_like_mcp_tool_runs_without_approval():
     entry = build_tool_entries(cfg, manager, [tool])[0]
     pending = json.loads(entry["callable"](path=r"C:\Repo"))
 
-    assert pending == {}
+    assert pending["status"] == "pending_approval"
+    assert pending["human_only"] is True
     assert entry["mcp_bridge"]["approval"]["reason"] == "untrusted_read_tool"
 
 
@@ -185,7 +233,7 @@ def test_unknown_reflected_tool_requires_approval_and_resumes_original_call():
     pending = json.loads(entry["callable"](value="abc"))
 
     assert pending["status"] == "pending_approval"
-    assert pending["reason"] == "unknown_tool_risk"
+    assert pending["human_only"] is True
     assert calls == []
 
     ticket = get_ticket(pending["ticket_id"])
@@ -198,6 +246,220 @@ def test_unknown_reflected_tool_requires_approval_and_resumes_original_call():
 
     assert resumed.status.value == "applied"
     assert calls == [("transform", {"value": "abc"})]
+
+
+@pytest.mark.parametrize(
+    "server_name,tool_name,cfg,permissions",
+    [
+        (
+            "fixture",
+            "get_credential_status",
+            {},
+            {"mode": "default"},
+        ),
+        (
+            "chrome-devtools",
+            "click",
+            {},
+            {"mode": "custom", "confirmations": {"click": True}},
+        ),
+    ],
+)
+def test_local_mcp_approval_ticket_is_attested_as_preflight(
+    monkeypatch, _runtime_settings, server_name, tool_name, cfg, permissions
+):
+    from app.agent.harness.tool_executor import ToolExecutor
+    from app.agent.iteration_budget import IterationBudget
+
+    _runtime_settings.permissions = merge_agent_settings(
+        _runtime_settings, {"permissions": permissions}
+    ).permissions
+    calls = []
+    manager = SimpleNamespace(
+        reflected_tool_names=[],
+        call_tool_sync=lambda *_args: calls.append("provider") or "{}",
+    )
+    if server_name == "chrome-devtools":
+        monkeypatch.setattr("app.skills.mcp_bridge.registry._browser_context", lambda *_a, **_kw: {
+            "context_token": "trusted-fixture", "context_version": "document:1", "url": "https://example.com/",
+            "action_kind": "click", "side_effect": "local_mutation", "target": {"uid": "1"},
+            "runtime_facts": {"target_verified": True, "context_verified": True},
+        })
+    entry = build_tool_entries(
+        MCPServerConfig(name=server_name, command="fixture", **cfg),
+        manager,
+        [SimpleNamespace(name=tool_name, description="Controlled test tool", inputSchema={"type": "object"})],
+    )[0]
+    operation, journal, _lifecycle = _prepare_mcp_durable_operation(
+        monkeypatch, entry["name"]
+    )
+    executor = ToolExecutor()
+    try:
+        result = asyncio.run(
+            executor.execute(
+                tool_dict=entry,
+                arguments={},
+                budget=IterationBudget(),
+                call_id="mcp-local-preflight",
+                operation_execution=operation,
+            )
+        )
+        assert result.status == "pending_approval", result.output
+        assert operation.note_pending_preflight(result.output)
+        assert operation.trusted_pending_resume
+        operation.preflight_rejected()
+    finally:
+        executor.shutdown()
+
+    assert calls == []
+    assert journal.transitions == ["authorized", "executing", "failed"]
+
+
+def test_provider_pending_payload_after_effect_is_not_local_preflight(
+    monkeypatch, _runtime_settings
+):
+    from app.agent.harness.tool_executor import ToolExecutor
+    from app.agent.iteration_budget import IterationBudget
+
+    _runtime_settings.permissions = merge_agent_settings(
+        _runtime_settings, {"permissions": {"mode": "full_access"}}
+    ).permissions
+    provider_effects = []
+    manager = SimpleNamespace(
+        reflected_tool_names=[],
+        call_tool_sync=lambda *_args: (
+            provider_effects.append("effect")
+            or json.dumps({"status": "pending_approval", "ticket_id": "remote-ticket"})
+        ),
+    )
+    entry = build_tool_entries(
+        MCPServerConfig(name="remote", command="fixture", trusted_tools=["transform"]),
+        manager,
+        [SimpleNamespace(name="transform", description="Transform", inputSchema={"type": "object"})],
+    )[0]
+    operation, journal, lifecycle = _prepare_mcp_durable_operation(
+        monkeypatch, entry["name"]
+    )
+    executor = ToolExecutor()
+    try:
+        result = asyncio.run(
+            executor.execute(
+                tool_dict=entry,
+                arguments={},
+                budget=IterationBudget(),
+                call_id="mcp-provider-pending",
+                operation_execution=operation,
+            )
+        )
+        assert result.status == "pending_approval"
+        assert not operation.note_pending_preflight(result.output)
+        operation.settle(result.output)
+    finally:
+        executor.shutdown()
+
+    assert provider_effects == ["effect"]
+    assert journal.transitions == ["authorized", "executing", "uncertain"]
+    assert lifecycle.review_requested
+
+
+def test_mcp_attestation_is_consumed_before_approved_remote_replay(
+    monkeypatch, _runtime_settings
+):
+    from app.agent.approval_broker import approve_ticket
+    from app.agent.harness.tool_executor import ToolExecutor
+    from app.agent.iteration_budget import IterationBudget
+
+    _runtime_settings.permissions = merge_agent_settings(
+        _runtime_settings, {"permissions": {"mode": "default"}}
+    ).permissions
+    provider_effects = []
+    manager = SimpleNamespace(
+        reflected_tool_names=[],
+        call_tool_sync=lambda *_args: (
+            provider_effects.append("effect")
+            or json.dumps({"status": "pending_approval", "ticket_id": "provider-ticket"})
+        ),
+    )
+    cfg = MCPServerConfig(
+        name="fixture", command="fixture"
+    )
+    entry = build_tool_entries(
+        cfg,
+        manager,
+        [SimpleNamespace(name="get_credential_status", description="Status", inputSchema={"type": "object"})],
+    )[0]
+    operation, journal, lifecycle = _prepare_mcp_durable_operation(
+        monkeypatch, entry["name"]
+    )
+    executor = ToolExecutor()
+    try:
+        pending = asyncio.run(
+            executor.execute(
+                tool_dict=entry,
+                arguments={},
+                budget=IterationBudget(),
+                call_id="mcp-attestation-once",
+                operation_execution=operation,
+            )
+        )
+        assert pending.status == "pending_approval"
+        assert provider_effects == []
+        assert operation.note_pending_preflight(pending.output)
+
+        ticket = get_ticket(json.loads(pending.output)["ticket_id"])
+        assert ticket is not None
+        approved = approve_ticket(ticket.id)
+        assert approved is not None
+
+        def replay_approved_provider_call():
+            updated = resume_approved_ticket(approved)
+            return updated.execution_result
+
+        resumed = asyncio.run(
+            executor.execute(
+                tool_dict={**entry, "callable": replay_approved_provider_call},
+                arguments={},
+                budget=IterationBudget(),
+                call_id="mcp-attestation-once",
+                operation_execution=operation,
+            )
+        )
+        assert resumed.status == "pending_approval"
+        assert not operation.note_pending_preflight(resumed.output)
+        operation.settle(resumed.output)
+    finally:
+        executor.shutdown()
+
+    assert provider_effects == ["effect"]
+    assert ticket.status.value == "failed"
+    assert journal.transitions == ["authorized", "executing", "uncertain"]
+    assert lifecycle.review_requested
+
+
+def test_generic_mcp_call_has_no_implicit_preflight_trust(monkeypatch):
+    from app.agent.harness.tool_executor import ToolExecutor
+    from app.agent.iteration_budget import IterationBudget
+
+    operation, _journal, _lifecycle = _prepare_mcp_durable_operation(
+        monkeypatch, "mcp_call"
+    )
+    executor = ToolExecutor()
+    try:
+        result = asyncio.run(
+            executor.execute(
+                tool_dict={
+                    "name": "mcp_call",
+                    "callable": lambda: json.dumps({"status": "pending_approval", "ticket_id": "untrusted"}),
+                },
+                arguments={},
+                budget=IterationBudget(),
+                call_id="generic-mcp-call",
+                operation_execution=operation,
+            )
+        )
+        assert not operation.note_pending_preflight(result.output)
+    finally:
+        executor.shutdown()
 
 
 def test_destructive_tool_stays_disabled_even_with_read_only_hint():
@@ -221,7 +483,7 @@ def test_destructive_tool_stays_disabled_even_with_read_only_hint():
 def test_full_access_executes_mcp_tools_without_approval_and_preserves_risk(_runtime_settings, tool_name):
     _runtime_settings.permissions = merge_agent_settings(_runtime_settings, {"permissions": {"mode": "full_access"}}).permissions
     calls = []
-    cfg = MCPServerConfig(name="Chrome", command="npx")
+    cfg = MCPServerConfig(name="Chrome", command="npx", trusted_tools=[tool_name])
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda tool, args: calls.append((tool, args)) or '{"ok":true}')
     tool = SimpleNamespace(name=tool_name, description="Control browser", inputSchema={"type": "object"})
     entry = build_tool_entries(cfg, manager, [tool])[0]
@@ -231,7 +493,7 @@ def test_full_access_executes_mcp_tools_without_approval_and_preserves_risk(_run
 
 
 def test_mcp_permission_mode_changes_apply_to_already_registered_tools(_runtime_settings):
-    cfg = MCPServerConfig(name="Chrome", command="npx")
+    cfg = MCPServerConfig(name="Chrome", command="npx", trusted_tools=["transform"])
     calls = []
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda tool, args: calls.append(tool) or '{"ok":true}')
     entry = build_tool_entries(cfg, manager, [SimpleNamespace(name="transform", description="Click a button")])[0]
@@ -250,7 +512,7 @@ def test_custom_mcp_confirmations_follow_matching_action_switch(_runtime_setting
     assert _runtime_settings.permissions.mode == "custom"
     calls = []
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda tool, args: calls.append(tool) or '{"ok":true}')
-    entry = build_tool_entries(MCPServerConfig(name="Chrome", command="npx"), manager, [SimpleNamespace(name=tool_name, description="Browser action")])[0]
+    entry = build_tool_entries(MCPServerConfig(name="Chrome", command="npx", trusted_tools=[tool_name]), manager, [SimpleNamespace(name=tool_name, description="Browser action")])[0]
     assert json.loads(entry["callable"]())["status"] == "pending_approval"
     _runtime_settings.permissions.confirmations.__setattr__(switch, False)
     assert json.loads(entry["callable"]())["ok"] is True
@@ -261,7 +523,7 @@ def test_mcp_deletion_follows_full_access_and_custom_rules(_runtime_settings):
     _runtime_settings.permissions = merge_agent_settings(_runtime_settings, {"permissions": {"mode": "full_access"}}).permissions
     calls = []
     manager = SimpleNamespace(reflected_tool_names=[], call_tool_sync=lambda *_: calls.append("delete") or '{"ok":true}')
-    entry = build_tool_entries(MCPServerConfig(name="files", command="npx"), manager, [SimpleNamespace(name="delete_file", description="Delete")])[0]
+    entry = build_tool_entries(MCPServerConfig(name="files", command="npx", trusted_tools=["delete_file"]), manager, [SimpleNamespace(name="delete_file", description="Delete")])[0]
     assert json.loads(entry["callable"]())["ok"] is True
     assert calls == ["delete"]
     _runtime_settings.permissions.mode = "custom"
@@ -289,7 +551,7 @@ def test_full_access_runs_mcp_refresh_and_reconnect_without_approval(_runtime_se
     register_tools(registry, _settings_with_servers([{"name": "Chrome", "enabled": True, "command": "npx"}]))
     calls = []
     monkeypatch.setattr(mcp_tools_module, "_refresh_server_tools", lambda registry, cfg: calls.append("refresh") or {"ok": True})
-    monkeypatch.setattr(mcp_tools_module, "reconnect_runtime_mcp_server", lambda name: calls.append("reconnect") or {"connected": True})
+    monkeypatch.setattr(mcp_tools_module, "reconnect_runtime_mcp_server", lambda name, **_kw: calls.append("reconnect") or {"connected": True})
     assert json.loads(registry.get_tool("mcp_refresh_tools")["callable"](server_name="Chrome"))["ok"] is True
     assert json.loads(registry.get_tool("mcp_reconnect_server")["callable"](server_name="Chrome"))["ok"] is True
     assert calls == ["refresh", "reconnect", "refresh"]
@@ -327,7 +589,52 @@ def test_changed_mcp_schema_invalidates_existing_approval():
     resumed = resume_approved_ticket(approved)
 
     assert resumed.status.value == "failed"
-    assert "schema changed" in (resumed.execution_result or "")
+    assert "mcp_schema_changed" in (resumed.execution_result or "")
+    assert calls == []
+
+
+@pytest.mark.parametrize("invalidation", ["session", "expiry", "payload"])
+def test_invalid_mcp_approval_never_calls_provider(monkeypatch, invalidation):
+    from datetime import datetime, timedelta, timezone
+
+    from app.agent.run_context import (
+        reset_current_control_session_id,
+        set_current_control_session_id,
+    )
+
+    calls = []
+    manager = SimpleNamespace(
+        reflected_tool_names=[],
+        call_tool_sync=lambda tool, args: calls.append((tool, args)) or '{"ok":true}',
+    )
+    entry = build_tool_entries(
+        MCPServerConfig(name="remote", command="fixture"),
+        manager,
+        [SimpleNamespace(name="transform", description="Transform", inputSchema={"type": "object"})],
+    )[0]
+
+    session_token = set_current_control_session_id("session-original")
+    try:
+        pending = json.loads(entry["callable"](value="approved-value"))
+        ticket = get_ticket(pending["ticket_id"])
+        assert ticket is not None
+        approved = approve_ticket(ticket.id)
+        assert approved is not None
+
+        if invalidation == "session":
+            reset_current_control_session_id(session_token)
+            session_token = set_current_control_session_id("session-changed")
+        elif invalidation == "expiry":
+            approved.expires_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        else:
+            approved.payload["args"]["value"] = "tampered-value"
+
+        resumed = resume_approved_ticket(approved)
+    finally:
+        reset_current_control_session_id(session_token)
+
+    assert resumed.status.value == "failed"
+    assert "approval_invalidated" in (resumed.execution_result or "")
     assert calls == []
 
 
@@ -424,6 +731,7 @@ def test_register_tools_adds_entries_for_enabled_servers(monkeypatch):
                     "enabled": True,
                     "command": "npx",
                     "args": ["-y", "@modelcontextprotocol/server-filesystem", r"C:\Repo"],
+                    "trusted_tools": ["list_directory"],
                 }
             ]
         ),
@@ -534,6 +842,47 @@ def test_reconnect_control_requires_approval(monkeypatch, _runtime_settings):
     assert ticket is not None
     assert ticket.action_type == "mcp_control"
     assert ticket.tool_name == "mcp_reconnect_server"
+
+
+def test_local_mcp_control_ticket_is_attested_as_preflight(
+    monkeypatch, _runtime_settings
+):
+    from app.agent.harness.tool_executor import ToolExecutor
+    from app.agent.iteration_budget import IterationBudget
+
+    _runtime_settings.permissions = merge_agent_settings(
+        _runtime_settings,
+        {"permissions": {"mode": "custom", "confirmations": {"launch_app": True}}},
+    ).permissions
+    monkeypatch.setattr(mcp_tools_module.importlib.util, "find_spec", lambda _name: None)
+    registry = ToolRegistry()
+    register_tools(
+        registry,
+        _settings_with_servers([{"name": "filesystem", "enabled": True, "command": "fixture"}]),
+    )
+    entry = registry.get_tool("mcp_reconnect_server")
+    assert entry is not None
+    operation, journal, _lifecycle = _prepare_mcp_durable_operation(
+        monkeypatch, "mcp_reconnect_server"
+    )
+    executor = ToolExecutor()
+    try:
+        result = asyncio.run(
+            executor.execute(
+                tool_dict=entry,
+                arguments={"server_name": "filesystem"},
+                budget=IterationBudget(),
+                call_id="mcp-control-preflight",
+                operation_execution=operation,
+            )
+        )
+        assert result.status == "pending_approval"
+        assert operation.note_pending_preflight(result.output)
+        operation.preflight_rejected()
+    finally:
+        executor.shutdown()
+
+    assert journal.transitions == ["authorized", "executing", "failed"]
 
 
 def test_failed_refresh_prunes_reflected_metadata(monkeypatch):
@@ -717,6 +1066,28 @@ def _call_with_session(session, tool_name: str) -> str:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2)
         loop.close()
+
+
+def test_remote_pending_content_is_wrapped_and_cannot_start_the_gate():
+    class PendingSession:
+        async def call_tool(self, _name, arguments):
+            assert arguments == {}
+            return SimpleNamespace(
+                isError=False,
+                structuredContent={"status": "pending_approval", "ticket_id": "remote-ticket"},
+                content=[],
+            )
+
+    from app.agent.execution_gate import ExecutionGateService
+
+    output = _call_with_session(PendingSession(), "get_credential_status")
+    payload = json.loads(output)
+
+    assert payload["status"] == "ok"
+    assert payload["structured_content"] == {
+        "status": "pending_approval", "ticket_id": "remote-ticket"
+    }
+    assert ExecutionGateService.check_pending_status(output) is None
 
 
 def test_mcp_image_blocks_are_saved_as_files_and_attached(monkeypatch, tmp_path):

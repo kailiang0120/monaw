@@ -73,7 +73,7 @@ def list_conversation_metadata() -> list[dict]:
 
 def create_conversation_file(conversation_id: str, title: str, workspace_dir: str = "") -> dict:
     """Create a new conversation and return its metadata dict."""
-    result = get_db().create_conversation(conversation_id, title, workspace_dir)
+    result = get_db().create_conversation(conversation_id, title, workspace_dir, default_chat_workspace=True)
     manager = peek_memory_manager()
     if manager is not None:
         manager._ensure_state(conversation_id, title)
@@ -510,6 +510,7 @@ class MemoryManager:
         steering_attachments: list[list[dict]] | None = None,
         steering_tool_call_indexes: list[int] | None = None,
         turn_id: str | None = None,
+        persist_user_message: bool = True,
     ) -> list[int]:
         """Atomically checkpoint history without waiting on model summarization.
 
@@ -517,7 +518,10 @@ class MemoryManager:
         ID makes retries safe even after the original process has exited.
         """
         state = self.get_or_create(conversation_id)
-        records = [{"role": "user", "content": user_message, "attachments": user_attachments}]
+        records = (
+            [{"role": "user", "content": user_message, "attachments": user_attachments}]
+            if persist_user_message else []
+        )
         # Each steering message sits where the agent read it: the tool calls made
         # before it go in an assistant message above it, the rest in the reply below.
         tool_calls_saved = 0
@@ -621,9 +625,9 @@ class MemoryManager:
     def delete(self, conversation_id: str) -> bool:
         """Delete conversation from memory and database."""
         found_memory = conversation_id in self._active_states
+        found_db = self._db.delete_conversation(conversation_id)
         if found_memory:
             del self._active_states[conversation_id]
-        found_db = self._db.delete_conversation(conversation_id)
         return found_memory or found_db
 
     def list_conversations(self) -> list[str]:

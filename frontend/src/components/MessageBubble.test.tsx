@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { fetchMessageToolCalls } from '../lib/api/conversations'
+import { approveTicket } from '../lib/api/approvals'
 import { downloadAttachment, fetchAttachmentObjectUrl } from '../lib/api/files'
 import type { Message } from '../hooks/useChat'
 import { MessageBubble } from './MessageBubble'
@@ -9,6 +10,7 @@ import { MessageBubble } from './MessageBubble'
 vi.mock('../lib/api/conversations', () => ({
   fetchMessageToolCalls: vi.fn(),
 }))
+vi.mock('../lib/api/approvals', () => ({ approveTicket: vi.fn(), rejectTicket: vi.fn() }))
 
 vi.mock('../lib/api/files', () => ({
   downloadAttachment: vi.fn(),
@@ -38,6 +40,38 @@ describe('MessageBubble', () => {
     expect(screen.getByRole('img', { name: 'Monaw mascot' })).toHaveAttribute('src', expect.stringMatching(/success\.gif/))
   })
 
+  it('shows exact approval scope and preserves the request if approval fails', async () => {
+    vi.mocked(approveTicket).mockRejectedValueOnce(new Error('Offline'))
+    render(<MessageBubble message={{ id: 'exact', role: 'assistant', content: '', approvals: [{
+      type: 'required', ticket_id: 'exact-ticket', action: 'Upload selected files', reason: 'Data leaves this PC.',
+      action_descriptor: { action_id: 'action-1', tool_name: 'mcp__chrome-devtools__upload_file', action_kind: 'upload_files', destination: 'https://example.com', human_only: true,
+        data_scope: { file_count: 1, size_bytes: 12, files: [{ name: 'report.pdf', size_bytes: 12 }] }, side_effect: 'external_submission' },
+    }] }} />)
+    expect(screen.getByText('https://example.com')).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Selected files' })).toHaveTextContent('report.pdf')
+    fireEvent.click(screen.getByRole('button', { name: 'Approve once' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('still pending')
+    expect(screen.getByRole('button', { name: 'Approve once' })).toBeEnabled()
+    expect(approveTicket).toHaveBeenCalledWith('exact-ticket')
+  })
+
+  it('distinguishes browser dispatch from verified and uncertain results', () => {
+    const message: Message = { id: 'browser-status', role: 'assistant', content: '', toolCalls: [{
+      id: 'call-1', tool: 'mcp__chrome-devtools__click', input: '{}', status: 'success', pending: false,
+      output: JSON.stringify({ action_outcome: { status: 'executed', action_executed: true } }),
+    }] }
+    const { rerender } = render(<MessageBubble message={message} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Used browser' }))
+    expect(screen.getByText('Dispatched · not verified')).toBeInTheDocument()
+    message.toolCalls![0].output = JSON.stringify({ action_outcome: { status: 'uncertain', action_executed: true, recovery: { retry_allowed: false } } })
+    rerender(<MessageBubble message={{ ...message, toolCalls: [...message.toolCalls!] }} />)
+    expect(screen.getByText('Outcome uncertain')).toBeInTheDocument()
+    expect(screen.queryByText('Verified')).not.toBeInTheDocument()
+    message.toolCalls![0].output = JSON.stringify({ action_outcome: { status: 'verified', action_executed: true } })
+    rerender(<MessageBubble message={{ ...message, toolCalls: [...message.toolCalls!] }} />)
+    expect(screen.getByText('Verified')).toBeInTheDocument()
+  })
+
   it('shows an Auto Review denial and its reason without approval buttons', () => {
     render(<MessageBubble message={{ id: 'review-denied', role: 'assistant', content: '', approvals: [{
       ticket_id: 'denied-ticket', action: 'Send the report', reason: 'You requested a draft only.',
@@ -58,6 +92,39 @@ describe('MessageBubble', () => {
     expect(screen.getByText('The target is unclear.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled()
+  })
+
+  it('shows the trusted file diff before the user approves a write', () => {
+    render(<MessageBubble message={{
+      id: 'approval-file-preview',
+      role: 'assistant',
+      content: '',
+      approvals: [{
+        ticket_id: 'ticket-file-preview',
+        action: 'Write report.txt',
+        reason: 'This change needs your approval.',
+        type: 'required',
+        file_preview: {
+          version: 1,
+          operation: 'write',
+          files: [{
+            path: 'C:/workspace/report.txt',
+            role: 'target',
+            before: { exists: true, kind: 'file', size: 4 },
+            after: { exists: true, kind: 'file', size: 12 },
+          }],
+          undo_capability: 'available',
+          preview: { kind: 'unified_diff', text: '--- before\n+++ after\n-old\n+new report\n' },
+        },
+      } as any],
+    }} />)
+
+    const preview = screen.getByRole('region', { name: 'File change preview' })
+    expect(preview).toHaveTextContent('C:/workspace/report.txt')
+    expect(screen.getByLabelText('Text diff')).toHaveTextContent('+new report')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Apply file change' })).not.toBeInTheDocument()
   })
 
   it('switches the mascot animation while the assistant is working', () => {
@@ -379,6 +446,7 @@ const answer = 42
     expect(screen.getByText('Opening the browser.')).toBeInTheDocument()
     expect(screen.getByText('Inspecting the page.')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Used browser' }))
+    fireEvent.click(screen.getByRole('button', { name: /Using browser_snapshot/ }))
     const lists = screen.getAllByRole('list', { name: 'Tool calls' })
     expect(lists).toHaveLength(2)
     expect(screen.getAllByRole('listitem')).toHaveLength(2)
@@ -413,11 +481,39 @@ const answer = 42
       />,
     )
 
+    fireEvent.click(screen.getByRole('button', { name: 'Using tool_4' }))
     expect(screen.getByRole('list', { name: 'Tool calls' })).toBeInTheDocument()
     expect(screen.getAllByRole('listitem')).toHaveLength(4)
     const calls = screen.getByRole('list', { name: 'Tool calls' })
     expect(within(calls).getByRole('button', { name: /Used tool_1/ })).toBeInTheDocument()
     expect(within(calls).getByRole('button', { name: /Using tool_4/ })).toBeInTheDocument()
+  })
+
+  it('keeps the user chosen tool expansion state as calls start and finish', () => {
+    const message: Message = {
+      id: 'stable-tool-expansion', role: 'assistant', content: '', streaming: true,
+      toolCalls: [{ id: 'first', tool: 'fs_read', input: '{}', pending: true }],
+    }
+    const { rerender } = render(<MessageBubble message={message} />)
+    const heading = screen.getByRole('button', { name: 'Using fs_read' })
+    expect(heading).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument()
+
+    fireEvent.click(heading)
+    const completed = { ...message.toolCalls![0], pending: false, output: 'Done' }
+    rerender(<MessageBubble message={{ ...message, toolCalls: [completed] }} />)
+    expect(heading).toHaveAttribute('aria-expanded', 'true')
+    const next = { id: 'second', tool: 'fs_read', input: '{}', pending: true }
+    rerender(<MessageBubble message={{ ...message, toolCalls: [completed, next] }} />)
+    expect(heading).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+
+    fireEvent.click(heading)
+    const finished = [completed, { ...next, pending: false, output: 'Done' }]
+    rerender(<MessageBubble message={{ ...message, toolCalls: finished }} />)
+    rerender(<MessageBubble message={{ ...message, toolCalls: [...finished, { ...next, id: 'third' }] }} />)
+    expect(heading).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('list', { name: 'Tool calls' })).not.toBeInTheDocument()
   })
 
   it('shows expandable command activity below plain progress', () => {
@@ -536,7 +632,7 @@ const answer = 42
     expect(screen.queryByText('Checked the available context.')).not.toBeInTheDocument()
   })
 
-  it('keeps active plan progress visible after answer playback starts', () => {
+  it('omits the redundant plan display while the answer streams', () => {
     render(
       <MessageBubble
         message={{
@@ -558,7 +654,8 @@ const answer = 42
     )
 
     expect(screen.getByText('The answer is now typing.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Prepare response' })).toBeInTheDocument()
+    expect(screen.queryByText('Prepare response')).not.toBeInTheDocument()
+    expect(screen.queryByText('Plan')).not.toBeInTheDocument()
   })
 
   it('shows progress before a simple answer without repeating its text', () => {

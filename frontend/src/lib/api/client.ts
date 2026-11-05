@@ -61,11 +61,16 @@ function legacyMessage(payload: Record<string, unknown>, fallbackMessage: string
 export async function decodeApiError(response: Response, fallbackMessage = 'Request failed'): Promise<ApiError> {
   const payload = await response.json().catch(() => null)
   const record = isRecord(payload) ? payload : {}
+  const detail = isRecord(record.detail) ? record.detail : {}
   const envelope: ApiErrorEnvelope = {
-    code: typeof record.code === 'string' && record.code ? record.code : 'request_failed',
+    code: typeof record.code === 'string' && record.code
+      ? record.code
+      : typeof detail.code === 'string' && detail.code
+        ? detail.code
+        : 'request_failed',
     message: typeof record.message === 'string' && record.message ? record.message : legacyMessage(record, fallbackMessage),
     request_id: typeof record.request_id === 'string' ? record.request_id : response.headers.get('x-request-id') || '',
-    details: isRecord(record.details) ? record.details : {},
+    details: isRecord(record.details) ? record.details : isRecord(detail.details) ? detail.details : {},
   }
   return new ApiError(response, envelope, fallbackMessage)
 }

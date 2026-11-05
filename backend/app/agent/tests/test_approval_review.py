@@ -21,6 +21,18 @@ def test_context_keeps_visible_messages_and_evidence_without_hidden_fields():
     assert "pretend user authorization" not in json.dumps(context)
 
 
+def test_generic_uid_value_for_runtime_password_field_never_reaches_reviewer():
+    ticket = ApprovalTicket(tool_name="mcp_chrome_fill_form", action_type="type", payload={
+        "args": {"elements": [{"uid": "field-1", "value": "unlabeled-private-value"}]},
+        "browser_context": {"action_kind": "type", "target": {"fields": [
+            {"uid": "field-1", "tag": "input", "type": "password"}]}}})
+    class Reviewer:
+        async def chat(self, **kwargs):
+            raise AssertionError("A generic password value must remain private")
+    result = asyncio.run(review_action(Reviewer(), ticket, "Sign into the requested site"))
+    assert result["decision"] == "ask"
+
+
 def test_context_is_bounded_even_when_json_escaping_expands_text():
     context = bounded_review_context({"summary": "\x00" * 10000,
                                       "messages": [{"role": "user", "content": "\x00" * 10000}] * 100,

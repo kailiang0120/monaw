@@ -1,10 +1,13 @@
 import asyncio
+import json
 
 import pytest
 
 from app.skills.browser_use.extension.keys import key_events, parse_key_combo
+from app.skills.browser_use.extension.dom_inspection import ACTION_TARGET, READ_ELEMENT
 from app.skills.browser_use.extension.session import ToolError
-from app.skills.browser_use.extension.toolset import BrowserTools
+from app.skills.browser_use.extension.toolset import BrowserTools, _TARGET_FACTS
+from app.skills.browser_use.extension.page_state import PAGE_STATE
 from app.skills.browser_use.extension.tools_schema import TOOL_DEFINITIONS, TOOL_NAMES
 from app.skills.mcp_bridge.builtin import BUILTIN_TOOL_POLICIES, CHROME_DEVTOOLS_SERVER
 
@@ -49,6 +52,7 @@ class FakeChrome:
         self.open_dialog_on_release = False
         self.hidden_nodes: set[int] = set()
         self.label_point = None
+        self.element_states = [{"attached": True, "visible": True, "enabled": True, "editable": True, "ready": True}]
 
     def add_listener(self, listener):
         self.listeners.append(listener)
@@ -72,9 +76,13 @@ class FakeChrome:
         cdp, args = params["method"], params["params"]
         self.calls.append((cdp, args))
         if cdp == "Page.getFrameTree":
-            return {"frameTree": {"frame": {"id": "F1", "loaderId": self.loader}}}
+            return {"frameTree": {"frame": {"id": "F1", "loaderId": self.loader, "url":self.tabs[0]["url"]}}}
+        if cdp == "Page.createIsolatedWorld":
+            return {"executionContextId":1}
         if cdp == "Accessibility.getFullAXTree":
             return {"nodes": self.tree}
+        if cdp == "Accessibility.getPartialAXTree":
+            return {"nodes":[node for node in self.tree if node.get("backendDOMNodeId") == args["backendNodeId"]]}
         if cdp == "DOM.getContentQuads":
             if args["backendNodeId"] in self.hidden_nodes:
                 return {"quads": [[5, 5, 5, 5, 5, 5, 5, 5]]}  # Visually hidden: no area.
@@ -83,10 +91,23 @@ class FakeChrome:
             return {"object": {"objectId": f"obj-{args['backendNodeId']}"}}
         if cdp == "Runtime.callFunctionOn":
             function = args["functionDeclaration"]
+            if "el.ownerDocument.activeElement === el" in function:
+                return {"result":{"value":True}}
+            if function == _TARGET_FACTS:
+                return {"result":{"value":{"tag":"input", "type":"text", "attached":True, "frame_url":self.tabs[0]["url"]}}}
+            if function in {READ_ELEMENT, ACTION_TARGET}:
+                state = self.element_states[0]
+                if len(self.element_states) > 1:
+                    self.element_states.pop(0)
+                return {"result": {"value": state}}
             if "el.labels" in function:
                 return {"result": {"value": self.label_point}}
             return {"result": {"value": self.fill_kind if "el.select" in function else 42}}
         if cdp == "Runtime.evaluate":
+            if args["expression"] == PAGE_STATE:
+                return {"result":{"value":{"document":self.loader, "revision":0, "url":self.tabs[0]["url"], "width":800, "height":600, "scale":1}}}
+            if args["expression"] == "location.href":
+                return {"result":{"value":self.tabs[0]["url"]}}
             if args["expression"] == "globalThis":
                 return {"result": {"objectId": "global"}}
             return {"result": {"value": "Hello Welcome"}}
@@ -152,10 +173,71 @@ def test_click_dispatches_mouse_events_at_the_element_center():
     tools, chrome = _tools()
     _run(tools, "take_snapshot")
     output = _run(tools, "click", uid="1_3")
-    assert output.lines == ["Successfully clicked on the element"]
+    assert output.lines[0] == "Successfully clicked on the element"
+    assert output.lines[-1].startswith("## Latest page snapshot")
     mouse = [args for method, args in chrome.calls if method == "Input.dispatchMouseEvent"]
     assert [event["type"] for event in mouse] == ["mouseMoved", "mousePressed", "mouseReleased"]
     assert (mouse[1]["x"], mouse[1]["y"]) == (60, 40)
+
+
+def test_actions_wait_for_usable_stable_controls_without_replaying():
+    tools, chrome = _tools()
+    _run(tools, "take_snapshot")
+    chrome.calls.clear()
+    chrome.element_states = [
+        {"attached": True, "ready": False, "covered": True},
+        {"attached": True, "ready": True, "bounds": {"x": 10}},
+        {"attached": True, "ready": True, "bounds": {"x": 20}},
+        {"attached": True, "ready": True, "bounds": {"x": 20}},
+    ]
+    result = _run(tools, "click", uid="1_3")
+    reads = [i for i, (method, args) in enumerate(chrome.calls)
+             if method == "Runtime.callFunctionOn" and args["functionDeclaration"] == ACTION_TARGET]
+    presses = [i for i, (method, args) in enumerate(chrome.calls)
+               if method == "Input.dispatchMouseEvent" and args["type"] == "mousePressed"]
+    assert len(reads) == 4 and len(presses) == 1 and presses[0] > reads[-1]
+    assert result.lines[-1].startswith("## Latest page snapshot")
+    assert sum(method == "Accessibility.getFullAXTree" for method, _ in chrome.calls) == 1
+    assert _run(tools, "click", uid="1_3", includeSnapshot=False).lines == ["Successfully clicked on the element"]
+    chrome.calls.clear()
+    chrome.element_states = [{"attached": False, "ready": False}]
+    with pytest.raises(ToolError, match="replaced or removed"):
+        _run(tools, "fill", uid="1_5", value="x")
+    assert not any(method.startswith("Input.") for method, _ in chrome.calls)
+
+
+def test_fill_form_reports_partial_completion_and_does_not_repeat_fields():
+    tools, chrome = _tools()
+    _run(tools, "take_snapshot")
+    chrome.element_states = [
+        {"attached": True, "ready": True}, {"attached": True, "ready": True},
+        {"attached": True, "ready": False, "readonly": True},
+    ]
+    output = _run(tools, "fill_form", timeout=200, elements=[
+        {"uid": "1_5", "value": "person@example.com"}, {"uid": "1_3", "value": "blocked"},
+    ])
+    assert "stopped at uid 1_3" in output.lines[0]
+    from app.skills.browser_use.extension.__main__ import _result
+    assert _result(output).isError is True
+    assert "Completed uids: 1_5" in output.lines[1]
+    assert output.lines[-1].startswith("## Latest page snapshot")
+    assert [args for method, args in chrome.calls if method == "Input.insertText"] == [{"text": "person@example.com"}]
+
+
+def test_snapshot_failure_preserves_completed_action(monkeypatch):
+    from app.skills.browser_use.extension import toolset
+    tools, chrome = _tools()
+    _run(tools, "take_snapshot")
+
+    async def unavailable(_session):
+        raise ToolError("Page navigated during read")
+
+    monkeypatch.setattr(toolset, "take_snapshot", unavailable)
+    output = _run(tools, "click", uid="1_3")
+    assert output.lines[0] == "Successfully clicked on the element"
+    assert "do not repeat the completed action" in output.lines[1]
+    assert sum(method == "Input.dispatchMouseEvent" and args["type"] == "mousePressed"
+               for method, args in chrome.calls) == 1
 
 
 def test_click_that_opens_a_dialog_returns_without_waiting_and_blocks_reads():
@@ -173,7 +255,7 @@ def test_click_that_opens_a_dialog_returns_without_waiting_and_blocks_reads():
 def test_fill_types_into_text_fields_and_reports_unfillable_elements():
     tools, chrome = _tools()
     _run(tools, "take_snapshot")
-    assert _run(tools, "fill", uid="1_5", value="me@x.y").lines == ["Successfully filled out the element"]
+    assert _run(tools, "fill", uid="1_5", value="me@x.y").lines[0] == "Successfully filled out the element"
     assert ("Input.insertText", {"text": "me@x.y"}) in chrome.calls
     chrome.fill_kind = {"kind": "error", "message": "This element cannot be filled."}
     with pytest.raises(ToolError, match="Could not fill uid 1_3"):
@@ -193,7 +275,8 @@ def test_navigate_waits_for_load_and_lists_pages():
     tools, chrome = _tools()
     output = _run(tools, "navigate_page", url="https://example.com/next")
     assert output.lines[0] == "Successfully navigated to https://example.com/next."
-    assert output.lines[-1].startswith("## Pages")
+    assert any(line.startswith("## Pages") for line in output.lines)
+    assert output.lines[-1].startswith("## Latest page snapshot")
     with pytest.raises(ToolError, match="Either URL or a type"):
         _run(tools, "navigate_page")
 
@@ -201,7 +284,8 @@ def test_navigate_waits_for_load_and_lists_pages():
 def test_new_page_opens_a_tab_and_selects_it():
     tools, chrome = _tools()
     output = _run(tools, "new_page", url="https://example.org/")
-    assert "2: about:blank [selected]" in output.lines[-1]
+    assert any("2: about:blank [selected]" in line for line in output.lines)
+    assert output.lines[-1].startswith("## Latest page snapshot")
 
 
 def test_close_page_refuses_the_last_page():
@@ -214,7 +298,9 @@ def test_close_page_refuses_the_last_page():
 
 def test_screenshot_returns_an_image_block():
     tools, chrome = _tools()
-    output = _run(tools, "take_screenshot")
+    # A deliberately non-image payload still exercises ordinary screenshot
+    # transport without advertising a coordinate binding.
+    output = _run(tools, "take_screenshot", fullPage=True)
     assert output.images == [{"data": "aGVsbG8=", "mimeType": "image/png"}]
     assert ("tabs.activate", {"tabId": 7}) in chrome.calls
 
@@ -222,8 +308,55 @@ def test_screenshot_returns_an_image_block():
 def test_wait_for_and_evaluate_script():
     tools, chrome = _tools()
     assert "found" in _run(tools, "wait_for", text=["Welcome"]).lines[0]
-    output = _run(tools, "evaluate_script", function="() => 42")
+    output = _run(tools, "evaluate_script", pageId=1, function="() => 42")
     assert output.lines == ["Script ran on page and returned:\n```json\n42\n```"]
+
+
+def test_inspect_element_uses_fixed_read_only_queries_and_releases_targets():
+    tools, chrome = _tools()
+    _run(tools, "take_snapshot")
+    chrome.element_states = [{"attached": True, "tag": "input", "attributes": {"id": "email"},
+                              "validation": {"invalid": True, "message": "Enter an email"}}]
+    output = _run(tools, "inspect_element", uid="1_5")
+    assert json.loads(output.lines[0].split("\n", 1)[1])["validation"]["invalid"] is True
+    selector = 'input[name="email"]'
+    _run(tools, "inspect_element", selector=selector)
+    reads = [args for method, args in chrome.calls if method == "Runtime.callFunctionOn"]
+    assert all(call["functionDeclaration"] == READ_ELEMENT for call in reads)
+    assert reads[-1]["arguments"] == [{"value": selector}, {"value": True}]
+    assert ("Runtime.releaseObject", {"objectId": "obj-13"}) in chrome.calls
+    assert ("Runtime.releaseObject", {"objectId": "global"}) in chrome.calls
+    assert not any(method.startswith("Input.") for method, _ in chrome.calls)
+
+
+def test_wait_for_dynamic_element_states_returns_one_fresh_snapshot():
+    tools, chrome = _tools()
+    chrome.element_states = [{"attached": True, "editable": False}, {"attached": True, "editable": True}]
+    output = _run(tools, "wait_for", selector="#email", state="editable", timeout=1000)
+    assert output.lines[0] == "Element reached state: editable."
+    assert "Latest page snapshot" in output.lines[1]
+    assert sum(method == "Accessibility.getFullAXTree" for method, _ in chrome.calls) == 1
+    # A selector is reevaluated on each poll; removing an overlay also satisfies hidden.
+    chrome.element_states = [{"attached": True, "visible": True}, {"attached": False, "visible": False}]
+    output = _run(tools, "wait_for", selector="#loading", state="hidden", includeSnapshot=False, timeout=1000)
+    assert output.lines == ["Element reached state: hidden."]
+    assert sum(method == "Accessibility.getFullAXTree" for method, _ in chrome.calls) == 1
+    assert sum(method == "Runtime.releaseObject" for method, _ in chrome.calls) == 2
+
+
+def test_element_wait_reports_failures_instead_of_treating_them_as_hidden():
+    tools, chrome = _tools()
+    chrome.element_states = [{"error": "Selector matches multiple elements. Narrow it to one element."}]
+    with pytest.raises(ToolError, match="multiple elements"):
+        _run(tools, "wait_for", selector="input", state="hidden")
+    chrome.element_states = [{"attached": True, "visible": False, "ready": False}]
+    with pytest.raises(ToolError, match="Timed out.*ready.*Last observed state"):
+        _run(tools, "wait_for", selector="#email", state="ready", timeout=10)
+    with pytest.raises(ToolError, match="exactly one"):
+        _run(tools, "inspect_element", uid="1_5", selector="#email")
+    with pytest.raises(ToolError, match="not both"):
+        _run(tools, "wait_for", text=["Done"], selector="#email")
+    assert sum(method == "Runtime.releaseObject" for method, _ in chrome.calls) == 2
 
 
 def test_upload_requires_existing_absolute_files(tmp_path):
@@ -233,7 +366,7 @@ def test_upload_requires_existing_absolute_files(tmp_path):
         _run(tools, "upload_file", uid="1_5", filePaths=["relative.txt"])
     upload = tmp_path / "a.txt"
     upload.write_text("x", encoding="utf-8")
-    assert "File uploaded" in _run(tools, "upload_file", uid="1_5", filePaths=[str(upload)]).lines[0]
+    assert "Network upload completion has not been verified" in _run(tools, "upload_file", uid="1_5", filePaths=[str(upload)]).lines[0]
     assert ("DOM.setFileInputFiles", {"files": [str(upload)], "backendNodeId": 13}) in chrome.calls
 
 
@@ -317,22 +450,21 @@ def test_click_on_a_hidden_control_clicks_its_visible_label():
     _run(tools, "take_snapshot")
     chrome.hidden_nodes = {13}
     chrome.label_point = {"x": 300, "y": 150}
-    assert _run(tools, "click", uid="1_5").lines == ["Successfully clicked on the element"]
+    assert _run(tools, "click", uid="1_5").lines[0] == "Successfully clicked on the element"
     pressed = [args for method, args in chrome.calls if method == "Input.dispatchMouseEvent" and args["type"] == "mousePressed"]
     assert (pressed[-1]["x"], pressed[-1]["y"]) == (300, 150)
 
 
-def test_click_on_a_hidden_control_without_a_label_clicks_it_directly():
+def test_click_on_a_hidden_control_without_a_label_does_not_force_a_click():
     tools, chrome = _tools()
     _run(tools, "take_snapshot")
     chrome.hidden_nodes = {13}
-    output = _run(tools, "click", uid="1_5")
-    assert output.lines == ["Successfully clicked on the element (it is hidden on screen, so it was clicked directly)"]
-    script = [args for method, args in chrome.calls if method == "Runtime.callFunctionOn" and "el.click()" in args["functionDeclaration"]]
-    assert script and script[-1]["userGesture"] is True and script[-1]["arguments"] == [{"value": False}]
-    assert not any(method == "Input.dispatchMouseEvent" and args["type"] == "mousePressed" for method, args in chrome.calls)
-    with __import__("pytest").raises(ToolError, match="not visible"):
-        _run(tools, "hover", uid="1_5")
+    chrome.element_states = [{"attached": True, "visible": False, "ready": False}]
+    with pytest.raises(ToolError, match="action was not dispatched"):
+        _run(tools, "click", uid="1_5", timeout=30)
+    assert not any(method == "Input.dispatchMouseEvent" for method, _ in chrome.calls)
+    assert not any(method == "Runtime.callFunctionOn" and "el.click()" in args["functionDeclaration"]
+                   for method, args in chrome.calls)
 
 
 def test_settle_stops_when_an_in_page_navigation_finishes():

@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   HardDrive,
+  Info,
   AlertCircle,
   Bot,
   CheckCircle2,
@@ -27,6 +28,8 @@ import { ConnectionPortalPanel } from './connectionPortals/ConnectionPortalPanel
 import { McpSettings } from './McpSettings'
 import { MemoryRetrieval } from './MemoryRetrieval'
 import { SandboxSettings } from './SandboxSettings'
+import { ExecutionDetailSetting } from './ExecutionDetailSetting'
+import { AboutSettings } from './AboutSettings'
 import { StorageSettings } from './StorageSettings'
 import { useSettingsDraft } from './useSettingsDraft'
 import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
@@ -146,6 +149,7 @@ const TOOLS_TABS: Array<{ id: ToolsTab; label: string }> = [
 ]
 
 const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
+  about: Info,
   identity: UserRound,
   apiKeys: KeyRound,
   model: Bot,
@@ -153,6 +157,7 @@ const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
   browser: Globe2,
   permissions: Shield,
   sandbox: Container,
+  execution: Activity,
   observability: Activity,
   storage: HardDrive,
 }
@@ -161,11 +166,11 @@ const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
  * Group pages by what the user is trying to configure.
  */
 const NAV_GROUPS: Array<{ id: string; label: string; items: SettingsTab[] }> = [
-  { id: 'general', label: 'General', items: ['identity', 'apiKeys'] },
+  { id: 'general', label: 'General', items: ['identity', 'apiKeys', 'about'] },
   { id: 'intelligence', label: 'Intelligence', items: ['model'] },
   { id: 'capabilities', label: 'Capabilities', items: ['tools', 'browser'] },
   { id: 'safety', label: 'Safety', items: ['permissions', 'sandbox'] },
-  { id: 'inspect', label: 'Inspect', items: ['observability', 'storage'] },
+  { id: 'inspect', label: 'Inspect', items: ['execution', 'observability', 'storage'] },
 ]
 
 const ALL_TABS: SettingsTab[] = NAV_GROUPS.flatMap((group) => group.items)
@@ -239,6 +244,20 @@ export function SettingsModal({
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
+  const saveDiagnosticsRef = useRef<AbortController | null>(null)
+  const mountedRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      saveDiagnosticsRef.current?.abort()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (isDirty) setSaved(false)
+  }, [isDirty])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -321,7 +340,8 @@ export function SettingsModal({
 
   const loadMcpDiagnostics = async (signal?: AbortSignal) => {
     try {
-      storeMcpDiagnostics(await fetchMCPDiagnostics(signal))
+      const diagnostics = await fetchMCPDiagnostics(signal)
+      if (!signal?.aborted) storeMcpDiagnostics(diagnostics)
     } catch {
       if (signal?.aborted) return
       setMcpDiagnostics({})
@@ -330,7 +350,8 @@ export function SettingsModal({
 
   const loadBrowserDiagnostics = async (signal?: AbortSignal) => {
     try {
-      setBrowserDiagnostics(await fetchBrowserDiagnostics(signal))
+      const diagnostics = await fetchBrowserDiagnostics(signal)
+      if (!signal?.aborted) setBrowserDiagnostics(diagnostics)
     } catch {
       if (signal?.aborted) return
       setBrowserDiagnostics(null)
@@ -339,7 +360,8 @@ export function SettingsModal({
 
   const loadSandboxStatus = async (signal?: AbortSignal) => {
     try {
-      setSandboxStatus(await fetchSandboxStatus(signal))
+      const status = await fetchSandboxStatus(signal)
+      if (!signal?.aborted) setSandboxStatus(status)
     } catch {
       if (signal?.aborted) return
       setSandboxStatus(null)
@@ -522,15 +544,21 @@ export function SettingsModal({
   }
 
   const handleSave = async () => {
-    if (!draft) return
+    if (!draft || !isDirty || saving) return
     if (duplicateMcpServerNames(draft.mcp.servers).length > 0) return
     keepEditing()
     const outcome = await saveDraft(modelOptions)
-    if (outcome === 'failed') return
-    await Promise.all([loadMcpDiagnostics(), loadBrowserDiagnostics(), loadSandboxStatus()])
-    if (outcome !== 'saved') return
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+    if (!mountedRef.current || outcome === 'failed') return
+    setSaved(outcome === 'saved')
+    // Saving is complete. Diagnostics must not delay success or outlive the dialog.
+    saveDiagnosticsRef.current?.abort()
+    const controller = new AbortController()
+    saveDiagnosticsRef.current = controller
+    void Promise.all([
+      loadMcpDiagnostics(controller.signal),
+      loadBrowserDiagnostics(controller.signal),
+      loadSandboxStatus(controller.signal),
+    ])
   }
 
   const updatePermissionMode = (mode: AgentSettings['permissions']['mode']) => {
@@ -689,20 +717,20 @@ export function SettingsModal({
         aria-modal="true"
         aria-label="Settings"
         tabIndex={-1}
-        className="settings-shell flex h-[min(92vh,940px)] w-full max-w-6xl overflow-hidden rounded-2xl"
+        className="settings-shell relative flex h-[min(86vh,820px)] w-full max-w-[960px] overflow-hidden rounded-2xl"
       >
+        <button
+          type="button"
+          onClick={requestClose}
+          className="st-btn st-btn-ghost st-btn-icon st-settings-close"
+          aria-label="Close settings"
+        >
+          <X size={15} />
+        </button>
         {/* ------------------------------------------------------ navigation */}
-        <aside className="st-nav hidden h-full w-56 shrink-0 flex-col p-3 md:flex">
-          <div className="mb-3 flex items-center justify-between gap-2 px-1">
+        <aside className="st-nav hidden h-full w-52 shrink-0 flex-col p-3 md:flex">
+          <div className="mb-3 flex h-7 items-center gap-2 px-1">
             <h2 className="st-title">Settings</h2>
-            <button
-              type="button"
-              onClick={requestClose}
-              className="st-btn st-btn-ghost st-btn-icon"
-              aria-label="Close settings"
-            >
-              <X size={15} />
-            </button>
           </div>
 
           <div className="relative mb-3">
@@ -758,16 +786,8 @@ export function SettingsModal({
 
         <div className="flex min-w-0 flex-1 flex-col">
           {/* ------------------------------------------------ compact header */}
-          <header className="st-divider-b flex items-center justify-between gap-3 px-5 py-3 md:hidden">
+          <header className="st-divider-b flex items-center gap-3 py-3 pl-5 pr-14 md:hidden">
             <h2 className="st-title">Settings</h2>
-            <button
-              type="button"
-              onClick={requestClose}
-              className="st-btn st-btn-ghost st-btn-icon"
-              aria-label="Close settings"
-            >
-              <X size={15} />
-            </button>
           </header>
 
           <div className="st-divider-b px-4 py-3 md:hidden">
@@ -780,12 +800,13 @@ export function SettingsModal({
           </div>
 
           {/* ---------------------------------------------------- page body */}
-          <div ref={scrollRef} className="st-scroll min-h-0 flex-1 overflow-y-auto px-6 py-6">
+          <div ref={scrollRef} className="st-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
             <div className="mx-auto w-full max-w-[46rem]">
+              {activeTab === 'about' && <AboutSettings />}
               {activeTab === 'model' && (
                 <>
                   <PageHeader title={PAGE_COPY.model.label} />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard
                       title="Voice input"
                       action={
@@ -847,7 +868,7 @@ export function SettingsModal({
               {activeTab === 'apiKeys' && (
                 <>
                   <PageHeader title={PAGE_COPY.apiKeys.label} />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard
                       title="OpenAI account"
                       description="Use your ChatGPT plan for Monaw's model requests, instead of an API key."
@@ -1010,7 +1031,7 @@ export function SettingsModal({
               {activeTab === 'identity' && (
                 <>
                   <PageHeader title={PAGE_COPY.identity.label} />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard title="Names">
                       <SettingRow label="Agent name">
                         <input
@@ -1181,7 +1202,7 @@ export function SettingsModal({
 
               {activeTab === 'tools' && toolsTab === 'skills' && (
                 <>
-                  <div role="tabpanel" id="settings-tools-panel-skills" aria-labelledby="settings-tools-tab-skills" className="space-y-4" tabIndex={0}>
+                  <div role="tabpanel" id="settings-tools-panel-skills" aria-labelledby="settings-tools-tab-skills" className="space-y-3" tabIndex={0}>
                     <Note tone="info">{SKILLS_COPY.intro}</Note>
                     <SettingsCard
                         title={SKILLS_COPY.title}
@@ -1263,7 +1284,7 @@ export function SettingsModal({
                       </button>
                     }
                   />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard title="Status">
                       <div className="grid grid-cols-2">
                         <StatusCell
@@ -1441,10 +1462,20 @@ export function SettingsModal({
                 </>
               )}
 
+              {activeTab === 'execution' && (
+                <>
+                  <PageHeader title={PAGE_COPY.execution.label} />
+                  <ExecutionDetailSetting
+                    value={draft.execution_detail}
+                    onChange={(execution_detail) => updateDraft((current) => ({ ...current, execution_detail }))}
+                  />
+                </>
+              )}
+
               {activeTab === 'permissions' && (
                 <>
                   <PageHeader title={PAGE_COPY.permissions.label} />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard title="Approval profile">
                       <div className="grid gap-2 p-4 sm:grid-cols-2">
                         {(['default', 'full_access', 'auto_review', 'custom'] as const).map((mode) => (
@@ -1536,11 +1567,11 @@ export function SettingsModal({
                   <button
                     type="button"
                     onClick={handleSave}
-                    disabled={saving || duplicateMcpNames.length > 0}
+                    disabled={!isDirty || saving || duplicateMcpNames.length > 0}
                     className="st-btn st-btn-primary"
                   >
                     <Save size={13} />
-                    {saved ? 'Saved' : saving ? 'Saving…' : 'Save changes'}
+                    {saving ? 'Saving…' : saved && !isDirty ? 'Saved' : 'Save changes'}
                   </button>
                 </div>
               </>

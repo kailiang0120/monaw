@@ -101,10 +101,14 @@ class ToolPolicy:
         )
 
     def classify_risk(self, tool_name: str, tool: dict | None = None) -> str:
+        # Reflected provider metadata can raise the display risk, never lower
+        # the local minimum for opaque execution capabilities. Authorization
+        # itself is decided by the runtime ActionDescriptor at adapter entry.
+        minimum = "high" if tool_name in _HIGH_RISK_TOOLS or tool_name.startswith(_HIGH_RISK_PREFIXES) else "low"
         if tool:
             metadata_risk = str((tool.get("metadata", {}) or {}).get("risk_level") or "").strip().lower()
             if metadata_risk in {"low", "medium", "high"}:
-                return metadata_risk
+                return max((minimum, metadata_risk), key={"low": 0, "medium": 1, "high": 2}.__getitem__)
         if tool_name in _HIGH_RISK_TOOLS or tool_name.startswith(_HIGH_RISK_PREFIXES):
             return "high"
         if tool_name in _MEDIUM_RISK_TOOLS:

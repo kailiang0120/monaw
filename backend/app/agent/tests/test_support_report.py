@@ -18,8 +18,8 @@ PRIVATE_PATH = r"C:\Users\Kai\Documents\payroll.xlsx"
 def _report(**overrides):
     values = {
         "created_at": "2026-10-31T00:00:00Z",
-        "app_version": "1.0.0",
-        "summary": {"backend": {"version": "1.0.0"}},
+        "app_version": app.version,
+        "summary": {"backend": {"version": app.version}},
         "configuration": {},
         "errors": [],
         "log_lines": None,

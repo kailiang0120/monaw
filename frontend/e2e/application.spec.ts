@@ -8,6 +8,58 @@ async function toolRows(desktop: import('./desktop').Desktop) {
   return messages.flatMap((message: { tool_calls?: unknown[] }) => message.tool_calls || [])
 }
 
+test('typing resumes after saving a model API key and closing settings', async ({ desktop }, testInfo) => {
+  const { page } = desktop
+  await desktop.send('recover')
+  await expect(page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
+  for (const theme of ['dark', 'light']) {
+    const toggle = page.getByRole('button', { name: `Switch to ${theme} mode`, exact: true }).last()
+    if (await toggle.isVisible()) await toggle.click()
+    await page.screenshot({ path: testInfo.outputPath(`chat-${theme}.png`) })
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    const preview = page.getByRole('dialog', { name: 'Settings', exact: true })
+    await expect(preview.getByRole('button', { name: 'Close settings', exact: true })).toBeVisible()
+    await preview.screenshot({ path: testInfo.outputPath(`settings-${theme}.png`) })
+    await preview.locator('nav').getByRole('button', { name: 'Connections', exact: true }).click()
+    await preview.screenshot({ path: testInfo.outputPath(`connections-${theme}.png`) })
+    await preview.getByRole('button', { name: 'Close settings', exact: true }).click()
+  }
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Draft before settings')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+  await settings.getByRole('button', { name: /Connections/ }).click()
+  await settings.getByPlaceholder('OpenAI API Key').fill('sk-monaw-e2e-updated-fixture-only')
+  // Simulate slow post-save checks and the settings refresh after closing.
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/diagnostics/**', async (route) => { await pending; await route.fallback() })
+  await page.route('**/api/settings', async (route) => {
+    if (route.request().method() === 'GET') await pending
+    await route.fallback()
+  })
+  const refresh = page.waitForResponse((response) => response.url().endsWith('/api/settings')
+    && response.request().method() === 'GET')
+  try {
+    await settings.getByRole('button', { name: 'Save changes', exact: true }).click()
+    await expect(settings.getByRole('button', { name: 'Saved', exact: true })).toBeDisabled()
+    await settings.getByRole('button', { name: 'Close settings', exact: true }).click()
+    await expect(settings).toHaveCount(0)
+    await expect(composer).toBeFocused()
+    await page.keyboard.press('End')
+    await page.keyboard.type(' and after settings')
+    await expect(composer).toHaveValue('Draft before settings and after settings')
+  } finally {
+    release()
+  }
+  // Finishing the refresh must not steal focus or replace the user's draft.
+  await refresh
+  await expect(composer).toBeFocused()
+  await page.keyboard.type(' after refresh')
+  await expect(composer).toHaveValue('Draft before settings and after settings after refresh')
+  expect(desktop.errors).toEqual([])
+})
+
 test('authenticated startup, streamed response, and persistence after reopening', async ({ desktop }) => {
   const { page, port } = desktop
   expect((await page.request.get(`http://127.0.0.1:${port}/api/settings`)).status()).toBe(401)
@@ -60,6 +112,30 @@ test('approved file action runs once through the real execution gate', async ({ 
   expect(await readFile(join(desktop.root, 'workspace', 'allow.txt'), 'utf8')).toBe('one change\n')
   const rows = await toolRows(desktop)
   expect(rows.filter((row: { tool_name: string; status: string }) => row.tool_name === 'fs_append' && row.status === 'complete')).toHaveLength(1)
+})
+
+test('consequential approval displays exact scope and dispatches once through the real gate', async ({ desktop }) => {
+  await desktop.send('exact-action')
+  const approve = desktop.page.getByRole('button', { name: 'Approve once', exact: true })
+  await expect(approve).toBeVisible()
+  await expect(desktop.page.getByText('https://fixture.example', { exact: true })).toBeVisible()
+  await expect(desktop.page.getByRole('list', { name: 'Selected files' })).toContainText('report.pdf')
+  const pending = (await desktop.api('/api/approvals/pending')).data
+  expect(pending).toHaveLength(1)
+  expect(pending[0].action_descriptor).toMatchObject({ human_only: true, action_kind: 'upload', data_scope: { file_count: 1 } })
+  expect(pending[0].payload).toEqual({})
+  const dispatched = async () => (await readFile(join(desktop.root, 'control', 'events.jsonl'), 'utf8'))
+    .split('\n').filter((line) => line.includes('exact_action_dispatched')).length
+  expect(await dispatched()).toBe(0)
+  const decision = desktop.page.waitForResponse((response) => response.url().endsWith(`/approvals/${pending[0].id}/approve`))
+  await approve.click()
+  const response = await decision
+  expect(response.status(), await response.text()).toBe(200)
+  await expect(desktop.page.getByText('Fixture exact-action completed.', { exact: false }).last()).toBeVisible()
+  expect(await dispatched()).toBe(1)
+  expect((await desktop.api(`/api/approvals/${pending[0].id}/approve`, {})).status).not.toBe(200)
+  expect(await dispatched()).toBe(1)
+  expect(desktop.errors).toEqual([])
 })
 
 test('rejected file action is visible and leaves the disposable file unchanged', async ({ desktop }) => {

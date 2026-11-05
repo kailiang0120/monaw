@@ -10,6 +10,32 @@ vi.mock('../lib/api/uploads', () => ({ uploadAttachment: vi.fn() }))
 describe('InputBar model picker', () => {
   afterEach(cleanup)
 
+  it('keeps Send and Stop next to Pause and Continue', async () => {
+    const control = vi.fn().mockResolvedValue(undefined)
+    const common = {
+      onSend: vi.fn(), onStop: vi.fn(), conversationId: null, contextRefreshKey: 0,
+      approvalMode: 'default' as const, onApprovalModeChange: vi.fn(),
+      modelOptions: FALLBACK_MODEL_OPTIONS, onModelSelectionChange: vi.fn(),
+      modelSelection: { provider: 'openai' as const, model_name: 'gpt-6-luna', reasoning_effort: 'medium' as const },
+      onRunControl: control,
+    }
+    const { rerender } = render(<InputBar {...common} isStreaming runControl="pause" />)
+    // A pause that takes a while must never leave the task without Stop or steering.
+    expect(screen.getByRole('button', { name: 'Stop response' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Steer message' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause execution' }))
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(1))
+    rerender(<InputBar {...common} isStreaming runControl="pausing" />)
+    expect(screen.getByRole('button', { name: 'Pausing safely' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Stop response' })).toBeInTheDocument()
+    rerender(<InputBar {...common} isStreaming={false} runControl="resume" />)
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue execution' }))
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(2))
+    rerender(<InputBar {...common} isStreaming={false} />)
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
+  })
+
   it('hides Google models until a Google API key is saved', () => {
     const common = {
       onSend: vi.fn(),
@@ -134,10 +160,15 @@ describe('InputBar model picker', () => {
     expect(common.onApprovalModeChange).toHaveBeenCalledWith('full_access')
     expect(screen.queryByRole('listbox', { name: 'Permission mode' })).not.toBeInTheDocument()
 
-    rerender(<InputBar {...common} focusRequestKey={1} modelSelection={{
+    rerender(<InputBar {...common} disabled focusRequestKey={1} modelSelection={{
       provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'none',
     }} />)
     const composer = screen.getByPlaceholderText('Enter to send · Shift+Enter for newline')
+    expect(composer).not.toHaveFocus()
+    // Closing Settings can request focus while another operation still disables the input.
+    rerender(<InputBar {...common} focusRequestKey={1} modelSelection={{
+      provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'none',
+    }} />)
     expect(composer).toHaveFocus()
     fireEvent.change(composer, { target: { value: 'Typing after Settings closes' } })
     expect(composer).toHaveValue('Typing after Settings closes')

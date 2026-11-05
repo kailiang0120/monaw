@@ -367,6 +367,9 @@ def test_default_browser_artifacts_live_under_monaw_home():
         "screenshots_dir",
         "extension_port",
         "allowed_domains",
+        "upload_workspace_roots",
+        "sensitive_paths",
+        "max_upload_bytes",
     }
 
 
@@ -616,6 +619,7 @@ def test_runtime_namespace_uses_settings_json_values():
     runtime = build_runtime_namespace(_base_settings(), settings_data)
 
     assert runtime.model_provider == "openai"
+    assert not hasattr(runtime, "execution_detail")
     assert runtime.mcp.servers[0]["name"] == "filesystem"
     assert runtime.mcp.servers[0]["command"] == "npx"
 

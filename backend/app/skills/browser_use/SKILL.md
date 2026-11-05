@@ -3,7 +3,7 @@ name: browser-use
 description: Browser automation in the user's own Chrome through the Monaw extension (pages, snapshots, clicking, typing, screenshots), plus read-only page fetching.
 display_name: Browser automation
 summary: Browse, inspect, and interact with websites using your own Chrome profile.
-version: 1.0.0
+version: 1.2.0
 enabled_by_default: true
 always: true
 tier: internal
@@ -17,12 +17,14 @@ Tools:
 
 Workflow (`observe -> decide -> act -> verify`):
 1. `mcp__chrome-devtools__list_pages` to see open tabs. Reuse a relevant tab with `select_page`; otherwise `new_page` or `navigate_page` with a full http(s) URL. Pass the `pageId` from `list_pages` to page tools.
-2. `mcp__chrome-devtools__take_snapshot` to get the page's accessibility tree with element `uid`s.
-3. Act on one `uid` at a time with `click`, `fill`, `fill_form` (preferred for several form fields), `type_text`, `press_key`, `hover`, `drag`, or `handle_dialog`. Identify the target from its role, name, label, and nearby text in the snapshot, never from position alone.
-4. `take_snapshot` again to verify the result before the next action. `uid`s change after navigation or re-render; if a call reports a stale or missing `uid`, take a fresh snapshot.
-- Use `wait_for` when the page needs time to show expected text.
+2. Use the accessibility snapshot returned by opening or navigating the page to get element `uid`s. Call `mcp__chrome-devtools__take_snapshot` when there is no current snapshot or the page has changed further.
+3. If a control is ambiguous or a form fails, use `mcp__chrome-devtools__inspect_element` with its `uid` to read attributes, labels, visibility, value, validation errors and nearby elements. A specific CSS `selector` can inspect elements omitted from the accessibility tree. Use selectors grounded in observed page attributes; multiple matches are an error. This is read-only and does not require custom JavaScript.
+4. Act with `click`, `fill`, `fill_form` (preferred for several independent form fields), `type_text`, `press_key`, `hover`, `drag`, or `handle_dialog`. Identify the target from its role, name, label, and nearby text, never from position alone. Actions return an updated snapshot by default; use `includeSnapshot: false` only when that observation is unnecessary. Click and fill automatically scroll and wait for the target to be enabled, unobstructed and stable; filling also waits for read-only fields to unlock. The default readiness budget is 5 seconds (`timeout` can extend it to 30 seconds); `fill_form` shares the budget across its fields. Batch independent fields, but keep dependent fields and submission separate.
+5. Verify using the snapshot returned by the action or wait. Do not immediately call `take_snapshot` again when that result already answers the question. Call `take_snapshot` again to verify only when no current snapshot was returned or the page changed further. Existing nodes keep their `uid` across snapshots; navigation or replacement makes them stale.
+- Use `wait_for` for a specific expected condition instead of repeated reads or scripts with sleep loops. Use `text: ["expected text"]` for page text, or exactly one `uid`/`selector` plus a `state`: `hidden` for a loading overlay to disappear, `editable` for a field to unlock, `ready` for a visible enabled control with no covering overlay, or `attached`/`detached` for a DOM node to appear/disappear. CSS selectors are rechecked through dynamic re-renders; uids track their original node. These waits return a fresh snapshot by default. A navigation invalidates an element wait: inspect the new page before continuing. Use a bounded `timeout` (milliseconds, maximum 60000), and inspect the reported state if it times out.
+- Readiness waits run before the action and never replay a submitted action. If a uid was replaced, use a fresh snapshot to choose its replacement. If a form stops partway through, preserve the completed fields and inspect the current field before proceeding. If an action completed but its snapshot failed, read the current page; do not repeat the action just to obtain a snapshot.
 - Use `mcp__chrome-devtools__take_screenshot` only for visual evidence or layout questions; the image is saved to the screenshots folder and shown to you. Do not use generic screenshot-style tools to read webpage content when `mcp__chrome-devtools__take_snapshot` is available.
-- Use `mcp__chrome-devtools__evaluate_script` only for DOM details the accessibility snapshot cannot provide. It runs page JavaScript and asks the user for approval outside Full access.
+- Use `mcp__chrome-devtools__evaluate_script` only when the dedicated tools cannot express the task. This is arbitrary code execution, not a DOM observation tool, even if a script appears to only read data. Scripts can read authenticated data, send requests and trigger actions. Supply an explicit `pageId`; never rely on whichever tab is selected when approval completes. Do not write scripts just to read attributes, check validity or wait for overlays. Follow the current permission mode: Default/Custom may require approval, Auto Review reviews the exact action, and Full Access permits execution subject to hard blocks. A script must not bypass a denied action or an always-confirm operation such as file upload.
 - For forms, treat each field (for example recipient, subject, and message body) as a separate target and verify each value after filling. In email compose UIs, commit an autocomplete recipient with Enter or the exact suggestion, then verify a recipient chip/token before continuing.
 - Console tools (`list_console_messages`, `get_console_message`) are read-only and useful for debugging pages. Network inspection is not available.
 

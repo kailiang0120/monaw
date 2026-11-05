@@ -63,7 +63,7 @@ export function SupportReport() {
           type="button"
           onClick={() => void prepare()}
           disabled={preparing}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.08] px-3 py-1.5 text-xs text-neutral-200 hover:bg-white/[0.05] disabled:opacity-50"
+          className="st-btn st-btn-secondary"
         >
           {preparing && <Loader2 size={12} className="animate-spin" aria-hidden="true" />}
           {text ? 'Prepare again' : 'Prepare report'}
@@ -91,11 +91,11 @@ export function SupportReport() {
             <button
               type="button"
               onClick={save}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90"
+              className="st-btn st-btn-primary"
             >
               <Download size={12} aria-hidden="true" /> Save report
             </button>
-            <button type="button" onClick={() => setText('')} className="rounded-lg px-3 py-1.5 text-xs text-neutral-400 hover:text-neutral-200">
+            <button type="button" onClick={() => setText('')} className="st-btn st-btn-ghost">
               Discard
             </button>
           </div>

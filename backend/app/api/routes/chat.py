@@ -65,21 +65,24 @@ def _runtime_attachments(req: ChatRequest, *, control_session_id: str, conversat
 
 
 def _prepare_conversation_workspace(req: ChatRequest, conv_id: str) -> None:
+    from app.agent.database import get_db
+    from app.agent.memory_manager import create_conversation_file
+    from app.agent.turn_text import conversation_title_from_prompt
+
+    db = get_db()
+    existing = db.get_conversation(conv_id)
+    workspace_dir = ""
     if req.workspace_dir is not None:
         from app.agent.conversation_workspace import validate_workspace_dir
-        from app.agent.database import get_db
-        from app.agent.turn_text import conversation_title_from_prompt
 
         try:
             workspace_dir = validate_workspace_dir(req.workspace_dir)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        db = get_db()
-        existing = db.get_conversation(conv_id)
-        if existing is None:
-            db.create_conversation(conv_id, conversation_title_from_prompt(req.message), workspace_dir)
-        elif existing.get("workspace_dir", "") != workspace_dir:
+        if existing is not None and existing.get("workspace_dir", "") != workspace_dir:
             raise HTTPException(status_code=409, detail="Change the working folder before starting a task.")
+    if existing is None:
+        create_conversation_file(conv_id, conversation_title_from_prompt(req.message), workspace_dir)
 
 
 @router.post("/chat")
@@ -87,6 +90,7 @@ async def chat(req: ChatRequest, request: Request):
     conv_id = req.conversation_id or str(uuid.uuid4())
     message = _message_with_attachments(req)
     control_session_id = request.state.control_session.session_id
+    owner_principal_id = request.state.control_session.profile_id or control_session_id
     runtime_attachments = _runtime_attachments(
         req,
         control_session_id=control_session_id,
@@ -120,10 +124,11 @@ async def chat(req: ChatRequest, request: Request):
                 attachments=runtime_attachments,
                 control_session_id=control_session_id,
                 execution_source="desktop",
-                principal_id=control_session_id,
+                principal_id=owner_principal_id,
                 permission_profile_id="desktop-current",
                 interactive=True,
                 steering=inbox,
+                durable_run_id=inbox.run_id,
             ):
                 event_name = event_dict.get("event", "message")
                 if event_name == "done":
@@ -179,6 +184,7 @@ async def list_chat_runs(request: Request):
         {
             "run_id": inbox.run_id, "conversation_id": inbox.conversation_id, "message": inbox.display_message,
             "attachments": inbox.public_attachments, "started_at": inbox.started_at,
+            "continuation": inbox.continuation,
         }
         for inbox in running_turns(request.state.control_session.session_id)
     ]
@@ -245,6 +251,7 @@ async def create_chat_job(req: ChatRequest, request: Request):
     message = _message_with_attachments(req)
     merged = build_runtime_namespace(settings, load_agent_settings(settings))
     control_session_id = request.state.control_session.session_id
+    owner_principal_id = request.state.control_session.profile_id or control_session_id
     runtime_attachments = _runtime_attachments(
         req,
         control_session_id=control_session_id,
@@ -260,8 +267,8 @@ async def create_chat_job(req: ChatRequest, request: Request):
             merged,
             attachments=runtime_attachments,
             control_session_id=control_session_id,
-            execution_source="desktop",
-            principal_id=control_session_id,
+            execution_source="desktop_job",
+            principal_id=owner_principal_id,
             permission_profile_id="desktop-current",
             interactive=True,
         )

@@ -132,6 +132,7 @@ def _clean_gate_state(tmp_path, monkeypatch):
     _all.clear()
     _grant_resume_events.clear()
     _grant_resume_decisions.clear()
+    registered_executors = dict(_EXECUTORS)
     _EXECUTORS.clear()
     yield
     _all_tickets.clear()
@@ -143,6 +144,7 @@ def _clean_gate_state(tmp_path, monkeypatch):
     _grant_resume_events.clear()
     _grant_resume_decisions.clear()
     _EXECUTORS.clear()
+    _EXECUTORS.update(registered_executors)
 
 
 async def _collect_events(generator):
@@ -157,6 +159,83 @@ async def _fake_execute_tool(_budget, tool_dict, arguments):
             "arguments": arguments,
         }
     )
+
+
+def test_action_tickets_isolate_sibling_calls_and_explicit_children():
+    from app.agent.action_identity import action_invocation, delegated_action, ticket_ownership_error
+    calls = []
+    register_executor("computer_functions_launch_app", lambda payload: calls.append(json.loads(payload)) or '{"status":"ok"}')
+    service = ExecutionGateService()
+
+    async def run():
+        with action_invocation("computer_functions_act", {"app": "notes"}) as owner:
+            with delegated_action("computer_functions_launch_app", {"app": "notes"}) as child:
+                ticket = create_ticket(tool_name="computer_functions_launch_app", payload={"input_str": '{"app":"notes"}'})
+            assert ticket.action_id != ticket.parent_action_id
+            assert ticket.parent_action_id == child.action_id
+            assert child.parent_action_id == owner.action_id
+            assert ticket.root_action_id == owner.action_id
+            assert ticket.root_tool_name == "computer_functions_act"
+            approve_ticket(ticket.id)
+            with action_invocation("computer_functions_act", {"app": "notes"}):
+                result = await service._resume_approved_ticket(ticket.id, tool_dict={"name": "computer_functions_act"})
+                assert json.loads(result)["reason_code"] == "approval_ticket_mismatch"
+                assert ticket.status == TicketStatus.APPROVED
+            assert calls == []
+            result = await service._resume_approved_ticket(ticket.id, tool_dict={"name": "computer_functions_act"})
+            assert json.loads(result)["status"] == "ok"
+            assert ticket.status == TicketStatus.APPLIED
+
+        with action_invocation("computer_functions_act", {}):
+            with pytest.raises(ValueError, match="explicit parent/child"):
+                create_ticket(tool_name="computer_functions_kill_process")
+        # Old tickets do not acquire an exemption merely by sharing a prefix.
+        legacy = create_ticket(tool_name="computer_functions_kill_process")
+        assert ticket_ownership_error(legacy, "computer_functions_act")
+
+    asyncio.run(run())
+    assert calls == [{"app": "notes"}]
+
+
+def test_action_binding_rejects_changed_payload_and_parent_arguments():
+    from app.agent.action_identity import action_invocation
+    calls = []
+    register_executor("script", lambda payload: calls.append(payload) or '{"status":"ok"}')
+
+    async def run():
+        with action_invocation("script", {"pageId": 1}):
+            ticket = create_ticket(tool_name="script", payload={"input_str": '{"pageId":1}'})
+            changed_arguments = await ExecutionGateService().resolve_pending_output(
+                tool_output=json.dumps({"status": "pending_approval", "ticket_id": ticket.id}),
+                tool_dict={"name": "script"}, arguments={"pageId": 2}, budget=IterationBudget(),
+                execute_tool=_fake_execute_tool, emit=lambda event: pytest.fail("Must reject before showing approval"),
+            )
+            assert json.loads(changed_arguments)["reason_code"] == "approval_ticket_mismatch"
+            approve_ticket(ticket.id)
+            ticket.payload["input_str"] = '{"pageId":2}'
+            ticket.payload_hash = ticket.compute_hash()
+            result = await ExecutionGateService()._resume_approved_ticket(ticket.id, tool_dict={"name": "script"})
+            assert json.loads(result)["reason_code"] == "approval_ticket_mismatch"
+        assert ticket.status == TicketStatus.APPROVED  # Foreign/changed tickets are not consumed.
+
+    asyncio.run(run())
+    assert calls == []
+
+
+def test_sibling_approval_and_access_tickets_do_not_supersede_or_replay_each_other():
+    from app.agent.action_identity import action_invocation, ticket_ownership_error
+    with action_invocation("same_tool", {}):
+        first = create_ticket(tool_name="same_tool")
+        grant = create_grant_ticket(target_type="app", target_identifier="notes")
+    with action_invocation("same_tool", {}):
+        second = create_ticket(tool_name="same_tool")
+        second_grant = create_grant_ticket(target_type="app", target_identifier="notes")
+        assert first.status == second.status == TicketStatus.PENDING
+        assert grant.status == second_grant.status == "pending"
+        assert ticket_ownership_error(first, "same_tool")
+        assert ticket_ownership_error(grant, "same_tool")
+        assert not ticket_ownership_error(second, "same_tool")
+        assert not ticket_ownership_error(second_grant, "same_tool")
 
 
 @pytest.mark.parametrize("response,should_run", [
@@ -357,6 +436,7 @@ def _resolve_pending(service: ExecutionGateService, tool_output: str, emitted: l
 
 def test_resolve_pending_output_emits_prompt_before_waiting():
     service = ExecutionGateService()
+    ticket = create_ticket(tool_name="looping_tool")
     emitted: list[dict] = []
     seen_at_wait: list[list[dict]] = []
 
@@ -367,10 +447,10 @@ def test_resolve_pending_output_emits_prompt_before_waiting():
 
     service.await_ticket_resolution = resolves_after_prompt  # type: ignore[method-assign]
 
-    output = _resolve_pending(service, json.dumps({"status": "pending_approval", "ticket_id": "t1"}), emitted)
+    output = _resolve_pending(service, json.dumps({"status": "pending_approval", "ticket_id": ticket.id}), emitted)
 
     assert json.loads(output) == {"status": "ok"}
-    assert seen_at_wait == [[{"event": "approval_required", "data": {"ticket_id": "t1", "action": "", "reason": ""}}]]
+    assert seen_at_wait == [[{"event": "approval_required", "data": {"ticket_id": ticket.id, "action": "", "reason": ""}}]]
     assert [event["event"] for event in emitted] == ["approval_required", "tool_resumed"]
 
 
@@ -380,15 +460,89 @@ def test_resolve_pending_output_passes_through_non_pending_output():
     assert _resolve_pending(ExecutionGateService(), output) == output
 
 
-def test_resolve_pending_output_errors_when_gate_hops_are_exhausted():
+def _pending_file_preview() -> dict[str, object]:
+    return {
+        "operation": "write",
+        "files": [{
+            "path": "C:/workspace/report.txt",
+            "role": "target",
+            "before": {"exists": True, "size": 4},
+            "after": {"exists": True, "size": 12},
+        }],
+        "undo_capability": "available",
+        "preview": {"kind": "unified_diff", "text": "--- before\n+++ after\n-old\n+new report\n"},
+    }
+
+
+class _PendingPreflightOperation:
+    def __init__(self, tool_name: str, *, trusted_builtin: bool) -> None:
+        self.tool_name = tool_name
+        self.trusted_builtin = trusted_builtin
+
+    def note_pending_preflight(self, _tool_output: str) -> bool:
+        return True
+
+
+def _emit_pending_approval_with_file_preview(
+    *, tool_name: str, trusted_builtin: bool, preview: dict[str, object]
+) -> list[dict[str, object]]:
+    ticket = create_ticket(
+        tool_name=tool_name,
+        interactive=True,
+        action_description="Write report.txt",
+        payload={"input_str": '{"path":"C:/workspace/report.txt"}'},
+    )
     service = ExecutionGateService()
 
+    async def stop_after_prompt(**_kwargs):
+        yield {"_result": json.dumps({"status": "cancelled", "reason_code": "test_finished"})}
+
+    service.await_ticket_resolution = stop_after_prompt  # type: ignore[method-assign]
+    events: list[dict[str, object]] = []
+    asyncio.run(service.resolve_pending_output(
+        tool_output=json.dumps({"status": "pending_approval", "ticket_id": ticket.id, "preview": preview}),
+        tool_dict={"name": tool_name},
+        arguments={"path": "C:/workspace/report.txt"},
+        budget=IterationBudget(max_iterations=1),
+        execute_tool=_fake_execute_tool,
+        emit=events.append,
+        operation_execution=_PendingPreflightOperation(tool_name, trusted_builtin=trusted_builtin),  # type: ignore[arg-type]
+    ))
+    return events
+
+
+def test_pending_approval_event_includes_bounded_preview_for_trusted_native_file_write():
+    preview = _pending_file_preview()
+
+    events = _emit_pending_approval_with_file_preview(
+        tool_name="fs_write", trusted_builtin=True, preview=preview,
+    )
+
+    assert events[0]["event"] == "approval_required"
+    assert events[0]["data"]["file_preview"] == preview  # type: ignore[index]
+
+
+def test_untrusted_tool_cannot_inject_a_file_preview_into_approval_event():
+    preview = _pending_file_preview()
+
+    events = _emit_pending_approval_with_file_preview(
+        tool_name="mcp__fixture__write_file", trusted_builtin=False, preview=preview,
+    )
+
+    assert events[0]["event"] == "approval_required"
+    assert "file_preview" not in events[0]["data"]  # type: ignore[operator]
+
+
+def test_resolve_pending_output_errors_when_gate_hops_are_exhausted():
+    service = ExecutionGateService()
+    ticket = create_ticket(tool_name="looping_tool")
+
     async def always_pending(**_kwargs):
-        yield {"_result": json.dumps({"status": "pending_approval", "ticket_id": "loop"})}
+        yield {"_result": json.dumps({"status": "pending_approval", "ticket_id": ticket.id})}
 
     service.await_ticket_resolution = always_pending  # type: ignore[method-assign]
 
-    result = json.loads(_resolve_pending(service, json.dumps({"status": "pending_approval", "ticket_id": "loop"})))
+    result = json.loads(_resolve_pending(service, json.dumps({"status": "pending_approval", "ticket_id": ticket.id})))
 
     assert result["status"] == "error"
     assert result["reason_code"] == "gate_hop_limit_exceeded"
@@ -424,13 +578,14 @@ def test_gate_hop_exhaustion_denies_trailing_access_grant():
 
 def test_await_ticket_resolution_returns_denied_when_user_rejects():
     service = ExecutionGateService()
-    signal_approval_resume("ticket-denied", "rejected")
+    ticket = create_ticket(tool_name="danger_tool")
+    signal_approval_resume(ticket.id, "rejected")
 
     events = asyncio.run(
         _collect_events(
             service.await_ticket_resolution(
                 budget=IterationBudget(max_iterations=1),
-                ticket_id="ticket-denied",
+                ticket_id=ticket.id,
                 event_kind="approval_required",
                 tool_dict={"name": "danger_tool"},
                 arguments={},
@@ -491,12 +646,13 @@ def test_noninteractive_access_grant_is_auto_denied_without_waiting():
 
 def test_await_ticket_resolution_times_out_safely():
     service = ExecutionGateService(default_timeout_seconds=0)
+    ticket = create_ticket(tool_name="danger_tool")
 
     events = asyncio.run(
         _collect_events(
             service.await_ticket_resolution(
                 budget=IterationBudget(max_iterations=1),
-                ticket_id="never-signaled",
+                ticket_id=ticket.id,
                 event_kind="approval_required",
                 tool_dict={"name": "danger_tool"},
                 arguments={},

@@ -131,12 +131,14 @@ Runtime layout:
 
 ```text
 %USERPROFILE%\.monaw\runtime\        settings.json, agent.db, backend.log, Electron store
-%USERPROFILE%\.monaw\workspace\      default workdir for agent shell commands
+Documents\monaw\                    default workdir for agent shell commands
 %USERPROFILE%\.monaw\browser\        browser artifacts
 %USERPROFILE%\.monaw\memory\         global and workspace memory markdown files
 ```
 
 Override the main folder with `MONAW_HOME` or `AGENT_HOME`, runtime with `AGENT_RUNTIME_DIR`, workspace with `AGENT_WORKSPACE_DIR`, and memory with `AGENT_MEMORY_DIR`.
+
+The default workspace uses the system Documents folder, including Windows folder redirection (such as OneDrive). It is created on launch. `MONAW_HOME` and `AGENT_HOME` relocate application data; use `AGENT_WORKSPACE_DIR` to override the workspace.
 
 ## Architecture
 

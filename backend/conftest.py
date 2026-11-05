@@ -17,8 +17,13 @@ TEST_GROUPS = {
         "test_support_report.py",
         "test_mcp_runtime_routes.py",
         "test_mcp_settings_integration.py",
+        "test_execution_detail_settings.py",
         "test_mcp_credentials.py",
         "test_response_attachments.py",
+        "test_file_mutations_api.py",
+        "test_git_changes.py",
+        "test_profile_attachment_api.py",
+        "test_runs_api.py",
     },
     "runtime": {
         "test_architecture_boundaries.py",
@@ -42,12 +47,20 @@ TEST_GROUPS = {
         "test_tool_executor.py",
         "test_tool_batch.py",
         "test_run_outcome.py",
+        "test_durable_journal.py",
+        "test_durable_recovery.py",
         "test_live_context_budget.py",
         "test_tool_registry_enhanced.py",
         "test_builtin_mcp.py",
         "test_turn_loop.py",
     },
     "policy": {
+        "test_data_scope.py",
+        "test_destination_policy.py",
+        "test_mcp_action_scope.py",
+        "test_mcp_control_scope.py",
+        "test_action_policy.py",
+        "test_action_approval_binding.py",
         "test_access_grant_broker_discovery.py",
         "test_approval_broker.py",
         "test_controller_policy.py",
@@ -71,9 +84,16 @@ TEST_GROUPS = {
         "test_browser_extension_bridge.py",
         "test_browser_extension_install.py",
         "test_browser_extension_tools.py",
+        "test_browser_real_chrome.py",
+        "test_browser_action_verification.py",
         "test_local_chrome_launch.py",
         "test_exec_tool.py",
         "test_filesystem_tools.py",
+        "test_file_mutation_preview.py",
+        "test_file_mutation_evidence.py",
+        "test_file_mutation_integration.py",
+        "test_file_mutation_undo.py",
+        "test_p7_process_recovery.py",
         "test_mcp_bridge.py",
         "test_skill_creator_hardening.py",
         "test_windows_controller.py",
@@ -88,6 +108,8 @@ TEST_GROUPS = {
         "test_memory_context_management.py",
         "test_context_compression.py",
         "test_memory_migrations.py",
+        "test_durable_migrations.py",
+        "test_local_data_retention.py",
         "test_data_lifecycle.py",
         "test_observability_recorder.py",
     },
@@ -170,13 +192,24 @@ def isolate_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     conversations, such as an empty chat, to the app the developer uses.
     """
     import app.agent.database as database
+    import app.agent.durable.recovery as durable_recovery
+    import app.agent.git_changes as git_changes
+    import app.agent.conversation_workspace as conversation_workspace
+
+    monkeypatch.setattr(git_changes, "STORE", tmp_path / "git-checkpoints")
+    monkeypatch.setattr(conversation_workspace, "DEFAULT_CHAT_WORKSPACE_ROOT", tmp_path / "chat-workspaces")
 
     database.reset_db()
     monkeypatch.setattr(database, "_RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(database, "_DB_PATH", tmp_path / "agent.db")
     # The legacy JSON import moves files it finds here into a backup folder.
     monkeypatch.setattr(database, "_JSON_CONVERSATIONS_DIR", tmp_path / "conversations")
+    durable_recovery._PROCESS_IDENTITY.close()
+    process_identity = durable_recovery.OwnerProcessIdentity(tmp_path / "owner_locks")
+    monkeypatch.setattr(durable_recovery, "_OWNER_LOCK_DIR", tmp_path / "owner_locks")
+    monkeypatch.setattr(durable_recovery, "_PROCESS_IDENTITY", process_identity)
     yield
+    process_identity.close()
     database.reset_db()
 
 

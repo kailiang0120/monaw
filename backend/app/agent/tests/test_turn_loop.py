@@ -120,6 +120,323 @@ def test_turn_loop_checks_live_tool_context_and_preserves_full_history(monkeypat
     assert memory.persisted_turns[0]["tool_calls"][0]["output"] == output
 
 
+def test_browser_workflow_guides_snapshot_reuse_and_batching_without_rewriting_calls():
+    prefix = "mcp__chrome-devtools__"
+    output = json.dumps({"status": "ok", "content": [{"type": "text", "text":
+        'Completed\n## Latest page snapshot\nuid=1_1 textbox "Email"\nuid=1_2 textbox "Name"'}]})
+    script = [
+        ("fill", {"pageId": 1, "uid": "1_1", "value": "person@example.com"}),
+        ("fill", {"pageId": 1, "uid": "1_2", "value": "Person"}),
+        ("take_snapshot", {"pageId": 1}),
+        ("take_snapshot", {"pageId": 1}),
+    ]
+    invoked = []
+
+    class WorkflowLLM:
+        calls = 0
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            if self.calls == len(script):
+                hints = [message["content"] for message in messages
+                         if str(message.get("content", "")).startswith("Browser workflow guidance:")]
+                assert len(hints) == 3
+                assert any("already includes an updated snapshot" in hint for hint in hints)
+                assert any("one fill_form call" in hint for hint in hints)
+                assert any("instead of polling take_snapshot" in hint for hint in hints)
+                return final_answer_response("Verified")
+            name, arguments = script[self.calls]
+            self.calls += 1
+            return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                call_id=f"browser-{self.calls}", tool_name=prefix + name, arguments=arguments,
+            )], finish_reason="tool_calls")
+
+    def tool(**arguments):
+        invoked.append(arguments)
+        return output
+
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(llm_client=WorkflowLLM(), registry=ToolRegistry([{
+        "name": prefix + name, "callable": tool,
+        "parameters": {"type": "object", "properties": {
+            "pageId": {"type": "integer"}, "uid": {"type": "string"}, "value": {"type": "string"},
+        }},
+        "metadata": {"repeat_safe": True, "risk_level": "low"},
+    } for name in ("fill", "take_snapshot")]), memory=memory, observability=FakeObservability())
+    async def collect():
+        return [event async for event in loop.run("Fill the form", "browser-workflow", system_prompt="")]
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert events[-1]["data"]["summary"] == "Verified"
+    assert invoked == [arguments for _, arguments in script]
+    assert all(call["output"] == output for call in memory.persisted_turns[0]["tool_calls"])
+
+
+def test_cooperative_pause_during_model_wait_stops_before_tool_dispatch():
+    from app.agent.durable.turn_run import pause_run
+
+    model_started = asyncio.Event()
+    release_model = asyncio.Event()
+    invoked: list[str] = []
+
+    class WaitingLLM:
+        async def chat_with_tools(self, messages, tools, **kwargs):  # noqa: ARG002
+            model_started.set()
+            await release_model.wait()
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(call_id="paused-call", tool_name="change", arguments={})],
+                finish_reason="tool_calls",
+            )
+
+    class PauseHandle:
+        run_id = "cooperative-pause-test"
+        turn_id = "cooperative-pause-turn"
+        lease_lost = False
+        pause_requested = False
+
+        def begin_pause(self):
+            self.pause_requested = True
+
+        def renew_lease(self):
+            return None
+
+        def finalize(self, outcome_status, reason_code=""):
+            self.finalized = (outcome_status, reason_code)
+            return True
+
+    handle = PauseHandle()
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(
+        llm_client=WaitingLLM(),
+        registry=ToolRegistry([{
+            "name": "change",
+            "callable": lambda: invoked.append("change") or "done",
+            "parameters": {"type": "object", "properties": {}},
+        }]),
+        memory=memory,
+        observability=FakeObservability(),
+    )
+
+    async def collect():
+        task = asyncio.create_task(_collect_events(loop, handle))
+        await asyncio.wait_for(model_started.wait(), timeout=2)
+        assert await pause_run(handle.run_id)
+        release_model.set()
+        return await asyncio.wait_for(task, timeout=2)
+
+    async def _collect_events(turn_loop, durable_run):
+        return [event async for event in turn_loop.run(
+            "inspect safely", "pause-boundary", system_prompt="", durable_run=durable_run,
+        )]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+
+    assert invoked == []
+    assert handle.finalized == ("paused", "user_pause")
+    assert events[-1]["event"] == "done"
+    assert events[-1]["data"]["status"] == "paused"
+    assert memory.persisted_turns[0]["status"] == "paused"
+
+
+def test_pause_cancels_a_model_call_instead_of_waiting_for_it():
+    from app.agent.durable.turn_run import pause_run
+
+    model_started = asyncio.Event()
+    model_cancelled = asyncio.Event()
+
+    class NeverAnsweringLLM:
+        async def chat_with_tools(self, messages, tools, **kwargs):  # noqa: ARG002
+            model_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                model_cancelled.set()
+                raise
+
+    class PauseHandle:
+        run_id = "pause-cancels-model-call"
+        turn_id = "pause-cancels-model-turn"
+        lease_lost = False
+        pause_requested = False
+
+        def begin_pause(self):
+            self.pause_requested = True
+
+        def renew_lease(self):
+            return None
+
+        def finalize(self, outcome_status, reason_code=""):
+            self.finalized = (outcome_status, reason_code)
+            return True
+
+    handle = PauseHandle()
+    memory = PersistingFakeMemory()
+    loop = TurnLoop(
+        llm_client=NeverAnsweringLLM(),
+        registry=ToolRegistry([]),
+        memory=memory,
+        observability=FakeObservability(),
+    )
+
+    async def collect():
+        task = asyncio.create_task(_collect(loop, handle))
+        await asyncio.wait_for(model_started.wait(), timeout=2)
+        assert await pause_run(handle.run_id)
+        # A long reasoning call must not hold the pause: no release is ever sent.
+        events = await asyncio.wait_for(task, timeout=2)
+        assert model_cancelled.is_set()
+        return events
+
+    async def _collect(turn_loop, durable_run):
+        return [event async for event in turn_loop.run(
+            "think for a long time", "pause-model-call", system_prompt="", durable_run=durable_run,
+        )]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+
+    assert handle.finalized == ("paused", "user_pause")
+    assert events[-1]["event"] == "done"
+    assert events[-1]["data"]["status"] == "paused"
+    assert memory.persisted_turns[0]["status"] == "paused"
+
+
+def test_continue_injects_only_sanitized_verified_operation_evidence():
+    captured_system_prompts: list[str] = []
+
+    class EvidenceLLM:
+        async def chat_with_tools(self, _messages, _tools, *, system_prompt="", **_kwargs):
+            captured_system_prompts.append(system_prompt)
+            return final_answer_response("Continued safely")
+
+    class ContinuationHandle:
+        run_id = "verified-recovery-run"
+        turn_id = "verified-recovery-turn"
+        lease_seconds = 30
+        is_continuation = True
+        recovery_evidence = [{
+            "operation_id": "verified-file-op",
+            "operation_kind": "file_write",
+            "status": "verified",
+            "input_summary": {"target_count": 1},
+            "evidence": {"verification_result": "completed", "target_exists": True},
+        }]
+
+        def renew_lease(self):
+            return None
+
+        def finalize(self, *_args, **_kwargs):
+            return True
+
+    class ContinuationMemory(PersistingFakeMemory):
+        async def persist_turn(self, *args, **kwargs):
+            kwargs.pop("persist_user_message", None)
+            return await super().persist_turn(*args, **kwargs)
+
+    loop = TurnLoop(
+        llm_client=EvidenceLLM(),
+        registry=ToolRegistry(),
+        memory=ContinuationMemory(),
+        observability=FakeObservability(),
+    )
+
+    async def collect():
+        return [event async for event in loop.run(
+            "Continue the task.",
+            "verified-recovery-chat",
+            system_prompt="",
+            durable_run=ContinuationHandle(),
+        )]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+
+    assert events[-1]["data"]["status"] == "complete"
+    assert len(captured_system_prompts) == 1
+    assert "Verified durable operation evidence from an earlier attempt" in captured_system_prompts[0]
+    assert '"operation_id":"verified-file-op"' in captured_system_prompts[0]
+    assert '"verification_result":"completed"' in captured_system_prompts[0]
+    assert "before_sha256" not in captured_system_prompts[0]
+
+
+def test_durable_run_factory_waits_for_conversation_lock():
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    created: list[str] = []
+
+    class SerialLLM:
+        calls = 0
+
+        async def chat_with_tools(self, messages, tools, **kwargs):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                first_started.set()
+                await release_first.wait()
+                return final_answer_response("First finished")
+            return final_answer_response("Second finished")
+
+    class Handle:
+        lease_lost = False
+        pause_requested = False
+
+        def __init__(self, run_id):
+            self.run_id = run_id
+            self.turn_id = f"turn-{run_id}"
+
+        def renew_lease(self):
+            return None
+
+        def finalize(self, outcome_status, reason_code=""):
+            return True
+
+    loop = TurnLoop(
+        llm_client=SerialLLM(),
+        registry=ToolRegistry(),
+        memory=PersistingFakeMemory(),
+        observability=FakeObservability(),
+    )
+
+    def factory(run_id):
+        def create():
+            created.append(run_id)
+            return Handle(run_id)
+        return create
+
+    async def collect(run_id):
+        return [event async for event in loop.run(
+            run_id,
+            "same-conversation",
+            system_prompt="",
+            durable_run_factory=factory(run_id),
+        )]
+
+    async def scenario():
+        first = asyncio.create_task(collect("first-run"))
+        await asyncio.wait_for(first_started.wait(), timeout=2)
+        second = asyncio.create_task(collect("second-run"))
+        await asyncio.sleep(0.05)
+        assert created == ["first-run"]
+        release_first.set()
+        return await asyncio.gather(first, second)
+
+    try:
+        results = asyncio.run(scenario())
+    finally:
+        loop.shutdown()
+
+    assert created == ["first-run", "second-run"]
+    assert [result[-1]["data"]["summary"] for result in results] == ["First finished", "Second finished"]
+    assert all(result[-1]["data"]["status"] == "complete" for result in results)
+
+
 def test_turn_warns_then_pauses_at_its_token_limit():
     from app.agent.observability.recorder import UsageStats
 
@@ -1383,7 +1700,9 @@ def test_turn_loop_prompts_for_access_while_siblings_run_and_reruns_with_call_id
     def gated_tool() -> str:
         gated_call_ids.append(current_call_id())
         if len(gated_call_ids) == 1:
-            return json.dumps({"status": "pending_access_grant", "ticket_id": "grant-1"})
+            from app.agent.access_grant_broker import create_grant_ticket
+            ticket = create_grant_ticket(target_type="app", target_identifier="fixture-app")
+            return json.dumps({"status": "pending_access_grant", "ticket_id": ticket.id})
         return json.dumps({"status": "ok", "value": "granted"})
 
     def sibling_tool() -> str:

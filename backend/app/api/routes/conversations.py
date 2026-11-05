@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.agent.database import get_db
+from app.agent.database import ConversationHasUnresolvedRunError, get_db
 from app.agent.conversation_workspace import validate_workspace_dir
 from app.agent.context_usage import (
     build_context_usage_report,
@@ -347,7 +347,8 @@ async def get_context_usage(conv_id: str):
 @router.patch("/conversations/{conv_id}", response_model=ConversationOut)
 async def rename_conversation(conv_id: str, body: ConversationRename):
     db = get_db()
-    if db.get_conversation(conv_id) is None:
+    conversation = db.get_conversation(conv_id)
+    if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     fields = {}
     if body.title is not None:
@@ -365,8 +366,15 @@ async def rename_conversation(conv_id: str, body: ConversationRename):
             raise HTTPException(status_code=409, detail="Wait for the current task to finish before changing its working folder.")
         try:
             fields["workspace_dir"] = validate_workspace_dir(body.workspace_dir)
+            if not fields["workspace_dir"]:
+                from app.agent.conversation_workspace import create_default_chat_workspace
+
+                fields["workspace_dir"] = create_default_chat_workspace(conv_id, conversation["created_at"])
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+    fields = {key: value for key, value in fields.items() if conversation.get(key) != value}
+    if not fields:
+        return conversation
     db.update_conversation(conv_id, **fields)
     conv = db.get_conversation(conv_id)
     publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "renamed"})
@@ -376,7 +384,10 @@ async def rename_conversation(conv_id: str, body: ConversationRename):
 @router.delete("/conversations/{conv_id}", response_model=OkResponse)
 async def delete_conversation(conv_id: str):
     memory_manager = peek_memory_manager()
-    found = memory_manager.delete(conv_id) if memory_manager is not None else delete_conversation_file(conv_id)
+    try:
+        found = memory_manager.delete(conv_id) if memory_manager is not None else delete_conversation_file(conv_id)
+    except ConversationHasUnresolvedRunError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not found:
         raise HTTPException(status_code=404, detail="Conversation not found")
     publish_ui_event("conversation.changed", {"conversation_id": conv_id, "action": "deleted"})

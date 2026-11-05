@@ -149,6 +149,9 @@ Approval ticket fields include:
 | `conversation_id` | Conversation that requested the action. |
 | `action_type` | Type of action. |
 | `tool_name` | Tool requesting approval. |
+| `action_id` | Server-generated identity of this concrete approval action. |
+| `parent_action_id`, `parent_tool_name` | Local invocation that created the action. |
+| `root_action_id`, `root_tool_name` | Original harness invocation that owns the continuation. |
 | `target_path` | Path target, if any. |
 | `target_app` | App target, if any. |
 | `risk_level` | Low, medium, or high risk. |
@@ -172,12 +175,58 @@ Ticket statuses:
 
 Approval tickets are persisted as JSONL so pending and historical approvals survive restarts.
 
+The harness keeps a private binding from each live invocation to its exact approval and access-grant tickets. Ownership is checked before review, prompting, ticket retirement and replay; changed parent arguments, targets or payloads invalidate continuation. Calls to the same tool have different invocation identities and cannot reuse or supersede each other's tickets. Sharing a `computer_functions_` prefix grants no authority. Trusted adapter code must explicitly establish a delegated child invocation before creating a child action ticket; the child still applies its own permission checks.
+
+These identities are generated locally, not accepted from model arguments or returned tool text. Restarting loses the live binding, so an old bound ticket cannot execute without its original parent invocation; a fresh action must go through its current checks. Legacy direct callers retain exact-tool checks, with no family-wide exception.
+
 Files:
 
 ```text
 %USERPROFILE%\.monaw\runtime\approvals\tickets.jsonl
 %USERPROFILE%\.monaw\runtime\policy\approval_log.md
 ```
+
+## Run Recovery And Undo
+
+Run recovery is a separate desktop control surface. Run read and control
+requests use the signed Monaw profile and recheck the current conversation
+workspace. A historical chat from before durable Runs were introduced remains
+readable, but does not gain a recovery timeline during upgrade. `available_actions`
+from the server reflects the current Run state and evidence; a stale revision or
+changed workspace is rejected.
+
+Continue starts a new attempt from a safe checkpoint. It does not replay an
+interrupted Shell, Browser, MCP, or other opaque tool call. An effect without
+reliable evidence remains `needs_review`; inspect the external state before
+retrying an equivalent action. File Verify is a read-only check against saved
+file identity and fingerprints. It does not repair a file or override a denied
+permission.
+
+File Undo is offered only for supported, verified ordinary-file writes,
+deletes, and same-volume `fs_move` operations with a valid private snapshot and
+no conflicting later change. The separate `fs_rename` tool is opaque and does
+not have Undo. Undo rechecks current READ and MUTATE permissions, including
+when its confirmed inverse removes a file created by the original operation. Folder
+trees, links, cross-volume changes, Copy, and Shell/Browser/MCP side effects do
+not have general Undo through the current API. If a user edits or replaces the
+target, changes its parent scope, or revokes permission, Monaw preserves the
+current file and marks Undo conflicted or unavailable.
+
+Undo has its own short-lived preview and confirmation, bound to the operation,
+revision, workspace and file state. It does not reuse `once` or `session`
+grants from the forward operation or override explicit permission denials.
+Permission and file identity are checked again at the effect boundary. On non-Windows
+platforms, deleting a newly created file as an Undo is unavailable because
+Monaw cannot safely bind the deletion to the file identity.
+
+Snapshots contain private before-image bytes and file identity/path metadata.
+On Windows they are protected with DPAPI for the current Windows user. Each
+before-image is limited to 4 MiB, a snapshot to 8 MiB of before-image bytes,
+and the store to 512 MiB. Undo expires after 30 days. Active or unresolved Runs
+keep their referenced evidence for recovery; deleting a terminal conversation
+also queues its unshared snapshots for safe reclamation. The API exposes a snapshot-available flag, not snapshot
+contents or paths. See [operations.md](operations.md) for backup, deletion, and
+retention behavior.
 
 ## Settings And Generated Policy Files
 

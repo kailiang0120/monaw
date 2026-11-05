@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme, safeStorage, clipboard } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, session, shell, nativeTheme, safeStorage, clipboard, Notification } = require('electron')
 const path = require('path')
 const os = require('os')
 const { spawn, spawnSync } = require('child_process')
@@ -7,11 +7,13 @@ const fs = require('fs')
 const { fileURLToPath } = require('url')
 const runtimeConfig = require('../config/runtime.json')
 const { backendLaunch } = require('./backend-launch.cjs')
+const { createUpdateController } = require('./updates.cjs')
 const { portInUse, startupFailureMessage } = require('./backend-startup.cjs')
 const { backendPort, useDevelopmentRenderer } = require('./runtime-options.cjs')
 const {
   generateControlSecret,
   generateControlSessionId,
+  loadOrCreateControlProfileId,
   mintControlSession,
   normalizeBackendHost,
 } = require('./control-auth')
@@ -29,6 +31,7 @@ const BACKEND_PORT = backendPort(runtimeConfig)
 const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`
 const CONTROL_SECRET = generateControlSecret()
 const CONTROL_SESSION_ID = generateControlSessionId()
+let CONTROL_PROFILE_ID = null
 const BACKEND_RESTART_EXIT_CODE = 78
 const isDev = !app.isPackaged
 const useDevServer = useDevelopmentRenderer(app.isPackaged)
@@ -47,6 +50,7 @@ let backendProcess = null
 let backendUvCommand = null
 let appQuitting = false
 let backendReady = false
+let updateController = null
 
 function currentBackendLaunch() {
   return backendLaunch({
@@ -74,7 +78,13 @@ function getBackendRuntimeDir() {
 }
 
 function getBackendWorkspaceDir() {
-  return process.env.AGENT_WORKSPACE_DIR || path.join(getMonawHomeDir(), 'workspace')
+  if (process.env.AGENT_WORKSPACE_DIR) return process.env.AGENT_WORKSPACE_DIR
+  try {
+    return path.join(app.getPath('documents'), 'monaw')
+  } catch (err) {
+    console.warn('[main] Documents folder unavailable; using the Monaw home workspace:', err.message)
+    return path.join(getMonawHomeDir(), 'workspace')
+  }
 }
 
 function rotateFileIfNeeded(filePath, maxBytes = 5 * 1024 * 1024) {
@@ -347,7 +357,7 @@ function isTrustedRenderer(webContents, value) {
 function updateBackendSettings(payload) {
   return new Promise((resolve, reject) => {
     const body = Buffer.from(JSON.stringify(payload), 'utf8')
-    const session = mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID)
+    const session = mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID, undefined, undefined, CONTROL_PROFILE_ID)
     const request = http.request(
       `${BACKEND_BASE_URL}/api/settings`,
       {
@@ -513,6 +523,19 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   if (!hasInstanceLock) return
+  try {
+    CONTROL_PROFILE_ID = loadOrCreateControlProfileId({
+      safeStorage,
+      store: await getStore(),
+      profileContext: getMonawHomeDir(),
+      platform: process.platform,
+    })
+  } catch (err) {
+    // A missing OS encryption service disables cross-restart Run/Undo identity.
+    // Never fall back to a renderer-provided or plaintext profile id.
+    CONTROL_PROFILE_ID = null
+    console.error('[main] Profile-bound recovery is unavailable:', err.message)
+  }
   installContentSecurityPolicy()
   installMediaPermissionHandler()
   if (await portInUse(BACKEND_HOST, BACKEND_PORT)) {
@@ -522,6 +545,27 @@ app.whenReady().then(async () => {
   if (!currentBackendLaunch().frozen) backendUvCommand = await pickBackendUv()
   spawnBackend()
   createWindow()
+
+  const updatesEnabled = app.isPackaged && process.platform === 'win32'
+  const updater = updatesEnabled ? require('electron-updater').autoUpdater : null
+  updateController = createUpdateController({
+    updater, version: app.getVersion(), enabled: updatesEnabled,
+    installDirectory: updatesEnabled ? path.dirname(process.execPath) : undefined,
+    publish: (state) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updates:state', state)
+      if (state.status === 'ready' && Notification.isSupported()) {
+        const notice = new Notification({ title: 'Monaw update ready', body: `Version ${state.latestVersion} is ready. Open Settings > About to install it.` })
+        notice.on('click', () => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus() } })
+        notice.show()
+      }
+    },
+  })
+  if (updatesEnabled) {
+    const firstCheck = setTimeout(() => { void updateController.check() }, 30_000)
+    const periodicCheck = setInterval(() => { void updateController.check() }, 6 * 60 * 60 * 1000)
+    firstCheck.unref()
+    periodicCheck.unref()
+  }
 
   waitForBackend().then(applyStoredCredentialsToBackend).catch((err) => {
     console.error('[main] Backend startup or credential sync failed:', err.message)
@@ -672,7 +716,22 @@ async function applyStoredCredentialsToBackend() {
 
 ipcMain.handle('control:get-session', async (event) => {
   assertTrustedIpcSender(event)
-  return mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID)
+  return mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID, undefined, undefined, CONTROL_PROFILE_ID)
+})
+
+ipcMain.handle('updates:status', (event) => {
+  assertTrustedIpcSender(event)
+  return updateController?.getState() || { currentVersion: app.getVersion(), status: 'unavailable' }
+})
+
+ipcMain.handle('updates:check', async (event) => {
+  assertTrustedIpcSender(event)
+  return updateController ? updateController.check() : { currentVersion: app.getVersion(), status: 'unavailable' }
+})
+
+ipcMain.handle('updates:install', (event) => {
+  assertTrustedIpcSender(event)
+  return updateController?.install() || false
 })
 
 ipcMain.handle('credentials:status', async (event) => {

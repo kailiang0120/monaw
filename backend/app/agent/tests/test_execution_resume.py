@@ -30,8 +30,11 @@ def _clean(tmp_path, monkeypatch):
     monkeypatch.setattr(broker_mod, "_APPROVAL_LOG", tmp_path / "log.md")
     _all_tickets.clear()
     _pending_index.clear()
+    registered_executors = dict(_EXECUTORS)
     _EXECUTORS.clear()
     yield
+    _EXECUTORS.clear()
+    _EXECUTORS.update(registered_executors)
 
 
 class TestRegisterExecutor:

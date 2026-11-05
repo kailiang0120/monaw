@@ -86,6 +86,8 @@ def _settings_patch_from_body(body: SettingsUpdate) -> dict:
         patch["sandbox"] = body.sandbox.model_dump(exclude_unset=True)
     if body.identity is not None:
         patch["identity"] = body.identity.model_dump(exclude_unset=True)
+    if body.execution_detail is not None:
+        patch["execution_detail"] = body.execution_detail
 
     if (
         body.model_provider is not None
@@ -136,12 +138,14 @@ async def update_settings(body: SettingsUpdate):
         if updated != current:
             save_agent_settings(updated)
             changed = True
-            runtime_changed = True
             changed_sections = {
                 section
                 for section in patch
                 if getattr(updated, section) != getattr(current, section)
             }
+            # Execution detail affects the desktop presentation only, so it
+            # should not flush the agent runtime cache or alter authorization.
+            runtime_changed = bool(changed_sections - {"execution_detail"})
             mcp_changed = "mcp" in changed_sections or _browser_connection_changed(current, updated)
             if "memory" in changed_sections:
                 from app.agent.memory_store import get_memory_store

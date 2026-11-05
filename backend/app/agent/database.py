@@ -12,9 +12,10 @@ import logging
 import sqlite3
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.agent.db_bootstrap import initialize_database
 from app.agent.runtime_paths import RUNTIME_DIR
@@ -32,6 +33,10 @@ class ScheduledTaskConflictError(RuntimeError):
 
 class ScheduledTaskCapacityError(RuntimeError):
     """No bounded queue capacity is available for a manual request."""
+
+
+class ConversationHasUnresolvedRunError(RuntimeError):
+    """A conversation still owns active, recoverable, or unresolved Run evidence."""
 
 
 class Database:
@@ -72,6 +77,24 @@ class Database:
         with self._lock:
             self.conn.commit()
 
+    @contextmanager
+    def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+        """Run a unit of work on the shared connection under its reentrant lock.
+
+        ``BEGIN IMMEDIATE`` serializes competing Journal writers across both
+        threads and independent Database instances before they read revisions
+        or allocate event sequence numbers.
+        """
+        with self._lock:
+            conn = self.conn
+            conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
     def fetchone(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
         with self._lock:
             return self.conn.execute(sql, params).fetchone()
@@ -88,9 +111,18 @@ class Database:
 
     # Conversation CRUD
 
-    def create_conversation(self, conv_id: str, title: str, workspace_dir: str = "") -> dict:
+    def create_conversation(
+        self, conv_id: str, title: str, workspace_dir: str = "", *, default_chat_workspace: bool = False,
+    ) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
+            existing = self.get_conversation(conv_id)
+            if existing is not None:
+                return existing
+            if default_chat_workspace and not workspace_dir:
+                from app.agent.conversation_workspace import create_default_chat_workspace
+
+                workspace_dir = create_default_chat_workspace(conv_id, now)
             self.conn.execute(
                 "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, workspace_dir) VALUES (?, ?, ?, ?, ?)",
                 (conv_id, title, now, now, workspace_dir),
@@ -131,10 +163,96 @@ class Database:
             self.conn.commit()
 
     def delete_conversation(self, conv_id: str) -> bool:
-        with self._lock:
-            cur = self.conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
-            self.conn.commit()
-            return cur.rowcount > 0
+        now = datetime.now(timezone.utc).isoformat()
+        reclaim_refs: set[str] = set()
+        with self.transaction() as conn:
+            conversation = conn.execute(
+                "SELECT 1 FROM conversations WHERE id = ?", (conv_id,)
+            ).fetchone()
+            if conversation is None:
+                return False
+
+            unresolved = conn.execute(
+                """SELECT 1
+                   FROM agent_runs AS r
+                   WHERE r.conversation_id = ?
+                     AND (
+                       r.status IN (
+                           'running', 'waiting_approval', 'pausing', 'paused',
+                           'interrupted', 'needs_review'
+                       )
+                       OR EXISTS (
+                           SELECT 1 FROM run_operations AS o
+                           WHERE o.run_id = r.run_id
+                             AND o.status IN (
+                               'prepared', 'authorized', 'executing',
+                               'uncertain', 'needs_review'
+                             )
+                       )
+                     )
+                   LIMIT 1""",
+                (conv_id,),
+            ).fetchone()
+            if unresolved is not None:
+                raise ConversationHasUnresolvedRunError(
+                    "Resolve or stop active and recoverable Runs before deleting this conversation."
+                )
+
+            candidate_refs = {
+                str(row["snapshot_ref"])
+                for row in conn.execute(
+                    """SELECT DISTINCT o.snapshot_ref
+                       FROM run_operations AS o
+                       JOIN agent_runs AS r ON r.run_id = o.run_id
+                       WHERE r.conversation_id = ? AND o.snapshot_ref IS NOT NULL""",
+                    (conv_id,),
+                ).fetchall()
+            }
+            deleted = conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+            if deleted.rowcount <= 0:
+                return False
+
+            # Claim exclusive references before releasing the DB transaction.
+            # The migration trigger prevents a new Run from acquiring a ref
+            # while its file is being reclaimed.
+            for snapshot_ref in candidate_refs:
+                remaining = conn.execute(
+                    "SELECT 1 FROM run_operations WHERE snapshot_ref = ? LIMIT 1",
+                    (snapshot_ref,),
+                ).fetchone()
+                if remaining is not None:
+                    continue
+                conn.execute(
+                    """INSERT OR IGNORE INTO snapshot_ref_gc
+                       (snapshot_ref, state, created_at, reclaimed_at)
+                       VALUES (?, 'pending', ?, NULL)""",
+                    (snapshot_ref, now),
+                )
+                reclaim_refs.add(snapshot_ref)
+
+        if reclaim_refs:
+            try:
+                from app.agent.file_mutation.snapshot_store import reclaim_pending_snapshot_refs
+
+                result = reclaim_pending_snapshot_refs(self, snapshot_refs=reclaim_refs)
+                if int(result.get("snapshot_gc_pending", 0)):
+                    logger.warning(
+                        "snapshot reclamation deferred after conversation deletion pending=%s",
+                        int(result["snapshot_gc_pending"]),
+                    )
+            except Exception as exc:
+                # The durable queue is committed with the conversation deletion;
+                # startup/periodic retention retries failures without exposing refs.
+                logger.warning(
+                    "snapshot reclamation deferred after conversation deletion error_type=%s",
+                    type(exc).__name__,
+                )
+        try:
+            from app.agent.git_changes import reclaim_checkpoints
+            reclaim_checkpoints(self)
+        except Exception as exc:
+            logger.warning("Git checkpoint reclamation deferred error_type=%s", type(exc).__name__)
+        return True
 
     # Scheduled task CRUD
 
@@ -693,10 +811,13 @@ class Database:
     # Message CRUD
 
     def persist_turn_messages(self, turn_id: str, conv_id: str, messages: list[dict]) -> tuple[list[int], bool]:
-        """Commit all turn messages and tool results together; the first commit wins.
+        """Commit all turn messages and tool results together; retries are idempotent.
 
         The checkpoint survives process restarts, so retrying an uncertain commit
-        returns its original user IDs without inserting duplicate history.
+        returns its original user IDs without inserting duplicate history. A
+        durable turn may first have committed its user input as a recovery
+        checkpoint; in that case this call appends the remaining turn messages
+        and seals that checkpoint atomically.
         """
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -704,16 +825,55 @@ class Database:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 existing = conn.execute(
-                    "SELECT conversation_id, user_message_ids FROM turn_checkpoints WHERE turn_id = ?",
+                    "SELECT conversation_id, user_message_ids, finalized FROM turn_checkpoints WHERE turn_id = ?",
                     (turn_id,),
                 ).fetchone()
                 if existing is not None:
                     if existing["conversation_id"] != conv_id:
                         raise ValueError("Turn ID belongs to another conversation")
-                    conn.commit()
-                    return json.loads(existing["user_message_ids"]), False
-                user_ids: list[int] = []
-                for message in messages:
+                    try:
+                        user_ids = json.loads(existing["user_message_ids"])
+                    except (TypeError, json.JSONDecodeError) as exc:
+                        raise ValueError("Turn checkpoint user IDs are invalid") from exc
+                    if not isinstance(user_ids, list) or any(
+                        isinstance(item, bool) or not isinstance(item, int) for item in user_ids
+                    ):
+                        raise ValueError("Turn checkpoint user IDs are invalid")
+                    if int(existing["finalized"]):
+                        conn.commit()
+                        return user_ids, False
+                    if len(user_ids) != 1:
+                        raise ValueError("Pending turn checkpoint must contain one user input")
+                    initial_user_index = next(
+                        (index for index, message in enumerate(messages) if message.get("role") == "user"),
+                        None,
+                    )
+                    if initial_user_index is None:
+                        raise ValueError("Final turn commit is missing its checkpointed user input")
+                    initial_user = messages[initial_user_index]
+                    saved_input = conn.execute(
+                        "SELECT role, content, attachments_json FROM messages WHERE id = ? AND conversation_id = ?",
+                        (int(user_ids[0]), conv_id),
+                    ).fetchone()
+                    expected_attachments = (
+                        json.dumps(initial_user["attachments"], ensure_ascii=False)
+                        if initial_user.get("attachments") else ""
+                    )
+                    if (
+                        saved_input is None
+                        or saved_input["role"] != "user"
+                        or saved_input["content"] != initial_user.get("content")
+                        or str(saved_input["attachments_json"] or "") != expected_attachments
+                    ):
+                        raise ValueError("Final turn input does not match its recovery checkpoint")
+                    records_to_insert = [
+                        message for index, message in enumerate(messages) if index != initial_user_index
+                    ]
+                else:
+                    user_ids = []
+                    records_to_insert = messages
+                assistant_message_id = None
+                for message in records_to_insert:
                     cursor = conn.execute(
                         """INSERT INTO messages (
                             conversation_id, role, content, thinking, status,
@@ -724,6 +884,8 @@ class Database:
                          json.dumps(message["attachments"], ensure_ascii=False) if message.get("attachments") else "", now),
                     )
                     message_id = cursor.lastrowid
+                    if message["role"] == "assistant":
+                        assistant_message_id = int(message_id)
                     if message["role"] == "user":
                         user_ids.append(message_id)
                     for call in message.get("tool_calls", []):
@@ -735,10 +897,16 @@ class Database:
                              str(call.get("output", "")), str(call.get("status", "complete")), now),
                         )
                 conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conv_id))
-                conn.execute(
-                    "INSERT INTO turn_checkpoints (turn_id, conversation_id, user_message_ids) VALUES (?, ?, ?)",
-                    (turn_id, conv_id, json.dumps(user_ids)),
-                )
+                if existing is None:
+                    conn.execute(
+                        "INSERT INTO turn_checkpoints (turn_id, conversation_id, user_message_ids, assistant_message_id) VALUES (?, ?, ?, ?)",
+                        (turn_id, conv_id, json.dumps(user_ids), assistant_message_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE turn_checkpoints SET user_message_ids = ?, finalized = 1, assistant_message_id = ? WHERE turn_id = ?",
+                        (json.dumps(user_ids), assistant_message_id, turn_id),
+                    )
                 conn.commit()
                 return user_ids, True
             except BaseException:

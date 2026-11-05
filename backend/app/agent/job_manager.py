@@ -189,6 +189,7 @@ async def run_job(
                 principal_id=principal_id,
                 permission_profile_id=permission_profile_id,
                 interactive=interactive,
+                durable_run_id=job.job_id,
             ):
                 await job.append_event(event)
                 if event.get("event") == "done":
