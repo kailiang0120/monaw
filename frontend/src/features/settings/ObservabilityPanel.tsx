@@ -353,7 +353,7 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
             type="button"
             onClick={() => void deleteData()}
             disabled={loading || deletingData}
-            className="ghost-button h-8 rounded-lg px-3 text-xs text-red-200 disabled:opacity-50"
+            className="st-btn st-btn-danger"
           >
             <Trash2 size={13} />
             Delete Data
@@ -362,7 +362,7 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
             type="button"
             onClick={() => void refreshAll()}
             disabled={loading || deletingData}
-            className="ghost-button h-8 rounded-lg px-3 text-xs disabled:opacity-50"
+            className="st-btn st-btn-ghost"
           >
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
             Refresh
@@ -424,22 +424,23 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
             key={item}
             type="button"
             onClick={() => setView(item)}
-            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`st-btn ${
               view === item
-                ? 'border-accent bg-accent text-white'
-                : 'border-white/[0.08] bg-white/[0.03] text-neutral-400 hover:text-neutral-100'
+                ? 'st-btn-primary'
+                : 'st-btn-secondary'
             }`}
           >
             {item === 'runs' ? 'Runs' : item === 'errors' ? 'Errors' : item === 'backend' ? 'Backend log' : 'Support report'}
           </button>
         ))}
-        <div className="ml-auto flex min-w-[220px] items-center gap-2 rounded-lg border border-white/[0.08] bg-black/10 px-2 py-1.5">
-          <Search size={13} className="text-neutral-500" />
+        <div className="relative ml-auto min-w-[220px]">
+          <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500" />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search traces"
-            className="min-w-0 flex-1 bg-transparent text-xs text-neutral-200 outline-none placeholder:text-neutral-600"
+            aria-label="Search traces"
+            className="st-input st-search"
           />
         </div>
         {view === 'runs' && (
@@ -707,11 +708,11 @@ function RunDetail({
           <p className="mt-1 truncate text-xs text-neutral-300">{run.provider || '-'} / {run.model || '-'}</p>
         </div>
         <div className="flex gap-2">
-          <button type="button" onClick={() => onReplay(run.run_id)} disabled={!!actionRunId} className="ghost-button h-8 rounded-lg px-2.5 text-xs disabled:opacity-50">
+          <button type="button" onClick={() => onReplay(run.run_id)} disabled={!!actionRunId} className="st-btn st-btn-ghost">
             <Play size={13} className={actionRunId === run.run_id ? 'animate-pulse' : ''} />
             Replay
           </button>
-          <button type="button" onClick={() => onExport(run.run_id)} disabled={!!actionRunId} className="ghost-button h-8 rounded-lg px-2.5 text-xs disabled:opacity-50">
+          <button type="button" onClick={() => onExport(run.run_id)} disabled={!!actionRunId} className="st-btn st-btn-ghost">
             <Archive size={13} />
             Bundle
           </button>

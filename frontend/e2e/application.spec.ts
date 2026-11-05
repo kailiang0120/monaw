@@ -8,8 +8,22 @@ async function toolRows(desktop: import('./desktop').Desktop) {
   return messages.flatMap((message: { tool_calls?: unknown[] }) => message.tool_calls || [])
 }
 
-test('typing resumes after saving a model API key and closing settings', async ({ desktop }) => {
+test('typing resumes after saving a model API key and closing settings', async ({ desktop }, testInfo) => {
   const { page } = desktop
+  await desktop.send('recover')
+  await expect(page.getByText('Fixture recover completed.', { exact: false }).last()).toBeVisible()
+  for (const theme of ['dark', 'light']) {
+    const toggle = page.getByRole('button', { name: `Switch to ${theme} mode`, exact: true }).last()
+    if (await toggle.isVisible()) await toggle.click()
+    await page.screenshot({ path: testInfo.outputPath(`chat-${theme}.png`) })
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    const preview = page.getByRole('dialog', { name: 'Settings', exact: true })
+    await expect(preview.getByRole('button', { name: 'Close settings', exact: true })).toBeVisible()
+    await preview.screenshot({ path: testInfo.outputPath(`settings-${theme}.png`) })
+    await preview.locator('nav').getByRole('button', { name: 'Connections', exact: true }).click()
+    await preview.screenshot({ path: testInfo.outputPath(`connections-${theme}.png`) })
+    await preview.getByRole('button', { name: 'Close settings', exact: true }).click()
+  }
   const composer = page.getByRole('textbox', { name: 'Message', exact: true })
   await composer.fill('Draft before settings')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()

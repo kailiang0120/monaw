@@ -407,7 +407,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={() => onNewChat()}
-            className="flex w-full items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[13px] font-medium text-neutral-200 transition-colors hover:border-accent/30 hover:bg-accent/10 hover:text-accent-light"
+            className="flex w-full items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-[13px] font-medium text-neutral-200 transition-colors hover:border-accent/30 hover:bg-accent/10 hover:text-accent-light"
             aria-label="New chat"
             tabIndex={collapsed ? -1 : 0}
           >

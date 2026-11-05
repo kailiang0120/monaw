@@ -714,20 +714,20 @@ export function SettingsModal({
         aria-modal="true"
         aria-label="Settings"
         tabIndex={-1}
-        className="settings-shell flex h-[min(92vh,940px)] w-full max-w-6xl overflow-hidden rounded-2xl"
+        className="settings-shell relative flex h-[min(86vh,820px)] w-full max-w-[960px] overflow-hidden rounded-2xl"
       >
+        <button
+          type="button"
+          onClick={requestClose}
+          className="st-btn st-btn-ghost st-btn-icon st-settings-close"
+          aria-label="Close settings"
+        >
+          <X size={15} />
+        </button>
         {/* ------------------------------------------------------ navigation */}
-        <aside className="st-nav hidden h-full w-56 shrink-0 flex-col p-3 md:flex">
-          <div className="mb-3 flex items-center justify-between gap-2 px-1">
+        <aside className="st-nav hidden h-full w-52 shrink-0 flex-col p-3 md:flex">
+          <div className="mb-3 flex h-7 items-center gap-2 px-1">
             <h2 className="st-title">Settings</h2>
-            <button
-              type="button"
-              onClick={requestClose}
-              className="st-btn st-btn-ghost st-btn-icon"
-              aria-label="Close settings"
-            >
-              <X size={15} />
-            </button>
           </div>
 
           <div className="relative mb-3">
@@ -783,16 +783,8 @@ export function SettingsModal({
 
         <div className="flex min-w-0 flex-1 flex-col">
           {/* ------------------------------------------------ compact header */}
-          <header className="st-divider-b flex items-center justify-between gap-3 px-5 py-3 md:hidden">
+          <header className="st-divider-b flex items-center gap-3 py-3 pl-5 pr-14 md:hidden">
             <h2 className="st-title">Settings</h2>
-            <button
-              type="button"
-              onClick={requestClose}
-              className="st-btn st-btn-ghost st-btn-icon"
-              aria-label="Close settings"
-            >
-              <X size={15} />
-            </button>
           </header>
 
           <div className="st-divider-b px-4 py-3 md:hidden">
@@ -805,12 +797,12 @@ export function SettingsModal({
           </div>
 
           {/* ---------------------------------------------------- page body */}
-          <div ref={scrollRef} className="st-scroll min-h-0 flex-1 overflow-y-auto px-6 py-6">
+          <div ref={scrollRef} className="st-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
             <div className="mx-auto w-full max-w-[46rem]">
               {activeTab === 'model' && (
                 <>
                   <PageHeader title={PAGE_COPY.model.label} />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard
                       title="Voice input"
                       action={
@@ -872,7 +864,7 @@ export function SettingsModal({
               {activeTab === 'apiKeys' && (
                 <>
                   <PageHeader title={PAGE_COPY.apiKeys.label} />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard
                       title="OpenAI account"
                       description="Use your ChatGPT plan for Monaw's model requests, instead of an API key."
@@ -1035,7 +1027,7 @@ export function SettingsModal({
               {activeTab === 'identity' && (
                 <>
                   <PageHeader title={PAGE_COPY.identity.label} />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard title="Names">
                       <SettingRow label="Agent name">
                         <input
@@ -1206,7 +1198,7 @@ export function SettingsModal({
 
               {activeTab === 'tools' && toolsTab === 'skills' && (
                 <>
-                  <div role="tabpanel" id="settings-tools-panel-skills" aria-labelledby="settings-tools-tab-skills" className="space-y-4" tabIndex={0}>
+                  <div role="tabpanel" id="settings-tools-panel-skills" aria-labelledby="settings-tools-tab-skills" className="space-y-3" tabIndex={0}>
                     <Note tone="info">{SKILLS_COPY.intro}</Note>
                     <SettingsCard
                         title={SKILLS_COPY.title}
@@ -1288,7 +1280,7 @@ export function SettingsModal({
                       </button>
                     }
                   />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard title="Status">
                       <div className="grid grid-cols-2">
                         <StatusCell
@@ -1479,7 +1471,7 @@ export function SettingsModal({
               {activeTab === 'permissions' && (
                 <>
                   <PageHeader title={PAGE_COPY.permissions.label} />
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <SettingsCard title="Approval profile">
                       <div className="grid gap-2 p-4 sm:grid-cols-2">
                         {(['default', 'full_access', 'auto_review', 'custom'] as const).map((mode) => (

@@ -396,7 +396,7 @@ export function PageHeader({
   action?: ReactNode
 }) {
   return (
-    <div className="mb-5 flex items-start justify-between gap-4">
+    <div className="st-page-header mb-3 flex items-start justify-between gap-4">
       <div className="min-w-0">
         <h3 className="st-page-title">{title}</h3>
         {description && <p className="st-page-desc mt-1.5">{description}</p>}
