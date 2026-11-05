@@ -858,11 +858,20 @@ def test_scheduled_tasks_create_interval_runs_promptly(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduled_tasks_route, "get_db", lambda: db)
     monkeypatch.setattr(scheduled_tasks_route, "get_scheduled_task_service", lambda: None)
 
+    # Request latency must not count against the scheduler's first-run delay.
+    now = datetime(2026, 5, 8, 10, 0, 0, 997321, tzinfo=timezone.utc)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(scheduled_tasks_route, "datetime", FrozenDatetime)
+
     app = FastAPI()
     app.include_router(scheduled_tasks_route.router, prefix="/api")
     client = TestClient(app)
 
-    before = datetime.now(timezone.utc)
     response = client.post(
         "/api/scheduled-tasks",
         json={
@@ -876,7 +885,7 @@ def test_scheduled_tasks_create_interval_runs_promptly(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     next_run_at = datetime.fromisoformat(response.json()["nextRunAt"])
-    assert 0 <= (next_run_at - before).total_seconds() <= 60
+    assert next_run_at == datetime(2026, 5, 8, 10, 1, tzinfo=timezone.utc)
 
 
 def test_scheduled_tasks_telegram_chats_return_labels(tmp_path, monkeypatch):
