@@ -23,7 +23,7 @@ test('checks releases and installs only after a download completes', async () =>
   updater.emit('update-downloaded', { version: '1.2.0' })
   assert.equal(controller.getState().status, 'ready')
   assert.equal(controller.install(), true)
-  assert.deepEqual(updater.installArgs, [false, true])
+  assert.deepEqual(updater.installArgs, [true, true])
   assert.equal(events.at(-1).latestVersion, '1.2.0')
 })
 

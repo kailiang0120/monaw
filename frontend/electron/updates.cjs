@@ -41,7 +41,8 @@ function createUpdateController({ updater, version, enabled, publish = () => {} 
     },
     install() {
       if (!enabled || state.status !== 'ready') return false
-      updater.quitAndInstall(false, true)
+      // The user already confirmed in-app; NSIS must not open a second wizard.
+      updater.quitAndInstall(true, true)
       return true
     },
   }

@@ -124,7 +124,7 @@ test.afterEach(async () => {
     try { app.kill() } catch { /* already gone */ }
   }
   await expect.poll(() => packagedProcesses().length, { timeout: 20_000 }).toBe(0)
-  if (home.startsWith(tmpdir()) && home.includes('monaw-e2e-packaged')) await rm(home, { recursive: true, force: true })
+  if (home.startsWith(tmpdir()) && home.includes('monaw-e2e-packaged')) await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 })
 })
 
 function track(app: PackagedApp) {
@@ -201,7 +201,7 @@ for (const corrupted of [false, true]) test(corrupted ? 'rejects an update with 
   }
 })
 
-test('installs a newer version and preserves settings', async () => {
+test('installs a newer version and preserves settings', async ({}, testInfo) => {
   const installer = process.env.MONAW_UPDATE_TEST_INSTALLER
   test.skip(!installer, 'Run only on a disposable Windows runner with an installed test build')
   test.setTimeout(180_000)
@@ -219,13 +219,15 @@ test('installs a newer version and preserves settings', async () => {
     } else { response.writeHead(404); response.end() }
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  let desktop: PackagedApp | undefined
   const stopInstalled = () => execFileSync('powershell', ['-NoProfile', '-Command',
     "$p = [IO.Path]::GetFullPath($env:MONAW_PACKAGED_APP); Get-CimInstance Win32_Process -Filter \"Name='Monaw.exe' OR Name='monaw-backend.exe'\" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $p -or $_.ExecutablePath.StartsWith([IO.Path]::GetDirectoryName($p) + '\\', [StringComparison]::OrdinalIgnoreCase)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { stdio: 'ignore' })
   try {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('No update test port')
-    const desktop = track(new PackagedApp(home, await freePort()))
+    desktop = track(new PackagedApp(home, await freePort()))
     await desktop.start()
+    await expect.poll(() => health(desktop!.port), { timeout: 30_000 }).toBe(true)
     expect((await desktop.api('/api/settings', { identity: { user_name: 'Update test' } }, 'PUT')).status).toBe(200)
     await desktop.app.evaluate((_, url) => {
       const updater = process.mainModule!.require('electron-updater').autoUpdater
@@ -237,9 +239,8 @@ test('installs a newer version and preserves settings', async () => {
     await desktop.page.getByRole('button', { name: 'Check for updates' }).click()
     await expect(desktop.page.getByText('Version 1.1.1 is ready to install.')).toBeVisible({ timeout: 60_000 })
     await desktop.page.getByRole('button', { name: 'Restart to update' }).click()
-    const closed = desktop.app.waitForEvent('close', { timeout: 45_000 })
     await desktop.page.getByRole('button', { name: 'Restart and install' }).click()
-    await closed
+    await expect.poll(() => desktop!.app.process().exitCode, { timeout: 45_000 }).not.toBeNull()
     await expect.poll(() => {
       try {
         return execFileSync('powershell', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:MONAW_PACKAGED_APP).VersionInfo.ProductVersion'], { encoding: 'utf8' }).trim()
@@ -256,7 +257,9 @@ test('installs a newer version and preserves settings', async () => {
     await expect.poll(async () => updated.api('/api/settings').then(result => result.data.identity?.user_name, () => ''), { timeout: 30_000 }).toBe('Update test')
     await updated.quit()
   } finally {
+    if (desktop) await testInfo.attach('updater-main.log', { body: desktop.output, contentType: 'text/plain' })
     stopInstalled()
+    server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 })
