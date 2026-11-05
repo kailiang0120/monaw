@@ -234,10 +234,15 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
     await writeFile(join(appDir, 'resources', 'app-update.yml'), `provider: generic\nurl: http://127.0.0.1:${address.port}\nupdaterCacheDirName: monaw-agent-updater\n`)
     const port = await freePort()
     const debugPort = await freePort()
+    const workspace = join(home, 'workspace')
+    await mkdir(workspace, { recursive: true })
     // CDP attaches to the renderer only. Playwright's Electron main-process
     // inspector prevents normal process exit and can block the NSIS update.
     const child = spawn(appExe, [`--remote-debugging-port=${debugPort}`], {
-      env: packagedEnv(home, port), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      // This test runs only on a clean Windows runner. Keep its real Windows
+      // profile for NSIS while isolating Monaw's own data and workspace.
+      env: { ...process.env, MONAW_HOME: home, MONAW_BACKEND_PORT: String(port), AGENT_WORKSPACE_DIR: workspace },
+      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     })
     const capture = (chunk: Buffer) => { appOutput = (appOutput + chunk.toString()).slice(-20_000) }
     child.stdout?.on('data', capture)

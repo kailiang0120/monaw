@@ -120,6 +120,9 @@ jobs:
           finally { Pop-Location }
           ./scripts/package-windows.ps1 -SkipBackend
           if ($LASTEXITCODE -ne 0) { throw 'Update build failed' }
+          $version = (Get-Item frontend/release/win-unpacked/Monaw.exe).VersionInfo.ProductVersion
+          Write-Host "New test app product version: $version"
+          if ($version -notlike '1.1.1*') { throw 'The newer test build has the wrong executable version.' }
       - name: Install the initial version into a disposable folder
         shell: pwsh
         run: |
