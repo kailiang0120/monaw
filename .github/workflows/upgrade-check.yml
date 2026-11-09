@@ -39,7 +39,9 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        shell: bash
+        # Electron's postinstall downloads from GitHub, which has returned 504s on CI.
+        run: for attempt in 1 2 3; do npm ci && exit 0; echo "npm ci failed (attempt $attempt)"; sleep 20; done; exit 1
 
       - name: Build the installer
         shell: pwsh
@@ -105,7 +107,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        shell: bash
+        # Electron's postinstall downloads from GitHub, which has returned 504s on CI.
+        run: for attempt in 1 2 3; do npm ci && exit 0; echo "npm ci failed (attempt $attempt)"; sleep 20; done; exit 1
       - name: Build the initial installer
         shell: pwsh
         run: |

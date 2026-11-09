@@ -190,7 +190,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install locked frontend and Electron dependencies
         working-directory: frontend
-        run: npm ci
+        shell: bash
+        # Electron's postinstall downloads from GitHub, which has returned 504s on CI.
+        run: for attempt in 1 2 3; do npm ci && exit 0; echo "npm ci failed (attempt $attempt)"; sleep 20; done; exit 1
       - name: Verify application workflows and OS-encrypted MCP lifecycle
         working-directory: frontend
         run: npm run test:app
@@ -234,7 +236,9 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        shell: bash
+        # Electron's postinstall downloads from GitHub, which has returned 504s on CI.
+        run: for attempt in 1 2 3; do npm ci && exit 0; echo "npm ci failed (attempt $attempt)"; sleep 20; done; exit 1
 
       # Each commit must stand on its own: compile, import, boot the API,
       # type-check, and produce a renderer bundle. The other jobs only prove
@@ -268,7 +272,9 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        shell: bash
+        # Electron's postinstall downloads from GitHub, which has returned 504s on CI.
+        run: for attempt in 1 2 3; do npm ci && exit 0; echo "npm ci failed (attempt $attempt)"; sleep 20; done; exit 1
 
       - name: Test, type-check, and build
         working-directory: frontend
