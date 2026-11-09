@@ -465,4 +465,64 @@ describe('useRunController chat scoping', () => {
       stream.close()
     }
   })
+  for (const action of ['pause', 'resume'] as const) {
+    it(`${action === 'pause' ? 'retries Pause once' : 'does not retry Continue'} after a revision conflict from a Run that moved on`, async () => {
+      installDesktopSession()
+      const runId = `run-conflict-${action}`
+      const conversationId = `chat-conflict-${action}`
+      const status = action === 'pause' ? 'running' : 'paused'
+      let serverSnapshot = runAtRevision(runId, conversationId, 4, 4, status)
+      const commandBodies: number[] = []
+      const stream = controlledEventStream()
+      const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input))
+        if (url.pathname === '/api/runs') {
+          return Promise.resolve(jsonResponse({ runs: [serverSnapshot], next_run_id: null, has_more: false }))
+        }
+        if (url.pathname === `/api/runs/${runId}/${action}`) {
+          const expected = JSON.parse(String(init?.body)).expected_revision as number
+          commandBodies.push(expected)
+          if (expected !== serverSnapshot.revision) {
+            return Promise.resolve(new Response(JSON.stringify({ code: 'revision_conflict', message: 'The Run changed since the client last read it.' }), {
+              status: 409, headers: { 'Content-Type': 'application/json' },
+            }))
+          }
+          return Promise.resolve(jsonResponse({ accepted: true, run: runAtRevision(runId, conversationId, expected + 1, expected + 1, action === 'pause' ? 'pausing' : 'running') }))
+        }
+        if (url.pathname === `/api/runs/${runId}/events`) return Promise.resolve(jsonResponse(eventPage(runId, 4)))
+        if (url.pathname === `/api/runs/${runId}/events/stream`) return Promise.resolve(stream.response)
+        if (url.pathname === `/api/runs/${runId}`) return Promise.resolve(jsonResponse(serverSnapshot))
+        if (url.pathname === `/api/runs/${runId}/operations`) {
+          return Promise.resolve(jsonResponse(operationPage(serverSnapshot, operation(runId, 'op-1', 1))))
+        }
+        if (url.pathname === `/api/runs/${runId}/recovery`) {
+          return Promise.resolve(jsonResponse(recoveryReport(serverSnapshot, operation(runId, 'op-1', 1))))
+        }
+        throw new Error(`Unexpected request: ${url}`)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const { result } = renderHook(() => useRunController(conversationId))
+      try {
+        await waitFor(() => expect(result.current.snapshot?.revision).toBe(4))
+        // The Run advances (for example an operation is verified) before the UI hears about it.
+        serverSnapshot = runAtRevision(runId, conversationId, 6, 6, status)
+        let outcome: unknown
+        await act(async () => {
+          outcome = await result.current[action]().catch((error: unknown) => error)
+        })
+        if (action === 'pause') {
+          expect(commandBodies).toEqual([4, 6])
+          expect(outcome).toMatchObject({ accepted: true })
+        } else {
+          expect(commandBodies).toEqual([4])
+          expect(outcome).toMatchObject({ code: 'revision_conflict' })
+          await waitFor(() => expect(result.current.snapshot?.revision).toBe(6))
+        }
+      } finally {
+        cleanup()
+        stream.close()
+      }
+    })
+  }
 })

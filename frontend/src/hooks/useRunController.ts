@@ -456,12 +456,27 @@ export function useRunController(conversationId: string | null): UseRunControlle
       throw new RunActionUnavailableError('refresh')
     }
     if (!current.available_actions.includes(action)) throw new RunActionUnavailableError(action)
+    const send = (snapshot: RunSnapshot) => action === 'pause'
+      ? pauseRun(currentRunId, snapshot)
+      : action === 'resume'
+        ? resumeRun(currentRunId, snapshot)
+        : stopRun(currentRunId, snapshot)
     try {
-      const response = action === 'pause'
-        ? await pauseRun(currentRunId, current)
-        : action === 'resume'
-          ? await resumeRun(currentRunId, current)
-          : await stopRun(currentRunId, current)
+      let response: RunCommandResponse
+      try {
+        response = await send(current)
+      } catch (caught) {
+        // A running Run advances its revision with every event, so a Pause or
+        // Stop pressed just before the UI caught up would otherwise fail. Both
+        // mean the same thing at any revision; Continue is never retried
+        // because it acts on the state the user saw.
+        if (action === 'resume' || !(caught instanceof ApiError) || caught.code !== 'revision_conflict') throw caught
+        await refresh()
+        const fresh = snapshotRef.current
+        if (selectedRunIdRef.current !== currentRunId || !fresh || fresh.run_id !== currentRunId
+          || fresh.revision <= current.revision || !fresh.available_actions.includes(action)) throw caught
+        response = await send(fresh)
+      }
       if (selectedRunIdRef.current === currentRunId) setCurrentSnapshot(response.run)
       await refresh()
       return response
