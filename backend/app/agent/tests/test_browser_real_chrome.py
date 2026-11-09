@@ -53,12 +53,14 @@ def isolated_chrome(tmp_path):
     thread.start()
     profile = tmp_path/'isolated-chrome-profile'
     profile.mkdir()
+    chrome_log = open(tmp_path/'chrome-stderr.log','wb')
     process = subprocess.Popen([executable,'--headless=new','--no-first-run','--no-default-browser-check',
         '--disable-background-networking','--remote-debugging-port=0','--remote-allow-origins=http://localhost',
-        '--user-data-dir='+str(profile),'about:blank'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        '--user-data-dir='+str(profile),'about:blank'],stdout=subprocess.DEVNULL,stderr=chrome_log)
     try:
         active = profile/'DevToolsActivePort'
-        deadline = time.monotonic()+15
+        # Cold headless starts on shared Windows runners have exceeded 15s.
+        deadline = time.monotonic()+45
         port=None
         while process.poll() is None and time.monotonic()<deadline:
             try:
@@ -67,7 +69,11 @@ def isolated_chrome(tmp_path):
             except (OSError,ValueError,IndexError):
                 pass  # Windows can briefly hold the file while Chrome writes it.
             time.sleep(.05)
-        assert port,'Isolated Chrome did not expose DevTools endpoint.'
+        if not port:
+            chrome_log.flush()
+            stderr = (tmp_path/'chrome-stderr.log').read_text(errors='replace')[-2000:]
+            state = f'exited with code {process.returncode}' if process.poll() is not None else 'still running after 45s'
+            pytest.fail(f'Isolated Chrome did not expose DevTools endpoint ({executable} {state}).\n{stderr}')
         with urlopen(f'http://127.0.0.1:{port}/json/list',timeout=5) as response:
             page = next(t for t in json.load(response) if t['type']=='page')
         yield page['webSocketDebuggerUrl'],f'http://127.0.0.1:{http.server_port}/'
@@ -81,6 +87,7 @@ def isolated_chrome(tmp_path):
         http.shutdown()
         http.server_close()
         thread.join(timeout=3)
+        chrome_log.close()
 
 class RealCDPBridge:
     connected = True
