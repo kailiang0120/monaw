@@ -1,5 +1,5 @@
-import { test, expect, _electron, chromium, type Browser, type ElectronApplication, type Page } from '@playwright/test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { test, expect, _electron, chromium, type Browser, type BrowserContext, type ElectronApplication, type Page } from '@playwright/test'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -413,5 +413,95 @@ test.describe('with a ChatGPT account', () => {
     expect(answer.tool_calls.length).toBeGreaterThan(0)
     await expect(desktop.page.getByText(code).last()).toBeVisible()
     await desktop.quit()
+  })
+
+  // The model drives a real page through the packaged browser server and the
+  // Monaw extension. The extension runs in Playwright's own Chromium (branded
+  // Chrome ignores --load-extension), so the user's Chrome is never opened.
+  test('submits a local form through the Monaw extension and reads the result', async () => {
+    test.setTimeout(25 * 60_000)
+    const code = `form-${randomUUID().slice(0, 8)}`
+    const receipt = `R-${randomUUID().slice(0, 6)}`
+    const posts: string[] = []
+    const site = createHttpServer((request, response) => {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8')
+      if (request.method === 'POST' && request.url === '/save') {
+        let body = ''
+        request.on('data', (chunk) => { body += chunk })
+        request.on('end', () => {
+          posts.push(new URLSearchParams(body).get('reference') || '')
+          response.end(`<!doctype html><title>Saved</title><p>Saved. Receipt number: ${receipt}</p>`)
+        })
+        return
+      }
+      response.end(`<!doctype html><title>Release form</title><h1>Release form</h1>
+        <form method="post" action="/save"><label>Reference code <input name="reference"></label>
+        <button type="submit">Save reference</button></form>`)
+    })
+    await new Promise<void>((done) => site.listen(0, '127.0.0.1', done))
+    const siteUrl = `http://127.0.0.1:${(site.address() as { port: number }).port}/`
+
+    const extensionPort = await freePort()
+    const extension = join(home, 'browser', 'extension')
+    await cp(join(appDir, 'resources', 'browser-extension'), extension, { recursive: true })
+    await writeFile(join(extension, 'pairing.json'), JSON.stringify({ protocol: 1, port: extensionPort, token: randomUUID() }))
+    await mkdir(join(home, 'runtime'), { recursive: true })
+    await writeFile(join(home, 'runtime', 'settings.json'), JSON.stringify({
+      llm: { provider: 'codex' }, memory: { enabled: false, auto_learn: false },
+      browser: { extension_port: extensionPort },
+    }))
+
+    const desktop = track(new PackagedApp(home, await freePort()))
+    let chromiumContext: BrowserContext | undefined
+    try {
+      await desktop.start()
+      await expect.poll(() => health(desktop.port), { timeout: 30_000 }).toBe(true)
+      chromiumContext = await chromium.launchPersistentContext(join(home, 'chromium-profile'), {
+        headless: false,
+        args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
+      })
+      // Never let the backend fall back to opening the user's own Chrome.
+      await expect.poll(async () => (await desktop.api('/api/diagnostics/browser-use')).data.extension?.connected, {
+        timeout: 60_000, message: 'Monaw extension did not connect to the packaged browser server',
+      }).toBe(true)
+
+      const login = await desktop.api('/api/openai-account/login', {})
+      expect(login.status).toBe(200)
+      await desktop.app.evaluate(({ shell }, url) => shell.openExternal(url), login.data.auth_url as string)
+      console.log('Sign in with ChatGPT in the browser window that just opened. Waiting up to 10 minutes.')
+      await expect.poll(async () => (await desktop.api('/api/openai-account/status')).data.connected, {
+        timeout: 10 * 60_000, intervals: [2_000],
+      }).toBe(true)
+
+      await desktop.page.getByRole('textbox', { name: 'Message', exact: true }).fill(
+        `Open ${siteUrl} in the browser, enter ${code} as the reference code, save the form once, `
+        + 'then reply with only the receipt number shown on the page.')
+      await desktop.page.getByRole('button', { name: 'Send message', exact: true }).click()
+      await expect.poll(async () => (await desktop.api('/api/chat/runs')).data.length, { timeout: 30_000 }).toBe(1)
+      // Approve whatever the app asks for through its own approval control.
+      const deadline = Date.now() + 8 * 60_000
+      let approvals = 0
+      while ((await desktop.api('/api/chat/runs')).data.length > 0) {
+        expect(Date.now(), 'browser task did not finish').toBeLessThan(deadline)
+        if ((await desktop.api('/api/approvals/pending')).data.length > 0) {
+          await desktop.page.getByRole('button', { name: /^Approve( once)?$/ }).first().click()
+          approvals++
+        }
+        await desktop.page.waitForTimeout(1_000)
+      }
+      console.log(`Approvals given: ${approvals}`)
+
+      expect(posts, 'the form must be submitted exactly once with the requested code').toEqual([code])
+      const conversations = await desktop.api('/api/conversations')
+      const messages = (await desktop.api(`/api/conversations/${conversations.data[0].id}/messages`)).data.messages
+      const answer = messages.findLast((message: { role: string }) => message.role === 'assistant')
+      expect(answer.content).toContain(receipt)
+      const toolNames = JSON.stringify(messages.flatMap((message: { tool_calls?: unknown[] }) => message.tool_calls || []))
+      expect(toolNames).toContain('chrome-devtools')
+      await desktop.quit()
+    } finally {
+      await chromiumContext?.close().catch(() => {})
+      await new Promise((done) => site.close(done))
+    }
   })
 })
