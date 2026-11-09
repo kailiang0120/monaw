@@ -19,7 +19,7 @@ from .session import PageRegistry, SnapshotNode, TabSession, ToolError
 from .snapshot import take_snapshot
 from .tools_schema import TOOL_NAMES
 from .action_executor import ActionAttempt, before_dispatch, current_attempt
-from .action_verifier import validate_expectation, verify_effect
+from .action_verifier import auto_verify, validate_expectation, verify_effect
 from .browser_recovery import recovery_reason
 from .locator import validate_identity
 from .page_state import canonical_hash, context_version, read_page_state, frame_origin, resolve_frame_origins, isolated_dom_context, evaluate_fixed
@@ -243,7 +243,10 @@ class BrowserTools:
             output = await handler(material_args)
             if name in _MUTATING and attempt.dispatched:
                 try:
-                    verification = await verify_effect(self, attempt.session, material_args.get("expected_effect"), attempt.before)
+                    if material_args.get("expected_effect") is None and not output.is_error:
+                        verification = await auto_verify(self, attempt.session, name, material_args)
+                    else:
+                        verification = await verify_effect(self, attempt.session, material_args.get("expected_effect"), attempt.before)
                     status = "verified" if verification["passed"] is True else "failed" if verification["passed"] is False else "executed"
                     if output.is_error:
                         status = "uncertain"
