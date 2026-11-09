@@ -13,6 +13,8 @@ const temporaryRoot = realpathSync.native(tmpdir())
 // Playwright forces colour in workers; without --color never uv wraps these paths in escape codes.
 const uvCache = execFileSync('uv', ['--color', 'never', 'cache', 'dir'], { encoding: 'utf8', windowsHide: true }).trim()
 const python = execFileSync('uv', ['--color', 'never', 'python', 'find', '--project', resolve(frontend, '../backend')], { encoding: 'utf8', windowsHide: true }).trim()
+// Shared backend environment built once by global-setup.ts.
+const venv = process.env.MONAW_E2E_VENV ?? ''
 
 async function freePort(): Promise<number> {
   const server = createServer()
@@ -44,9 +46,11 @@ export class Desktop {
   errors: string[] = []
   consoleErrors: string[] = []
   mainOutput = ''
+  readonly venv = venv
   constructor(readonly root: string, readonly port: number) {}
 
   async start() {
+    if (!this.venv) throw new Error('MONAW_E2E_VENV is not set; run application tests through the Playwright config')
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined
       && !/^(OPENAI|GOOGLE|GEMINI|TAVILY|TELEGRAM|CODEX|MONAW|AGENT|VITE|PYTHON|UV|ELECTRON_RUN_AS_NODE)/i.test(key))) as Record<string, string>
     Object.assign(env, {
@@ -55,7 +59,7 @@ export class Desktop {
       AGENT_MEMORY_DIR: join(this.root, 'memory'), MONAW_BACKEND_PORT: String(this.port),
       MONAW_RENDERER_MODE: 'bundle', MONAW_DISABLE_BUILTIN_MCP: '1',
       PYTHONPATH: join(frontend, 'e2e', 'fixtures', 'python'),
-      UV_PROJECT_ENVIRONMENT: join(this.root, 'venv'), UV_PYTHON: python, UV_CACHE_DIR: uvCache,
+      UV_PROJECT_ENVIRONMENT: this.venv, UV_PYTHON: python, UV_CACHE_DIR: uvCache,
       OPENAI_API_KEY: 'sk-monaw-e2e-fixture-only', GOOGLE_API_KEY: '', TAVILY_API_KEY: '', TELEGRAM_BOT_TOKEN: '',
       MODEL_PROVIDER: 'openai', MODEL_NAME: 'gpt-6.1-sol',
       REASONING_EFFORT: 'medium', PORT: String(this.port), ALLOW_ARBITRARY_APP_PATHS: 'false',

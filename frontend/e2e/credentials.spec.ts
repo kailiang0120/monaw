@@ -11,7 +11,7 @@ test('OS encrypted MCP credentials hydrate, rotate, reconnect after schema chang
   const lines = (name: string) => readFile(join(desktop.root, 'control', name), 'utf8')
     .then(text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line)), () => [])
   const configured = await desktop.api('/api/settings', { mcp: { enabled: true, servers: [{
-    name: 'fixture', enabled: false, command: join(desktop.root, 'venv', 'Scripts', 'python.exe'),
+    name: 'fixture', enabled: false, command: join(desktop.venv, 'Scripts', 'python.exe'),
     args: [resolve(import.meta.dirname, 'fixtures/python/mcp_fixture.py'), join(desktop.root, 'control')],
     startup_timeout_ms: 15000,
   }] } }, 'PUT')
