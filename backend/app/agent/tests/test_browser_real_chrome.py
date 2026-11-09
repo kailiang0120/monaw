@@ -43,12 +43,12 @@ class _Page(BaseHTTPRequestHandler):
         pass
 
 @contextmanager
-def isolated_chrome(tmp_path):
+def isolated_chrome(tmp_path, handler=None):
     executable = next((p for p in [shutil.which('google-chrome'),shutil.which('chromium'),
         r'C:\Program Files\Google\Chrome\Application\chrome.exe',r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'] if p and Path(p).is_file()),None)
     if not executable:
         pytest.skip('Chrome/Chromium required for isolated real-browser integration.')
-    http = ThreadingHTTPServer(('127.0.0.1',0),_Page)
+    http = ThreadingHTTPServer(('127.0.0.1',0),handler or _Page)
     thread = threading.Thread(target=http.serve_forever,daemon=True)
     thread.start()
     profile = tmp_path/'isolated-chrome-profile'

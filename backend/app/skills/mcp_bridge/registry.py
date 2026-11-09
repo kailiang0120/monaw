@@ -432,9 +432,11 @@ def _call_mcp_tool(manager, reflected_name: str, tool_name: str, arguments: dict
                     url = url.get("url") or url.get("origin")
                 if url and not (url == "about:blank" and tool_name in {"navigate_page", "new_page", "list_pages", "select_page"}):
                     ensure_allowed_current_origin(origin_manager, str(url))
-            destination = str(context.get("destination") or "")
-            if destination.lower().startswith(("http://", "https://")):
-                ensure_allowed_current_origin(origin_manager, destination)
+            for destination in [str(context.get("destination") or ""), *map(str, context.get("additional_destinations") or [])]:
+                if destination.lower().startswith(("http://", "https://")):
+                    ensure_allowed_current_origin(origin_manager, destination)
+                elif destination.lower().startswith("invalid:"):
+                    raise ValueError("destination_origin_required")
         destinations = observable_argument_destinations(arguments)
         if cfg.allowed_destinations:
             permitted = {canonical_origin(url) for url in cfg.allowed_destinations}

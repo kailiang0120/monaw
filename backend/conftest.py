@@ -85,6 +85,7 @@ TEST_GROUPS = {
         "test_browser_extension_install.py",
         "test_browser_extension_tools.py",
         "test_browser_real_chrome.py",
+        "test_browser_adversarial_submission.py",
         "test_browser_action_verification.py",
         "test_local_chrome_launch.py",
         "test_exec_tool.py",

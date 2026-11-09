@@ -49,13 +49,19 @@ _TARGET_FACTS = r"""function(action) {
  // HTMLFormElement named children can shadow action/method/elements even in
  // an isolated realm. Read the actual native properties used by submission.
  const controls = form ? Array.from(native(HTMLFormElement.prototype,'elements',form)) : [];
- const submitter = form && !['submit','image'].includes(el.type)
-   ? controls.find(n => n.type === 'submit' || n.type === 'image') : el;
+ // form.elements leaves out input[type=image], which can still be the default
+ // button for implicit (Enter) submission. Collect submitters in tree order.
+ const submitters = form ? Array.from(el.ownerDocument.querySelectorAll('button,input'))
+   .filter(n => n.form === form && (n.type === 'submit' || n.type === 'image')) : [];
+ const submitter = form && !['submit','image'].includes(el.type) ? submitters[0] : el;
+ // Hyperlink auditing sends a POST to every ping URL when the link is followed.
+ const pings = el.matches('a[href],area[href]') ? String(Element.prototype.getAttribute.call(el,'ping') || '').split(/\s+/).filter(Boolean)
+   .slice(0, 16).map(u => { try { return new URL(u, el.baseURI).href; } catch (_) { return 'invalid:' + u.slice(0, 200); } }) : [];
  const endpoint = form ? (submitter && submitter.hasAttribute('formaction') ? submitter.formAction : native(HTMLFormElement.prototype,'action',form)) : '';
  const method = form ? (submitter && submitter.hasAttribute('formmethod') ? submitter.formMethod : native(HTMLFormElement.prototype,'method',form)) : '';
  const rect = el.getBoundingClientRect();
  return {tag:el.localName, type:el.type || '', id:el.id || '', role:el.getAttribute('role') || '',
-   href:el.href || '', form_action:endpoint, form_method:method, form_id:form ? Element.prototype.getAttribute.call(form,'id') || '' : '',
+   href:el.href || '', ping_urls:pings, form_action:endpoint, form_method:method, form_id:form ? Element.prototype.getAttribute.call(form,'id') || '' : '',
    control_index:form ? controls.indexOf(el) : -1,
    current_value:typeof el.value === 'string' ? el.value : null,
    bounds:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},
@@ -510,7 +516,8 @@ class BrowserTools:
                                 or name == "type_text" and "enter" in str(arguments.get("submitKey")).lower()))
         kind = "submit" if external_submit else {"evaluate_script":"execute_code", "upload_file":"upload",
                  "navigate_page":"navigate", "fill":"type", "fill_form":"type", "type_text":"type"}.get(name, "click" if name in _MUTATING else "read")
-        side_effect = "external_mutation" if external_submit else "unknown" if name in {"evaluate_script", "click", "press_key", "handle_dialog", "drag"} else "local_mutation" if name in _MUTATING else "none"
+        ping_urls = [str(item) for item in target.get("ping_urls") or []] if name == "click" else []
+        side_effect = "external_mutation" if external_submit or ping_urls else "unknown" if name in {"evaluate_script", "click", "press_key", "handle_dialog", "drag"} else "local_mutation" if name in _MUTATING else "none"
         if name == "upload_file":
             side_effect = "external_mutation"  # onchange handlers can transmit immediately.
         if name == "navigate_page" and arguments.get("url"):
@@ -527,6 +534,7 @@ class BrowserTools:
                                      + [{"frame_id":frame_id,"reason_code":"inaccessible_frame"} for frame_id in sorted(session.inaccessible_frames)],
                 "context_version":context_version(session, state), "target":target, "destination":destination,
                 "action_kind":kind, "side_effect":side_effect, "data_scope":data_scope,
+                "additional_destinations":ping_urls,
                 "runtime_facts":{"target_verified":True, "context_verified":True,
                                  "coordinate_only":bool(arguments.get("visual_target")),
                                  "sensitive_data_submission":bool(external_submit and sensitive_form),
