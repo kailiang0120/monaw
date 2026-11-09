@@ -26,7 +26,14 @@ def public_descriptor(action, decision) -> dict:
         scope["files"] = [{**{key: item[key] for key in ("size_bytes", "sensitivity") if key in item},
                            "name": PureWindowsPath(str(item.get("name") or item.get("path") or "")).name}
                           for item in files if isinstance(item, dict)]
+    facts = action.runtime_facts or {}
+    # Opaque: Monaw cannot observe what the action sends or changes, so an
+    # approval cannot be limited to the shown destination.
+    opaque = bool(facts.get("opaque_execution")) or action.side_effect == "unknown" or action.action_kind == "execute_code"
+    pings = action.target.get("ping_urls")
+    also = sorted({_safe_destination(url) for url in pings if isinstance(url, str)})[:8] if isinstance(pings, list) else []
     return redact_sensitive(dict(action_id=action.action_id, run_id=action.run_id, operation_id=action.operation_id,
+        opaque=opaque, also_sends_to=also,
         tool_name=action.tool_name, action_kind=action.action_kind, target=target,
         destination=_safe_destination(action.destination), data_scope=scope, side_effect=action.side_effect,
         risk_level=decision.risk_level, human_only=decision.human_only,

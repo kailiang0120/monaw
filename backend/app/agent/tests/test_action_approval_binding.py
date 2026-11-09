@@ -174,3 +174,18 @@ def test_browser_runtime_outcome_preserves_uncertainty_and_prevents_replay(tmp_p
             operation.begin_effect()
     finally:
         reset_current_operation_execution(token)
+
+
+def test_public_descriptor_flags_opaque_actions_and_extra_destinations():
+    decision = SimpleNamespace(risk_level="medium", human_only=False)
+    bound = public_descriptor(descriptor(), decision)
+    assert bound["opaque"] is False and bound["also_sends_to"] == []
+
+    script = public_descriptor(descriptor(action_kind="execute_code", side_effect="unknown"), decision)
+    assert script["opaque"] is True
+    remote = public_descriptor(descriptor(runtime_facts={"target_verified": True, "context_verified": True, "opaque_execution": True}), decision)
+    assert remote["opaque"] is True
+
+    link = public_descriptor(descriptor(action_kind="click", target={"page_id": 1, "ping_urls": [
+        "https://collector.example.net/ping?id=secret", "https://collector.example.net/other"]}), decision)
+    assert link["also_sends_to"] == ["https://collector.example.net"]
