@@ -17,7 +17,7 @@ from app.skills.browser_use.extension.toolset import BrowserTools
 
 HTML = b'''<!doctype html><meta charset=utf-8><title>Isolated workflow</title>
 <style>button,input{display:block;margin:18px;padding:12px}</style>
-<input id=email aria-label=Email><button id=save onclick="window.sent=(window.sent||0)+1;document.querySelector('#status').innerHTML='<p id=success>Saved</p>';history.pushState({},'', '/done')">Save draft</button>
+<input id=email aria-label=Email><input id=upper aria-label="Upper field" oninput="this.value=this.value.toUpperCase()"><input id=secret type=password aria-label="Secret field"><button id=save onclick="window.sent=(window.sent||0)+1;document.querySelector('#status').innerHTML='<p id=success>Saved</p>';history.pushState({},'', '/done')">Save draft</button>
 <button id=duplicate>Duplicate</button><button>Duplicate</button><div id=status></div>
 <button id=noeffect>No effect</button><button id=dialog onclick="alert('Review')">Show dialog</button>
 <form action=/form-target method=post><input id=first name=first aria-label="First field"><input id=second name=second aria-label="Second field">
@@ -43,22 +43,24 @@ class _Page(BaseHTTPRequestHandler):
         pass
 
 @contextmanager
-def isolated_chrome(tmp_path):
+def isolated_chrome(tmp_path, handler=None):
     executable = next((p for p in [shutil.which('google-chrome'),shutil.which('chromium'),
         r'C:\Program Files\Google\Chrome\Application\chrome.exe',r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'] if p and Path(p).is_file()),None)
     if not executable:
         pytest.skip('Chrome/Chromium required for isolated real-browser integration.')
-    http = ThreadingHTTPServer(('127.0.0.1',0),_Page)
+    http = ThreadingHTTPServer(('127.0.0.1',0),handler or _Page)
     thread = threading.Thread(target=http.serve_forever,daemon=True)
     thread.start()
     profile = tmp_path/'isolated-chrome-profile'
     profile.mkdir()
+    chrome_log = open(tmp_path/'chrome-stderr.log','wb')
     process = subprocess.Popen([executable,'--headless=new','--no-first-run','--no-default-browser-check',
         '--disable-background-networking','--remote-debugging-port=0','--remote-allow-origins=http://localhost',
-        '--user-data-dir='+str(profile),'about:blank'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        '--user-data-dir='+str(profile),'about:blank'],stdout=subprocess.DEVNULL,stderr=chrome_log)
     try:
         active = profile/'DevToolsActivePort'
-        deadline = time.monotonic()+15
+        # Cold headless starts on shared Windows runners have exceeded 15s.
+        deadline = time.monotonic()+45
         port=None
         while process.poll() is None and time.monotonic()<deadline:
             try:
@@ -67,7 +69,11 @@ def isolated_chrome(tmp_path):
             except (OSError,ValueError,IndexError):
                 pass  # Windows can briefly hold the file while Chrome writes it.
             time.sleep(.05)
-        assert port,'Isolated Chrome did not expose DevTools endpoint.'
+        if not port:
+            chrome_log.flush()
+            stderr = (tmp_path/'chrome-stderr.log').read_text(errors='replace')[-2000:]
+            state = f'exited with code {process.returncode}' if process.poll() is not None else 'still running after 45s'
+            pytest.fail(f'Isolated Chrome did not expose DevTools endpoint ({executable} {state}).\n{stderr}')
         with urlopen(f'http://127.0.0.1:{port}/json/list',timeout=5) as response:
             page = next(t for t in json.load(response) if t['type']=='page')
         yield page['webSocketDebuggerUrl'],f'http://127.0.0.1:{http.server_port}/'
@@ -81,6 +87,7 @@ def isolated_chrome(tmp_path):
         http.shutdown()
         http.server_close()
         thread.join(timeout=3)
+        chrome_log.close()
 
 class RealCDPBridge:
     connected = True
@@ -159,6 +166,18 @@ async def _workflow(socket_url,url):
         result=await tools.call('fill',{'uid':uid('Email'),'value':'fixture@example.test',
             'expected_effect':{'type':'value_equals','selector':'#email','value':'fixture@example.test'}})
         assert result.action_outcome['status']=='verified'
+        # Without an expected_effect, fills are read back with a fixed query.
+        result=await tools.call('fill',{'uid':uid('Email'),'value':'second@example.test','includeSnapshot':False})
+        assert result.action_outcome['status']=='verified', result.action_outcome
+        assert result.action_outcome['verification']['automatic'] is True
+        result=await tools.call('fill',{'uid':uid('Upper field'),'value':'abc','includeSnapshot':False})
+        assert result.action_outcome['status']=='failed', result.action_outcome
+        assert result.action_outcome['verification']['fields']==[{'uid':uid('Upper field'),'passed':False,'observed':'ABC'}]
+        result=await tools.call('fill',{'uid':uid('Secret field'),'value':'not-read-back','includeSnapshot':False})
+        assert result.action_outcome['status']=='executed' and result.action_outcome['verification']['passed'] is None
+        assert 'not-read-back' not in json.dumps(result.action_outcome)
+        result=await tools.call('fill_form',{'elements':[{'uid':uid('Email'),'value':'third@example.test'},{'uid':uid('Upper field'),'value':'XYZ'}],'includeSnapshot':False})
+        assert result.action_outcome['status']=='verified', result.action_outcome
         result=await tools.call('click',{'uid':uid('Save draft'),'expected_effect':{'type':'url_equals','value':url+'done'}})
         assert result.action_outcome['status']=='verified'
         assert await bridge.evaluate('window.sent')==1 and session.same_document>0

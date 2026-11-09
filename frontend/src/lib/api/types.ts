@@ -829,6 +829,10 @@ export interface ActionDescriptor {
   risk_level?: string
   context_version?: string
   human_only?: boolean
+  /** Monaw cannot observe everything this action sends or changes. */
+  opaque?: boolean
+  /** Other origins the action is known to contact, such as link ping URLs. */
+  also_sends_to?: string[]
 }
 
 export interface ApprovalTicket {

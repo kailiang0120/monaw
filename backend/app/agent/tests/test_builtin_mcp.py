@@ -346,3 +346,22 @@ def test_changing_the_extension_port_restarts_mcp():
     current = AgentSettings()
     assert _browser_connection_changed(current, merge_agent_settings(current, {"browser": {"extension_port": 8500}}))
     assert not _browser_connection_changed(current, merge_agent_settings(current, {"browser": {"allowed_domains": ["a.com"]}}))
+
+
+@pytest.mark.parametrize("pings,reason_code", [
+    (["https://collector.evil.example.net/ping"], "domain_not_allowed"),
+    (["invalid:http://[bad"], "destination_origin_required"),
+])
+def test_link_ping_destinations_are_checked_against_allowed_domains(runtime_settings, monkeypatch, pings, reason_code):
+    # A same-origin link can still POST to every URL in its ping attribute.
+    runtime_settings.browser.allowed_domains = ["example.com"]
+    def ping_context(_manager, name, arguments, upload_scope=None):
+        return {"context_token":"ping-context", "context_version":"document:1", "url":"https://example.com/",
+                "target":{"page_id":1, "ping_urls":pings}, "destination":"https://example.com/next",
+                "additional_destinations":pings, "action_kind":"click", "side_effect":"external_mutation",
+                "runtime_facts":{"target_verified":True, "context_verified":True}, "data_scope":{}}
+    monkeypatch.setattr("app.skills.mcp_bridge.registry._browser_context", ping_context)
+    calls = []
+    result = json.loads(_devtools_entries("click", calls=calls)["click"]["callable"](uid="1_2"))
+    assert result["status"] == "blocked" and result["reason_code"] == reason_code
+    assert calls == []
