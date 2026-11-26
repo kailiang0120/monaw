@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -44,8 +45,14 @@ class _Page(BaseHTTPRequestHandler):
 
 @contextmanager
 def isolated_chrome(tmp_path, handler=None):
-    executable = next((p for p in [shutil.which('google-chrome'),shutil.which('chromium'),
+    """Run an explicitly selected test browser in a disposable local-only profile."""
+    configured = os.environ.get('MONAW_TEST_CHROME')
+    executable = configured or next((p for p in [shutil.which('google-chrome'),shutil.which('chromium'),
         r'C:\Program Files\Google\Chrome\Application\chrome.exe',r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'] if p and Path(p).is_file()),None)
+    if configured and not Path(configured).is_file():
+        pytest.fail('MONAW_TEST_CHROME must name an installed test browser.')
+    if not executable and os.environ.get('MONAW_REQUIRE_BROWSER_TESTS') == '1':
+        pytest.fail('The required real-browser contract tests have no Chrome executable.')
     if not executable:
         pytest.skip('Chrome/Chromium required for isolated real-browser integration.')
     http = ThreadingHTTPServer(('127.0.0.1',0),handler or _Page)

@@ -23,13 +23,13 @@ class ModelUsageBudget:
     estimated_requests: int = 0
     requests: int = 0
 
-    def reserve(self, input_tokens: int) -> tuple[int, int | None]:
+    def reserve(self, input_tokens: int, *, output_cap: int = 16_384, minimum_output: int = 16) -> tuple[int, int | None]:
         """Reserve input and bounded output before any provider attempt starts."""
         if not self.limit:
             return 0, None
         remaining = self.limit - self.usage.total_tokens - self.reserved
-        output_limit = min(16_384, remaining - input_tokens)
-        if output_limit < 16:
+        output_limit = min(output_cap, remaining - input_tokens)
+        if output_limit < minimum_output:
             raise TokenBudgetExceeded(
                 "Paused: the next model request does not fit within the remaining token budget. "
                 "Continue with a new turn or increase the limit in Settings."
@@ -70,3 +70,14 @@ def estimated_usage(client, input_tokens: int, output: str) -> UsageStats:
         output_tokens=count_text_tokens(output, llm_client=client),
         source="chatgpt_account" if client.provider == "codex" else "estimated",
     ).normalized()
+
+
+def settle_estimated_usage(client, usage: UsageStats, *, output_allowance: int | None, uncertain: bool) -> UsageStats:
+    """Retain the reserved output when failure or hidden reasoning hides usage."""
+    from app.agent.model_capabilities import model_capabilities
+
+    if output_allowance is not None and (uncertain or model_capabilities(client).hidden_reasoning):
+        # A visible reasoning summary is not a measurement of hidden tokens.
+        usage.output_tokens = max(usage.output_tokens, output_allowance)
+        usage.total_tokens = usage.input_tokens + usage.output_tokens
+    return usage

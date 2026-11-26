@@ -8,6 +8,7 @@ from app.skills.browser_use.extension.dom_inspection import ACTION_TARGET, READ_
 from app.skills.browser_use.extension.session import ToolError
 from app.skills.browser_use.extension.toolset import BrowserTools, _TARGET_FACTS
 from app.skills.browser_use.extension.page_state import PAGE_STATE
+from app.skills.browser_use.extension.form_policy import _INSTALL
 from app.skills.browser_use.extension.tools_schema import TOOL_DEFINITIONS, TOOL_NAMES
 from app.skills.mcp_bridge.builtin import BUILTIN_TOOL_POLICIES, CHROME_DEVTOOLS_SERVER
 
@@ -104,6 +105,8 @@ class FakeChrome:
                 return {"result": {"value": self.label_point}}
             return {"result": {"value": self.fill_kind if "el.select" in function else 42}}
         if cdp == "Runtime.evaluate":
+            if args["expression"].startswith(_INSTALL):
+                return {"result": {"value": {"installed": True, "violations": 0}}}
             if args["expression"] == PAGE_STATE:
                 return {"result":{"value":{"document":self.loader, "revision":0, "url":self.tabs[0]["url"], "width":800, "height":600, "scale":1}}}
             if args["expression"] == "location.href":

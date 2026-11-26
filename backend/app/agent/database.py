@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.agent.conversation_history import ConversationHistory
 from app.agent.db_bootstrap import initialize_database
 from app.agent.runtime_paths import RUNTIME_DIR
 
@@ -134,34 +135,11 @@ class Database:
         self, *, limit: int | None = None, offset: int = 0, search: str = "",
         before_updated_at: str = "", before_id: str = "",
     ) -> list[dict]:
-        """Search persisted history and paginate by a stable activity cursor."""
-        clauses = []
-        params: list = []
-        if search.strip():
-            clauses.append("""(instr(lower(c.title), lower(?)) > 0
-                OR instr(lower(c.workspace_dir), lower(?)) > 0
-                OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id
-                           AND instr(lower(m.content), lower(?)) > 0))""")
-            params.extend([search.strip()] * 3)
-        if before_updated_at and before_id:
-            clauses.append("(c.updated_at < ? OR (c.updated_at = ? AND c.id < ?))")
-            params.extend([before_updated_at, before_updated_at, before_id])
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        paging = " LIMIT ? OFFSET ?" if limit is not None else ""
-        if limit is not None:
-            params.extend([max(1, limit), max(0, offset)])
-        rows = self.fetchall(
-            "SELECT c.id, c.title, c.created_at, c.updated_at, c.workspace_dir FROM conversations c"
-            + where + " ORDER BY c.updated_at DESC, c.id DESC" + paging,
-            tuple(params),
+        """Delegate paged history reads without exposing the shared connection."""
+        return ConversationHistory(self).list(
+            limit=limit, offset=offset, search=search,
+            before_updated_at=before_updated_at, before_id=before_id,
         )
-        return [
-            {
-                "id": r["id"], "title": r["title"], "created_at": r["created_at"], "updated_at": r["updated_at"],
-                "workspace_dir": r["workspace_dir"],
-            }
-            for r in rows
-        ]
 
     def get_conversation(self, conv_id: str) -> dict | None:
         row = self.fetchone("SELECT * FROM conversations WHERE id = ?", (conv_id,))
@@ -944,6 +922,16 @@ class Database:
                         "UPDATE turn_checkpoints SET user_message_ids = ?, finalized = 1, assistant_message_id = ? WHERE turn_id = ?",
                         (json.dumps(user_ids), assistant_message_id, turn_id),
                     )
+                # The IMMEDIATE transaction serializes this watermark with every
+                # operation transition, independently of clock precision/skew.
+                conn.execute(
+                    """UPDATE turn_checkpoints SET operation_result_seq = (
+                        SELECT r.last_seq FROM agent_runs r
+                        JOIN run_attempts a ON a.run_id = r.run_id
+                        WHERE a.turn_id = ? AND r.conversation_id = ?
+                    ) WHERE turn_id = ?""",
+                    (turn_id, conv_id, turn_id),
+                )
                 conn.commit()
                 return user_ids, True
             except BaseException:

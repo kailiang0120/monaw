@@ -35,6 +35,7 @@ TEST_GROUPS = {
         "test_iteration_budget.py",
         "test_job_manager.py",
         "test_llm_client_schema.py",
+        "test_provider_contracts.py",
         "test_retry.py",
         "test_run_events.py",
         "test_ui_events.py",

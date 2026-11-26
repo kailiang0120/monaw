@@ -16,6 +16,7 @@ class LLMProviderAdapter(Protocol):
         system_prompt: str = "",
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
         tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> Any:
         """Execute one provider-specific chat request."""
 
@@ -33,13 +34,16 @@ class GeminiProviderAdapter:
         system_prompt: str = "",
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
         tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> Any:
+        """Expose the same answer/reasoning callback contract as other providers."""
         return await self._client._gemini_chat(
             messages,
             tools,
             system_prompt,
             stream_callback,
             tool_choice,
+            reasoning_callback,
         )
 
 

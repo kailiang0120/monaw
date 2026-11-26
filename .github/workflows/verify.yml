@@ -12,6 +12,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  browser-provider-contracts:
+    name: Browser/provider contracts (${{ matrix.chrome }}, Python ${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chrome: minimum
+            python: "3.11"
+          - chrome: stable
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Prepare locked dependencies and isolated Chrome
+        shell: pwsh
+        run: |
+          uv sync --directory backend --locked --python ${{ matrix.python }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $chrome = uv run --directory backend --locked python ../scripts/fetch-test-chrome.py --channel ${{ matrix.chrome }} --destination "$env:RUNNER_TEMP/monaw-test-chrome"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "MONAW_TEST_CHROME=$chrome"
+      - name: Verify real browser and provider wire contracts
+        working-directory: backend
+        env:
+          MONAW_REQUIRE_BROWSER_TESTS: "1"
+          MONAW_HOME: ${{ runner.temp }}/monaw-contract-data
+          AGENT_WORKSPACE_DIR: ${{ runner.temp }}/monaw-contract-workspace
+        run: uv run --locked pytest app/agent/tests/test_browser_real_chrome.py app/agent/tests/test_browser_adversarial_submission.py app/agent/tests/test_provider_contracts.py --junitxml=test-results/contracts.xml
+      - name: Upload contract report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contracts-${{ matrix.chrome }}-python-${{ matrix.python }}
+          path: backend/test-results/contracts.xml
+          if-no-files-found: error
+
   backend:
     name: Backend (${{ matrix.group }})
     runs-on: windows-latest

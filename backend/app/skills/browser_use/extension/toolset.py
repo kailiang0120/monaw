@@ -14,6 +14,7 @@ from typing import Any
 from .bridge import ExtensionBridge, ExtensionError
 from .chrome import ensure_extension_connected
 from .dom_inspection import ACTION_TARGET, READ_ELEMENT
+from .form_policy import form_submission_blocked, protect_form_submission
 from .keys import key_events
 from .session import PageRegistry, SnapshotNode, TabSession, ToolError
 from .snapshot import take_snapshot
@@ -249,12 +250,16 @@ class BrowserTools:
             output = await handler(material_args)
             if name in _MUTATING and attempt.dispatched:
                 try:
-                    if material_args.get("expected_effect") is None and not output.is_error:
+                    if await form_submission_blocked(attempt):
+                        verification = {"type": "form_destination", "passed": False,
+                                        "reason": "Chrome blocked a form submission outside the approved destination policy."}
+                        output.is_error = True
+                    elif material_args.get("expected_effect") is None and not output.is_error:
                         verification = await auto_verify(self, attempt.session, name, material_args)
                     else:
                         verification = await verify_effect(self, attempt.session, material_args.get("expected_effect"), attempt.before)
                     status = "verified" if verification["passed"] is True else "failed" if verification["passed"] is False else "executed"
-                    if output.is_error:
+                    if output.is_error and verification.get("type") != "form_destination":
                         status = "uncertain"
                 except (ToolError, ExtensionError, TimeoutError):
                     verification = {"type":(material_args.get("expected_effect") or {}).get("type", "not_requested"),
@@ -299,6 +304,7 @@ class BrowserTools:
         if continuation:
             await self._validate_continuation(attempt)
             await self._validate_input_boundary(attempt)
+            await protect_form_submission(attempt)
             return
         token = binding.get("context_token")
         stored = self._contexts.pop(token, None)
@@ -309,6 +315,7 @@ class BrowserTools:
         if canonical_hash(current) != stored[1] or canonical_hash(expected) != stored[1]:
             raise ToolError("Browser action context changed after authorization. No action was dispatched; obtain a fresh review.")
         await self._validate_input_boundary(attempt)
+        await protect_form_submission(attempt)
 
     async def _validate_input_boundary(self, attempt):
         method, params = getattr(attempt, "boundary", (None, {}))
@@ -509,11 +516,11 @@ class BrowserTools:
         sensitive_form = any(control.get("type") in {"password", "file"}
                              or bool(set(str(control.get("autocomplete") or "").lower().split()) & sensitive_autocomplete)
                              for control in target.get("form_controls") or [])
-        external_submit = (name in {"click", "press_key", "type_text"} and target.get("form_action")
-                           and (str(target.get("form_method")).lower() != "get" or sensitive_form)
+        form_submit = (name in {"click", "press_key", "type_text"} and target.get("form_action")
                            and (name == "click" and target.get("type") in {"submit", "image"}
                                 or name == "press_key" and "enter" in str(arguments.get("key")).lower()
                                 or name == "type_text" and "enter" in str(arguments.get("submitKey")).lower()))
+        external_submit = form_submit and (str(target.get("form_method")).lower() != "get" or sensitive_form)
         kind = "submit" if external_submit else {"evaluate_script":"execute_code", "upload_file":"upload",
                  "navigate_page":"navigate", "fill":"type", "fill_form":"type", "type_text":"type"}.get(name, "click" if name in _MUTATING else "read")
         ping_urls = [str(item) for item in target.get("ping_urls") or []] if name == "click" else []
@@ -538,6 +545,7 @@ class BrowserTools:
                 "runtime_facts":{"target_verified":True, "context_verified":True,
                                  "coordinate_only":bool(arguments.get("visual_target")),
                                  "sensitive_data_submission":bool(external_submit and sensitive_form),
+                                 "form_submission":bool(form_submit),
                                  "external_submission":bool(external_submit)}}
 
     # -- helpers -------------------------------------------------------------

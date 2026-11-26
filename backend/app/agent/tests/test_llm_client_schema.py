@@ -261,7 +261,7 @@ def test_gemini_chat_payload_uses_generate_content_with_thinking_config(monkeypa
     class FakeModels:
         async def generate_content(self, **kwargs):
             captured.update(kwargs)
-            return SimpleNamespace(text="ok", function_calls=[])
+            return SimpleNamespace(text="ok", function_calls=[], candidates=[SimpleNamespace(finish_reason="STOP")])
 
     class FakeClient:
         def __init__(self, **_kwargs):
@@ -291,6 +291,7 @@ def test_gemini_chat_separates_thought_summaries_from_answer(monkeypatch):
         function_calls=[],
         candidates=[
             SimpleNamespace(
+                finish_reason="STOP",
                 content=SimpleNamespace(
                     parts=[
                         SimpleNamespace(text="thought summary", thought=True),
@@ -334,6 +335,7 @@ def test_gemini_stream_separates_thought_summaries_from_answer(monkeypatch):
             function_calls=[],
             candidates=[
                 SimpleNamespace(
+                    finish_reason=None if thought else "STOP",
                     content=SimpleNamespace(parts=[SimpleNamespace(text=text, thought=thought)])
                 )
             ],
@@ -560,6 +562,7 @@ def test_gemini_extracts_usage_metadata(monkeypatch):
         function_calls=[],
         candidates=[
             SimpleNamespace(
+                finish_reason="STOP",
                 content=SimpleNamespace(
                     parts=[SimpleNamespace(text="final answer", thought=False)]
                 )
@@ -762,7 +765,8 @@ def test_model_budget_counts_helpers_and_failed_attempts_before_next_request(mon
         token = current_model_budget.set(budget)
         try:
             await client.chat([], system_prompt="Compact this context")
-            await client.chat_with_tools([], [])
+            with pytest.raises(TokenBudgetExceeded):
+                await client.chat_with_tools([], [])
             with pytest.raises(TokenBudgetExceeded):
                 await client.chat_with_tools([], [])
         finally:
@@ -770,9 +774,9 @@ def test_model_budget_counts_helpers_and_failed_attempts_before_next_request(mon
         assert current_output_limit.get() is None
 
     asyncio.run(scenario())
-    assert limits == [60, 40, 30]
-    assert budget.usage.total_tokens == 60
-    assert budget.requests == 3
+    assert limits == [60, 40]
+    assert budget.usage.total_tokens == 70
+    assert budget.requests == 2
     assert budget.estimated_requests == 1
     assert budget.reserved == 0
 

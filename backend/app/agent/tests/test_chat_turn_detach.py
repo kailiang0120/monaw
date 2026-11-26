@@ -373,6 +373,11 @@ def test_opaque_returned_effect_requires_a_final_checkpoint_before_resume(tmp_pa
         )
     if checkpoint_after_return:
         database.persist_turn_messages(handle.turn_id, "opaque-chat", messages)
+    # Contradict wall-clock order deliberately: only transaction sequence proves
+    # that the transcript contains the returned operation, even after clock skew.
+    with database.transaction() as conn:
+        conn.execute("UPDATE messages SET created_at = ?", ("2000" if checkpoint_after_return else "2099",))
+        conn.execute("UPDATE run_operations SET updated_at = ?", ("2099" if checkpoint_after_return else "2000",))
     handle.begin_pause()
     assert handle.finalize("paused", "user_pause")
 

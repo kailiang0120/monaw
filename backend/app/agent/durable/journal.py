@@ -954,7 +954,7 @@ class Journal:
                 (revision, now, run_id, int(run["revision"])),
             )
             self._require_rowcount(conn, "operation transition lost its run revision fence")
-            self._append_event(
+            event_seq = self._append_event(
                 conn,
                 run_id,
                 "operation.updated",
@@ -969,6 +969,11 @@ class Journal:
                 },
                 at=now,
             )
+            if to_status == "returned":
+                conn.execute(
+                    "UPDATE run_operations SET returned_event_seq = ? WHERE operation_id = ? AND run_id = ?",
+                    (event_seq, operation_id, run_id),
+                )
             updated = conn.execute(
                 "SELECT * FROM run_operations WHERE run_id = ? AND operation_id = ?",
                 (run_id, operation_id),
@@ -2116,7 +2121,8 @@ class Journal:
                           WHERE a.run_id = o.run_id AND a.attempt = o.attempt
                             AND c.conversation_id = ? AND c.finalized = 1
                             AND m.conversation_id = c.conversation_id AND m.role = 'assistant'
-                            AND m.created_at >= o.updated_at
+                            AND o.returned_event_seq IS NOT NULL
+                            AND c.operation_result_seq >= o.returned_event_seq
                       ) AS result_checkpointed
                FROM run_operations AS o WHERE run_id = ? ORDER BY sequence_no""",
             (run_row["conversation_id"], run_row["run_id"]),
