@@ -887,7 +887,7 @@ class TextWithoutToolLLM:
         return LLMResponse(content="Let me take another screenshot.", tool_calls=[], finish_reason="stop")
 
 
-class TextOnlyThenForcedFinalLLM:
+class TextOnlyThenClarificationLLM:
     def __init__(self) -> None:
         self.calls = 0
         self.tool_choices: list[str | dict | None] = []
@@ -902,8 +902,8 @@ class TextOnlyThenForcedFinalLLM:
     ):
         self.calls += 1
         self.tool_choices.append(tool_choice)
-        if tool_choice == "required":
-            return final_answer_response("Finished after forced tool choice.")
+        if self.calls == 2:
+            return LLMResponse(content="Which source should I search?")
         return LLMResponse(
             content=f"Searching without a tool call {self.calls}.",
             tool_calls=[],
@@ -2211,7 +2211,7 @@ def test_turn_loop_completes_substantial_plain_text_without_generic_rewrite():
     assert memory.persisted_turns[-1]["assistant_message"] == llm.summary
 
 
-def test_turn_loop_accepts_json_text_matching_final_answer_schema():
+def test_turn_loop_preserves_json_text_containing_an_answer_field():
     registry = ToolRegistry(
         [
             {
@@ -2242,9 +2242,9 @@ def test_turn_loop_accepts_json_text_matching_final_answer_schema():
     assert not any(event["event"] == "progress" for event in events)
     assert not any(event["event"] == "tool_start" for event in events)
     assert events[-1]["event"] == "done"
-    assert events[-1]["data"]["summary"] == "Finished from JSON text."
+    assert events[-1]["data"]["summary"] == json.dumps({"answer": "Finished from JSON text."})
     assert events[-1]["data"].get("incomplete") is not True
-    assert memory.added_messages[-1] == ("assistant", "Finished from JSON text.")
+    assert memory.added_messages[-1] == ("assistant", json.dumps({"answer": "Finished from JSON text."}))
 
 
 def test_turn_loop_pauses_after_repeated_progress_without_tool():
@@ -2284,7 +2284,7 @@ def test_turn_loop_pauses_after_repeated_progress_without_tool():
 
     # The third call is the tool-less wrap-up after the guard stops the loop.
     assert llm.calls == 3
-    assert llm.tool_choices == [None, "required", None]
+    assert llm.tool_choices == [None, None, None]
     assert len(progress_events) == 2
     assert done_event["data"]["status"] == "paused"
     assert done_event["data"]["incomplete"] is True
@@ -2292,7 +2292,7 @@ def test_turn_loop_pauses_after_repeated_progress_without_tool():
     assert memory.clear_task_progress_calls == 0
 
 
-def test_turn_loop_forces_tool_choice_after_progress_without_tool():
+def test_turn_loop_allows_clarification_after_progress_without_tool():
     registry = ToolRegistry(
         [
             {
@@ -2311,7 +2311,7 @@ def test_turn_loop_forces_tool_choice_after_progress_without_tool():
         ]
     )
     memory = FakeMemory()
-    llm = TextOnlyThenForcedFinalLLM()
+    llm = TextOnlyThenClarificationLLM()
     loop = TurnLoop(llm_client=llm, registry=registry, memory=memory)
 
     async def collect():
@@ -2321,13 +2321,13 @@ def test_turn_loop_forces_tool_choice_after_progress_without_tool():
     progress_events = [event for event in events if event["event"] == "progress"]
 
     assert llm.calls == 2
-    assert llm.tool_choices == [None, "required"]
+    assert llm.tool_choices == [None, None]
     assert [event["data"]["content"] for event in progress_events] == [
         "Searching without a tool call 1.",
     ]
     assert events[-1]["event"] == "done"
     assert events[-1]["data"]["status"] == "complete"
-    assert events[-1]["data"]["summary"] == "Finished after forced tool choice."
+    assert events[-1]["data"]["summary"] == "Which source should I search?"
     assert memory.clear_task_progress_calls == 1
 
 
@@ -2367,7 +2367,7 @@ def test_turn_loop_bounds_progress_without_a_tool_call():
     error_events = [event for event in events if event["event"] == "error"]
 
     assert llm.calls == 3
-    assert llm.tool_choices == [None, "required", None]
+    assert llm.tool_choices == [None, None, None]
     assert len(progress_events) == 2
     assert error_events == []
     assert events[-1]["event"] == "done"
@@ -2525,7 +2525,7 @@ def test_turn_loop_bounds_post_tool_progress_without_action():
     progress_events = [event for event in events if event["event"] == "progress"]
 
     assert llm.calls == 4
-    assert llm.tool_choices == [None, None, "required", None]
+    assert llm.tool_choices == [None, None, None, None]
     assert len(progress_events) == 2
     assert done_event["data"]["status"] == "paused"
     assert done_event["data"]["incomplete"] is True

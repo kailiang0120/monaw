@@ -31,6 +31,7 @@ def completion_protocol_prompt(system_prompt: str) -> str:
     protocol_lines = [
         "## Completion Protocol",
         "- When the task is complete, reply to the user directly. A normal assistant answer finishes the turn.",
+        "- Before finishing, check the user's requested outcomes against the available results. State any unfinished work or blocker plainly; a successful tool call alone does not prove the whole task is complete.",
         "- If more work is needed, call the next real tool. You may include a short progress update with that tool call.",
         "- Do not send a separate text-only progress message saying you will act later; call the tool now.",
         "- When delivering a file created by a tool, include its exact local path in the final answer.",
@@ -43,7 +44,8 @@ def completion_protocol_prompt(system_prompt: str) -> str:
 
 TOOL_REPROMPT_MESSAGE = (
     "Your last message described an action you intend to take, but did not call a tool. "
-    "Call the next real task tool now. If no action is needed, give the user your final answer directly."
+    "Call the next real task tool now. If no action is needed, give the user your final answer directly. "
+    "If you need information or permission from the user, ask for it directly instead of calling an unrelated tool."
 )
 
 
@@ -194,8 +196,9 @@ async def emit_typewriter_tokens(emit: Callable[[dict], None], text: str) -> Non
 
 
 def final_answer_text(arguments: dict, fallback_content: str) -> str:
+    """Read a legacy completion envelope without inventing a successful answer."""
     answer = str(arguments.get("answer") or arguments.get("summary") or "").strip()
-    return answer or fallback_content.strip() or "Done."
+    return answer or fallback_content.strip()
 
 
 def final_answer_attachment_paths(arguments: dict) -> list[str]:
@@ -237,7 +240,7 @@ def _coerce_final_answer_args(arguments: Any) -> dict | None:
 
 
 def json_text_as_final_answer(text: str) -> str | None:
-    """Accept plain-text JSON only when it matches the final_answer schema."""
+    """Unwrap explicit legacy final_answer calls; preserve ordinary JSON answers."""
     content = _strip_json_fence(text)
     if not content:
         return None
@@ -248,24 +251,17 @@ def json_text_as_final_answer(text: str) -> str | None:
     if not isinstance(payload, dict):
         return None
 
-    if isinstance(payload.get("answer"), str):
-        answer = payload["answer"].strip()
-        return answer or None
-    if isinstance(payload.get("summary"), str):
-        summary = payload["summary"].strip()
-        return summary or None
-
     tool_name = str(payload.get("tool_name") or payload.get("name") or "").strip()
     if tool_name == FINAL_ANSWER_TOOL_NAME:
         arguments = _coerce_final_answer_args(payload.get("arguments"))
         if arguments is not None:
-            return final_answer_text(arguments, content)
+            return final_answer_text(arguments, "")
 
     function_payload = payload.get("function")
     if isinstance(function_payload, dict) and str(function_payload.get("name") or "") == FINAL_ANSWER_TOOL_NAME:
         arguments = _coerce_final_answer_args(function_payload.get("arguments"))
         if arguments is not None:
-            return final_answer_text(arguments, content)
+            return final_answer_text(arguments, "")
 
     return None
 
@@ -299,9 +295,18 @@ _PROGRESS_OPENERS = (
 
 
 def plain_text_describes_next_action(text: str) -> bool:
-    """Distinguish a short tool intent from a completed natural-language answer."""
+    """Check the closing prose for an immediate intent, preserving user handoffs."""
     content = str(text or "").strip()
-    if not content or len(content) > 320 or len(content.splitlines()) > 2:
+    if not content:
         return False
-    last_sentence = re.split(r"(?<=[.!?])\s+", content)[-1].lower().lstrip(" \t-:—–")
+    # Code and quoted examples are answer content, not executable promises.
+    if content.count("```") % 2 or content.splitlines()[-1].lstrip().startswith(("```", ">")):
+        return False
+    last_sentence = re.split(r"(?<=[.!?])\s+|\n+", content)[-1].lower().lstrip(" \t-:—–*")
+    last_sentence = last_sentence.replace("’", "'")
+    last_sentence = re.sub(r"^(?:next|now|then)[,:]\s*", "", last_sentence)
+    if re.search(r"\b(?:if|once|when|after|until)\s+you\b", last_sentence):
+        return False
+    if re.match(r"i(?: need| will need|'ll need) (?:you|your|a confirmation|permission)\b", last_sentence):
+        return False
     return last_sentence.startswith((*_PENDING_ACTION_PHRASES, *_PROGRESS_OPENERS))

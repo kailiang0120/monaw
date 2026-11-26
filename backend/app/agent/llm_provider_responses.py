@@ -140,6 +140,38 @@ def gemini_finish_reason(response: Any) -> str:
     return "" if value in {"FINISH_REASON_UNSPECIFIED", "BLOCK_REASON_UNSPECIFIED"} else value
 
 
+def gemini_completion_status(reason: str, *, has_tool_calls: bool) -> str:
+    """Preserve unsuccessful Gemini endings instead of turning them into stop."""
+    if reason == "STOP":
+        return "tool_calls" if has_tool_calls else "stop"
+    if reason == "MAX_TOKENS":
+        return "length"
+    if reason in {
+        "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT",
+        "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT",
+    }:
+        return "blocked"
+    return "incomplete"
+
+
+def openai_completion_status(response: Any, *, has_tool_calls: bool) -> tuple[str, str]:
+    """Distinguish refusal, output limits, and successful Responses API endings."""
+    status = str(obj_get(response, "status", "") or "")
+    if status == "incomplete":
+        details = obj_get(response, "incomplete_details", None)
+        reason = str(obj_get(details, "reason", "") or "incomplete")
+        return {"max_output_tokens": "length", "content_filter": "blocked"}.get(reason, "incomplete"), reason
+    refused = any(
+        obj_get(part, "type", "") == "refusal"
+        for item in openai_response_output_items(response)
+        if obj_get(item, "type", "") == "message"
+        for part in obj_get(item, "content", []) or []
+    )
+    if refused:
+        return "blocked", "refusal"
+    return ("tool_calls" if has_tool_calls else "stop"), status
+
+
 def extract_gemini_model_parts(response: Any) -> list:
     try:
         candidates = response.candidates or []
@@ -203,6 +235,8 @@ def openai_response_text_and_reasoning(response: Any) -> tuple[str, str]:
                 part_type = obj_get(part, "type", "")
                 if part_type in {"output_text", "text"}:
                     text_parts.append(str(obj_get(part, "text", "") or ""))
+                elif part_type == "refusal":
+                    text_parts.append(str(obj_get(part, "refusal", "") or ""))
         elif item_type == "reasoning":
             for summary in list(obj_get(item, "summary", []) or []):
                 reasoning_parts.append(str(obj_get(summary, "text", "") or ""))

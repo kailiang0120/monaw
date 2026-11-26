@@ -32,6 +32,7 @@ TEST_GROUPS = {
         "test_approval_review.py",
         "test_approval_injection.py",
         "test_execution_resume.py",
+        "test_harness_completion.py",
         "test_iteration_budget.py",
         "test_job_manager.py",
         "test_llm_client_schema.py",

@@ -38,7 +38,21 @@ test('Continue resumes a clean pause after an opaque action without replaying it
   const run = await runFor(desktop, conversation.id)
   const operations = async () => (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations
   expect(await operations()).toEqual([expect.objectContaining({ effect_class: 'opaque_effect', status: 'returned' })])
+  const pauseResponses: Response[] = []
+  const isPauseResponse = (response: Response) =>
+    response.request().method() === 'POST' && response.url().endsWith(`/api/runs/${run.run_id}/pause`)
+  desktop.page.on('response', (response) => {
+    if (isPauseResponse(response)) pauseResponses.push(response)
+  })
+  const acceptedPause = desktop.page.waitForResponse((response) => isPauseResponse(response) && response.status() === 202)
   await desktop.page.getByRole('button', { name: 'Pause execution' }).click()
+  // Keep the model blocked until Pause is accepted, including a stale-revision retry.
+  // Otherwise the test can ask to pause an outcome that is already being saved.
+  await acceptedPause
+  expect([[202], [409, 202]]).toContainEqual(pauseResponses.map((response) => response.status()))
+  if (pauseResponses[0].status() === 409) {
+    expect(await pauseResponses[0].json()).toMatchObject({ code: 'revision_conflict' })
+  }
   await desktop.signal('opaque-resume.release')
   const continueButton = desktop.page.getByRole('button', { name: 'Continue execution' })
   await expect(continueButton).toBeVisible()

@@ -57,7 +57,6 @@ from app.agent.turn_text import (
     conversation_title_from_prompt,
     emit_progress_message,
     emit_typewriter_tokens,
-    final_answer_text,
     guard_wrap_up_prompt,
 )
 
@@ -549,9 +548,8 @@ class TurnLoop:
                 streamed_answer_text = ""
                 try:
                     visible_tools = self.registry.get_all_tools(visible_only=True)
-                    tool_choice = response_policy.take_tool_choice()
                     model_result = await _model_request_or_pause(model_runner.request(transcript.snapshot(
-                        tools=visible_tools, system_prompt=_current_system_prompt(), tool_choice=tool_choice,
+                        tools=visible_tools, system_prompt=_current_system_prompt(),
                         metadata={"iteration": iteration_index + 1, "consumed": budget.consumed},
                     )), lifecycle)
                     if model_result is None:
@@ -635,6 +633,8 @@ class TurnLoop:
                 if decision.action == "reprompt":
                     continue
                 if decision.action in {"final", "pause"}:
+                    if decision.action == "pause":
+                        transcript.close_unanswered_calls(decision.reason_code)
                     final_text = decision.text
                     final_attachment_paths = decision.attachment_paths
                     completed_normally = decision.action == "final"
@@ -773,6 +773,7 @@ class TurnLoop:
                 not completed_normally
                 and incomplete_reason_code in GUARD_WRAP_UP_REASON_CODES
                 and budget.consumed > 0
+                and not lifecycle.pause_requested
             ):
                 # A guard ended the loop, but the model is healthy: give it one
                 # tool-less call to tell the user what it did and what stopped it.
@@ -781,18 +782,21 @@ class TurnLoop:
                 streamed_answer_text = ""
 
                 try:
-                    wrap_up_result = await model_runner.request(transcript.snapshot(
-                        tools=[], system_prompt=_current_system_prompt(), tool_choice="none", stream_reasoning=False,
+                    wrap_up_result = await _model_request_or_pause(model_runner.request(transcript.snapshot(
+                        tools=[], system_prompt=_current_system_prompt(), tool_choice="none",
+                        stream_reasoning=False, stream_answer=False,
                         metadata={"wrap_up": True, "reason_code": incomplete_reason_code},
-                    ))
-                    transcript.accept(wrap_up_result)
-                    wrap_up_response = wrap_up_result.response
-                    obs_usage_total = obs_usage_total.merge(wrap_up_result.usage)
+                    )), lifecycle)
+                    wrap_up_response = None
+                    if wrap_up_result is not None:
+                        obs_usage_total = obs_usage_total.merge(wrap_up_result.usage)
+                        if not lifecycle.pause_requested and transcript.accept(wrap_up_result):
+                            wrap_up_response = wrap_up_result.response
                 except ModelRequestError:
                     wrap_up_response = None
-                streamed_answer_text = model_runner.answer_text
-                wrap_up_text = ""
-                if wrap_up_response is not None:
+                wrap_up_text = response_policy.wrap_up_text(wrap_up_response) if wrap_up_response is not None else ""
+                if wrap_up_text:
+                    # Rejected summaries must not become the next turn's history.
                     if wrap_up_response.tool_calls:
                         transcript.begin_tool_round(wrap_up_response)
                         transcript.close_unanswered_calls("wrap_up_completed")
@@ -801,21 +805,15 @@ class TurnLoop:
                             [{"role": "assistant", "content": wrap_up_response.content}]
                             if wrap_up_response.content else []
                         ))
-                    wrap_up_text = str(wrap_up_response.content or "").strip()
-                    if not wrap_up_text:
-                        for call in wrap_up_response.tool_calls or []:
-                            if call.tool_name == FINAL_ANSWER_TOOL_NAME:
-                                call_args = call.arguments if isinstance(call.arguments, dict) else {}
-                                wrap_up_text = final_answer_text(call_args, "").strip()
-                if wrap_up_text:
                     final_text = wrap_up_text
                     pause_error_event = None
-                    if not streamed_answer_text:
-                        await emit_typewriter_tokens(_emit_response_event, final_text)
+                    await emit_typewriter_tokens(_emit_response_event, final_text)
                     streamed_answer_text = final_text
-                elif streamed_answer_text:
-                    final_text = streamed_answer_text.strip() or final_text
-                    pause_error_event = None
+            if lifecycle.pause_requested and not completed_normally:
+                stop_requested = True
+                incomplete_reason_code = "user_pause"
+                final_text = "Paused at a safe point. Continue to resume from the saved conversation."
+                pause_error_event = None
             if pause_error_event is not None:
                 _put(pause_error_event)
             if lifecycle.review_requested:
@@ -826,6 +824,10 @@ class TurnLoop:
 
             if steering is not None:
                 steering.closed = True
+            if not final_text.strip():
+                terminal_error = True
+                incomplete_reason_code = "model_empty_response"
+                final_text = "Paused: the model returned no answer. Continue to retry from the saved results."
             run_status = "error" if lifecycle.review_requested else turn_status(
                 stop_requested=stop_requested,
                 iteration_limit_hit=iteration_limit_hit,
@@ -848,7 +850,7 @@ class TurnLoop:
                 tool_calls=tool_runner.history,
             )
             await lifecycle.finalize(
-                TurnOutcome(final_text or "Done.", run_status, incomplete_reason_code, response_attachments),
+                TurnOutcome(final_text, run_status, incomplete_reason_code, response_attachments),
                 persist=_persist_turn,
                 usage=_turn_usage(),
                 tool_calls=_tool_calls_for_persist(),

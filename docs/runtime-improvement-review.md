@@ -3,6 +3,53 @@
 Scope: runtime correctness, persistence, resource limits and everyday task flows.
 Release, packaging and distribution changes are outside this review.
 
+## Turn completion follow-up
+
+The harness runs provider requests through `ModelRequestRunner`, checks each
+response with `TurnResponsePolicy`, executes accepted calls through
+`ToolBatchRunner`, and saves one outcome through `TurnLifecycle`. Tool schemas,
+permissions, durable operation journals and cancellation remain separate from
+the decision to finish a turn.
+
+The completion review found several cases where the user-visible ending did not
+match the available evidence:
+
+| Trigger | Previous behavior | Updated behavior |
+| --- | --- | --- |
+| Empty or reasoning-only response | Saved a successful `Done.` | Ask once for an answer or necessary action, then pause if the response is still unusable. Alternating empty output and progress cannot reset this limit. |
+| Gemini rejects a response or produces an invalid function call | Normalized the ending to an ordinary stop | Preserve blocked or incomplete status, suppress its calls, and keep the task resumable. Record the original provider reason in diagnostics. |
+| OpenAI refusal or content filtering | Could lose refusal text or label filtering as an output-length limit | Preserve the refusal and distinguish a blocked response from truncation. |
+| Text promises another action | Forced the next provider request to call a tool | Reprompt once with automatic tool choice, allowing a clarification or final answer without an unrelated action. Check closing prose in longer replies as well. |
+| JSON answer contains `summary` or `answer` | Replaced the entire JSON value with that field | Preserve ordinary JSON verbatim. Only explicit legacy `final_answer` envelopes are unwrapped. |
+| Pause arrives during a guard's final summary | Waited for the summary request to finish | Cancel that request through the same pause boundary as the main model call. |
+| Guard summary is truncated or promises more work | Replaced the pause notice with the unusable summary | Keep the original notice and exclude the rejected summary from saved provider history. |
+| Pause or Stop arrives while the final outcome is being saved | Accepted a control after completion had been selected; Pause could turn a successful run into `needs_review` | Reject new controls once finalization owns the outcome. Direct pause requests obey the same boundary, and snapshots stop advertising unavailable controls. |
+
+Normal final answers do not acquire an additional model-verification call.
+Existing token, iteration and wall-clock budgets still apply, including to the
+single repair attempt. A guard summary cannot change a paused run into a
+completed one.
+
+Live checks used Gemini Flash-Lite with the real Electron app and backend, an
+isolated profile and synthetic files. They verified exact JSON output, a
+read/write/approval/read-back task, and a same-conversation follow-up that reused
+the verified results. An initial lower test allowance also exercised
+the token-budget pause; the file task completed with sufficient allowance.
+
+The broader runtime suite passed 581 checks. After the desktop workflow exposed
+the late-control race, 129 focused completion, lifecycle and Run API checks
+passed, including deterministic Pause/Stop requests during persistence. The
+affected desktop Pause/Continue workflow passed three consecutive runs; the
+other 18 desktop workflows passed in the full application run. These test sets
+overlap. The desktop pause test now waits for an accepted command before
+releasing its model barrier, so it tests an intentional pause rather than racing
+the final answer.
+
+These checks improve the completion protocol; they do not prove semantic task
+completion for every prompt. The model still has to judge whether its verified
+results satisfy the user's request. The progress-text detector is a bounded
+heuristic, not an authorization decision or a general language classifier.
+
 ## Changes
 
 | Area | Problem | Improvement |

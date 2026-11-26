@@ -46,10 +46,11 @@ class LLMResponse:
 
     content: str
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
-    finish_reason: str = "stop"  # "stop" | "tool_calls" | "length"
+    finish_reason: str = "stop"  # stop | tool_calls | length | blocked | incomplete
     reasoning_content: str = ""
     provider_messages: list[dict] = field(default_factory=list)
     usage: UsageStats = field(default_factory=UsageStats)
+    provider_finish_reason: str = ""
 
 
 class ResponseFailedError(RuntimeError):
@@ -581,7 +582,7 @@ class LLMClient:
                 pass
 
         tool_calls = _extract_gemini_tool_calls(response) if terminal_reason == "STOP" else []
-        finish_reason = "length" if terminal_reason == "MAX_TOKENS" else "tool_calls" if tool_calls else "stop"
+        finish_reason = provider_responses.gemini_completion_status(terminal_reason, has_tool_calls=bool(tool_calls))
         # Final text can carry a thought signature needed by the next turn.
         model_parts = _extract_gemini_model_parts(response) if terminal_reason == "STOP" else []
         provider_messages = (
@@ -596,6 +597,7 @@ class LLMClient:
             reasoning_content=reasoning_content,
             provider_messages=provider_messages,
             usage=_usage_from_gemini_response(response),
+            provider_finish_reason=terminal_reason,
         )
 
     async def _gemini_stream(self, contents, config, stream_callback, reasoning_callback=None) -> LLMResponse:
@@ -664,7 +666,7 @@ class LLMClient:
             except Exception as exc:
                 logger.warning("Failed to parse streamed Gemini function_call: %s", exc)
 
-        finish_reason = "length" if terminal_reason == "MAX_TOKENS" else "tool_calls" if tool_calls else "stop"
+        finish_reason = provider_responses.gemini_completion_status(terminal_reason, has_tool_calls=bool(tool_calls))
         provider_messages = (
             [{"role": "model", "gemini_parts": raw_model_parts}]
             if raw_model_parts
@@ -677,6 +679,7 @@ class LLMClient:
             reasoning_content=collected_reasoning_content,
             provider_messages=provider_messages,
             usage=usage,
+            provider_finish_reason=terminal_reason,
         )
 
     # ------------------------------------------------------------------
@@ -729,20 +732,22 @@ class LLMClient:
         response = await self._openai_client.responses.create(**kwargs)
         content, reasoning_content = _openai_response_text_and_reasoning(response)
         tool_calls = _extract_openai_response_tool_calls(response)
-        finish_reason = "tool_calls" if tool_calls else "stop"
         status = str(_obj_get(response, "status", "") or "")
         if status not in {"completed", "incomplete"}:
             raise ResponseInterruptedError(f"The model response ended with status {status}.")
-        if status == "incomplete":
+        finish_reason, terminal_reason = provider_responses.openai_completion_status(
+            response, has_tool_calls=bool(tool_calls),
+        )
+        if finish_reason not in {"stop", "tool_calls"}:
             tool_calls = []
-            finish_reason = "length"
         return LLMResponse(
             content=content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             reasoning_content=reasoning_content,
-            provider_messages=_openai_response_provider_messages(response) if status != "incomplete" else [],
+            provider_messages=_openai_response_provider_messages(response) if finish_reason in {"stop", "tool_calls"} else [],
             usage=_usage_from_openai(_obj_get(response, "usage", None)),
+            provider_finish_reason=terminal_reason,
         )
 
     async def _openai_responses_stream(
@@ -801,16 +806,18 @@ class LLMClient:
             if status not in {"completed", "incomplete"}:
                 raise ResponseInterruptedError("The model stream did not confirm a terminal response state.")
             final_tool_calls = _extract_openai_response_tool_calls(final_response)
-            truncated = status == "incomplete"
+            finish_reason, terminal_reason = provider_responses.openai_completion_status(
+                final_response, has_tool_calls=bool(final_tool_calls),
+            )
+            accepted = finish_reason in {"stop", "tool_calls"}
             return LLMResponse(
                 content=final_content or collected_content,
-                tool_calls=[] if truncated else final_tool_calls,
-                finish_reason=(
-                    "length" if truncated else "tool_calls" if final_tool_calls else "stop"
-                ),
+                tool_calls=final_tool_calls if accepted else [],
+                finish_reason=finish_reason,
                 reasoning_content=final_reasoning or collected_reasoning_content,
-                provider_messages=[] if truncated else _openai_response_provider_messages(final_response),
+                provider_messages=_openai_response_provider_messages(final_response) if accepted else [],
                 usage=_usage_from_openai(_obj_get(final_response, "usage", None)),
+                provider_finish_reason=terminal_reason,
             )
 
         raise ResponseInterruptedError(

@@ -945,6 +945,73 @@ def test_parallel_resolve_requests_with_one_idempotency_key_verify_once(
     assert context["journal"].load_operation(context["run"].run_id, evidence["operation_id"])["status"] == "verified"
 
 
+@pytest.mark.parametrize("action", ["pause", "stop"])
+def test_controls_cannot_replace_an_outcome_being_saved(runs_api_context, monkeypatch, action):
+    """A late control cannot turn a completed answer into a recovery incident."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.agent.durable import turn_run
+    from app.agent.harness.turn_lifecycle import TurnLifecycle, TurnOutcome
+    from app.agent.observability.recorder import UsageStats
+    from app.agent.run_events import RunEventPublisher
+    from app.agent.tests.test_run_outcome import _RecordingObservability
+    from app.api.routes import runs
+
+    context = runs_api_context
+    run = context["run"]
+
+    async def scenario():
+        """Hold persistence open while the real control endpoint handles a click."""
+        saving = asyncio.Event()
+        release = asyncio.Event()
+        publisher = RunEventPublisher(asyncio.Queue(), [asyncio.get_running_loop().time()])
+        lifecycle = TurnLifecycle(context["conversation_id"], publisher, _RecordingObservability(), durable_run=run)
+        turn_run.register_active_lifecycle(run.run_id, lifecycle)
+
+        async def persist(outcome):
+            """Save a completed transcript before delaying the durable commit."""
+            context["db"].persist_turn_messages(
+                run.turn_id,
+                context["conversation_id"],
+                [{"role": "assistant", "content": outcome.summary}],
+            )
+            saving.set()
+            await release.wait()
+
+        outcome = TurnOutcome("The requested work is complete.")
+        kwargs = dict(persist=persist, usage=UsageStats(), tool_calls=[])
+        finalizer = asyncio.create_task(lifecycle.finalize(outcome, **kwargs))
+        monkeypatch.setattr(runs, "_live_task", lambda *_args: finalizer)
+        try:
+            await asyncio.wait_for(saving.wait(), timeout=2)
+            snapshot = context["journal"].snapshot(run.run_id)
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    f"/api/runs/{run.run_id}/{action}",
+                    json={"expected_revision": snapshot["revision"], "expected_attempt": snapshot["attempt"]},
+                    headers=_headers(session_id=OLD_SESSION_ID, idempotency_key=f"late-{action}"),
+                )
+                assert response.status_code == 409, response.text
+                assert response.json()["code"] == "action_unavailable"
+                public = await client.get(
+                    f"/api/runs/{run.run_id}", headers=_headers(session_id=OLD_SESSION_ID),
+                )
+            assert not {"pause", "stop"}.intersection(public.json()["available_actions"])
+            assert await turn_run.pause_run(run.run_id) is False
+            assert not lifecycle.pause_requested
+            assert not finalizer.cancelled()
+            assert context["journal"].snapshot(run.run_id)["status"] == "running"
+        finally:
+            release.set()
+            await lifecycle.finalize(outcome, **kwargs)
+            await asyncio.gather(finalizer, return_exceptions=True)
+            turn_run.unregister_active_lifecycle(run.run_id, lifecycle)
+        assert context["journal"].snapshot(run.run_id)["status"] == "completed"
+        assert lifecycle.outcome == outcome
+
+    asyncio.run(scenario())
+
+
 def test_pause_revision_conflict_and_pending_approval_invalidation(runs_api_context, monkeypatch: pytest.MonkeyPatch):
     context = runs_api_context
     run = context["run"]
@@ -958,6 +1025,7 @@ def test_pause_revision_conflict_and_pending_approval_invalidation(runs_api_cont
 
         async def request_pause(self):
             run.begin_pause()
+            return True
 
     lifecycle = LiveLifecycle()
     from app.agent import durable

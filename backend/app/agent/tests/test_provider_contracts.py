@@ -14,7 +14,7 @@ from app.agent.model_usage import ModelUsageBudget, current_model_budget
 
 
 @pytest.mark.parametrize('streaming', [False, True])
-@pytest.mark.parametrize('finish_reason', ['STOP', 'MAX_TOKENS', 'SAFETY', None])
+@pytest.mark.parametrize('finish_reason', ['STOP', 'MAX_TOKENS', 'SAFETY', 'MALFORMED_FUNCTION_CALL', None])
 def test_gemini_sdk_terminal_contract_and_model_limit(streaming, finish_reason):
     """Only completed calls survive SDK parsing; metadata constrains the request."""
     requests = []
@@ -62,7 +62,12 @@ def test_gemini_sdk_terminal_contract_and_model_limit(streaming, finish_reason):
                     result = await call
                     assert bool(result.tool_calls) is (finish_reason == 'STOP')
                     assert bool(result.provider_messages) is (finish_reason == 'STOP')
-                    assert result.finish_reason == ('length' if finish_reason == 'MAX_TOKENS' else 'tool_calls' if finish_reason == 'STOP' else 'stop')
+                    expected = {
+                        'STOP': 'tool_calls', 'MAX_TOKENS': 'length',
+                        'SAFETY': 'blocked', 'MALFORMED_FUNCTION_CALL': 'incomplete',
+                    }
+                    assert result.finish_reason == expected[finish_reason]
+                    assert result.provider_finish_reason == finish_reason
                     assert budget.usage.total_tokens == 23
             finally:
                 current_model_budget.reset(token)
@@ -151,7 +156,7 @@ def test_account_and_unreported_reasoning_keep_conservative_reservations():
     assert gemini.total_tokens == 25 and gemini.image_tokens == 7
 
 
-@pytest.mark.parametrize('terminal', ['completed', 'incomplete', None, 'late_content'])
+@pytest.mark.parametrize('terminal', ['completed', 'incomplete', 'content_filter', 'refusal', None, 'late_content'])
 def test_openai_sdk_stream_requires_terminal_evidence(terminal):
     """Real SDK parsing must preserve completion guards and output-cap fields."""
     from openai import AsyncOpenAI
@@ -161,10 +166,14 @@ def test_openai_sdk_stream_requires_terminal_evidence(terminal):
             'name': 'inspect', 'arguments': '{}', 'status': 'completed'}
     events = [{'type': 'response.output_item.done', 'output_index': 0, 'sequence_number': 1, 'item': item}]
     if terminal is not None:
-        status = 'completed' if terminal == 'late_content' else terminal
+        status = 'completed' if terminal in {'late_content', 'refusal'} else 'incomplete' if terminal == 'content_filter' else terminal
+        output = [{'type': 'message', 'id': 'msg-1', 'role': 'assistant', 'status': 'completed',
+                   'content': [{'type': 'refusal', 'refusal': 'I cannot fulfill this request.'}]}] if terminal == 'refusal' else []
         events.append({'type': 'response.' + status, 'sequence_number': 2, 'response': {
             'id': 'resp-1', 'object': 'response', 'created_at': 1, 'model': 'gpt-4.1', 'status': status,
-            'output': [], 'usage': {'input_tokens': 5, 'output_tokens': 10, 'total_tokens': 15},
+            'output': output, 'usage': {'input_tokens': 5, 'output_tokens': 10, 'total_tokens': 15},
+            **({'incomplete_details': {'reason': 'content_filter' if terminal == 'content_filter' else 'max_output_tokens'}}
+               if status == 'incomplete' else {}),
         }})
     if terminal == 'late_content':
         events.append({'type': 'response.output_item.done', 'output_index': 1, 'sequence_number': 3, 'item': item})
@@ -194,7 +203,10 @@ def test_openai_sdk_stream_requires_terminal_evidence(terminal):
                 else:
                     result = await call
                     assert bool(result.tool_calls) is (terminal == 'completed')
-                    assert result.finish_reason == ('tool_calls' if terminal == 'completed' else 'length')
+                    expected = 'tool_calls' if terminal == 'completed' else 'blocked' if terminal in {'content_filter', 'refusal'} else 'length'
+                    assert result.finish_reason == expected
+                    if terminal == 'refusal':
+                        assert result.content == 'I cannot fulfill this request.'
                 assert len(requests) == 1
                 assert 0 < requests[0]['max_output_tokens'] < 1000
                 assert budget.reserved == 0

@@ -549,9 +549,8 @@ def unregister_active_lifecycle(run_id: str, lifecycle: Any) -> None:
 
 
 async def pause_run(run_id: str) -> bool:
-    """Request a cooperative pause from a live owner; no HTTP surface is added."""
+    """Request a cooperative pause before the live owner selects its outcome."""
     lifecycle = _ACTIVE_LIFECYCLES.get(run_id)
     if lifecycle is None:
         return False
-    await lifecycle.request_pause()
-    return True
+    return await lifecycle.request_pause()

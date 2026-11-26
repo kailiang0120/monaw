@@ -78,12 +78,20 @@ class TurnLifecycle:
     def pause_requested(self) -> bool:
         return self._pause_requested or bool(getattr(self.durable_run, "pause_requested", False))
 
-    async def request_pause(self) -> None:
-        """Ask the worker to stop at its next safe model/tool boundary."""
+    @property
+    def finalizing(self) -> bool:
+        """The selected outcome owns the run until its durable commit finishes."""
+        return self._finalization_task is not None
+
+    async def request_pause(self) -> bool:
+        """Pause at a safe boundary, unless an outcome already owns the run."""
+        if self.finalizing:
+            return False
         self._pause_requested = True
         self.pause_event.set()
         if self.durable_run is not None:
             self.durable_run.begin_pause()
+        return True
 
     def request_review(self, reason_code: str = "external_effect_unknown") -> None:
         self.review_requested = True
