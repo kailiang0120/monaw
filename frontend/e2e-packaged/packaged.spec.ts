@@ -291,7 +291,9 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
     browser = undefined
     await expect.poll(() => {
       try {
-        return execFileSync('powershell', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:MONAW_PACKAGED_APP).VersionInfo.ProductVersion'], { encoding: 'utf8' }).trim()
+        // Windows version resources may append a zero revision to the app version.
+        return execFileSync('powershell', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:MONAW_PACKAGED_APP).VersionInfo.ProductVersion'], { encoding: 'utf8' })
+          .trim().replace(/^(\d+\.\d+\.\d+)\.0$/, '$1')
       } catch { return '' }
     }, { timeout: 90_000 }).toBe(updateVersion)
     await expect.poll(() => packagedProcesses('Monaw.exe').length, { timeout: 60_000 }).toBeGreaterThan(0)
