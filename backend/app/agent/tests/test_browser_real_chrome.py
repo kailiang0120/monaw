@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import pytest
 import websockets
 from app.skills.browser_use.extension.session import ToolError
@@ -44,8 +45,14 @@ class _Page(BaseHTTPRequestHandler):
 
 @contextmanager
 def isolated_chrome(tmp_path, handler=None):
-    executable = next((p for p in [shutil.which('google-chrome'),shutil.which('chromium'),
+    """Run an explicitly selected test browser in a disposable local-only profile."""
+    configured = os.environ.get('MONAW_TEST_CHROME')
+    executable = configured or next((p for p in [shutil.which('google-chrome'),shutil.which('chromium'),
         r'C:\Program Files\Google\Chrome\Application\chrome.exe',r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'] if p and Path(p).is_file()),None)
+    if configured and not Path(configured).is_file():
+        pytest.fail('MONAW_TEST_CHROME must name an installed test browser.')
+    if not executable and os.environ.get('MONAW_REQUIRE_BROWSER_TESTS') == '1':
+        pytest.fail('The required real-browser contract tests have no Chrome executable.')
     if not executable:
         pytest.skip('Chrome/Chromium required for isolated real-browser integration.')
     http = ThreadingHTTPServer(('127.0.0.1',0),handler or _Page)
@@ -55,6 +62,7 @@ def isolated_chrome(tmp_path, handler=None):
     profile.mkdir()
     chrome_log = open(tmp_path/'chrome-stderr.log','wb')
     process = subprocess.Popen([executable,'--headless=new','--no-first-run','--no-default-browser-check',
+        '--enable-logging=stderr',
         '--disable-background-networking','--remote-debugging-port=0','--remote-allow-origins=http://localhost',
         '--user-data-dir='+str(profile),'about:blank'],stdout=subprocess.DEVNULL,stderr=chrome_log)
     try:
@@ -74,9 +82,16 @@ def isolated_chrome(tmp_path, handler=None):
             stderr = (tmp_path/'chrome-stderr.log').read_text(errors='replace')[-2000:]
             state = f'exited with code {process.returncode}' if process.poll() is not None else 'still running after 45s'
             pytest.fail(f'Isolated Chrome did not expose DevTools endpoint ({executable} {state}).\n{stderr}')
-        with urlopen(f'http://127.0.0.1:{port}/json/list',timeout=5) as response:
-            page = next(t for t in json.load(response) if t['type']=='page')
+        # Own a target instead of depending on the browser's startup tab.
+        request = Request(f'http://127.0.0.1:{port}/json/new?about:blank', method='PUT')
+        with urlopen(request, timeout=10) as response:
+            page = json.load(response)
         yield page['webSocketDebuggerUrl'],f'http://127.0.0.1:{http.server_port}/'
+    except BaseException:
+        chrome_log.flush()
+        stderr = (tmp_path/'chrome-stderr.log').read_text(errors='replace')[-6000:]
+        print('Isolated Chrome stderr:\n' + stderr)
+        raise
     finally:
         process.terminate()
         try:
@@ -93,6 +108,7 @@ class RealCDPBridge:
     connected = True
     def __init__(self,socket):
         self.socket,self.pending,self.listeners,self.counter,self.url,self.calls=socket,{},[],0,'about:blank',[]
+        self.navigation_events = []
         self.reader=asyncio.create_task(self._read())
     def add_listener(self,callback):
         self.listeners.append(callback)
@@ -105,6 +121,13 @@ class RealCDPBridge:
                     future.set_result(message)
             elif 'method' in message:
                 params=message.get('params',{})
+                if message['method'] in {'Network.requestWillBeSent', 'Network.responseReceived', 'Network.loadingFailed', 'Page.downloadWillBegin'}:
+                    payload = params.get('response') or params.get('request') or params
+                    self.navigation_events.append({
+                        'event': message['method'], 'type': params.get('type'),
+                        **{key: payload[key] for key in ('url', 'status', 'mimeType', 'errorText', 'blockedReason', 'canceled') if key in payload},
+                    })
+                    self.navigation_events = self.navigation_events[-20:]
                 if message['method']=='Page.frameNavigated' and not params.get('frame',{}).get('parentId'):
                     self.url=params['frame'].get('url',self.url)
                 if message['method']=='Page.navigatedWithinDocument':
@@ -120,6 +143,10 @@ class RealCDPBridge:
         assert method=='cdp',method
         return await self.cdp(params['method'],params['params'],timeout)
     async def cdp(self,method,params=None,timeout=30):
+        """Relay protocol commands and retain diagnostics for fixture navigation."""
+        if method == 'Page.navigate':
+            self.navigation_events.clear()
+            await self.cdp('Network.enable')
         self.calls.append((method,params or {}))
         self.counter+=1
         request_id=self.counter
@@ -129,80 +156,89 @@ class RealCDPBridge:
         response=await asyncio.wait_for(future,timeout)
         if 'error' in response:
             raise ToolError(response['error']['message'])
+        if method == 'Page.navigate' and response.get('result', {}).get('errorText'):
+            pytest.fail(json.dumps({
+                'navigation': response['result'], 'events': self.navigation_events,
+                'browser': await self.cdp('Browser.getVersion'),
+            }, indent=2), pytrace=False)
         return response.get('result',{})
     async def evaluate(self,expression):
-        return (await self.cdp('Runtime.evaluate',{'expression':expression,'returnByValue':True}))['result'].get('value')
+        """Expose fixture script failures instead of silently returning None."""
+        response = await self.cdp('Runtime.evaluate', {'expression': expression, 'returnByValue': True})
+        assert not response.get('exceptionDetails'), response.get('exceptionDetails')
+        return response['result'].get('value')
 
 async def _workflow(socket_url,url):
     async with websockets.connect(socket_url,origin='http://localhost') as socket:
         bridge=RealCDPBridge(socket)
         tools=BrowserTools(bridge)
-        await tools.call('navigate_page',{'url':url,'includeSnapshot':False})
-        snapshot=await tools.call('take_snapshot',{})
+        navigation = await tools.call('navigate_page', {'pageId': 1, 'url': url, 'includeSnapshot': False})
+        assert bridge.url == url, navigation.lines
+        snapshot=await tools.call('take_snapshot',{'pageId': 1})
         session=tools.pages.session(7)
         uid=lambda name:next(n.uid for n in session.nodes.values() if n.name==name)
-        assert any(n.name=='Frame action' for n in session.nodes.values())
+        assert any(n.name=='Frame action' for n in session.nodes.values()), (session.frames, snapshot.lines)
         assert any(n.name=='Srcdoc action' for n in session.nodes.values()), (session.frames, snapshot.lines[0])
         assert any(n.name=='Blank action' for n in session.nodes.values())
         assert not any(n.name=='Opaque action' for n in session.nodes.values())
         assert 'inaccessible or policy-restricted frame was omitted' in snapshot.lines[0]
-        context=(await tools.call('__monaw_action_context',{'tool_name':'inspect_element','arguments':{'selector':'#email'}})).structured_content['browser_action_context']
+        context=(await tools.call('__monaw_action_context',{'tool_name':'inspect_element','arguments':{'pageId': 1, 'selector':'#email'}})).structured_content['browser_action_context']
         assert context['frame_origins'] and all(origin.startswith('http://127.0.0.1:') for origin in context['frame_origins'])
         assert context['unsupported_frames']
-        result=await tools.call('click',{'uid':uid('Srcdoc action'),'expected_effect':{'type':'element_appeared','selector':'body[data-srcdoc="clicked"]'}})
+        result=await tools.call('click',{'pageId': 1, 'uid':uid('Srcdoc action'),'expected_effect':{'type':'element_appeared','selector':'body[data-srcdoc="clicked"]'}})
         assert result.action_outcome['status']=='verified'
-        result=await tools.call('click',{'uid':uid('Frame action'),'expected_effect':{'type':'element_appeared','selector':'#frameclicked'}})
+        result=await tools.call('click',{'pageId': 1, 'uid':uid('Frame action'),'expected_effect':{'type':'element_appeared','selector':'#frameclicked'}})
         assert result.action_outcome['status']=='verified'
         with pytest.raises(ToolError,match='multiple'):
-            await tools.call('inspect_element',{'selector':'button'})
+            await tools.call('inspect_element',{'pageId': 1, 'selector':'button'})
         stale=uid('Duplicate')
         await bridge.evaluate("document.querySelector('#duplicate').outerHTML='<button id=duplicate>Different target</button>'")
         presses=lambda:sum(m=='Input.dispatchMouseEvent' and p['type']=='mousePressed' for m,p in bridge.calls)
         count=presses()
         with pytest.raises(ToolError,match='stale_element|no longer exists|replaced|node'):
-            await tools.call('click',{'uid':stale})
+            await tools.call('click',{'pageId': 1, 'uid':stale})
         assert presses()==count
-        await tools.call('take_snapshot',{})
-        result=await tools.call('fill',{'uid':uid('Email'),'value':'fixture@example.test',
+        await tools.call('take_snapshot',{'pageId': 1})
+        result=await tools.call('fill',{'pageId': 1, 'uid':uid('Email'),'value':'fixture@example.test',
             'expected_effect':{'type':'value_equals','selector':'#email','value':'fixture@example.test'}})
         assert result.action_outcome['status']=='verified'
         # Without an expected_effect, fills are read back with a fixed query.
-        result=await tools.call('fill',{'uid':uid('Email'),'value':'second@example.test','includeSnapshot':False})
+        result=await tools.call('fill',{'pageId': 1, 'uid':uid('Email'),'value':'second@example.test','includeSnapshot':False})
         assert result.action_outcome['status']=='verified', result.action_outcome
         assert result.action_outcome['verification']['automatic'] is True
-        result=await tools.call('fill',{'uid':uid('Upper field'),'value':'abc','includeSnapshot':False})
+        result=await tools.call('fill',{'pageId': 1, 'uid':uid('Upper field'),'value':'abc','includeSnapshot':False})
         assert result.action_outcome['status']=='failed', result.action_outcome
         assert result.action_outcome['verification']['fields']==[{'uid':uid('Upper field'),'passed':False,'observed':'ABC'}]
-        result=await tools.call('fill',{'uid':uid('Secret field'),'value':'not-read-back','includeSnapshot':False})
+        result=await tools.call('fill',{'pageId': 1, 'uid':uid('Secret field'),'value':'not-read-back','includeSnapshot':False})
         assert result.action_outcome['status']=='executed' and result.action_outcome['verification']['passed'] is None
         assert 'not-read-back' not in json.dumps(result.action_outcome)
-        result=await tools.call('fill_form',{'elements':[{'uid':uid('Email'),'value':'third@example.test'},{'uid':uid('Upper field'),'value':'XYZ'}],'includeSnapshot':False})
+        result=await tools.call('fill_form',{'pageId': 1, 'elements':[{'uid':uid('Email'),'value':'third@example.test'},{'uid':uid('Upper field'),'value':'XYZ'}],'includeSnapshot':False})
         assert result.action_outcome['status']=='verified', result.action_outcome
-        result=await tools.call('click',{'uid':uid('Save draft'),'expected_effect':{'type':'url_equals','value':url+'done'}})
+        result=await tools.call('click',{'pageId': 1, 'uid':uid('Save draft'),'expected_effect':{'type':'url_equals','value':url+'done'}})
         assert result.action_outcome['status']=='verified'
         assert await bridge.evaluate('window.sent')==1 and session.same_document>0
-        result=await tools.call('click',{'uid':uid('No effect'),'expected_effect':{'type':'element_appeared','selector':'#never','timeout':0}})
+        result=await tools.call('click',{'pageId': 1, 'uid':uid('No effect'),'expected_effect':{'type':'element_appeared','selector':'#never','timeout':0}})
         assert result.action_outcome['status']=='failed' and result.action_outcome['action_executed']
         assert result.action_outcome['recovery']['retry_allowed'] is False
-        screenshot=await tools.call('take_screenshot',{})
+        screenshot=await tools.call('take_screenshot',{'pageId': 1})
         binding=screenshot.structured_content['visual_binding']
         assert binding['image_width']>0 and binding['viewport_width']>0
         point=await bridge.evaluate("(()=>{const r=document.querySelector('#noeffect').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()")
         visual={'screenshot_id':binding['screenshot_id'],**point}
         await bridge.evaluate("document.querySelector('#noeffect').setAttribute('data-revision','new')")
         with pytest.raises(ToolError,match='unsafe_visual_fallback'):
-            await tools.call('click',{'visual_target':visual})
-        screenshot=await tools.call('take_screenshot',{})
+            await tools.call('click',{'pageId': 1, 'visual_target':visual})
+        screenshot=await tools.call('take_screenshot',{'pageId': 1})
         visual['screenshot_id']=screenshot.structured_content['visual_binding']['screenshot_id']
-        result=await tools.call('click',{'visual_target':visual,'includeSnapshot':False})
+        result=await tools.call('click',{'pageId': 1, 'visual_target':visual,'includeSnapshot':False})
         assert result.action_outcome['status']=='executed'
         with pytest.raises(ToolError,match='unsafe_visual_fallback'):
-            await tools.call('click',{'visual_target':visual})
-        result=await tools.call('click',{'uid':uid('Show dialog'),'expected_effect':{'type':'dialog_opened'}})
+            await tools.call('click',{'pageId': 1, 'visual_target':visual})
+        result=await tools.call('click',{'pageId': 1, 'uid':uid('Show dialog'),'expected_effect':{'type':'dialog_opened'}})
         assert result.action_outcome['status']=='verified'
-        await tools.call('handle_dialog',{'action':'dismiss','includeSnapshot':False})
+        await tools.call('handle_dialog',{'pageId': 1, 'action':'dismiss','includeSnapshot':False})
         tools.require_authorization=True
-        args={'uid':uid('No effect'),'includeSnapshot':False}
+        args={'pageId': 1, 'uid':uid('No effect'),'includeSnapshot':False}
         with pytest.raises(ToolError,match='authorization'):
             await tools.call('click',args)
         context=(await tools.call('__monaw_action_context',{'tool_name':'click','arguments':args})).structured_content['browser_action_context']
@@ -215,10 +251,10 @@ async def _workflow(socket_url,url):
         with pytest.raises(ToolError,match='context changed'):
             await tools.call('click',{**args,'__monaw_authorization':context})
         tools.require_authorization=False
-        await tools.call('navigate_page',{'url':url,'includeSnapshot':False})
-        await tools.call('take_snapshot',{})
+        await tools.call('navigate_page',{'pageId': 1, 'url':url,'includeSnapshot':False})
+        await tools.call('take_snapshot',{'pageId': 1})
         tools.require_authorization=True
-        args={'elements':[{'uid':uid('First field'),'value':'one'},{'uid':uid('Second field'),'value':'two'}],
+        args={'pageId': 1, 'elements':[{'uid':uid('First field'),'value':'one'},{'uid':uid('Second field'),'value':'two'}],
               'includeSnapshot':False,'expected_effect':{'type':'value_equals','selector':'#second','value':'two'}}
         context=(await tools.call('__monaw_action_context',{'tool_name':'fill_form','arguments':args})).structured_content['browser_action_context']
         result=await tools.call('fill_form',{**args,'__monaw_authorization':context})
@@ -236,19 +272,19 @@ async def _workflow(socket_url,url):
           Object.defineProperty(button,'type',lie('button'));
           Object.defineProperty(button,'formAction',lie('https://false-destination.invalid/'));
           Object.defineProperty(button,'formMethod',lie('get'));
-          Object.defineProperty(form,'action',lie('https://false-destination.invalid/'));
-          Object.defineProperty(form,'method',lie('get'));
+          Object.defineProperty(HTMLFormElement.prototype,'action',lie('https://false-destination.invalid/'));
+          Object.defineProperty(HTMLFormElement.prototype,'method',lie('get'));
         })()""")
-        click_args={'uid':uid('Submit locally'),'includeSnapshot':False}
+        click_args={'pageId': 1, 'uid':uid('Submit locally'),'includeSnapshot':False}
         guarded=(await tools.call('__monaw_action_context',{'tool_name':'click','arguments':click_args})).structured_content['browser_action_context']
         assert guarded['side_effect']=='external_mutation' and guarded['destination']==url+'override'
         assert guarded['target']['type']=='submit' and guarded['target']['form_method']=='post'
         assert await bridge.evaluate('window.hostileFactsRead')==0
         text_uid=next(n.uid for n in session.nodes.values() if n.role=='StaticText' and n.name=='Submit locally')
-        nested=(await tools.call('__monaw_action_context',{'tool_name':'click','arguments':{'uid':text_uid}})).structured_content['browser_action_context']
+        nested=(await tools.call('__monaw_action_context',{'tool_name':'click','arguments':{'pageId': 1, 'uid':text_uid}})).structured_content['browser_action_context']
         assert nested['side_effect']=='external_mutation' and nested['destination']==url+'override'
         await bridge.evaluate('document.querySelector("#first").focus()')
-        args={'key':'Enter','includeSnapshot':False,'expected_effect':{'type':'url_equals','value':url+'override'}}
+        args={'pageId': 1, 'key':'Enter','includeSnapshot':False,'expected_effect':{'type':'url_equals','value':url+'override'}}
         context=(await tools.call('__monaw_action_context',{'tool_name':'press_key','arguments':args})).structured_content['browser_action_context']
         assert context['destination']==url+'override' and context['side_effect']=='external_mutation'
         assert await bridge.evaluate('window.hostileFactsRead')==0

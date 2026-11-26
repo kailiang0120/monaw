@@ -10,6 +10,11 @@ ordinary folders as well as Git repositories. Git must be installed and availabl
 to the backend. Monaw does not create commits in your project or change its branch,
 index, or staged changes.
 
+Checkpoint capture runs on one dedicated worker so Git and filesystem work do
+not block the backend event loop. The owning run keeps renewing its lease while
+waiting. Cancellation waits for an already-started capture to stop before the
+run releases its execution resources.
+
 **Undo** previews the inverse diff. Choose **Undo** to confirm or **Cancel** to
 leave the file unchanged. The restored contents come from the start of that run,
 including any uncommitted edits that were already present. Later file changes,

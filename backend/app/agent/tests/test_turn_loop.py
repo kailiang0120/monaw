@@ -3769,6 +3769,7 @@ def test_turn_loop_streams_openai_summary_before_answer_tokens():
             async def events():
                 yield {"type": "response.reasoning_summary_text.delta", "delta": "Checking context."}
                 yield {"type": "response.output_text.delta", "delta": "Here is the answer."}
+                yield {"type": "response.completed", "response": {"status": "completed", "output": []}}
 
             return events()
 

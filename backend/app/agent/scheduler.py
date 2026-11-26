@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import uuid
+from copy import copy
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -14,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.agent.database import get_db
 from app.agent.harness.workers import unfinished_conversation_ids
 from app.agent.ui_events import publish_ui_event
+from app.agent.notification_outbox import claim_notification, finish_notification, record_delivered_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,9 @@ class ScheduledTaskService:
         self._max_queued_occurrences = max(1, int(max_queued_occurrences))
         self._lease_owner = f"scheduler:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
+        self._notification_task: asyncio.Task | None = None
+        self._notification_lock = asyncio.Lock()
+        self._notification_wake = asyncio.Event()
         self._inflight: dict[str, list[asyncio.Task]] = {}
         self._run_tasks: dict[int, asyncio.Task] = {}
         self._entered_runs: set[int] = set()
@@ -135,11 +140,16 @@ class ScheduledTaskService:
         self._stop.clear()
         self._retire_expired_scheduler_rows(_iso_utc(_utc_now()))
         self._task = asyncio.create_task(self._tick_loop(), name="scheduled-task-service")
+        self._notification_task = asyncio.create_task(self._notification_loop(), name="scheduled-notifications")
         set_scheduled_task_service(self)
         logger.info("scheduled-tasks: service started")
 
     async def stop(self) -> None:
         self._stop.set()
+        if self._notification_task is not None:
+            self._notification_task.cancel()
+            await asyncio.gather(self._notification_task, return_exceptions=True)
+            self._notification_task = None
         if self._task is not None:
             self._task.cancel()
             try:
@@ -211,6 +221,58 @@ class ScheduledTaskService:
             except asyncio.TimeoutError:
                 pass
 
+    async def _notification_loop(self) -> None:
+        """Retry persisted deliveries independently from agent scheduling capacity."""
+        while not self._stop.is_set():
+            self._notification_wake.clear()
+            try:
+                await self._deliver_notifications()
+            except Exception as exc:
+                logger.warning("scheduled-tasks: notification worker failed error_type=%s", type(exc).__name__)
+            try:
+                await asyncio.wait_for(self._notification_wake.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                pass
+
+    def wake_notifications(self) -> None:
+        """Wake delivery independently of the execution slot that created it."""
+        self._notification_wake.set()
+
+    async def _deliver_notifications(self, run_id: int | None = None) -> None:
+        """Deliver leased outbox records; retry delivery without rerunning the task."""
+        async with self._notification_lock:
+            for _ in range(10):
+                delivery = claim_notification(get_db(), self._lease_owner, run_id=run_id)
+                if delivery is None:
+                    return
+                payload = delivery["payload"]
+                row = {
+                    **payload["row"],
+                    "_notification_run_id": delivery["run_id"],
+                    "_notification_next_chunk": delivery["next_chunk"],
+                    "_notification_chunks": payload["chunks"],
+                }
+                try:
+                    async with asyncio.timeout(60):
+                        await self._notify_telegram(
+                            row, final_text=payload["final_text"], status=payload["status"], error=payload["error"],
+                        )
+                except asyncio.CancelledError:
+                    finish_notification(get_db(), delivery, self._lease_owner, error="delivery_interrupted")
+                    raise
+                except Exception as exc:
+                    finish_notification(
+                        get_db(), delivery, self._lease_owner,
+                        error=type(exc).__name__, blocked=isinstance(exc, PermissionError),
+                    )
+                    logger.warning(
+                        "scheduled-tasks: notification delivery failed task=%s run=%s error_type=%s",
+                        delivery["task_id"], delivery["run_id"], type(exc).__name__,
+                    )
+                else:
+                    finish_notification(get_db(), delivery, self._lease_owner)
+                publish_ui_event("scheduled_tasks.changed", {"task_id": delivery["task_id"], "action": "notification_updated"})
+
     async def _fire_due_tasks(self) -> None:
         now_iso = _iso_utc(_utc_now())
         self._retire_expired_scheduler_rows(now_iso)
@@ -263,6 +325,8 @@ class ScheduledTaskService:
                     occurrence = max(due, self._cron_occurrence(row, now, forward=False))
                     next_run = self.compute_next_run(row, after=now)
             suffix = "shared" if row["reuse_conversation"] else uuid.uuid4().hex[:12]
+            if row["reuse_conversation"] and row.get("workspace_dir"):
+                suffix += "_" + hashlib.sha256(row["workspace_dir"].encode()).hexdigest()[:12]
             return {
                 "conversation_id": f"sched_{task_id[:40]}_{suffix}",
                 "conversation_title": f"Scheduled: {row['title']}",
@@ -392,6 +456,23 @@ class ScheduledTaskService:
                 name=f"scheduled-task-lease-{run_id}",
             )
             settings = self.settings_factory()
+            if row.get("workspace_dir"):
+                from app.agent.conversation_workspace import validate_workspace_dir
+                validate_workspace_dir(row["workspace_dir"])
+                conversation = get_db().get_conversation(conversation_id)
+                if conversation is None or conversation["workspace_dir"] != row["workspace_dir"]:
+                    raise ValueError("The scheduled conversation's workspace changed after this occurrence was accepted")
+            if row.get("model_provider") and row.get("model_name"):
+                # Copy the runtime namespace; never modify the shared defaults.
+                settings = copy(settings)
+                settings.model_provider = row["model_provider"]
+                settings.model_name = row["model_name"]
+                settings.reasoning_effort = row.get("model_reasoning_effort") or "medium"
+                if hasattr(settings, "llm"):
+                    settings.llm = copy(settings.llm)
+                    settings.llm.provider = settings.model_provider
+                    settings.llm.model_name = settings.model_name
+                    settings.llm.reasoning_effort = settings.reasoning_effort
             async for event in self.runner(
                 message=str(row.get("prompt") or ""),
                 conversation_id=conversation_id,
@@ -486,6 +567,13 @@ class ScheduledTaskService:
                 "consecutive_failures": failures, "enabled": enabled,
             }
 
+        notification = None
+        if status not in {"skipped", "cancelled"} and row.get("notify_telegram") and str(row.get("telegram_chat_id") or "").strip():
+            notification = {
+                "row": {key: row.get(key, "") for key in ("id", "title", "telegram_chat_id")},
+                "final_text": final_text, "status": status, "error": error,
+                "chunks": self._notification_chunks(row, final_text=final_text, status=status, error=error),
+            }
         current = get_db().finalize_scheduled_task_run(
             task_id=str(row["id"]), run_id=run_id, conversation_id=conversation_id,
             lease_owner=self._lease_owner,
@@ -494,6 +582,7 @@ class ScheduledTaskService:
             final_text=final_text,
             error=error,
             prepare_task_update=prepare_task_update,
+            notification=notification,
         )
         if current is None:
             return
@@ -508,20 +597,24 @@ class ScheduledTaskService:
         publish_ui_event("usage.changed", {"conversation_id": conversation_id})
         publish_ui_event("observability.changed", {"conversation_id": conversation_id})
 
-        if (
-            status not in {"skipped", "cancelled"}
-            and int(row.get("notify_telegram") or 0)
-            and str(row.get("telegram_chat_id") or "").strip()
-        ):
-            try:
-                await self._notify_telegram(row, final_text=final_text, status=status, error=error)
-            except Exception as exc:
-                # Delivery is separate from execution. Transport exceptions can
-                # contain URLs/tokens, so log only the type and correlation IDs.
-                logger.warning(
-                    "scheduled-tasks: notification delivery failed task=%s run=%s error_type=%s",
-                    row["id"], run_id, type(exc).__name__,
-                )
+        if notification is not None:
+            self.wake_notifications()
+
+    @staticmethod
+    def _notification_chunks(row: dict, *, final_text: str, status: str, error: str) -> list[str]:
+        """Freeze the exact chunks before committing the notification outbox."""
+        title = str(row.get("title") or "Scheduled task").strip()
+        body = (
+            final_text.strip() or "Scheduled task completed successfully (no output)."
+            if status == "succeeded" else f"Scheduled task failed: {error or 'unknown error'}"
+        )
+        text = f"{title}\n\n{body}".strip()
+        try:
+            from app.integrations.telegram.agent_bridge import simplify_telegram_text, split_telegram_message
+            return list(split_telegram_message(simplify_telegram_text(text)))
+        except Exception:
+            # Formatting or an unavailable integration must not lose the run result.
+            return [text[index:index + 3000] for index in range(0, len(text), 3000)]
 
     async def _notify_telegram(
         self,
@@ -531,34 +624,28 @@ class ScheduledTaskService:
         status: ScheduledRunOutcome,
         error: str,
     ) -> None:
-        try:
-            from app.integrations.telegram.agent_bridge import simplify_telegram_text, split_telegram_message
-            from app.integrations.telegram.service import get_telegram_bot
-        except Exception:
-            logger.debug("scheduled-tasks: Telegram modules unavailable", exc_info=True)
-            return
+        from app.integrations.telegram.service import get_telegram_bot
 
         bot = get_telegram_bot()
         if bot is None:
-            return
+            raise RuntimeError("telegram_unavailable")
         if not telegram_chat_allowed(str(row.get("telegram_chat_id") or "")):
             logger.warning(
                 "scheduled-tasks: refusing Telegram notification for task %s to a chat outside the allowlist",
                 row.get("id"),
             )
-            return
-        title = str(row.get("title") or "Scheduled task").strip()
-        body = (
-            final_text.strip() or "Scheduled task completed successfully (no output)."
-            if status == "succeeded"
-            else f"Scheduled task failed: {error or 'unknown error'}"
+            raise PermissionError("telegram_destination_not_allowed")
+        chunks = row.get("_notification_chunks") or self._notification_chunks(
+            row, final_text=final_text, status=status, error=error,
         )
-        text = simplify_telegram_text(f"{title}\n\n{body}".strip())
         chat_id = str(row.get("telegram_chat_id") or "").strip()
-        for chunk in split_telegram_message(text):
+        for index in range(int(row.get("_notification_next_chunk") or 0), len(chunks)):
+            chunk = chunks[index]
             result = bot.send_message(chat_id=chat_id, text=chunk)
             if inspect.isawaitable(result):
                 await result
+            if row.get("_notification_run_id"):
+                record_delivered_chunk(get_db(), row["_notification_run_id"], self._lease_owner, index + 1)
 
     @staticmethod
     def _cron_occurrence(task_row: dict[str, Any], reference: datetime, *, forward: bool) -> datetime:

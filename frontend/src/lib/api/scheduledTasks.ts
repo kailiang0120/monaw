@@ -93,6 +93,14 @@ export async function fetchScheduledTaskRuns(id: string, limit = 20): Promise<Sc
   return res.json()
 }
 
+/** Retry delivery of an existing result without executing its task again. */
+export async function retryScheduledNotification(taskId: string, runId: number): Promise<void> {
+  const res = await apiFetch(`${BASE}/api/scheduled-tasks/${encodeURIComponent(taskId)}/runs/${runId}/notification/retry`, {
+    method: 'POST',
+  })
+  if (!res.ok) return throwApiError(res, 'Could not retry the notification')
+}
+
 export async function previewSchedule(input: SchedulePreviewRequest): Promise<{ next: string[] }> {
   const res = await apiFetch(`${BASE}/api/scheduled-tasks/preview`, {
     method: 'POST',

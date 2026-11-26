@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { resetApiSessionForTests } from '../lib/api/client'
 import type { RunEvent, RunEventsPage, RunSnapshot } from '../lib/api/runs'
-import { useRunEvents } from './useRunEvents'
+import { MAX_RETAINED_RUN_EVENTS, useRunEvents } from './useRunEvents'
 
 function snapshot(runId: string, lastSeq: number, status: RunSnapshot['status'] = 'running'): RunSnapshot {
   return {
@@ -117,10 +117,12 @@ describe('useRunEvents durable replay and reconnection', () => {
 
     expect(eventPageCursors).toEqual([0, 500, 503])
     expect(streamCursors).toEqual([502, 505])
-    expect(result.current.events.map((item) => item.seq)).toEqual(Array.from({ length: 506 }, (_, index) => index + 1))
-    expect(new Set(result.current.events.map((item) => `${item.run_id}:${item.seq}`)).size).toBe(506)
-    expect(result.current.events[0]).toMatchObject({ run_id: runId, seq: 1, type: 'run.created' })
-    expect(result.current.events[505]).toMatchObject({ run_id: runId, seq: 506, type: 'operation.updated' })
+    expect(result.current.events.map((item) => item.seq)).toEqual(
+      Array.from({ length: MAX_RETAINED_RUN_EVENTS }, (_, index) => index + 7),
+    )
+    expect(new Set(result.current.events.map((item) => `${item.run_id}:${item.seq}`)).size).toBe(MAX_RETAINED_RUN_EVENTS)
+    expect(result.current.events[0]).toMatchObject({ run_id: runId, seq: 7 })
+    expect(result.current.events[result.current.events.length - 1]).toMatchObject({ run_id: runId, seq: 506, type: 'operation.updated' })
   })
 
   it('falls back to the atomic snapshot when the requested event cursor has expired', async () => {

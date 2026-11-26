@@ -13,6 +13,7 @@ from typing import AsyncIterator, Callable
 from app.agent.execution_gate import ExecutionGateService
 from app.agent.iteration_budget import IterationBudget
 from app.agent.llm_client import LLMClient
+from app.agent.model_usage import ModelUsageBudget, current_model_budget
 from app.agent.conversation_workspace import selected_workspace_dir
 from app.agent.memory_manager import MemoryManager
 from app.agent.observability.recorder import (
@@ -190,6 +191,12 @@ class TurnLoop:
         turn_thinking_parts: list[str] = []
         persisted_user_ids: list[int] = []
         obs_usage_total = UsageStats()
+        model_budget = ModelUsageBudget(self.max_tokens_per_turn) if isinstance(self.llm_client, LLMClient) else None
+        usage_token = current_model_budget.set(model_budget)
+
+        def _turn_usage() -> UsageStats:
+            """Include compaction and failed attempts in the turn's reported usage."""
+            return model_budget.usage if model_budget is not None else obs_usage_total
 
         budget = self._new_turn_budget()
         observer = TurnObserver(self.observability, conversation_id=conversation_id, client=self.llm_client)
@@ -333,6 +340,9 @@ class TurnLoop:
                 )
 
         try:
+            checkpoint_files = getattr(lifecycle.durable_run, "checkpoint_files", None)
+            if callable(checkpoint_files):
+                await checkpoint_files("before")
             obs_run_id = self.observability.start_run(
                 conversation_id=conversation_id,
                 user_message=message,
@@ -353,7 +363,7 @@ class TurnLoop:
                 _put({"event": "error", "data": {"code": "tool_still_running", "message": final_text}})
                 await lifecycle.finalize(
                     TurnOutcome(final_text, "paused", "tool_still_running"),
-                    persist=_persist_turn, usage=obs_usage_total, tool_calls=_tool_calls_for_persist(),
+                    persist=_persist_turn, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
                 )
                 return
             build_long_term_context = getattr(self.memory, "build_long_term_memory_context", None)
@@ -448,7 +458,7 @@ class TurnLoop:
                 if _apply_steering():
                     response_policy.steered()
                 token_limit = self.max_tokens_per_turn
-                tokens_used = obs_usage_total.total_tokens
+                tokens_used = _turn_usage().total_tokens
                 if token_limit and tokens_used >= token_limit:
                     final_text = (
                         f"Paused: this task used {tokens_used:,} tokens, over its limit of {token_limit:,}. "
@@ -535,7 +545,13 @@ class TurnLoop:
                     obs_usage_total = obs_usage_total.merge(model_result.usage)
                 except ModelRequestError as exc:
                     final_text = str(exc)
-                    terminal_error = True
+                    streamed_answer_text = model_runner.answer_text
+                    if model_runner.reasoning_text:
+                        turn_thinking_parts.append(model_runner.reasoning_text)
+                    if streamed_answer_text.strip():
+                        final_text += f"\n\nPartial response:\n{streamed_answer_text.strip()}"
+                    budget_exhausted = exc.reason_code == "token_budget_exhausted"
+                    terminal_error = not budget_exhausted
                     incomplete_reason_code = exc.reason_code
                     _put({"event": "error", "data": {"code": exc.reason_code, "message": final_text}})
                     break
@@ -797,12 +813,14 @@ class TurnLoop:
             await lifecycle.finalize(
                 TurnOutcome(final_text or "Done.", run_status, incomplete_reason_code, response_attachments),
                 persist=_persist_turn,
-                usage=obs_usage_total,
+                usage=_turn_usage(),
                 tool_calls=_tool_calls_for_persist(),
                 metadata={
                     "completed_normally": completed_normally,
                     "budget_consumed": budget.consumed,
                     "budget_limit": budget.max_iterations,
+                    "estimated_requests": model_budget.estimated_requests if model_budget is not None else 0,
+                    "model_requests": model_budget.requests if model_budget is not None else 0,
                 },
                 clear_progress=lambda: self.memory.clear_task_progress(conversation_id),
             )
@@ -839,7 +857,7 @@ class TurnLoop:
                 partial_text += "\n\nA tool is still stopping. Further actions are blocked until it finishes; verify its last action before retrying."
             await lifecycle.finalize(
                 TurnOutcome(partial_text, "paused", reason.value),
-                persist=_persist_turn, usage=obs_usage_total, tool_calls=_tool_calls_for_persist(),
+                persist=_persist_turn, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
             )
             raise
         except Exception as exc:
@@ -853,9 +871,10 @@ class TurnLoop:
             _put({"event": "error", "data": {"code": "internal_error", "message": str(exc)}})
             await lifecycle.finalize(
                 TurnOutcome(failure_text, "error", "internal_error"),
-                persist=_persist_turn, usage=obs_usage_total, tool_calls=_tool_calls_for_persist(),
+                persist=_persist_turn, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
             )
         finally:
+            current_model_budget.reset(usage_token)
             memory_store = getattr(self.memory, "memory_store", None)
             if memory_store is not None and obs_run_id:
                 memory_store.discard_pending_sources(obs_run_id)

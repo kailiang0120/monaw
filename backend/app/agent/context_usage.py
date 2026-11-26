@@ -8,6 +8,7 @@ from typing import Any
 
 from app.agent.llm_client import _normalise_messages_for_openai_responses, _tools_to_openai_responses
 from app.agent.llm_constants import DEFAULT_OPENAI_CHAT_MODEL
+from app.agent.image_usage import estimate_image_tokens
 
 try:
     import tiktoken
@@ -23,7 +24,6 @@ _OPENAI_MESSAGE_OVERHEAD_TOKENS = 3
 _OPENAI_NAME_OVERHEAD_TOKENS = 1
 _GENERIC_MESSAGE_OVERHEAD_TOKENS = 4
 _TOOL_OVERHEAD_TOKENS = 12
-_IMAGE_ATTACHMENT_TOKEN_FALLBACK = 850
 _CHARS_PER_TOKEN_FALLBACK = 4
 _OPENAI_CONTEXT_WINDOWS = {
     "gpt-5.6": 1_050_000,
@@ -156,7 +156,7 @@ def _count_content_tokens(content: Any, *, llm_client) -> int:
                 if part_type in {"text", "input_text"}:
                     total += count_text_tokens(str(item.get("text") or ""), llm_client=llm_client)
                 elif part_type in {"image_url", "input_image"}:
-                    total += _IMAGE_ATTACHMENT_TOKEN_FALLBACK
+                    total += estimate_image_tokens(item, llm_client=llm_client)
                 else:
                     total += count_text_tokens(
                         json.dumps(item, ensure_ascii=False, sort_keys=True),
@@ -187,8 +187,9 @@ def estimate_message_tokens(messages: list[dict], *, llm_client) -> int:
                 payload = part if isinstance(part, dict) else part.model_dump(exclude_none=True)
                 payload = dict(payload)
                 for image_key in ("inline_data", "file_data"):
-                    if payload.pop(image_key, None) is not None:
-                        total += _IMAGE_ATTACHMENT_TOKEN_FALLBACK
+                    image = payload.pop(image_key, None)
+                    if image is not None:
+                        total += estimate_image_tokens(image, llm_client=llm_client)
                 total += count_text_tokens(json.dumps(payload, ensure_ascii=False, default=str), llm_client=llm_client)
             continue
         if provider == "gemini" and isinstance(message.get("gemini_function_response"), dict):
@@ -196,7 +197,8 @@ def estimate_message_tokens(messages: list[dict], *, llm_client) -> int:
             continue
         total += _count_content_tokens(message.get("content", ""), llm_client=llm_client)
         images = message.get("images") if isinstance(message.get("images"), list) else []
-        total += len(images) * _IMAGE_ATTACHMENT_TOKEN_FALLBACK
+        if getattr(llm_client, "supports_vision", False):
+            total += sum(estimate_image_tokens(image, llm_client=llm_client) for image in images if isinstance(image, dict))
     return total
 
 
@@ -208,7 +210,11 @@ def _estimate_openai_message_tokens(messages: list[dict], *, llm_client) -> int:
     total = _OPENAI_REPLY_PRIMER_TOKENS
     for message in normalized:
         total += _OPENAI_MESSAGE_OVERHEAD_TOKENS
-        if message.get("type") in {"function_call", "function_call_output", "reasoning"}:
+        if message.get("type") == "function_call_output":
+            total += _count_content_tokens(message.get("output"), llm_client=llm_client)
+            total += count_text_tokens(str(message.get("call_id", "")), llm_client=llm_client)
+            continue
+        if message.get("type") in {"function_call", "reasoning"}:
             total += count_text_tokens(
                 json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                 llm_client=llm_client,

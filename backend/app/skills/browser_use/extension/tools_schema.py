@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-_PAGE_ID = {"type": "number", "description": "Targets a specific page by ID from list_pages. Defaults to the selected page."}
+_PAGE_ID = {"type": "number", "description": "Required target page ID from list_pages or new_page. Always pass it explicitly, including after select_page."}
 _UID = {"type": "string", "description": "The uid of an element on the page from the page content snapshot"}
 _SELECTOR = {"type": "string", "maxLength": 1000, "description": "CSS selector for one element in the main document. Use observed IDs/attributes; multiple matches are an error. Prefer uid for elements in snapshots or frames."}
 _TIMEOUT = {
@@ -22,6 +22,10 @@ _ACTION_TIMEOUT = {"type": "integer", "minimum": 0, "maximum": 30000, "descripti
 
 
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
+    """Require explicit page targets so interleaved tasks cannot share selection."""
+    required = list(required or [])
+    if "pageId" in properties and "pageId" not in required:
+        required.append("pageId")
     schema: dict[str, Any] = {"type": "object", "properties": properties, "additionalProperties": False}
     if required:
         schema["required"] = required
@@ -37,7 +41,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "select_page",
-        "description": "Select a page as a context for future tool calls.",
+        "description": "Inspect or focus a page. Continue passing its pageId explicitly on every subsequent call.",
         "inputSchema": _schema({
             "pageId": {"type": "number", "description": "The ID of the page to select. Call list_pages to get available pages."},
             "bringToFront": {"type": "boolean", "description": "Whether to focus the page and bring it to the top."},
@@ -334,7 +338,7 @@ for _tool in TOOL_DEFINITIONS:
     if not _tool.get("readOnly"):
         _tool["inputSchema"]["properties"]["expected_effect"] = _EXPECTED_EFFECT
     if _tool["name"] == "click":
-        _tool["inputSchema"].pop("required", None)
+        _tool["inputSchema"]["required"] = ["pageId"]
         _tool["inputSchema"]["properties"]["visual_target"] = {
             "type":"object", "additionalProperties":False,
             "description":"Controlled fallback after a fresh accessibility snapshot cannot identify the target. Use a current viewport screenshot binding. One click only, same policy gate, no automatic retries. Coordinates are viewport CSS pixels; inaccessible frames are unsupported.",

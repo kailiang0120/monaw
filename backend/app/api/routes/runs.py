@@ -535,7 +535,7 @@ def _start_resume_worker(durable_run: Any, resume_input: dict[str, Any]) -> None
         # The durable attempt is already claimed. Keep the failure visible as a
         # failed durable turn rather than leaving a running row without a worker.
         try:
-            durable_run.finalize("error", "run_failed")
+            durable_run.finalize("error", "run_failed", checkpoint_files=False)
         except Exception:
             logger.exception("Unable to finalize duplicate resumed run run_id=%s", run_id)
         logger.warning("Unable to register resumed Run inbox run_id=%s error=%s", run_id, type(exc).__name__)

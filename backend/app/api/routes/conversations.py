@@ -241,12 +241,20 @@ def _summary_tool_calls(db, *, message_id: int, limit: int) -> list[ToolCallOut]
 @router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations(
     limit: int = Query(100, ge=1, le=CONVERSATION_LIST_LIMIT_MAX),
-    offset: int = Query(0, ge=0, le=10_000),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=200),
+    before_updated_at: str = Query("", max_length=80),
+    before_id: str = Query("", max_length=120),
 ):
     from app.agent.steering import conversation_is_running
     from app.agent.turn_loop import conversation_turn_running
 
-    conversations = list_conversation_metadata()[offset:offset + limit]
+    if bool(before_updated_at) != bool(before_id):
+        raise HTTPException(status_code=400, detail="Both conversation cursor fields are required.")
+    conversations = list_conversation_metadata(
+        limit=limit, offset=offset, search=search,
+        before_updated_at=before_updated_at, before_id=before_id,
+    )
     return [
         {**conversation, "running": conversation_is_running(conversation["id"]) or conversation_turn_running(conversation["id"])}
         for conversation in conversations

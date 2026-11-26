@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.agent.conversation_history import ConversationHistory
 from app.agent.db_bootstrap import initialize_database
 from app.agent.runtime_paths import RUNTIME_DIR
 
@@ -130,17 +131,15 @@ class Database:
             self.conn.commit()
         return {"id": conv_id, "title": title, "created_at": now, "workspace_dir": workspace_dir}
 
-    def list_conversations(self) -> list[dict]:
-        rows = self.fetchall(
-            "SELECT id, title, created_at, updated_at, workspace_dir FROM conversations ORDER BY updated_at DESC"
+    def list_conversations(
+        self, *, limit: int | None = None, offset: int = 0, search: str = "",
+        before_updated_at: str = "", before_id: str = "",
+    ) -> list[dict]:
+        """Delegate paged history reads without exposing the shared connection."""
+        return ConversationHistory(self).list(
+            limit=limit, offset=offset, search=search,
+            before_updated_at=before_updated_at, before_id=before_id,
         )
-        return [
-            {
-                "id": r["id"], "title": r["title"], "created_at": r["created_at"], "updated_at": r["updated_at"],
-                "workspace_dir": r["workspace_dir"],
-            }
-            for r in rows
-        ]
 
     def get_conversation(self, conv_id: str) -> dict | None:
         row = self.fetchone("SELECT * FROM conversations WHERE id = ?", (conv_id,))
@@ -270,6 +269,10 @@ class Database:
         "notify_telegram",
         "telegram_chat_id",
         "reuse_conversation",
+        "workspace_dir",
+        "model_provider",
+        "model_name",
+        "model_reasoning_effort",
         "owner_principal_id",
         "permission_profile_id",
         "permission_profile_snapshot",
@@ -289,6 +292,7 @@ class Database:
         "title", "prompt", "schedule_kind", "cron_expr", "interval_seconds", "run_at",
         "timezone", "enabled", "overlap_policy", "notify_telegram", "telegram_chat_id",
         "reuse_conversation", "owner_principal_id", "permission_profile_id", "permission_profile_snapshot",
+        "workspace_dir", "model_provider", "model_name", "model_reasoning_effort",
     })
     _SCHEDULED_TASK_COMPLETION_COLS = frozenset({
         "last_run_at", "last_run_status", "last_run_conversation_id", "next_run_at",
@@ -307,6 +311,10 @@ class Database:
             "notify_telegram": 0,
             "telegram_chat_id": "",
             "reuse_conversation": 0,
+            "workspace_dir": "",
+            "model_provider": "",
+            "model_name": "",
+            "model_reasoning_effort": "",
             "owner_principal_id": "",
             "permission_profile_id": "scheduled-restricted",
             "permission_profile_snapshot": "",
@@ -431,8 +439,8 @@ class Database:
                 )
             if conversation_id:
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (conversation_id, values["conversation_title"], now_iso, now_iso),
+                    "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, workspace_dir) VALUES (?, ?, ?, ?, ?)",
+                    (conversation_id, values["conversation_title"], now_iso, now_iso, current["workspace_dir"]),
                 )
             cur = self.conn.execute(
                 """INSERT INTO scheduled_task_runs
@@ -575,6 +583,7 @@ class Database:
         self, *, task_id: str, run_id: int, conversation_id: str, lease_owner: str,
         finished_at: str, status: str, final_text: str, error: str,
         prepare_task_update: Callable[[dict[str, Any]], dict[str, Any]],
+        notification: dict | None = None,
     ) -> dict[str, Any] | None:
         """Commit terminal evidence once, preserving current configuration.
 
@@ -621,6 +630,9 @@ class Database:
                        lease_owner = '', lease_expires_at = '', task_snapshot = '' WHERE id = ?""",
                 (finished_at, stored_status, final_text, error, run_id),
             )
+            if notification is not None:
+                from app.agent.notification_outbox import enqueue_notification
+                enqueue_notification(self.conn, run_id, task_id, notification, finished_at)
             if fields:
                 fields["updated_at"] = finished_at
                 sets = ", ".join(f"{key} = ?" for key in fields)
@@ -687,9 +699,12 @@ class Database:
     def list_scheduled_task_runs(self, task_id: str, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.fetchall(
             """
-            SELECT * FROM scheduled_task_runs
-            WHERE task_id = ?
-            ORDER BY id DESC
+            SELECT r.*, COALESCE(n.status, 'not_requested') AS notification_status,
+                   COALESCE(n.last_error, '') AS notification_error
+            FROM scheduled_task_runs r
+            LEFT JOIN scheduled_notifications n ON n.run_id = r.id
+            WHERE r.task_id = ?
+            ORDER BY r.id DESC
             LIMIT ?
             """,
             (task_id, max(1, min(100, int(limit)))),
@@ -907,6 +922,16 @@ class Database:
                         "UPDATE turn_checkpoints SET user_message_ids = ?, finalized = 1, assistant_message_id = ? WHERE turn_id = ?",
                         (json.dumps(user_ids), assistant_message_id, turn_id),
                     )
+                # The IMMEDIATE transaction serializes this watermark with every
+                # operation transition, independently of clock precision/skew.
+                conn.execute(
+                    """UPDATE turn_checkpoints SET operation_result_seq = (
+                        SELECT r.last_seq FROM agent_runs r
+                        JOIN run_attempts a ON a.run_id = r.run_id
+                        WHERE a.turn_id = ? AND r.conversation_id = ?
+                    ) WHERE turn_id = ?""",
+                    (turn_id, conv_id, turn_id),
+                )
                 conn.commit()
                 return user_ids, True
             except BaseException:

@@ -21,6 +21,8 @@ from app.agent import llm_provider_requests as provider_requests
 from app.agent import llm_provider_responses as provider_responses
 from app.agent.llm_provider_adapters import create_llm_provider_adapter
 from app.agent.observability.recorder import UsageStats
+from app.agent.model_usage import current_model_budget, current_output_limit, estimate_request_tokens, estimated_usage, settle_estimated_usage
+from app.agent.model_capabilities import resolve_model_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,12 @@ class ResponseFailedError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.param = param
+
+
+class ResponseInterruptedError(RuntimeError):
+    """An unfinished response must not dispatch tools or restart visible output."""
+
+    retryable = False
 
 
 def _stateless_input(items: list[dict]) -> list[dict]:
@@ -98,98 +106,13 @@ async def _with_retry(coro_factory: Callable[[], Awaitable]):
 
 
 def _json_schema_prop_to_gemini(prop_def: dict, types_mod):
-    """Map a JSON Schema property (Pydantic-style) to google.genai.types.Schema."""
-    T = types_mod.Type
-
-    desc = str(prop_def.get("description") or prop_def.get("title") or "")
-
-    if "anyOf" in prop_def:
-        variants = prop_def["anyOf"]
-        non_null = [v for v in variants if isinstance(v, dict) and v.get("type") != "null"]
-        nullable = any(isinstance(v, dict) and v.get("type") == "null" for v in variants)
-        if len(non_null) == 1:
-            inner = _json_schema_prop_to_gemini(non_null[0], types_mod)
-            if nullable:
-                return inner.model_copy(update={"nullable": True})
-            return inner
-        if non_null:
-            return _json_schema_prop_to_gemini(non_null[0], types_mod)
-        return types_mod.Schema(type=T.STRING, description=desc)
-
-    ptype = prop_def.get("type")
-    if isinstance(ptype, list):
-        ptype = next((x for x in ptype if x and x != "null"), "string")
-
-    if ptype == "string":
-        kw: dict = {"type": T.STRING, "description": desc}
-        if "enum" in prop_def and prop_def["enum"]:
-            enum_values = [str(e) for e in prop_def["enum"] if str(e)]
-            if enum_values:
-                kw["enum"] = enum_values
-        return types_mod.Schema(**kw)
-    if ptype == "number":
-        return types_mod.Schema(type=T.NUMBER, description=desc)
-    if ptype == "integer":
-        return types_mod.Schema(type=T.INTEGER, description=desc)
-    if ptype == "boolean":
-        return types_mod.Schema(type=T.BOOLEAN, description=desc)
-    if ptype == "array":
-        items_src = prop_def.get("items") if isinstance(prop_def.get("items"), dict) else None
-        items_schema = _json_schema_prop_to_gemini(items_src or {"type": "string"}, types_mod)
-        return types_mod.Schema(type=T.ARRAY, description=desc, items=items_schema)
-    if ptype == "object":
-        raw_props = prop_def.get("properties")
-        properties: dict = {}
-        if isinstance(raw_props, dict):
-            for name, sub in raw_props.items():
-                if isinstance(sub, dict):
-                    properties[name] = _json_schema_prop_to_gemini(sub, types_mod)
-        req = prop_def.get("required")
-        required_list = req if isinstance(req, list) else None
-        # Gemini function declaration schema rejects additional_properties in this context.
-        # For free-form dict inputs, keep a plain object node and rely on runtime validation.
-        return types_mod.Schema(
-            type=T.OBJECT,
-            description=desc,
-            properties=properties or None,
-            required=required_list,
-        )
-
-    return types_mod.Schema(type=T.STRING, description=desc)
+    """Delegate the legacy schema helper to the provider implementation."""
+    return provider_requests.json_schema_prop_to_gemini(prop_def, types_mod)
 
 
 def _tools_to_gemini(tools: list[dict]):
-    """Convert tool dicts to a google.genai types.Tool object."""
-    from google.genai import types
-
-    declarations = []
-    for t in tools:
-        params = t.get("parameters", {})
-        props_raw = params.get("properties", {})
-
-        properties: dict = {}
-        for prop_name, prop_def in props_raw.items():
-            if isinstance(prop_def, dict):
-                properties[prop_name] = _json_schema_prop_to_gemini(prop_def, types)
-            else:
-                properties[prop_name] = types.Schema(
-                    type=types.Type.STRING,
-                    description="",
-                )
-
-        declarations.append(
-            types.FunctionDeclaration(
-                name=t["name"],
-                description=t.get("description", ""),
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties=properties,
-                    required=params.get("required", []),
-                ),
-            )
-        )
-
-    return types.Tool(function_declarations=declarations)
+    """Use the same schema conversion as actual Gemini requests."""
+    return provider_requests.tools_to_gemini(tools)
 
 
 def _tools_to_openai(tools: list[dict]) -> list[dict]:
@@ -495,7 +418,7 @@ class LLMClient:
             self._genai_client = genai.Client(api_key=api_key) if api_key else None
         elif self.provider == "openai":
             from openai import AsyncOpenAI
-            self._openai_client = AsyncOpenAI(api_key=api_key)
+            self._openai_client = AsyncOpenAI(api_key=api_key, max_retries=0)
         elif self.provider == "codex":
             # Created per access token in _codex_chat; the token rotates hourly.
             self._chatgpt_token = ""
@@ -527,15 +450,74 @@ class LLMClient:
         tool_choice: str | dict | None = None,
         reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
+        emitted = False
+        streamed_tokens = 0
+        budget = current_model_budget.get()
+        input_estimate = estimate_request_tokens(self, messages, tools, system_prompt) if budget is not None else 0
+        capabilities = await resolve_model_capabilities(self) if budget is not None and budget.limit else None
+
+        async def emit_answer(delta: str) -> None:
+            """Record visible output before forwarding an answer delta."""
+            nonlocal emitted, streamed_tokens
+            emitted = emitted or bool(delta)
+            if budget is not None:
+                streamed_tokens += estimated_usage(self, 0, delta).output_tokens
+            await stream_callback(delta)
+
+        async def emit_reasoning(delta: str) -> None:
+            """Record visible output before forwarding a reasoning delta."""
+            nonlocal emitted, streamed_tokens
+            emitted = emitted or bool(delta)
+            if budget is not None:
+                streamed_tokens += estimated_usage(self, 0, delta).output_tokens
+            await reasoning_callback(delta)
+
         async def call_provider() -> LLMResponse:
-            if reasoning_callback is not None and self.provider in {"openai", "codex"}:
-                return await self.provider_adapter.chat_with_tools(
-                    messages, tools, system_prompt, stream_callback, tool_choice,
-                    reasoning_callback=reasoning_callback,
-                )
-            return await self.provider_adapter.chat_with_tools(
-                messages, tools, system_prompt, stream_callback, tool_choice,
+            """Retry only before anything from this request becomes visible."""
+            kwargs = {}
+            if reasoning_callback is not None:
+                kwargs["reasoning_callback"] = emit_reasoning
+            reservation, output_limit = budget.reserve(
+                input_estimate, output_cap=capabilities.output_allowance if capabilities is not None else 16_384,
+                minimum_output=capabilities.minimum_output if capabilities is not None else 16,
+            ) if budget is not None else (0, None)
+            output_token = current_output_limit.set(
+                output_limit if capabilities is None or capabilities.output_parameter is not None else None
             )
+            response = None
+            try:
+                response = await self.provider_adapter.chat_with_tools(
+                    messages, tools, system_prompt,
+                    emit_answer if stream_callback is not None else None,
+                    tool_choice, **kwargs,
+                )
+                return response
+            except Exception as exc:
+                if emitted:
+                    raise ResponseInterruptedError(
+                        "The model response was interrupted after streaming began. "
+                        "Partial output was preserved; continue to request a new response."
+                    ) from exc
+                raise
+            finally:
+                current_output_limit.reset(output_token)
+                if budget is not None:
+                    usage = response.usage.normalized() if response is not None else UsageStats()
+                    estimated = usage.total_tokens == 0
+                    if estimated:
+                        if response is not None:
+                            output = response.content + response.reasoning_content + json.dumps([
+                                {"name": call.tool_name, "arguments": call.arguments} for call in response.tool_calls
+                            ])
+                            usage = estimated_usage(self, input_estimate, output)
+                        else:
+                            usage = estimated_usage(self, input_estimate, "")
+                            usage.output_tokens = streamed_tokens
+                            usage.total_tokens += streamed_tokens
+                        usage = settle_estimated_usage(
+                            self, usage, output_allowance=output_limit, uncertain=response is None,
+                        )
+                    budget.record(reservation, usage, estimated=estimated)
         return await _with_retry(
             call_provider
         )
@@ -584,6 +566,9 @@ class LLMClient:
             tool_choice=tool_choice,
         )
         kwargs["store"] = False
+        # This account endpoint does not accept the API's output-limit field.
+        # Input preflight and usage accounting still share the turn budget.
+        kwargs.pop("max_output_tokens", None)
         kwargs["include"] = ["reasoning.encrypted_content"]
         kwargs["input"] = _stateless_input(kwargs["input"])
 
@@ -625,7 +610,9 @@ class LLMClient:
         system_prompt: str,
         stream_callback: Callable[[str], Awaitable[None]] | None,
         tool_choice: str | dict | None = None,
+        reasoning_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
+        """Build a Gemini request using the common answer/reasoning interface."""
         gemini_messages, config = provider_requests.gemini_request_payload(
             model_name=self.model_name,
             messages=messages,
@@ -636,12 +623,13 @@ class LLMClient:
             tool_choice=tool_choice,
         )
 
-        if stream_callback is not None:
-            return await self._gemini_stream(gemini_messages, config, stream_callback)
+        if stream_callback is not None or reasoning_callback is not None:
+            return await self._gemini_stream(gemini_messages, config, stream_callback, reasoning_callback)
         else:
             return await self._gemini_no_stream(gemini_messages, config)
 
     async def _gemini_no_stream(self, contents, config) -> LLMResponse:
+        """Accept callable parts only from a successfully completed candidate."""
         if not self._genai_client:
             raise ValueError("Gemini provider selected but no Google API key is configured.")
         kwargs = {"model": self.model_name, "contents": contents}
@@ -649,6 +637,9 @@ class LLMClient:
             kwargs["config"] = config
 
         response = await self._genai_client.aio.models.generate_content(**kwargs)
+        terminal_reason = provider_responses.gemini_finish_reason(response)
+        if not terminal_reason:
+            raise ResponseInterruptedError("Gemini returned no terminal completion; no tool calls were accepted.")
 
         text, reasoning_content = _split_gemini_text_parts(response)
         if not text:
@@ -657,8 +648,8 @@ class LLMClient:
             except Exception:
                 pass
 
-        tool_calls = _extract_gemini_tool_calls(response)
-        finish_reason = "tool_calls" if tool_calls else "stop"
+        tool_calls = _extract_gemini_tool_calls(response) if terminal_reason == "STOP" else []
+        finish_reason = "length" if terminal_reason == "MAX_TOKENS" else "tool_calls" if tool_calls else "stop"
         model_parts = _extract_gemini_model_parts(response) if tool_calls else []
         provider_messages = (
             [{"role": "model", "gemini_parts": model_parts}]
@@ -674,7 +665,8 @@ class LLMClient:
             usage=_usage_from_gemini_response(response),
         )
 
-    async def _gemini_stream(self, contents, config, stream_callback) -> LLMResponse:
+    async def _gemini_stream(self, contents, config, stream_callback, reasoning_callback=None) -> LLMResponse:
+        """Collect streamed parts but expose tools only after successful completion."""
         if not self._genai_client:
             raise ValueError("Gemini provider selected but no Google API key is configured.")
         kwargs = {"model": self.model_name, "contents": contents}
@@ -688,12 +680,18 @@ class LLMClient:
         raw_model_parts = []
         collected_reasoning_content = ""
         usage = UsageStats()
+        terminal_reason = ""
 
         async for chunk in await self._genai_client.aio.models.generate_content_stream(**kwargs):
+            # A finish reason authorizes only the content preceding that terminal
+            # candidate. Later metadata-only chunks may still report usage.
+            chunk_parts = _extract_gemini_model_parts(chunk)
+            if terminal_reason and chunk_parts:
+                raise ResponseInterruptedError("Gemini sent content after completion; no tool calls were accepted.")
+            terminal_reason = provider_responses.gemini_finish_reason(chunk) or terminal_reason
             chunk_usage = _usage_from_gemini_response(chunk)
             if chunk_usage.total_tokens:
                 usage = chunk_usage
-            chunk_parts = _extract_gemini_model_parts(chunk)
             if chunk_parts:
                 raw_model_parts.extend(chunk_parts)
             # Collect function calls
@@ -708,11 +706,20 @@ class LLMClient:
                     text_part = ""
             if thought_part:
                 collected_reasoning_content += thought_part
+                if reasoning_callback is not None:
+                    await reasoning_callback(thought_part)
             if text_part:
                 collected_text += text_part
-                await stream_callback(text_part)
+                if stream_callback is not None:
+                    await stream_callback(text_part)
 
-        # Convert raw FunctionCall objects to ToolCallRequest
+        if not terminal_reason:
+            raise ResponseInterruptedError("Gemini stream ended without terminal completion; no tool calls were accepted.")
+        if terminal_reason != "STOP":
+            raw_function_calls = []
+            raw_model_parts = []
+
+        # Convert raw FunctionCall objects only after a successful terminal event.
         tool_calls: list[ToolCallRequest] = []
         for i, fc in enumerate(raw_function_calls):
             try:
@@ -724,7 +731,7 @@ class LLMClient:
             except Exception as exc:
                 logger.warning("Failed to parse streamed Gemini function_call: %s", exc)
 
-        finish_reason = "tool_calls" if tool_calls else "stop"
+        finish_reason = "length" if terminal_reason == "MAX_TOKENS" else "tool_calls" if tool_calls else "stop"
         provider_messages = (
             [{"role": "model", "gemini_parts": raw_model_parts}]
             if tool_calls and raw_model_parts
@@ -785,20 +792,23 @@ class LLMClient:
         return await self._openai_responses_no_stream(kwargs)
 
     async def _openai_responses_no_stream(self, kwargs: dict) -> LLMResponse:
+        """Require a terminal response before returning any callable tool results."""
         response = await self._openai_client.responses.create(**kwargs)
         content, reasoning_content = _openai_response_text_and_reasoning(response)
         tool_calls = _extract_openai_response_tool_calls(response)
         finish_reason = "tool_calls" if tool_calls else "stop"
         status = str(_obj_get(response, "status", "") or "")
-        incomplete_details = _obj_get(response, "incomplete_details", None)
-        if status == "incomplete" and _obj_get(incomplete_details, "reason", "") == "max_output_tokens":
+        if status not in {"completed", "incomplete"}:
+            raise ResponseInterruptedError(f"The model response ended with status {status}.")
+        if status == "incomplete":
+            tool_calls = []
             finish_reason = "length"
         return LLMResponse(
             content=content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             reasoning_content=reasoning_content,
-            provider_messages=_openai_response_provider_messages(response),
+            provider_messages=_openai_response_provider_messages(response) if status != "incomplete" else [],
             usage=_usage_from_openai(_obj_get(response, "usage", None)),
         )
 
@@ -812,11 +822,12 @@ class LLMClient:
         collected_content = ""
         collected_reasoning_content = ""
         final_response = None
-        tool_call_buffers: dict[int, dict] = {}
         completed_items: list[Any] = []
 
         async for event in stream:
             event_type = str(_obj_get(event, "type", "") or "")
+            if final_response is not None and event_type.startswith(("response.output", "response.reasoning")):
+                raise ResponseInterruptedError("The model sent content after completion; no tool calls were accepted.")
             if event_type == "response.output_text.delta":
                 delta = str(_obj_get(event, "delta", "") or "")
                 if delta:
@@ -828,31 +839,6 @@ class LLMClient:
                 collected_reasoning_content += delta
                 if delta and reasoning_callback is not None:
                     await reasoning_callback(delta)
-            elif event_type == "response.output_item.added":
-                item = _obj_get(event, "item", None)
-                if _obj_get(item, "type", "") == "function_call":
-                    output_index = int(_obj_get(event, "output_index", len(tool_call_buffers)) or 0)
-                    tool_call_buffers[output_index] = {
-                        "id": str(_obj_get(item, "id", "") or ""),
-                        "call_id": str(_obj_get(item, "call_id", "") or ""),
-                        "name": str(_obj_get(item, "name", "") or ""),
-                        "arguments_buf": str(_obj_get(item, "arguments", "") or ""),
-                    }
-            elif event_type == "response.function_call_arguments.delta":
-                output_index = int(_obj_get(event, "output_index", 0) or 0)
-                buf = tool_call_buffers.setdefault(
-                    output_index,
-                    {"id": "", "call_id": "", "name": "", "arguments_buf": ""},
-                )
-                buf["arguments_buf"] += str(_obj_get(event, "delta", "") or "")
-            elif event_type == "response.function_call_arguments.done":
-                output_index = int(_obj_get(event, "output_index", 0) or 0)
-                buf = tool_call_buffers.setdefault(
-                    output_index,
-                    {"id": "", "call_id": "", "name": "", "arguments_buf": ""},
-                )
-                buf["name"] = str(_obj_get(event, "name", "") or buf["name"])
-                buf["arguments_buf"] = str(_obj_get(event, "arguments", "") or buf["arguments_buf"])
             elif event_type == "response.output_item.done":
                 item = _obj_get(event, "item", None)
                 if item is not None:
@@ -879,9 +865,10 @@ class LLMClient:
                     param=str(_obj_get(error, "param", "") or ""),
                 )
             final_content, final_reasoning = _openai_response_text_and_reasoning(final_response)
+            if status not in {"completed", "incomplete"}:
+                raise ResponseInterruptedError("The model stream did not confirm a terminal response state.")
             final_tool_calls = _extract_openai_response_tool_calls(final_response)
-            incomplete_details = _obj_get(final_response, "incomplete_details", None)
-            truncated = status == "incomplete" and _obj_get(incomplete_details, "reason", "") == "max_output_tokens"
+            truncated = status == "incomplete"
             return LLMResponse(
                 content=final_content or collected_content,
                 tool_calls=[] if truncated else final_tool_calls,
@@ -889,29 +876,12 @@ class LLMClient:
                     "length" if truncated else "tool_calls" if final_tool_calls else "stop"
                 ),
                 reasoning_content=final_reasoning or collected_reasoning_content,
-                provider_messages=_openai_response_provider_messages(final_response),
+                provider_messages=[] if truncated else _openai_response_provider_messages(final_response),
                 usage=_usage_from_openai(_obj_get(final_response, "usage", None)),
             )
 
-        tool_calls: list[ToolCallRequest] = []
-        for index in sorted(tool_call_buffers):
-            buf = tool_call_buffers[index]
-            try:
-                arguments = json.loads(buf["arguments_buf"]) if buf["arguments_buf"] else {}
-            except json.JSONDecodeError:
-                arguments = {"_raw": buf["arguments_buf"]}
-            tool_calls.append(
-                ToolCallRequest(
-                    call_id=buf["call_id"] or buf["id"],
-                    tool_name=buf["name"],
-                    arguments=arguments,
-                )
-            )
-        return LLMResponse(
-            content=collected_content,
-            tool_calls=tool_calls,
-            finish_reason="tool_calls" if tool_calls else "stop",
-            reasoning_content=collected_reasoning_content,
+        raise ResponseInterruptedError(
+            "The model stream ended without a completion event. No buffered tool calls were dispatched."
         )
 
 

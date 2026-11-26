@@ -160,12 +160,12 @@ def can_parallelize(tool_calls: list[dict], tool_lookup=None) -> list[list[dict]
 def coerce_tool_args(args: dict, schema: dict) -> dict:
     """Coerce LLM-provided tool arguments to match the JSON Schema types."""
     properties = schema.get("properties", {})
-    if isinstance(properties, dict):
-        coerced = {key: value for key, value in dict(args).items() if key in properties}
-    else:
-        coerced = dict(args)
+    properties = properties if isinstance(properties, dict) else {}
+    coerced = dict(args)
     for key, value in list(coerced.items()):
         prop_schema = properties.get(key, {})
+        if not isinstance(prop_schema, dict):
+            continue
         expected = prop_schema.get("type")
         if expected is None:
             continue
@@ -174,12 +174,8 @@ def coerce_tool_args(args: dict, schema: dict) -> dict:
                 coerced[key] = int(value)
             elif expected == "number" and isinstance(value, str):
                 coerced[key] = float(value)
-            elif expected == "boolean" and isinstance(value, str):
-                coerced[key] = value.lower() in {"true", "1", "yes"}
-            elif expected == "boolean" and isinstance(value, (int, float)):
-                coerced[key] = bool(value)
-            elif expected == "string" and not isinstance(value, str):
-                coerced[key] = str(value)
+            elif expected == "boolean" and isinstance(value, str) and value.lower() in {"true", "false"}:
+                coerced[key] = value.lower() == "true"
             elif expected == "array" and isinstance(value, str):
                 coerced[key] = json.loads(value)
         except (ValueError, TypeError, json.JSONDecodeError):
@@ -188,31 +184,22 @@ def coerce_tool_args(args: dict, schema: dict) -> dict:
 
 
 def validate_tool_args(args: dict, schema: dict) -> list[str]:
-    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
-    required = schema.get("required", []) if isinstance(schema, dict) else []
-    errors: list[str] = []
-    for key in required or []:
-        if key not in args:
-            errors.append(f"Missing required argument '{key}'.")
-    for key, value in args.items():
-        prop_schema = properties.get(key, {}) if isinstance(properties, dict) else {}
-        expected = prop_schema.get("type")
-        if expected == "integer" and not isinstance(value, int):
-            errors.append(f"Argument '{key}' must be an integer.")
-        elif expected == "number" and not isinstance(value, (int, float)):
-            errors.append(f"Argument '{key}' must be a number.")
-        elif expected == "boolean" and not isinstance(value, bool):
-            errors.append(f"Argument '{key}' must be a boolean.")
-        elif expected == "string" and not isinstance(value, str):
-            errors.append(f"Argument '{key}' must be a string.")
-        elif expected == "array" and not isinstance(value, list):
-            errors.append(f"Argument '{key}' must be an array.")
-        elif expected == "object" and not isinstance(value, dict):
-            errors.append(f"Argument '{key}' must be an object.")
-        enum_values = prop_schema.get("enum")
-        if enum_values and value not in enum_values:
-            errors.append(f"Argument '{key}' must be one of: {', '.join(map(str, enum_values))}.")
-    return errors
+    """Validate the full schema locally without fetching external references."""
+    from itertools import islice
+    from jsonschema.validators import validator_for
+    from referencing import Registry as SchemaRegistry
+
+    try:
+        validator_type = validator_for(schema)
+        validator_type.check_schema(schema)
+        validator = validator_type(schema, registry=SchemaRegistry())
+        errors = []
+        for error in islice(validator.iter_errors(args), 20):
+            path = ".".join(str(part) for part in error.absolute_path) or "arguments"
+            errors.append(f"Argument '{path}' violates the schema's {error.validator} constraint.")
+        return errors
+    except Exception:
+        return ["Tool schema could not be validated; external schema references are unsupported."]
 
 
 def _search_tokens(value: str) -> set[str]:
@@ -359,7 +346,7 @@ class ToolRegistry:
         tool = self.get_tool(name)
         if tool is None:
             return None
-        coerced = coerce_tool_args(args, tool.get("parameters", {}))
+        coerced = dict(args) if name.startswith("mcp__") else coerce_tool_args(args, tool.get("parameters", {}))
         validation_errors = validate_tool_args(coerced, tool.get("parameters", {}))
         return {"tool": tool, "arguments": coerced, "validation_errors": validation_errors}
 

@@ -10,6 +10,8 @@ import threading
 from typing import AsyncIterator
 
 from app.agent.llm_client import LLMClient
+from app.agent.model_usage import ModelUsageBudget, current_model_budget
+from app.agent.observability.recorder import get_observability_recorder
 from app.agent.llm_constants import DEFAULT_MAX_TOKENS_PER_TURN
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
 from app.agent.memory_store import get_memory_store
@@ -203,7 +205,17 @@ class AgentRuntime:
                 await compact_lock.acquire()
                 lease_stop = asyncio.Event()
                 lease_task = None
+                compact_budget = ModelUsageBudget(getattr(self.turn_loop, "max_tokens_per_turn", DEFAULT_MAX_TOKENS_PER_TURN))
+                usage_token = current_model_budget.set(compact_budget)
+                recorder = get_observability_recorder()
+                compact_trace = ""
+                compact_status = "error"
                 try:
+                    compact_trace = recorder.start_run(
+                        conversation_id=conversation_id, user_message="/compact", source="compaction",
+                        provider=getattr(self.llm_client, "provider", ""),
+                        model=getattr(self.llm_client, "model_name", ""),
+                    )
                     if steering is not None:
                         steering.closed = True
                     if durable_run is None and callable(durable_run_factory):
@@ -218,6 +230,8 @@ class AgentRuntime:
                                     durable_run.renew_lease()
                         lease_task = asyncio.create_task(_renew_compact_lease())
                     try:
+                        if durable_run is not None:
+                            await durable_run.checkpoint_files("before")
                         result = await self.memory.compact_conversation(conversation_id)
                         reply = _format_compact_reply(result)
                         await self.memory.persist_turn(
@@ -234,8 +248,9 @@ class AgentRuntime:
                         if durable_run is not None:
                             if lease_task is not None and lease_task.done() and lease_task.exception() is not None:
                                 raise lease_task.exception()
-                            if not durable_run.finalize("complete"):
+                            if not await durable_run.finalize_async("complete"):
                                 raise RuntimeError("durable compact run was not committed")
+                        compact_status = "error" if result.get("status") == "failed" else "complete"
                         yield {"event": "token", "data": {"content": reply}}
                         yield {
                             "event": "done",
@@ -250,7 +265,7 @@ class AgentRuntime:
                         logger.exception("Durable compact turn failed conversation_id=%s", conversation_id)
                         if durable_run is not None:
                             try:
-                                durable_run.finalize("error", "persistence_failed")
+                                await durable_run.finalize_async("error", "persistence_failed")
                             except Exception:
                                 logger.exception("Unable to finalize failed compact run run_id=%s", durable_run.run_id)
                         yield {"event": "error", "data": {
@@ -265,6 +280,11 @@ class AgentRuntime:
                             "reason_code": "durable_run_failed",
                         }}
                 finally:
+                    current_model_budget.reset(usage_token)
+                    recorder.finish_run(
+                        run_id=compact_trace, status=compact_status, usage=compact_budget.usage,
+                        metadata={"estimated_requests": compact_budget.estimated_requests},
+                    )
                     lease_stop.set()
                     if lease_task is not None:
                         lease_task.cancel()
@@ -458,6 +478,7 @@ async def run_agent_stream(
                     principal_id=principal_id or control_session_id,
                     control_session_id=control_session_id,
                     workspace_dir=workspace_dir,
+                    checkpoint_files=False,
                 )
             async for event in runtime.run(
                 message, conversation_id, attachments=attachments,
@@ -470,7 +491,7 @@ async def run_agent_stream(
             logger.exception("Unable to start durable turn conversation_id=%s", conversation_id)
             if durable_run is not None:
                 try:
-                    durable_run.finalize("error", "persistence_failed")
+                    await durable_run.finalize_async("error", "persistence_failed")
                 except Exception:
                     logger.exception("Unable to finalize failed durable turn run_id=%s", durable_run.run_id)
             yield {"event": "error", "data": {

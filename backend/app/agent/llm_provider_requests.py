@@ -7,96 +7,29 @@ import logging
 import mimetypes
 from pathlib import Path
 from typing import Any
+from app.agent.model_usage import current_output_limit
 
 logger = logging.getLogger(__name__)
 
 
 def json_schema_prop_to_gemini(prop_def: dict, types_mod):
-    """Map a JSON Schema property to google.genai.types.Schema."""
-
-    T = types_mod.Type
-    desc = str(prop_def.get("description") or prop_def.get("title") or "")
-
-    if "anyOf" in prop_def:
-        variants = prop_def["anyOf"]
-        non_null = [v for v in variants if isinstance(v, dict) and v.get("type") != "null"]
-        nullable = any(isinstance(v, dict) and v.get("type") == "null" for v in variants)
-        if len(non_null) == 1:
-            inner = json_schema_prop_to_gemini(non_null[0], types_mod)
-            if nullable:
-                return inner.model_copy(update={"nullable": True})
-            return inner
-        if non_null:
-            return json_schema_prop_to_gemini(non_null[0], types_mod)
-        return types_mod.Schema(type=T.STRING, description=desc)
-
-    ptype = prop_def.get("type")
-    if isinstance(ptype, list):
-        ptype = next((x for x in ptype if x and x != "null"), "string")
-
-    if ptype == "string":
-        kw: dict = {"type": T.STRING, "description": desc}
-        if "enum" in prop_def and prop_def["enum"]:
-            enum_values = [str(e) for e in prop_def["enum"] if str(e)]
-            if enum_values:
-                kw["enum"] = enum_values
-        return types_mod.Schema(**kw)
-    if ptype == "number":
-        return types_mod.Schema(type=T.NUMBER, description=desc)
-    if ptype == "integer":
-        return types_mod.Schema(type=T.INTEGER, description=desc)
-    if ptype == "boolean":
-        return types_mod.Schema(type=T.BOOLEAN, description=desc)
-    if ptype == "array":
-        items_src = prop_def.get("items") if isinstance(prop_def.get("items"), dict) else None
-        items_schema = json_schema_prop_to_gemini(items_src or {"type": "string"}, types_mod)
-        return types_mod.Schema(type=T.ARRAY, description=desc, items=items_schema)
-    if ptype == "object":
-        raw_props = prop_def.get("properties")
-        properties: dict = {}
-        if isinstance(raw_props, dict):
-            for name, sub in raw_props.items():
-                if isinstance(sub, dict):
-                    properties[name] = json_schema_prop_to_gemini(sub, types_mod)
-        req = prop_def.get("required")
-        required_list = req if isinstance(req, list) else None
-        return types_mod.Schema(
-            type=T.OBJECT,
-            description=desc,
-            properties=properties or None,
-            required=required_list,
-        )
-
-    return types_mod.Schema(type=T.STRING, description=desc)
+    """Preserve supported schema fields; reject unsupported conversions explicitly."""
+    return types_mod.Schema.model_validate(prop_def)
 
 
 def tools_to_gemini(tools: list[dict]):
+    """Pass original JSON Schemas through Gemini's native schema field."""
+    from copy import deepcopy
     from google.genai import types
 
-    declarations = []
-    for t in tools:
-        params = t.get("parameters", {})
-        props_raw = params.get("properties", {})
-
-        properties: dict = {}
-        for prop_name, prop_def in props_raw.items():
-            if isinstance(prop_def, dict):
-                properties[prop_name] = json_schema_prop_to_gemini(prop_def, types)
-            else:
-                properties[prop_name] = types.Schema(type=types.Type.STRING, description="")
-
-        declarations.append(
-            types.FunctionDeclaration(
-                name=t["name"],
-                description=t.get("description", ""),
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties=properties,
-                    required=params.get("required", []),
-                ),
-            )
+    declarations = [
+        types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool.get("description", ""),
+            parameters_json_schema=deepcopy(tool.get("parameters", {"type": "object", "properties": {}})),
         )
-
+        for tool in tools
+    ]
     return types.Tool(function_declarations=declarations)
 
 
@@ -357,10 +290,16 @@ def gemini_request_payload(
         include_images=include_images,
     )
     config_kwargs: dict = {}
+    if current_output_limit.get() is not None:
+        config_kwargs["max_output_tokens"] = current_output_limit.get()
     if system_prompt:
         config_kwargs["system_instruction"] = system_prompt
     thinking_config = gemini_thinking_config(model_name, reasoning_effort, types)
     if thinking_config is not None:
+        output_limit = current_output_limit.get()
+        thinking_budget = getattr(thinking_config, "thinking_budget", None)
+        if output_limit is not None and thinking_budget is not None and thinking_budget > 0:
+            thinking_config.thinking_budget = min(thinking_budget, max(0, output_limit - 1))
         config_kwargs["thinking_config"] = thinking_config
     if tools:
         config_kwargs["tools"] = [tools_to_gemini(tools)]
@@ -390,6 +329,8 @@ def openai_responses_kwargs(
             include_images=include_images,
         ),
     }
+    if current_output_limit.get() is not None:
+        kwargs["max_output_tokens"] = current_output_limit.get()
     if system_prompt:
         kwargs["instructions"] = system_prompt
     if openai_model_supports_reasoning_config(model_name):

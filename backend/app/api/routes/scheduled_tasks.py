@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.agent.database import ScheduledTaskCapacityError, ScheduledTaskConflictError, get_db
+from app.agent.conversation_workspace import validate_workspace_dir
 from app.agent.scheduler import ScheduledTaskService, get_scheduled_task_service
 from app.agent.ui_events import publish_ui_event
 from app.integrations.telegram.session import TelegramSessionStore
@@ -41,9 +42,15 @@ class ScheduledTaskBase(CamelModel):
     notify_telegram: bool = False
     telegram_chat_id: str = Field("", max_length=80)
     reuse_conversation: bool = False
+    workspace_dir: str = Field("", max_length=4096)
+    model_provider: Literal["", "openai", "gemini", "codex"] = ""
+    model_name: str = Field("", max_length=200)
+    model_reasoning_effort: str = Field("", max_length=32)
 
     @model_validator(mode="after")
     def validate_schedule(self) -> "ScheduledTaskBase":
+        if bool(self.model_provider) != bool(self.model_name.strip()):
+            raise ValueError("modelProvider and modelName must both be set, or both empty to follow defaults")
         if self.schedule_kind == "cron" and not self.cron_expr.strip():
             raise ValueError("cronExpr is required for cron schedules")
         if self.schedule_kind == "interval" and self.interval_seconds <= 0:
@@ -71,6 +78,10 @@ class ScheduledTaskUpdate(CamelModel):
     notify_telegram: bool | None = None
     telegram_chat_id: str | None = Field(None, max_length=80)
     reuse_conversation: bool | None = None
+    workspace_dir: str | None = Field(None, max_length=4096)
+    model_provider: Literal["", "openai", "gemini", "codex"] | None = None
+    model_name: str | None = Field(None, max_length=200)
+    model_reasoning_effort: str | None = Field(None, max_length=32)
 
 
 class ScheduledTaskOut(ScheduledTaskBase):
@@ -95,6 +106,8 @@ class ScheduledTaskRunOut(CamelModel):
     status: str
     final_text: str = ""
     error: str = ""
+    notification_status: str = "not_requested"
+    notification_error: str = ""
 
 
 class SchedulePreviewRequest(CamelModel):
@@ -141,7 +154,12 @@ def _task_fields(model: ScheduledTaskBase | ScheduledTaskUpdate) -> dict[str, An
     raw = model.model_dump(by_alias=False, exclude_none=True)
     fields: dict[str, Any] = {}
     for key, value in raw.items():
-        if key in {"enabled", "notify_telegram", "reuse_conversation"}:
+        if key == "workspace_dir":
+            try:
+                fields[key] = validate_workspace_dir(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        elif key in {"enabled", "notify_telegram", "reuse_conversation"}:
             fields[key] = 1 if value else 0
         elif isinstance(value, str):
             fields[key] = value.strip()
@@ -289,6 +307,26 @@ async def list_scheduled_task_runs(task_id: str, limit: int = Query(20, ge=1, le
     if get_db().get_scheduled_task(task_id) is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
     return get_db().list_scheduled_task_runs(task_id, limit=limit)
+
+
+@router.post("/{task_id}/runs/{run_id}/notification/retry")
+async def retry_scheduled_notification(task_id: str, run_id: int) -> dict[str, str]:
+    """Retry only a failed delivery, preserving acknowledged chunks and execution."""
+    service = get_scheduled_task_service()
+    if service is None:
+        raise HTTPException(status_code=503, detail="Scheduled task service is not running")
+    with get_db().transaction() as connection:
+        result = connection.execute(
+            """UPDATE scheduled_notifications SET status = 'pending', attempts = 0,
+               next_attempt_at = ?, last_error = '', lease_owner = '', lease_expires_at = ''
+               WHERE task_id = ? AND run_id = ? AND status IN ('failed', 'blocked')""",
+            (datetime.now(timezone.utc).isoformat(), task_id, run_id),
+        )
+        if result.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Only failed or blocked notifications can be retried")
+    publish_ui_event("scheduled_tasks.changed", {"task_id": task_id, "action": "notification_queued"})
+    service.wake_notifications()
+    return {"status": "pending"}
 
 
 @router.post("/preview", response_model=SchedulePreviewResponse)

@@ -67,6 +67,7 @@ def usage_nested_int(obj: Any, *path: str) -> int:
 
 
 def usage_from_openai(usage: Any) -> UsageStats:
+    """Read API usage; reasoning tokens are already included in output tokens."""
     if not usage:
         return UsageStats()
     input_tokens = usage_int(usage, "input_tokens") or usage_int(usage, "prompt_tokens")
@@ -86,27 +87,36 @@ def usage_from_openai(usage: Any) -> UsageStats:
         output_tokens=output_tokens,
         reasoning_tokens=reasoning_tokens,
         cached_tokens=cached_tokens,
-        total_tokens=total_tokens or input_tokens + output_tokens + reasoning_tokens,
+        total_tokens=total_tokens or input_tokens + max(output_tokens, reasoning_tokens),
         source="provider",
     ).normalized()
 
 
 def usage_from_gemini_metadata(metadata: Any) -> UsageStats:
+    """Count thought/tool-use tokens while keeping image subtotals non-additive."""
     if not metadata:
         return UsageStats()
-    input_tokens = usage_int(metadata, "prompt_token_count")
-    output_tokens = usage_int(metadata, "candidates_token_count")
-    reasoning_tokens = usage_int(metadata, "thoughts_token_count")
-    cached_tokens = usage_int(metadata, "cached_content_token_count")
-    total_tokens = usage_int(metadata, "total_token_count")
-    image_tokens = usage_int(metadata, "image_token_count")
+    def count(snake: str, camel: str) -> int:
+        """Accept both SDK objects and the documented JSON wire format."""
+        return usage_int(metadata, snake) or usage_int(metadata, camel)
+
+    input_tokens = count("prompt_token_count", "promptTokenCount") + count("tool_use_prompt_token_count", "toolUsePromptTokenCount")
+    output_tokens = count("candidates_token_count", "candidatesTokenCount")
+    reasoning_tokens = count("thoughts_token_count", "thoughtsTokenCount")
+    cached_tokens = count("cached_content_token_count", "cachedContentTokenCount")
+    total_tokens = count("total_token_count", "totalTokenCount")
+    details = obj_get(metadata, "prompt_tokens_details", None) or obj_get(metadata, "promptTokensDetails", [])
+    image_tokens = sum(
+        usage_int(item, "token_count") or usage_int(item, "tokenCount")
+        for item in details if str(obj_get(item, "modality", "")).split(".")[-1] == "IMAGE"
+    ) or count("image_token_count", "imageTokenCount")
     return UsageStats(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         reasoning_tokens=reasoning_tokens,
         cached_tokens=cached_tokens,
         image_tokens=image_tokens,
-        total_tokens=total_tokens or input_tokens + output_tokens + reasoning_tokens + image_tokens,
+        total_tokens=total_tokens or input_tokens + output_tokens + reasoning_tokens,
         source="provider",
     ).normalized()
 
@@ -115,6 +125,19 @@ def usage_from_gemini_response(response: Any) -> UsageStats:
     return usage_from_gemini_metadata(
         obj_get(response, "usage_metadata", None) or obj_get(response, "usageMetadata", None)
     )
+
+
+def gemini_finish_reason(response: Any) -> str:
+    """Read terminal evidence from the chosen candidate or prompt rejection."""
+    candidates = obj_get(response, "candidates", None) or []
+    if candidates:
+        candidate = candidates[0]
+        reason = obj_get(candidate, "finish_reason", None) or obj_get(candidate, "finishReason", None)
+    else:
+        feedback = obj_get(response, "prompt_feedback", None) or obj_get(response, "promptFeedback", None)
+        reason = obj_get(feedback, "block_reason", None) or obj_get(feedback, "blockReason", None)
+    value = str(getattr(reason, "value", reason) or "").split(".")[-1]
+    return "" if value in {"FINISH_REASON_UNSPECIFIED", "BLOCK_REASON_UNSPECIFIED"} else value
 
 
 def extract_gemini_model_parts(response: Any) -> list:

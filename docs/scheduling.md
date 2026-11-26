@@ -34,6 +34,16 @@ The backend service starts during FastAPI startup. It polls SQLite for due work 
 | `reuseConversation` | Whether every run should use one shared scheduled-task conversation instead of creating a fresh chat. |
 | `notifyTelegram` | Whether to send a Telegram result message. |
 | `telegramChatId` | Telegram chat id to notify. |
+| `workspaceDir` | Existing absolute folder used by the scheduled conversation. Empty retains the default chat-workspace behavior. |
+| `modelProvider`, `modelName`, `modelReasoningEffort` | Saved model selection. Empty provider/name explicitly follow the defaults at execution time. |
+
+New tasks created from chat save the current workspace and model. The dialog
+starts with the active chat's folder and model, and allows following the default
+model instead. Existing tasks keep their previous default-model behavior until
+edited. Accepted occurrences retain their saved context when task settings or
+global model defaults change. A missing saved folder fails the run rather than
+silently using another folder. Changing the folder of a task with a shared
+conversation starts a separate conversation for that folder.
 
 ## Overlap Policies
 
@@ -53,6 +63,19 @@ work does not occupy an execution slot. Overflow is recorded as a skipped run
 with a reason. A rejected manual request does not cancel existing work.
 
 ## Run Lifecycle
+
+Telegram delivery has its own durable outbox. The execution result and notification
+are committed in one transaction. Delivery failures never rerun the agent or
+change a successful execution into a failed one. A separate worker retries up to
+five times with exponential backoff, starting at 30 seconds. Acknowledged chunks
+are saved and skipped on subsequent attempts, including after restart. Delivery
+rechecks the Telegram allowlist; a denied destination is marked blocked.
+
+Run history shows delivery status and offers **Retry notification** after a
+failed or blocked delivery. This resets the delivery attempt allowance while
+retaining acknowledged chunks. Telegram has no transaction shared with SQLite:
+if the process stops after a send succeeds but before its acknowledgement is
+saved, that chunk may be delivered again. Delivery is at least once.
 
 When a task fires, Monaw:
 

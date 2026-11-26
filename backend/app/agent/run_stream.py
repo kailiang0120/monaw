@@ -103,17 +103,18 @@ class RunStream:
         if (
             event in _MERGED_EVENTS and isinstance(content, str) and last is not None and last.event == event
             and last.pieces is not None and data.keys() == last.data.keys()
+            and last.size + len(chunk) <= min(self.max_replay_bytes, 64 * 1024)
         ):
             last.pieces.append(content)
-            added = len(content.encode())
+            # SSE serializes escaped JSON, which can be larger than UTF-8 text.
+            added = len(json.dumps(content).encode()) - 2
             last.size += added
             self._replay_bytes += added
         else:
             pieces = [content] if event in _MERGED_EVENTS and isinstance(content, str) else None
             self._entries.append(_ReplayEntry(event, data, len(chunk), pieces))
             self._replay_bytes += len(chunk)
-        # Keep the newest entry even when it alone is over the limit.
-        while self._replay_bytes > self.max_replay_bytes and len(self._entries) > 1:
+        while self._replay_bytes > self.max_replay_bytes and self._entries:
             dropped = self._entries.popleft()
             self._replay_bytes -= dropped.size
             self.dropped_events += 1
@@ -132,7 +133,14 @@ class RunStream:
         if self.dropped_events:
             subscription.put(sse_chunk("progress", {"content": "Earlier steps of this task are not shown here."}))
         for entry in self._entries:
-            subscription.put(entry.chunk())
+            chunk = entry.chunk()
+            if subscription.pending_bytes + len(chunk) > self.max_backlog_bytes:
+                subscription.cut_off(sse_chunk("error", {
+                    "code": "stream_lagging",
+                    "message": "Replay exceeds this view's buffer. Reload the saved chat history.",
+                }))
+                return subscription
+            subscription.put(chunk)
         if self.closed:
             subscription.put(None)
         else:

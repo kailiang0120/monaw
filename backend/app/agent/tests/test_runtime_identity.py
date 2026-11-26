@@ -75,6 +75,8 @@ def test_special_runtime_commands_emit_conversation_id_in_done_payload():
     runtime._active_runs = 0
     runtime._retired = False
     runtime.shutdown = lambda: None
+    runtime.turn_loop = SimpleNamespace(max_tokens_per_turn=1000)
+    runtime.llm_client = SimpleNamespace(provider="openai", model_name="fixture")
     runtime.memory = SimpleNamespace(
         compact_conversation=compact_conversation,
         persist_turn=persist_turn,
@@ -128,6 +130,8 @@ def test_compact_command_reports_failure_without_claiming_success():
     runtime._active_runs = 0
     runtime._retired = False
     runtime.shutdown = lambda: None
+    runtime.turn_loop = SimpleNamespace(max_tokens_per_turn=1000)
+    runtime.llm_client = SimpleNamespace(provider="openai", model_name="fixture")
     runtime.memory = SimpleNamespace(
         compact_conversation=compact_conversation,
         persist_turn=persist_turn,

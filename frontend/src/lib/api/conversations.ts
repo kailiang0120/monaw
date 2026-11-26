@@ -1,9 +1,19 @@
 import { apiFetch, BASE, JSON_HEADERS, throwApiError } from './client'
 import type { ContextUsage, Conversation, ConversationWorkspace, MessagesResponse, SavedMessage } from './types'
 
-export async function fetchConversations(limit = 100, offset = 0): Promise<Conversation[]> {
+/** Search all saved chats, optionally continuing from an activity cursor. */
+export async function fetchConversations(
+  limit = 100,
+  offset = 0,
+  options: { search?: string; beforeUpdatedAt?: string; beforeId?: string; signal?: AbortSignal } = {},
+): Promise<Conversation[]> {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
-  const res = await apiFetch(`${BASE}/api/conversations?${params}`)
+  if (options.search) params.set('search', options.search)
+  if (options.beforeUpdatedAt && options.beforeId) {
+    params.set('before_updated_at', options.beforeUpdatedAt)
+    params.set('before_id', options.beforeId)
+  }
+  const res = await apiFetch(`${BASE}/api/conversations?${params}`, { signal: options.signal })
   if (!res.ok) throw new Error('Failed to fetch conversations')
   return res.json()
 }

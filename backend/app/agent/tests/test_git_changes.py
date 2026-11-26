@@ -2,10 +2,56 @@
 import os
 from pathlib import Path
 import subprocess
+import asyncio
+import threading
+from contextvars import ContextVar
 
 import pytest
 
 from app.agent import git_changes as tracking
+from app.agent.durable.turn_run import DurableTurnRun
+
+
+def test_async_checkpoint_keeps_loop_responsive_and_drains_cancelled_work(monkeypatch):
+    """Stop keeps ownership until the checkpoint worker releases its context."""
+    entered = threading.Event()
+    release = threading.Event()
+    context = ContextVar("checkpoint-test", default="missing")
+    observed = []
+    renewals = []
+    run = DurableTurnRun(None, "fixture", "owner", 1, "turn", 1, lease_seconds=1)
+
+    def capture(phase):
+        """Hold a native worker so the test can exercise cancellation."""
+        observed.append((phase, context.get()))
+        entered.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(run, "_checkpoint_files", capture)
+    monkeypatch.setattr(run, "renew_lease", lambda: renewals.append(True))
+
+    async def scenario():
+        """Make progress and renew the lease while the native worker is busy."""
+        token = context.set("workspace")
+        task = asyncio.create_task(run.checkpoint_files("before"))
+        try:
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set()
+            task.cancel()
+            await asyncio.sleep(0.4)
+            assert not task.done()
+            assert renewals
+        finally:
+            release.set()
+            context.reset(token)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert observed == [("before", "workspace")]
 
 
 @pytest.fixture

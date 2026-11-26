@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, Clock3, Folder, Loader2, MessageSquare, Moon, Plus, RefreshCw, Settings, SquarePen, Sun, Trash2 } from 'lucide-react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ConversationHistoryDialog } from './ConversationHistoryDialog'
+import { ChevronDown, ChevronRight, Clock3, Folder, Loader2, MessageSquare, Moon, Plus, RefreshCw, Search, Settings, SquarePen, Sun, Trash2 } from 'lucide-react'
 import type { Conversation, ScheduledTask } from '../lib/api/types'
 import { ScheduledTasksList } from './scheduling/ScheduledTasksList'
 import { InlineConfirm } from './ui/InlineConfirm'
@@ -15,6 +16,7 @@ interface Props {
   // Here rather than in the title bar, away from the window buttons.
   onNewChat: (workspaceDir?: string) => void
   onSelect: (id: string) => void
+  onDiscoverConversation?: (conversation: Conversation) => void
   onDelete: (id: string) => void
   onRename?: (id: string, title: string) => void | Promise<boolean>
   onRefreshConversation?: (id: string) => void
@@ -44,7 +46,7 @@ function groupByDate(conversations: Conversation[]) {
   }
 
   for (const c of conversations) {
-    const d = new Date(c.created_at)
+    const d = new Date(c.updated_at ?? c.created_at)
     d.setHours(0, 0, 0, 0)
     if (d >= today) groups.Today.push(c)
     else if (d >= yesterday) groups.Yesterday.push(c)
@@ -122,6 +124,7 @@ export function Sidebar({
   onToggleCollapsed,
   onNewChat,
   onSelect,
+  onDiscoverConversation,
   onDelete,
   onRename,
   onRefreshConversation,
@@ -137,6 +140,19 @@ export function Sidebar({
   theme,
   onToggleTheme,
 }: Props) {
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const collapsedPanel = useRef<HTMLDivElement>(null)
+  const expandedPanel = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const hidden = collapsed ? expandedPanel.current : collapsedPanel.current
+    const visible = collapsed ? collapsedPanel.current : expandedPanel.current
+    const restoreFocus = hidden?.contains(document.activeElement)
+    if (collapsedPanel.current) collapsedPanel.current.inert = !collapsed
+    if (expandedPanel.current) expandedPanel.current.inert = collapsed
+    if (restoreFocus) visible?.querySelector<HTMLButtonElement>('button')?.focus()
+  }, [collapsed])
+
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
@@ -316,6 +332,7 @@ export function Sidebar({
     >
       {/* ── Collapsed icon strip ─────────────────────────────── */}
       <div
+        ref={collapsedPanel}
         className={`absolute inset-0 flex w-14 flex-col items-center px-2 py-3 transition-opacity duration-[160ms] ease-in-out ${
           collapsed ? 'opacity-100 delay-[70ms]' : 'pointer-events-none opacity-0'
         }`}
@@ -338,6 +355,9 @@ export function Sidebar({
           tabIndex={collapsed ? 0 : -1}
         >
           <SquarePen size={15} />
+        </button>
+        <button type="button" onClick={() => setHistoryOpen(true)} className="ghost-button mt-1 h-9 w-9 rounded-xl" aria-label="Search chats">
+          <Search size={15} />
         </button>
         <div className="sidebar-scroll mt-2 flex flex-1 flex-col items-center gap-1 overflow-y-auto">
           {conversations.slice(0, 14).map((c) => {
@@ -384,6 +404,7 @@ export function Sidebar({
 
       {/* ── Expanded full sidebar ─────────────────────────────── */}
       <div
+        ref={expandedPanel}
         className={`absolute inset-0 flex w-64 flex-col transition-[opacity,transform] duration-[180ms] ease-out ${
           collapsed
             ? 'pointer-events-none opacity-0'
@@ -413,6 +434,10 @@ export function Sidebar({
           >
             <SquarePen size={14} />
             New chat
+          </button>
+          <button type="button" onClick={() => setHistoryOpen(true)} className="ghost-button mt-1 min-h-8 w-full justify-start gap-2 rounded-lg px-3 text-xs">
+            <Search size={14} />
+            Search chats
           </button>
         </div>
         <div className="sidebar-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-2">
@@ -511,6 +536,15 @@ export function Sidebar({
           </div>
         </div>
       </div>
+      {historyOpen && (
+        <ConversationHistoryDialog
+          onClose={() => setHistoryOpen(false)}
+          onSelect={(conversation) => {
+            onDiscoverConversation?.(conversation)
+            onSelect(conversation.id)
+          }}
+        />
+      )}
     </aside>
   )
 }

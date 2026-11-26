@@ -24,23 +24,23 @@ def test_dispatch_proof_is_independent_of_business_result_and_lost_response():
     async def scenario():
         chrome=LostReply()
         tools=BrowserTools(chrome)
-        await tools.call('take_snapshot',{})
-        result=await tools.call('click',{'uid':'1_3','includeSnapshot':False})
+        await tools.call('take_snapshot',{'pageId': 1})
+        result=await tools.call('click',{'pageId': 1, 'uid':'1_3','includeSnapshot':False})
         assert result.action_outcome['status']=='executed' and result.action_outcome['verification']['passed'] is None
         chrome.lose_reply=True
         chrome.calls.clear()
-        result=await tools.call('click',{'uid':'1_3','includeSnapshot':False})
+        result=await tools.call('click',{'pageId': 1, 'uid':'1_3','includeSnapshot':False})
         assert result.action_outcome['status']=='uncertain' and result.action_outcome['action_executed']
         assert result.action_outcome['recovery']['retry_allowed'] is False
         assert sum(m=='Input.dispatchMouseEvent' and p['type']=='mousePressed' for m,p in chrome.calls)==1
         # A successful read-only reconciliation can prove the expected effect
         # even though the input reply was lost. It does not send another click.
         chrome.calls.clear()
-        result=await tools.call('click',{'uid':'1_3','expected_effect':{'type':'element_appeared','selector':'#success','timeout':0}})
+        result=await tools.call('click',{'pageId': 1, 'uid':'1_3','expected_effect':{'type':'element_appeared','selector':'#success','timeout':0}})
         assert result.action_outcome['status']=='verified'
         assert sum(m=='Input.dispatchMouseEvent' and p['type']=='mousePressed' for m,p in chrome.calls)==1
         chrome.element_states=[{'attached':False,'visible':False}]
-        result=await tools.call('click',{'uid':'1_3','expected_effect':{'type':'element_appeared','selector':'#missing','timeout':0}})
+        result=await tools.call('click',{'pageId': 1, 'uid':'1_3','expected_effect':{'type':'element_appeared','selector':'#missing','timeout':0}})
         # Readiness rejects this target; nothing is repeated after uncertainty.
     with pytest.raises(ToolError,match='replaced or removed'):
         asyncio.run(scenario())
@@ -66,12 +66,12 @@ def test_multifield_batch_stops_on_changed_destination_after_first_input():
     async def scenario():
         chrome=DynamicForm()
         tools=BrowserTools(chrome)
-        await tools.call('take_snapshot',{})
+        await tools.call('take_snapshot',{'pageId': 1})
         second=next(n.uid for n in tools.pages.session(7).nodes.values() if n.name=='Second')
         tools.require_authorization=True
-        arguments={'elements':[{'uid':'1_5','value':'first'},{'uid':second,'value':'second'}],'includeSnapshot':False}
+        arguments={'pageId': 1, 'elements':[{'uid':'1_5','value':'first'},{'uid':second,'value':'second'}],'includeSnapshot':False}
         context=(await tools.call('__monaw_action_context',{'tool_name':'fill_form','arguments':arguments})).structured_content['browser_action_context']
-        result=await tools.call('fill_form',{**arguments,'__monaw_authorization':context})
+        result=await tools.call('fill_form',{'pageId': 1, **arguments,'__monaw_authorization':context})
         assert result.is_error and result.action_outcome['status']=='uncertain'
         assert 'Completed uids: 1_5' in result.lines[1]
         assert [p for m,p in chrome.calls if m=='Input.insertText']==[{'text':'first'}]
@@ -82,12 +82,12 @@ def test_reconnect_invalidates_uid_and_opaque_binding_without_replay():
     async def scenario():
         chrome=FakeChrome()
         tools=BrowserTools(chrome)
-        await tools.call('take_snapshot',{})
-        arguments={'uid':'1_3','includeSnapshot':False}
+        await tools.call('take_snapshot',{'pageId': 1})
+        arguments={'pageId': 1, 'uid':'1_3','includeSnapshot':False}
         context=(await tools.call('__monaw_action_context',{'tool_name':'click','arguments':arguments})).structured_content['browser_action_context']
         tools.pages._on_bridge_event({'event':'disconnected'})
         with pytest.raises(ToolError,match='predates reconnection'):
-            await tools.call('click',{**arguments,'__monaw_authorization':context})
+            await tools.call('click',{'pageId': 1, **arguments,'__monaw_authorization':context})
         assert not any(m.startswith('Input.') for m,_ in chrome.calls)
     asyncio.run(scenario())
 
@@ -96,13 +96,13 @@ def test_stdio_validation_accepts_private_binding_but_does_not_expose_it():
     async def scenario():
         chrome=FakeChrome()
         tools=BrowserTools(chrome)
-        await tools.call('take_snapshot',{})
+        await tools.call('take_snapshot',{'pageId': 1})
         tools.require_authorization=True
         async def listening():
             return None
         server=build_server(tools,listening)
         call=server.request_handlers[types.CallToolRequest]
-        arguments={'uid':'1_3','includeSnapshot':False}
+        arguments={'pageId': 1, 'uid':'1_3','includeSnapshot':False}
         preflight=await call(types.CallToolRequest(params=types.CallToolRequestParams(name='__monaw_action_context',arguments={'tool_name':'click','arguments':arguments})))
         context=preflight.root.structuredContent['browser_action_context']
         response=await call(types.CallToolRequest(params=types.CallToolRequestParams(name='click',arguments={**arguments,'__monaw_authorization':{**context,'action_id':'adapter-action'}})))
@@ -127,8 +127,8 @@ def test_native_get_sensitive_controls_require_consequential_policy(field_type,a
             return result
     async def scenario():
         tools=BrowserTools(GetForm())
-        await tools.call('take_snapshot',{})
-        context=(await tools.call('__monaw_action_context',{'tool_name':'click','arguments':{'uid':'1_3'}})).structured_content['browser_action_context']
+        await tools.call('take_snapshot',{'pageId': 1})
+        context=(await tools.call('__monaw_action_context',{'tool_name':'click','arguments':{'pageId': 1, 'uid':'1_3'}})).structured_content['browser_action_context']
         assert (context['side_effect']=='external_mutation') is consequential
         assert context['runtime_facts']['sensitive_data_submission'] is consequential
         assert ('never exposed' in json.dumps(context)) is False

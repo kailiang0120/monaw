@@ -8,6 +8,19 @@ The backend remains the policy authority. Before a command, the trusted MCP adap
 
 Native submissions containing actual password/file controls or credential/payment autocomplete categories receive consequential-action handling even when the form uses GET. Ordinary GET search forms retain ordinary interaction permissions. This classification uses DOM control types and autocomplete tokens, not labels or model-provided claims.
 
+Before a native form submission, the isolated frame installs a `form-action` CSP
+for the reviewed destination. Chrome checks the resulting navigation after submit
+handlers run, so changing `form.action`, submitting later, opening a target tab, or
+removing the policy element cannot loosen that restriction. This also protects
+ordinary GET forms without changing their permission classification. Browser
+violation evidence produces a failed action outcome when observed. The policy
+uses native CSP URL matching: it ignores query strings and treats trailing-slash
+paths as prefixes. It lasts for the document's lifetime; a different destination
+requires reloading the page and obtaining fresh action evidence. Unsupported
+destination schemes, credential-bearing URLs, IPv6 literals and non-HTML documents
+fail before input. Arbitrary JavaScript network requests remain outside this
+form-specific policy.
+
 Supported mutating tool results include `structuredContent.action_outcome`, also serialized as a separate MCP text block for compatible clients:
 
 - `executed`: input was dispatched; no requested application-level condition was verified.
@@ -30,3 +43,11 @@ Origin checks control subsequent agent commands and observable destinations. The
 ## Verification evidence
 
 The main real-browser fixture launches Chrome/Chromium headlessly with a disposable profile and a local HTTP page. It exercises exact duplicate-name targeting, replaced nodes, actual same-origin iframe interaction, field-value verification, SPA navigation, an unmet business condition, actual screenshot dimensions and stale/one-use bindings, dialogs, strict context binding, multi-field form changes, and Enter-triggered native POST navigation with a submitter endpoint override. The mocked bridge suites additionally inject reply loss, disconnect/reconnect and destination changes during a batch, and exercise the real MCP server handler's public/private argument validation. These tests do not attach to the developer's profile or use their cookies.
+
+CI additionally selects the manifest's minimum Chrome milestone and the current
+stable Chrome for Testing build. `MONAW_TEST_CHROME` selects the executable;
+`MONAW_REQUIRE_BROWSER_TESTS=1` makes a missing browser fail instead of skip.
+The adversarial suite verifies rewritten GET/POST endpoints, delayed submission,
+popup targets, policy tampering, and permitted DOM/visual submission. Provider
+contract tests use real SDK serializers with fixture HTTP/SSE responses; they
+make no live provider calls.

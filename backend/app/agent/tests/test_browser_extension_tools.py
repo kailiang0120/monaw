@@ -8,6 +8,7 @@ from app.skills.browser_use.extension.dom_inspection import ACTION_TARGET, READ_
 from app.skills.browser_use.extension.session import ToolError
 from app.skills.browser_use.extension.toolset import BrowserTools, _TARGET_FACTS
 from app.skills.browser_use.extension.page_state import PAGE_STATE
+from app.skills.browser_use.extension.form_policy import _INSTALL
 from app.skills.browser_use.extension.tools_schema import TOOL_DEFINITIONS, TOOL_NAMES
 from app.skills.mcp_bridge.builtin import BUILTIN_TOOL_POLICIES, CHROME_DEVTOOLS_SERVER
 
@@ -47,6 +48,7 @@ class FakeChrome:
         self.calls: list[tuple[str, dict]] = []
         self.tabs = [{"id": 7, "url": "https://example.com/", "title": "Example", "active": True, "focusedWindow": True}]
         self.loader = "L1"
+        self.ready_state = "complete"
         self.tree = list(PAGE_TREE)
         self.fill_kind = {"kind": "type"}
         self.open_dialog_on_release = False
@@ -104,6 +106,10 @@ class FakeChrome:
                 return {"result": {"value": self.label_point}}
             return {"result": {"value": self.fill_kind if "el.select" in function else 42}}
         if cdp == "Runtime.evaluate":
+            if args["expression"] == "document.readyState":
+                return {"result": {"value": self.ready_state}}
+            if args["expression"].startswith(_INSTALL):
+                return {"result": {"value": {"installed": True, "violations": 0}}}
             if args["expression"] == PAGE_STATE:
                 return {"result":{"value":{"document":self.loader, "revision":0, "url":self.tabs[0]["url"], "width":800, "height":600, "scale":1}}}
             if args["expression"] == "location.href":
@@ -112,6 +118,8 @@ class FakeChrome:
                 return {"result": {"objectId": "global"}}
             return {"result": {"value": "Hello Welcome"}}
         if cdp == "Page.navigate":
+            self.loader = "L2"
+            self.emit("Page.frameNavigated", {"frame": {"id": "F1", "loaderId": self.loader}}, params["tabId"])
             asyncio.get_running_loop().call_soon(self.emit, "Page.loadEventFired", {}, params["tabId"])
             return {"frameId": "F1", "loaderId": "L2"}
         if cdp == "Input.dispatchMouseEvent" and args["type"] == "mouseReleased" and self.open_dialog_on_release:
@@ -123,12 +131,38 @@ class FakeChrome:
 
 
 def _run(tools, name, **arguments):
+    """Target the fixture page explicitly for page-scoped operations."""
+    definition = next((item for item in TOOL_DEFINITIONS if item["name"] == name), {})
+    if "pageId" in definition.get("inputSchema", {}).get("properties", {}):
+        arguments.setdefault("pageId", 1)
     return asyncio.run(tools.call(name, arguments))
 
 
 def _tools():
     chrome = FakeChrome()
     return BrowserTools(chrome), chrome
+
+
+def test_interleaved_callers_cannot_inherit_another_page_target():
+    """A second caller's selection cannot redirect an implicit operation."""
+    tools, chrome = _tools()
+    chrome.tabs.append({"id": 8, "url": "https://other.example/", "title": "Other", "active": False})
+
+    async def scenario():
+        """Interleave selections and require A to retain its explicit page."""
+        await tools.pages.resolve(1)
+        await tools.pages.resolve(2)
+        with pytest.raises(ToolError, match="pageId is required"):
+            await tools.pages.resolve(None)
+        page_id, session = await tools.pages.resolve(1)
+        assert page_id == 1
+        assert session.tab_id == 7
+        for definition in TOOL_DEFINITIONS:
+            schema = definition["inputSchema"]
+            if "pageId" in schema["properties"]:
+                assert "pageId" in schema["required"]
+
+    asyncio.run(scenario())
 
 
 def test_tool_names_are_a_subset_of_the_policy_table():
@@ -279,6 +313,43 @@ def test_navigate_waits_for_load_and_lists_pages():
     assert output.lines[-1].startswith("## Latest page snapshot")
     with pytest.raises(ToolError, match="Either URL or a type"):
         _run(tools, "navigate_page")
+
+
+def test_navigation_ignores_an_old_load_until_the_requested_document_is_ready():
+    """A delayed previous-page load cannot expose an incomplete new document."""
+    tools, chrome = _tools()
+    original_request = chrome.request
+
+    async def request(method, params=None, *, timeout=30.0):
+        """Acknowledge the requested navigation before its document commits."""
+        if method == "cdp" and params["method"] == "Page.navigate":
+            chrome.emit("Page.loadEventFired", {})
+            return {"frameId": "F1", "loaderId": "L2"}
+        return await original_request(method, params, timeout=timeout)
+
+    async def scenario():
+        """Advance commit and readiness separately while checking the waiter."""
+        await tools.pages.resolve(1)
+        chrome.request = request
+        task = asyncio.create_task(tools.call("navigate_page", {
+            "pageId": 1, "url": "https://example.com/next", "includeSnapshot": False,
+        }))
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.15)
+            chrome.loader = "L2"
+            chrome.ready_state = "loading"
+            chrome.emit("Page.frameNavigated", {"frame": {"id": "F1", "loaderId": "L2"}})
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.15)
+            chrome.ready_state = "complete"
+            output = await asyncio.wait_for(task, timeout=1)
+            assert "still loading" not in output.lines[0]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
 def test_new_page_opens_a_tab_and_selects_it():

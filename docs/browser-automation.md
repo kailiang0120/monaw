@@ -35,6 +35,11 @@ If the extension is not connected when a browser tool runs, Monaw opens Chrome n
 
 ## Tools
 
+Every tool that acts on or reads an existing page requires its explicit `pageId`
+from `list_pages` or `new_page`. `select_page` may focus a tab, but does not set an
+implicit target for subsequent calls. This prevents interleaved conversations
+from redirecting each other's actions through shared selected-tab state.
+
 | Tool | Notes |
 | --- | --- |
 | `list_pages`, `select_page`, `new_page`, `navigate_page`, `close_page` | Pages have small numeric ids that stay stable while the tab is open. `navigate_page` takes `type` `url`, `back`, `forward`, or `reload`. The last open page cannot be closed. |

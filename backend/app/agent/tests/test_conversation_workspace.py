@@ -46,6 +46,29 @@ def test_saved_folder_survives_reopen_and_can_be_reset(db, tmp_path):
     assert reset.json()["title"] == "Renamed"
 
 
+def test_history_search_reaches_old_chats_and_cursor_handles_equal_timestamps(db):
+    """History remains reachable beyond the sidebar's first hundred chats."""
+    timestamp = "2026-01-01T00:00:00+00:00"
+    with db.transaction() as conn:
+        conn.executemany(
+            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            [(f"chat-{index:03}", f"Chat {index}", timestamp, timestamp) for index in range(105)],
+        )
+    db.add_message("chat-000", "user", "find-this-old-message")
+    with db.transaction() as conn:
+        conn.execute("UPDATE conversations SET updated_at = ?", (timestamp,))
+    client = TestClient(app)
+    first = client.get("/api/conversations").json()
+    assert len(first) == 100
+    second = client.get("/api/conversations", params={
+        "before_updated_at": first[-1]["updated_at"], "before_id": first[-1]["id"],
+    }).json()
+    assert len(second) == 5
+    assert len({chat["id"] for chat in first + second}) == 105
+    found = client.get("/api/conversations", params={"search": "find-this-old-message"}).json()
+    assert [chat["id"] for chat in found] == ["chat-000"]
+
+
 def test_default_chats_have_separate_dated_workspaces_and_reuse_them(db, tmp_path, monkeypatch):
     root = tmp_path / "Documents" / "monaw"
     monkeypatch.setattr(workspace, "DEFAULT_CHAT_WORKSPACE_ROOT", root)
@@ -73,6 +96,13 @@ def test_default_chats_have_separate_dated_workspaces_and_reuse_them(db, tmp_pat
 
 
 def test_older_conversations_keep_default_after_migration(db):
+    """Upgrade an actual pre-workspace schema and backfill its search index."""
+    for table in ('conversations', 'messages'):
+        for operation in ('insert', 'update', 'delete'):
+            db.conn.execute(f'DROP TRIGGER {table}_search_{operation}')
+    db.conn.execute('DROP TABLE conversation_search')
+    db.conn.execute('DROP TABLE message_search')
+    db.conn.execute('DELETE FROM schema_migrations WHERE version = 27')
     db.conn.execute("ALTER TABLE conversations DROP COLUMN workspace_dir")
     db.conn.execute("DELETE FROM schema_migrations WHERE version = 13")
     db.conn.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('old', 'Old chat', 'now', 'now')")
@@ -81,6 +111,33 @@ def test_older_conversations_keep_default_after_migration(db):
     db.init_db()
     assert db.get_conversation("old")["workspace_dir"] == ""
     assert db.list_conversations()[0]["workspace_dir"] == ""
+    assert [row['id'] for row in db.list_conversations(search='Old chat')] == ['old']
+
+
+def test_history_index_tracks_edits_deletes_and_literal_search(db):
+    """Index maintenance follows the same transactions as persisted history."""
+    db.create_conversation('indexed', 'Original heading', '/projects/sample')
+    message_id = db.add_message('indexed', 'user', 'literal "quotes" OR punctuation 中文测试')
+    for query in ('original', 'sample', '"quotes" OR', '中文测试', '中文'):
+        assert [row['id'] for row in db.list_conversations(search=query)] == ['indexed']
+    assert db.list_conversations(search='heading OR missing') == []
+    db.update_conversation('indexed', title='Replacement heading')
+    assert db.list_conversations(search='Original') == []
+    with db.transaction() as conn:
+        conn.execute('UPDATE messages SET content = ? WHERE id = ?', ('edited message', message_id))
+    assert db.list_conversations(search='punctuation') == []
+    db.close()
+    assert [row['id'] for row in db.list_conversations(search='edited')] == ['indexed']
+    with pytest.raises(RuntimeError), db.transaction() as conn:
+        conn.execute('UPDATE messages SET content = ? WHERE id = ?', ('rolled back', message_id))
+        raise RuntimeError('rollback fixture')
+    assert db.list_conversations(search='rolled back') == []
+    assert db.delete_conversation('indexed') is True
+    assert db.list_conversations(search='edited') == []
+    # External-content integrity checks also find orphaned index entries.
+    db.execute("INSERT INTO message_search(message_search, rank) VALUES ('integrity-check', 1)")
+    db.execute("INSERT INTO conversation_search(conversation_search, rank) VALUES ('integrity-check', 1)")
+    db.commit()
 
 
 def test_invalid_folders_are_rejected_without_changing_saved_folder(db, tmp_path):

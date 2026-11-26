@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LEASE_SECONDS = 30
 LEASE_RENEW_INTERVAL_SECONDS = 10.0
+_CHECKPOINT_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workspace-checkpoint")
 CONTINUATION_PROMPT = (
     "Continue the interrupted task from the saved conversation and tool checkpoint. "
     "Use the recorded results as evidence, inspect the current state before repeating "
@@ -192,7 +195,40 @@ class DurableTurnRun:
         self.revision = int(updated["revision"])
         self.status = str(updated["status"])
 
-    def finalize(self, outcome_status: str, reason_code: str = "") -> bool:
+    async def checkpoint_files(self, phase: str) -> None:
+        """Checkpoint off-loop, renewing ownership until the worker has stopped."""
+        future = asyncio.get_running_loop().run_in_executor(
+            _CHECKPOINT_WORKER, copy_context().run, self._checkpoint_files, phase,
+        )
+        cancelled = False
+        failure = None
+        interval = max(0.1, min(LEASE_RENEW_INTERVAL_SECONDS, self.lease_seconds / 3))
+        while not future.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=interval)
+            except asyncio.TimeoutError:
+                if failure is None:
+                    try:
+                        self.renew_lease()
+                    except Exception as exc:
+                        failure = exc
+            except asyncio.CancelledError:
+                # Cancelling a Future cannot stop its native worker. Drain it
+                # before another attempt is allowed to inspect this baseline.
+                cancelled = True
+        future.result()
+        if failure is not None:
+            raise failure
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def finalize_async(self, outcome_status: str, reason_code: str = "") -> bool:
+        """Capture the final workspace without blocking control-plane requests."""
+        if outcome_status != "paused" or reason_code == "cancelled":
+            await self.checkpoint_files("after")
+        return self.finalize(outcome_status, reason_code, checkpoint_files=False)
+
+    def finalize(self, outcome_status: str, reason_code: str = "", *, checkpoint_files: bool = True) -> bool:
         """Commit the durable outcome; return false when the run needs review."""
         if self.lease_lost:
             raise LeaseConflictError("durable run lease was lost before finalization")
@@ -208,7 +244,8 @@ class DurableTurnRun:
         if current == target:
             return True
         if target in {"completed", "failed", "cancelled"}:
-            self._checkpoint_files("after")
+            if checkpoint_files:
+                self._checkpoint_files("after")
             # Checkpointing may take time; renew before committing the final state.
             self.renew_lease()
             dto = self._latest_owned()
@@ -300,6 +337,7 @@ def create_durable_run(
     turn_id: str | None = None,
     db: Database | None = None,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    checkpoint_files: bool = True,
 ) -> DurableTurnRun:
     database = db or get_db()
     journal = Journal(database)
@@ -329,7 +367,8 @@ def create_durable_run(
         status=str(dto["status"]),
         recovery_input_ref=f"turn_checkpoint:{checkpoint_turn_id}",
     )
-    durable._checkpoint_files("before")
+    if checkpoint_files:
+        durable._checkpoint_files("before")
     durable.renew_lease()
     return durable
 
