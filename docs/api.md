@@ -97,6 +97,7 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/scheduled-tasks/{task_id}/operations/{operation_key}` | `agent:run` | `RunNowResponse` |
 | `POST` | `/api/scheduled-tasks/{task_id}/run` | `agent:run` | `RunNowResponse` |
 | `GET` | `/api/scheduled-tasks/{task_id}/runs` | `agent:run` | `list` |
+| `POST` | `/api/scheduled-tasks/{task_id}/runs/{run_id}/notification/retry` | `agent:run` | `dict` |
 | `GET` | `/api/settings` | `settings:read` | `AgentSettingsPayload` |
 | `PUT` | `/api/settings` | `settings:write` | `AgentSettingsPayload` |
 | `GET` | `/api/settings/allowlisted-apps` | `settings:read` | `list` |

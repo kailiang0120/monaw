@@ -10,6 +10,8 @@ import {
 import type { RunEvent, RunSnapshot } from '../lib/api/runs'
 
 const EVENT_PAGE_SIZE = 500
+export const MAX_RETAINED_RUN_EVENTS = 500
+const EVENT_RENDER_INTERVAL_MS = 32
 const MAX_RECONNECT_DELAY_MS = 5_000
 
 export interface UseRunEventsOptions {
@@ -89,15 +91,28 @@ export function useRunEvents(
     let pageSync: Promise<void> | null = null
     const controller = new AbortController()
     const bySequence = new Map<number, RunEvent>()
+    let publishTimer: number | undefined
 
+    /** Commit a bounded batch while keeping the reconnect cursor independent. */
+    const flush = () => {
+      window.clearTimeout(publishTimer)
+      publishTimer = undefined
+      if (!active) return
+      setEvents([...bySequence.values()])
+      setLastSeq(cursor)
+    }
+
+    /** Deliver every event to controllers and retain only recent display history. */
     const publish = (event: RunEvent) => {
       if (!active || event.run_id !== runId || !Number.isInteger(event.seq) || event.seq < 1) return
       if (event.seq <= cursor) return
       cursor = event.seq
       bySequence.set(event.seq, event)
+      if (bySequence.size > MAX_RETAINED_RUN_EVENTS) {
+        bySequence.delete(bySequence.keys().next().value!)
+      }
       onEventRef.current?.(event)
-      setEvents([...bySequence.values()].sort((left, right) => left.seq - right.seq))
-      setLastSeq(cursor)
+      publishTimer ??= window.setTimeout(flush, EVENT_RENDER_INTERVAL_MS)
     }
 
     const recoverExpiredCursor = async () => {
@@ -107,8 +122,7 @@ export function useRunEvents(
       // atomic cursor and let the caller replace its state from that snapshot.
       bySequence.clear()
       cursor = snapshot.last_seq
-      setEvents([])
-      setLastSeq(cursor)
+      flush()
       setError(null)
       onSnapshotRef.current?.(snapshot)
     }
@@ -141,6 +155,7 @@ export function useRunEvents(
         }
       })()
       pageSync = task.finally(() => {
+        flush()
         pageSync = null
       })
       return pageSync
@@ -203,12 +218,16 @@ export function useRunEvents(
         retries += 1
         await waitForReconnect(delay, controller.signal)
       }
-      if (active) setConnected(false)
+      if (active) {
+        flush()
+        setConnected(false)
+      }
     }
 
     void run()
     return () => {
       active = false
+      window.clearTimeout(publishTimer)
       controller.abort()
       setConnected(false)
       if (refreshRef.current === syncPages) refreshRef.current = null

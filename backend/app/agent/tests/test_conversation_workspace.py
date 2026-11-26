@@ -46,6 +46,29 @@ def test_saved_folder_survives_reopen_and_can_be_reset(db, tmp_path):
     assert reset.json()["title"] == "Renamed"
 
 
+def test_history_search_reaches_old_chats_and_cursor_handles_equal_timestamps(db):
+    """History remains reachable beyond the sidebar's first hundred chats."""
+    timestamp = "2026-01-01T00:00:00+00:00"
+    with db.transaction() as conn:
+        conn.executemany(
+            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            [(f"chat-{index:03}", f"Chat {index}", timestamp, timestamp) for index in range(105)],
+        )
+    db.add_message("chat-000", "user", "find-this-old-message")
+    with db.transaction() as conn:
+        conn.execute("UPDATE conversations SET updated_at = ?", (timestamp,))
+    client = TestClient(app)
+    first = client.get("/api/conversations").json()
+    assert len(first) == 100
+    second = client.get("/api/conversations", params={
+        "before_updated_at": first[-1]["updated_at"], "before_id": first[-1]["id"],
+    }).json()
+    assert len(second) == 5
+    assert len({chat["id"] for chat in first + second}) == 105
+    found = client.get("/api/conversations", params={"search": "find-this-old-message"}).json()
+    assert [chat["id"] for chat in found] == ["chat-000"]
+
+
 def test_default_chats_have_separate_dated_workspaces_and_reuse_them(db, tmp_path, monkeypatch):
     root = tmp_path / "Documents" / "monaw"
     monkeypatch.setattr(workspace, "DEFAULT_CHAT_WORKSPACE_ROOT", root)

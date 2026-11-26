@@ -123,12 +123,38 @@ class FakeChrome:
 
 
 def _run(tools, name, **arguments):
+    """Target the fixture page explicitly for page-scoped operations."""
+    definition = next((item for item in TOOL_DEFINITIONS if item["name"] == name), {})
+    if "pageId" in definition.get("inputSchema", {}).get("properties", {}):
+        arguments.setdefault("pageId", 1)
     return asyncio.run(tools.call(name, arguments))
 
 
 def _tools():
     chrome = FakeChrome()
     return BrowserTools(chrome), chrome
+
+
+def test_interleaved_callers_cannot_inherit_another_page_target():
+    """A second caller's selection cannot redirect an implicit operation."""
+    tools, chrome = _tools()
+    chrome.tabs.append({"id": 8, "url": "https://other.example/", "title": "Other", "active": False})
+
+    async def scenario():
+        """Interleave selections and require A to retain its explicit page."""
+        await tools.pages.resolve(1)
+        await tools.pages.resolve(2)
+        with pytest.raises(ToolError, match="pageId is required"):
+            await tools.pages.resolve(None)
+        page_id, session = await tools.pages.resolve(1)
+        assert page_id == 1
+        assert session.tab_id == 7
+        for definition in TOOL_DEFINITIONS:
+            schema = definition["inputSchema"]
+            if "pageId" in schema["properties"]:
+                assert "pageId" in schema["required"]
+
+    asyncio.run(scenario())
 
 
 def test_tool_names_are_a_subset_of_the_policy_table():

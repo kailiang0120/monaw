@@ -80,6 +80,10 @@ export interface ScheduledTask {
   notifyTelegram: boolean
   telegramChatId: string
   reuseConversation: boolean
+  workspaceDir?: string
+  modelProvider?: '' | 'openai' | 'gemini' | 'codex'
+  modelName?: string
+  modelReasoningEffort?: string
   lastRunAt: string
   lastRunStatus: string
   lastRunConversationId: string
@@ -100,6 +104,8 @@ export interface ScheduledTaskRun {
   status: 'running' | 'ok' | 'error' | 'skipped' | string
   finalText: string
   error: string
+  notificationStatus?: 'not_requested' | 'pending' | 'sending' | 'sent' | 'failed' | 'blocked'
+  notificationError?: string
 }
 
 export interface ScheduledTaskInput {
@@ -115,6 +121,10 @@ export interface ScheduledTaskInput {
   notifyTelegram?: boolean
   telegramChatId?: string
   reuseConversation?: boolean
+  workspaceDir?: string
+  modelProvider?: '' | 'openai' | 'gemini' | 'codex'
+  modelName?: string
+  modelReasoningEffort?: string
 }
 
 export interface SchedulePreviewRequest {

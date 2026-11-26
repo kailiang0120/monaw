@@ -66,9 +66,9 @@ MANUAL_COMPACT_PROMPT = (
 
 # ── Module-level helpers (no manager instance required) ───────────────────────
 
-def list_conversation_metadata() -> list[dict]:
-    """Return metadata for all persisted conversations, newest-updated first."""
-    return get_db().list_conversations()
+def list_conversation_metadata(**filters) -> list[dict]:
+    """Return persisted metadata using database search and pagination."""
+    return get_db().list_conversations(**filters)
 
 
 def create_conversation_file(conversation_id: str, title: str, workspace_dir: str = "") -> dict:

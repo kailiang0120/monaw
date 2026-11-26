@@ -130,9 +130,30 @@ class Database:
             self.conn.commit()
         return {"id": conv_id, "title": title, "created_at": now, "workspace_dir": workspace_dir}
 
-    def list_conversations(self) -> list[dict]:
+    def list_conversations(
+        self, *, limit: int | None = None, offset: int = 0, search: str = "",
+        before_updated_at: str = "", before_id: str = "",
+    ) -> list[dict]:
+        """Search persisted history and paginate by a stable activity cursor."""
+        clauses = []
+        params: list = []
+        if search.strip():
+            clauses.append("""(instr(lower(c.title), lower(?)) > 0
+                OR instr(lower(c.workspace_dir), lower(?)) > 0
+                OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id
+                           AND instr(lower(m.content), lower(?)) > 0))""")
+            params.extend([search.strip()] * 3)
+        if before_updated_at and before_id:
+            clauses.append("(c.updated_at < ? OR (c.updated_at = ? AND c.id < ?))")
+            params.extend([before_updated_at, before_updated_at, before_id])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        paging = " LIMIT ? OFFSET ?" if limit is not None else ""
+        if limit is not None:
+            params.extend([max(1, limit), max(0, offset)])
         rows = self.fetchall(
-            "SELECT id, title, created_at, updated_at, workspace_dir FROM conversations ORDER BY updated_at DESC"
+            "SELECT c.id, c.title, c.created_at, c.updated_at, c.workspace_dir FROM conversations c"
+            + where + " ORDER BY c.updated_at DESC, c.id DESC" + paging,
+            tuple(params),
         )
         return [
             {
@@ -270,6 +291,10 @@ class Database:
         "notify_telegram",
         "telegram_chat_id",
         "reuse_conversation",
+        "workspace_dir",
+        "model_provider",
+        "model_name",
+        "model_reasoning_effort",
         "owner_principal_id",
         "permission_profile_id",
         "permission_profile_snapshot",
@@ -289,6 +314,7 @@ class Database:
         "title", "prompt", "schedule_kind", "cron_expr", "interval_seconds", "run_at",
         "timezone", "enabled", "overlap_policy", "notify_telegram", "telegram_chat_id",
         "reuse_conversation", "owner_principal_id", "permission_profile_id", "permission_profile_snapshot",
+        "workspace_dir", "model_provider", "model_name", "model_reasoning_effort",
     })
     _SCHEDULED_TASK_COMPLETION_COLS = frozenset({
         "last_run_at", "last_run_status", "last_run_conversation_id", "next_run_at",
@@ -307,6 +333,10 @@ class Database:
             "notify_telegram": 0,
             "telegram_chat_id": "",
             "reuse_conversation": 0,
+            "workspace_dir": "",
+            "model_provider": "",
+            "model_name": "",
+            "model_reasoning_effort": "",
             "owner_principal_id": "",
             "permission_profile_id": "scheduled-restricted",
             "permission_profile_snapshot": "",
@@ -431,8 +461,8 @@ class Database:
                 )
             if conversation_id:
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (conversation_id, values["conversation_title"], now_iso, now_iso),
+                    "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, workspace_dir) VALUES (?, ?, ?, ?, ?)",
+                    (conversation_id, values["conversation_title"], now_iso, now_iso, current["workspace_dir"]),
                 )
             cur = self.conn.execute(
                 """INSERT INTO scheduled_task_runs
@@ -575,6 +605,7 @@ class Database:
         self, *, task_id: str, run_id: int, conversation_id: str, lease_owner: str,
         finished_at: str, status: str, final_text: str, error: str,
         prepare_task_update: Callable[[dict[str, Any]], dict[str, Any]],
+        notification: dict | None = None,
     ) -> dict[str, Any] | None:
         """Commit terminal evidence once, preserving current configuration.
 
@@ -621,6 +652,9 @@ class Database:
                        lease_owner = '', lease_expires_at = '', task_snapshot = '' WHERE id = ?""",
                 (finished_at, stored_status, final_text, error, run_id),
             )
+            if notification is not None:
+                from app.agent.notification_outbox import enqueue_notification
+                enqueue_notification(self.conn, run_id, task_id, notification, finished_at)
             if fields:
                 fields["updated_at"] = finished_at
                 sets = ", ".join(f"{key} = ?" for key in fields)
@@ -687,9 +721,12 @@ class Database:
     def list_scheduled_task_runs(self, task_id: str, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.fetchall(
             """
-            SELECT * FROM scheduled_task_runs
-            WHERE task_id = ?
-            ORDER BY id DESC
+            SELECT r.*, COALESCE(n.status, 'not_requested') AS notification_status,
+                   COALESCE(n.last_error, '') AS notification_error
+            FROM scheduled_task_runs r
+            LEFT JOIN scheduled_notifications n ON n.run_id = r.id
+            WHERE r.task_id = ?
+            ORDER BY r.id DESC
             LIMIT ?
             """,
             (task_id, max(1, min(100, int(limit)))),

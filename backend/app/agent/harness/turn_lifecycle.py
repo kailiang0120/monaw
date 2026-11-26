@@ -219,7 +219,11 @@ class TurnLifecycle:
                     self.durable_run.mark_needs_review(self.review_reason_code)
                     durable_stable = False
                 else:
-                    durable_stable = self.durable_run.finalize(outcome.status, outcome.reason_code)
+                    finalize_async = getattr(self.durable_run, "finalize_async", None)
+                    if callable(finalize_async):
+                        durable_stable = await finalize_async(outcome.status, outcome.reason_code)
+                    else:
+                        durable_stable = self.durable_run.finalize(outcome.status, outcome.reason_code)
             except Exception:
                 logger.exception("Unable to finalize durable run run_id=%s", self.durable_run.run_id)
                 outcome = TurnOutcome(

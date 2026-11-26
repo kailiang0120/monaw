@@ -54,6 +54,8 @@ const OVERLAP_OPTIONS: Array<{
 
 interface Props {
   task?: ScheduledTask | null
+  defaultWorkspace?: string
+  defaultModel?: { provider: 'openai' | 'gemini' | 'codex'; model_name: string; reasoning_effort: string }
   onClose: () => void
   onSaved: () => void
   onRunConversation: (conversationId: string) => void
@@ -61,10 +63,17 @@ interface Props {
 
 export function ScheduledTaskDialog({
   task,
+  defaultWorkspace = '',
+  defaultModel,
   onClose,
   onSaved,
   onRunConversation,
 }: Props) {
+  const [workspaceDir, setWorkspaceDir] = useState(task?.workspaceDir ?? defaultWorkspace)
+  const [followDefaultModel, setFollowDefaultModel] = useState(task ? !task.modelProvider : !defaultModel)
+  const pinnedModel = task?.modelProvider ? {
+    provider: task.modelProvider, model_name: task.modelName ?? '', reasoning_effort: task.modelReasoningEffort ?? 'medium',
+  } : defaultModel
   const [title, setTitle] = useState(task?.title ?? '')
   const [prompt, setPrompt] = useState(task?.prompt ?? '')
   const [scheduleKind, setScheduleKind] = useState<ScheduleKind>(task?.scheduleKind ?? 'interval')
@@ -133,6 +142,10 @@ export function ScheduledTaskDialog({
     notifyTelegram,
     telegramChatId: notifyTelegram ? telegramChatId.trim() : '',
     reuseConversation,
+    workspaceDir: workspaceDir.trim(),
+    modelProvider: followDefaultModel ? '' : pinnedModel?.provider ?? '',
+    modelName: followDefaultModel ? '' : pinnedModel?.model_name ?? '',
+    modelReasoningEffort: followDefaultModel ? '' : pinnedModel?.reasoning_effort ?? '',
   })
 
   // Closing never silently throws away edits; at the discard prompt Escape keeps editing.
@@ -236,6 +249,15 @@ export function ScheduledTaskDialog({
 
         <div className="st-scroll flex-1 space-y-4 overflow-y-auto px-5 py-5">
           <SettingsCard title="What to run">
+            <StackedRow label="Workspace">
+              <input value={workspaceDir} onChange={(event) => setWorkspaceDir(event.target.value)} aria-label="Workspace" placeholder="Default workspace" className="st-input" />
+            </StackedRow>
+            <StackedRow label="Model">
+              <select value={followDefaultModel ? 'default' : 'pinned'} onChange={(event) => setFollowDefaultModel(event.target.value === 'default')} aria-label="Scheduled task model" className="st-input">
+                {pinnedModel && <option value="pinned">{pinnedModel.model_name} · saved for this task</option>}
+                <option value="default">Follow the default model</option>
+              </select>
+            </StackedRow>
             <StackedRow label="Title" description="Shown in the sidebar so you can find this task later.">
               <input
                 value={title}

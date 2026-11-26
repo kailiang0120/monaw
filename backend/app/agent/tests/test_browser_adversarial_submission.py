@@ -57,11 +57,11 @@ async def _context(socket_url, url, tool, build_args):
         bridge = RealCDPBridge(socket)
         tools = BrowserTools(bridge)
         try:
-            await tools.call('navigate_page', {'url': url, 'includeSnapshot': False})
-            await tools.call('take_snapshot', {})
+            await tools.call('navigate_page', {'pageId': 1, 'url': url, 'includeSnapshot': False})
+            await tools.call('take_snapshot', {'pageId': 1})
             session = tools.pages.session(7)
             uid = lambda name: next(n.uid for n in session.nodes.values() if n.name == name)
-            args = await build_args(bridge, uid)
+            args = {"pageId": 1, **await build_args(bridge, uid)}
             context = (await tools.call('__monaw_action_context', {'tool_name': tool, 'arguments': args})).structured_content['browser_action_context']
             await tools.call(tool, {**args, '__monaw_authorization': context})
             await asyncio.sleep(1.5)

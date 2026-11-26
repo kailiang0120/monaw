@@ -95,10 +95,10 @@ def test_real_browser_adapter_approval_replay_checks_live_context(settings, chan
             except ToolError as exc:
                 return json.dumps({"status": "blocked", "error": str(exc)})
     manager = Manager()
-    snapshot = asyncio.run(tools._tool_take_snapshot({}))
+    snapshot = asyncio.run(tools._tool_take_snapshot({"pageId": 1}))
     assert 'uid=1_3 button' in snapshot.lines[0]
     entry = build_tool_entries(manager.cfg, manager, [SimpleNamespace(name="click", inputSchema={"type": "object"})])[0]
-    pending = json.loads(entry["callable"](uid="1_3", includeSnapshot=False))
+    pending = json.loads(entry["callable"](pageId=1, uid="1_3", includeSnapshot=False))
     assert pending["status"] == "pending_approval", pending
     assert not any(name == "Input.dispatchMouseEvent" for name, _ in chrome.calls)
     if change == "navigation":

@@ -181,9 +181,23 @@ def test_a_viewer_that_falls_behind_is_disconnected_with_an_error():
     assert chunks[-1] is None
     assert b"stream_lagging" in chunks[-2]
     assert len(chunks) == 2
-    # The turn keeps going and a new viewer gets the replay.
+    # A new viewer must obey the same backlog limit during replay.
     fresh = stream.subscribe()
-    assert fresh.pending_bytes > 500
+    assert fresh.pending_bytes <= 500
+    assert b"stream_lagging" in _drain(fresh)[0]
+
+
+def test_replay_bounds_merged_unicode_text_and_single_oversized_events():
+    """Account for JSON escaping and never keep an unbounded newest entry."""
+    stream = RunStream(max_replay_bytes=1024)
+    for _ in range(100):
+        stream.publish("thinking", {"content": "\u4f60\u597d\n" * 10})
+    assert stream.replay_bytes <= 1024
+    assert stream.dropped_events > 0
+    chunks = _drain(stream.subscribe())
+    assert sum(len(chunk) for chunk in chunks if chunk) <= 1200
+    stream.publish("tool_end", {"output": "x" * 20_000})
+    assert stream.replay_bytes <= 1024
 
 
 def test_a_run_id_already_in_use_is_refused(turn):

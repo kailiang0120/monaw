@@ -354,18 +354,12 @@ class PageRegistry:
         return sorted(tabs, key=lambda tab: self._page_by_tab[tab.tab_id])
 
     async def resolve(self, page_id: int | None) -> tuple[int, TabSession]:
-        tabs = await self.list_tabs()
+        """Resolve an explicit target without inheriting another caller's selection."""
         if page_id is None:
-            page_id = self.selected_page
-        if page_id is None or page_id not in self._tab_by_page:
-            if page_id is not None:
-                raise ToolError(f"No page with id {page_id}. Call list_pages to see open pages.")
-            current = next((tab for tab in tabs if tab.active and tab.focused_window), None) or next(
-                (tab for tab in tabs if tab.active), None
-            )
-            if current is None:
-                raise ToolError("No open pages. Use new_page to open one.")
-            page_id = self.page_id_for(current.tab_id)
+            raise ToolError("pageId is required. Use list_pages or new_page and pass the target ID on every call.")
+        tabs = await self.list_tabs()
+        if page_id not in self._tab_by_page:
+            raise ToolError(f"No page with id {page_id}. Call list_pages to see open pages.")
         self.selected_page = page_id
         tab_id = self._tab_by_page[page_id]
         session = self.session(tab_id)

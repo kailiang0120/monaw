@@ -9,6 +9,8 @@ from app.agent.approval_broker import create_ticket
 from app.agent.database import get_db
 from app.agent.execution_resume import register_executor
 from app.agent.run_context import current_execution_principal, current_interactive
+from app.agent.conversation_workspace import current_workspace_dir, validate_workspace_dir
+from app.agent.settings_store import load_agent_settings
 from app.agent.scheduler import ScheduledTaskService, get_scheduled_task_service, telegram_chat_allowed
 
 
@@ -69,6 +71,10 @@ def _raw_scheduled_task_create(
     notify_telegram: bool = False,
     telegram_chat_id: str = "",
     reuse_conversation: bool = False,
+    workspace_dir: str = "",
+    model_provider: str = "",
+    model_name: str = "",
+    model_reasoning_effort: str = "",
 ) -> str:
     title = title.strip()
     prompt = prompt.strip()
@@ -92,6 +98,9 @@ def _raw_scheduled_task_create(
         )
 
     try:
+        workspace_dir = validate_workspace_dir(workspace_dir)
+        if model_provider not in {"", "openai", "gemini", "codex"} or bool(model_provider) != bool(model_name):
+            raise ValueError("A pinned model requires both a supported provider and a model name")
         if schedule_kind == "cron":
             _validate_cron(cron_expr)
             interval_seconds = 0
@@ -122,6 +131,10 @@ def _raw_scheduled_task_create(
             "notify_telegram": 1 if notify_telegram else 0,
             "telegram_chat_id": telegram_chat_id.strip(),
             "reuse_conversation": 1 if reuse_conversation else 0,
+            "workspace_dir": workspace_dir,
+            "model_provider": model_provider,
+            "model_name": model_name,
+            "model_reasoning_effort": model_reasoning_effort,
             "owner_principal_id": principal.principal_id,
             "permission_profile_id": f"scheduled-task:{principal.principal_id or 'unknown'}:restricted",
             "permission_profile_snapshot": json.dumps(
@@ -178,6 +191,7 @@ def scheduled_task_create(
     notify_telegram: bool = False,
     telegram_chat_id: str = "",
     reuse_conversation: bool = False,
+    follow_default_model: bool = False,
 ) -> str:
     """Stage a scheduled task for user approval.
 
@@ -187,6 +201,7 @@ def scheduled_task_create(
     blocked = _interactive_required("Creating a scheduled task")
     if blocked:
         return blocked
+    model = load_agent_settings().llm
     args = {
         "title": str(title or "").strip(),
         "prompt": str(prompt or "").strip(),
@@ -200,6 +215,10 @@ def scheduled_task_create(
         "notify_telegram": bool(notify_telegram),
         "telegram_chat_id": str(telegram_chat_id or ""),
         "reuse_conversation": bool(reuse_conversation),
+        "workspace_dir": str(current_workspace_dir()),
+        "model_provider": "" if follow_default_model else model.provider,
+        "model_name": "" if follow_default_model else model.model_name,
+        "model_reasoning_effort": "" if follow_default_model else model.reasoning_effort,
     }
     if not args["title"]:
         return _json({"status": "error", "error": "title is required"})
@@ -215,6 +234,7 @@ def scheduled_task_create(
         )
     schedule = cron_expr or (f"every {args['interval_seconds']}s" if args["interval_seconds"] else run_at)
     description = f"Create scheduled task '{args['title']}' ({schedule_kind} {schedule}): {args['prompt'][:160]}"
+    description += f" [workspace: {args['workspace_dir']}; model: {args['model_name'] or 'follow default'}]"
     if args["notify_telegram"]:
         description += f" [notify Telegram {args['telegram_chat_id'] or 'default'}]"
     ticket = create_ticket(
@@ -304,6 +324,7 @@ def register_tools(registry, _settings=None) -> None:
                         "enabled": {"type": "boolean", "default": True},
                         "overlap_policy": {"type": "string", "enum": ["skip", "queue", "cancel_previous"], "default": "skip"},
                         "notify_telegram": {"type": "boolean", "default": False},
+                        "follow_default_model": {"type": "boolean", "default": False, "description": "Use the model selected at execution time instead of pinning the current model. The current workspace is always saved."},
                         "telegram_chat_id": {"type": "string", "default": ""},
                         "reuse_conversation": {
                             "type": "boolean",

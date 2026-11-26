@@ -69,7 +69,8 @@ def test_registry_dispatch_coerces_arguments():
     assert dispatched["arguments"]["count"] == 7
 
 
-def test_registry_dispatch_drops_unknown_arguments():
+def test_registry_dispatch_preserves_permitted_additional_arguments():
+    """JSON Schema allows additional properties unless explicitly forbidden."""
     registry = ToolRegistry(
         [
             {
@@ -91,7 +92,25 @@ def test_registry_dispatch_drops_unknown_arguments():
     dispatched = registry.dispatch("demo", {"count": "7", "mode": "auto"})
 
     assert dispatched is not None
-    assert dispatched["arguments"] == {"count": 7}
+    assert dispatched["arguments"] == {"count": 7, "mode": "auto"}
+    assert dispatched["validation_errors"] == []
+
+
+def test_registry_validates_nested_mcp_schema_without_coercing_or_dropping_fields():
+    """Keep dynamic MCP fields and enforce references, unions and nested types."""
+    schema = {
+        "type": "object",
+        "$defs": {"choice": {"anyOf": [{"type": "integer"}, {"type": "string"}]}},
+        "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/choice"}}},
+        "additionalProperties": {"type": "boolean"},
+    }
+    registry = ToolRegistry([{"name": "mcp__fixture__tool", "parameters": schema}])
+    arguments = {"items": [1, "two"], "dynamic": True}
+    result = registry.dispatch("mcp__fixture__tool", arguments)
+    assert result["arguments"] == arguments
+    assert result["validation_errors"] == []
+    result = registry.dispatch("mcp__fixture__tool", {"items": [False], "dynamic": "maybe"})
+    assert len(result["validation_errors"]) == 2
 
 
 def test_registry_dispatch_reports_validation_errors():

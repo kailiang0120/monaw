@@ -245,10 +245,14 @@ export default function App() {
     try {
       const convs = await fetchConversations()
       if (generation !== mutationGeneration.current) return true
-      const sorted = [...convs].sort((a, b) => b.created_at.localeCompare(a.created_at))
+      const sorted = [...convs].sort((a, b) => (b.updated_at ?? b.created_at).localeCompare(a.updated_at ?? a.created_at))
       setIsBackendReady(true)
       setConversationsLoaded(true)
-      setConversations((current) => (sameConversations(current, sorted) ? current : sorted))
+      setConversations((current) => {
+        const active = current.find((chat) => chat.id === activeConvIdRef.current)
+        const next = active && !sorted.some((chat) => chat.id === active.id) ? [...sorted, active] : sorted
+        return sameConversations(current, next) ? current : next
+      })
       return true
     } catch {
       // Backend may not be ready yet
@@ -697,6 +701,9 @@ export default function App() {
           onToggleCollapsed={() => setIsSidebarCollapsed((value) => !value)}
           onNewChat={handleNewChat}
           onSelect={handleSelectConversation}
+          onDiscoverConversation={(conversation) => setConversations((current) => (
+            current.some((chat) => chat.id === conversation.id) ? current : [...current, conversation]
+          ))}
           onDelete={handleDeleteConversation}
           onRename={(id, title) => handleRenameConversation(id, title)}
           onRefreshConversation={(id) => {
@@ -831,6 +838,8 @@ export default function App() {
         <Suspense fallback={null}>
           <ScheduledTaskDialog
             task={editingScheduledTask}
+            defaultWorkspace={activeConversation?.workspace_dir ?? draftWorkspaceDir}
+            defaultModel={modelSelection}
             onClose={() => {
               setShowScheduledTaskDialog(false)
               setEditingScheduledTaskId(null)

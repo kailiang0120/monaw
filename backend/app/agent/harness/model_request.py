@@ -10,6 +10,7 @@ from typing import Callable, Literal
 from app.agent.harness.context_budget import ContextBudgetExceeded, fit_live_context
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.llm_client import LLMClient, LLMResponse
+from app.agent.model_usage import TokenBudgetExceeded
 from app.agent.observability.recorder import UsageStats, usage_from_any
 
 
@@ -97,7 +98,7 @@ class ModelRequestRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if isinstance(exc, ContextBudgetExceeded):
+            if isinstance(exc, (ContextBudgetExceeded, TokenBudgetExceeded)):
                 code, message = exc.reason_code, str(exc)
             elif isinstance(exc, TimeoutError):
                 code = "llm_timeout"

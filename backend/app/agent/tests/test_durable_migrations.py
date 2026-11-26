@@ -54,14 +54,14 @@ def test_v17_database_upgrades_in_place_and_retains_history_workspace_and_tasks(
         "INSERT INTO turn_checkpoints (turn_id, conversation_id, user_message_ids) VALUES (?, ?, ?)",
         ("legacy-turn", "legacy-chat", json.dumps([user_message_id])),
     )
-    old_db.create_scheduled_task({
-        "id": "legacy-scheduled-task",
-        "title": "Keep this task",
-        "prompt": "Never run during migration verification.",
-        "schedule_kind": "cron",
-        "cron_expr": "0 9 * * 1",
-        "enabled": 0,
-    })
+    # Seed the historical schema directly; today's writer includes newer columns.
+    old_db.execute(
+        """INSERT INTO scheduled_tasks
+           (id, title, prompt, schedule_kind, cron_expr, enabled, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("legacy-scheduled-task", "Keep this task", "Never run during migration verification.",
+         "cron", "0 9 * * 1", 0, "2026-10-30T00:00:00Z", "2026-10-30T00:00:00Z"),
+    )
     old_db.commit()
     old_db.close()
 
@@ -90,7 +90,9 @@ def test_v17_database_upgrades_in_place_and_retains_history_workspace_and_tasks(
     assert upgraded.fetchone("SELECT COUNT(*) FROM agent_runs")[0] == 0
     versions = [row["version"] for row in upgraded.fetchall("SELECT version FROM schema_migrations ORDER BY version")]
     assert versions[:13] == list(range(5, 18))
-    assert versions[-8:] == [18, 19, 20, 21, 22, 23, 24, 25]
+    assert versions[-9:] == [18, 19, 20, 21, 22, 23, 24, 25, 26]
+    assert task["workspace_dir"] == task["model_provider"] == task["model_name"] == ""
+    assert upgraded.fetchone("SELECT COUNT(*) FROM scheduled_notifications")[0] == 0
     upgraded.close()
 
 

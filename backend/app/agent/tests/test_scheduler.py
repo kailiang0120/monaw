@@ -228,6 +228,9 @@ def test_completion_delivers_canonical_outcome_without_changing_execution_result
         service = ScheduledTaskService(settings_factory=lambda: object(), runner=runner)
         await service.run_now(row["id"])
         await asyncio.wait_for(service._inflight[row["id"]][0], timeout=2)
+        # Delivery has its own worker and does not occupy an execution slot.
+        assert messages == []
+        await service._deliver_notifications()
 
     asyncio.run(run())
     assert len(messages) == 1
@@ -993,3 +996,76 @@ def test_scheduled_task_rejects_unlisted_telegram_chat(monkeypatch):
     )
 
     assert payload["reason_code"] == "telegram_chat_not_allowed"
+
+
+def test_saved_context_and_notification_resume_survive_restart(tmp_path, monkeypatch):
+    """Pin execution context and resume delivery without repeating agent work."""
+    from types import SimpleNamespace
+    from app.integrations.telegram import service as telegram_service
+
+    database_path = tmp_path / "agent.db"
+    db = Database(database_path)
+    db.init_db()
+    workspace = tmp_path / "saved-workspace"
+    workspace.mkdir()
+    row = db.create_scheduled_task({
+        "id": "durable-delivery", "title": "Report", "prompt": "Prepare report",
+        "schedule_kind": "interval", "interval_seconds": 3600,
+        "workspace_dir": str(workspace), "model_provider": "openai", "model_name": "saved-model",
+        "model_reasoning_effort": "low", "notify_telegram": 1, "telegram_chat_id": "123",
+    })
+    defaults = SimpleNamespace(
+        model_provider="gemini", model_name="new-default", reasoning_effort="high",
+        llm=SimpleNamespace(provider="gemini", model_name="new-default", reasoning_effort="high"),
+    )
+    calls, deliveries = [], []
+    monkeypatch.setattr(scheduler_module, "get_db", lambda: db)
+    monkeypatch.setattr(scheduler_module, "telegram_chat_allowed", lambda _: True)
+    monkeypatch.setattr(ScheduledTaskService, "_notification_chunks", staticmethod(lambda *_args, **_kwargs: ["first", "second"]))
+
+    class Bot:
+        async def send_message(self, **payload):
+            """Acknowledge the first chunk, then fail the second only once."""
+            deliveries.append(payload["text"])
+            if len(deliveries) == 2:
+                raise ConnectionResetError("fixture delivery interrupted")
+
+    monkeypatch.setattr(telegram_service, "get_telegram_bot", lambda: Bot())
+
+    async def runner(**kwargs):
+        """Capture the actual execution context without contacting a model."""
+        calls.append(kwargs)
+        yield {"event": "done", "data": {"summary": "Report ready", "status": "complete"}}
+
+    async def execute():
+        """Run once and wait for its initial notification attempt."""
+        service = ScheduledTaskService(settings_factory=lambda: defaults, runner=runner)
+        await service.run_now(row["id"])
+        await asyncio.wait_for(service._inflight[row["id"]][0], timeout=2)
+        assert deliveries == []
+        await service._deliver_notifications()
+
+    asyncio.run(execute())
+    run = db.list_scheduled_task_runs(row["id"])[0]
+    assert run["status"] == "succeeded"
+    assert run["notification_status"] == "pending"
+    assert db.get_conversation(run["conversation_id"])["workspace_dir"] == str(workspace)
+    assert calls[0]["settings"].model_name == "saved-model"
+    assert calls[0]["settings"].llm.provider == "openai"
+    assert defaults.llm.model_name == "new-default"
+    db.close()
+
+    # A new connection and service have only the durable outbox to continue from.
+    db = Database(database_path)
+    db.init_db()
+    db.execute("UPDATE scheduled_notifications SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
+    db.commit()
+    service = ScheduledTaskService(settings_factory=lambda: defaults, runner=runner)
+    asyncio.run(service._deliver_notifications())
+    assert deliveries == ["first", "second", "second"]
+    assert len(calls) == 1
+    run = db.list_scheduled_task_runs(row["id"])[0]
+    assert run["status"] == "succeeded"
+    assert run["final_text"] == "Report ready"
+    assert run["notification_status"] == "sent"
+    db.close()

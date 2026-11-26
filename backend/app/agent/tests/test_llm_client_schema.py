@@ -2,12 +2,14 @@
 
 import asyncio
 import shutil
+import pytest
 from types import SimpleNamespace
 from pathlib import Path
 
 from app.agent.llm_client import (
     LLMClient,
     LLMResponse,
+    ResponseInterruptedError,
     build_tool_result_message,
     _gemini_thinking_config,
     _json_schema_prop_to_gemini,
@@ -24,7 +26,7 @@ from app.agent.harness.tool_protocol import ToolCallResult
 from app.skills.memory.tools import register_tools as register_memory_tools
 
 
-def test_object_schema_does_not_emit_additional_properties_for_gemini():
+def test_object_schema_preserves_additional_properties_for_gemini():
     from google.genai import types
 
     prop_def = {
@@ -34,10 +36,10 @@ def test_object_schema_does_not_emit_additional_properties_for_gemini():
     }
     schema = _json_schema_prop_to_gemini(prop_def, types)
     payload = schema.model_dump(exclude_none=True)
-    assert "additional_properties" not in payload
+    assert payload["additional_properties"]["type"] == "string"
 
 
-def test_gemini_schema_drops_empty_string_enum_values():
+def test_gemini_schema_preserves_empty_string_enum_values():
     from google.genai import types
 
     schema = _json_schema_prop_to_gemini(
@@ -50,7 +52,7 @@ def test_gemini_schema_drops_empty_string_enum_values():
         types,
     )
 
-    assert schema.enum == ["preference", "behavior"]
+    assert schema.enum == ["", "preference", "behavior"]
 
 
 def test_memory_search_tool_schema_is_valid_for_gemini_enum_rules():
@@ -59,10 +61,23 @@ def test_memory_search_tool_schema_is_valid_for_gemini_enum_rules():
     memory_search = next(tool for tool in tools if tool["name"] == "memory_search")
 
     gemini_tool = _tools_to_gemini([memory_search])
-    scope_schema = gemini_tool.function_declarations[0].parameters.properties["scope"]
+    scope_schema = gemini_tool.function_declarations[0].parameters_json_schema["properties"]["scope"]
 
-    assert "" not in scope_schema.enum
-    assert scope_schema.enum == ["all", "global", "workspace"]
+    assert scope_schema == memory_search["parameters"]["properties"]["scope"]
+
+
+def test_gemini_preserves_union_references_and_dynamic_properties():
+    """Provider conversion must preserve every branch of the tool contract."""
+    schema = {
+        "type": "object",
+        "$defs": {"value": {"anyOf": [{"type": "integer"}, {"type": "string"}]}},
+        "properties": {"value": {"$ref": "#/$defs/value"}},
+        "additionalProperties": {"type": "boolean"},
+    }
+    result = llm_provider_requests.tools_to_gemini([{"name": "fixture", "parameters": schema}])
+    declaration = result.function_declarations[0]
+    assert declaration.parameters is None
+    assert declaration.parameters_json_schema == schema
 
 
 def test_openai_message_normalization_attaches_image_parts():
@@ -587,6 +602,7 @@ def test_openai_responses_stream_separates_reasoning_from_answer(monkeypatch):
     async def fake_stream():
         yield SimpleNamespace(type="response.reasoning_summary_text.delta", delta="why")
         yield SimpleNamespace(type="response.output_text.delta", delta="answer")
+        yield SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed", output=[]))
 
     class FakeResponses:
         async def create(self, **kwargs):
@@ -634,21 +650,26 @@ def test_openai_responses_stream_separates_reasoning_from_answer(monkeypatch):
     assert response_without_answer_stream.content == "answer"
 
 
-def test_openai_stream_marks_reasoning_only_incomplete_response_as_truncated(monkeypatch):
+@pytest.mark.parametrize("streamed", [True, False])
+def test_openai_incomplete_response_discards_tools_and_reports_truncation(monkeypatch, streamed):
+    """No partial response may authorize a tool, with either transport mode."""
+    incomplete = SimpleNamespace(
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+        output=[
+            SimpleNamespace(type="reasoning", summary=[SimpleNamespace(text="Checking.")]),
+            SimpleNamespace(type="function_call", name="write_file", call_id="call-1", arguments='{"path":"unsafe"}'),
+        ],
+    )
+
     async def fake_stream():
+        """Provide reasoning and an incomplete terminal response."""
         yield SimpleNamespace(type="response.reasoning_summary_text.delta", delta="Checking.")
-        yield SimpleNamespace(
-            type="response.incomplete",
-            response=SimpleNamespace(
-                status="incomplete",
-                incomplete_details=SimpleNamespace(reason="max_output_tokens"),
-                output=[SimpleNamespace(type="reasoning", summary=[SimpleNamespace(text="Checking.")])],
-            ),
-        )
+        yield SimpleNamespace(type="response.incomplete", response=incomplete)
 
     class FakeResponses:
         async def create(self, **_kwargs):
-            return fake_stream()
+            return fake_stream() if streamed else incomplete
 
     class FakeAsyncOpenAI:
         def __init__(self, **_kwargs):
@@ -658,11 +679,102 @@ def test_openai_stream_marks_reasoning_only_incomplete_response_as_truncated(mon
     client = LLMClient("openai", "gpt-5.6-luna", "openai-key")
     response = asyncio.run(client._openai_chat(
         [{"role": "user", "content": "Hello"}], [], "", None,
-        reasoning_callback=lambda _delta: asyncio.sleep(0),
+        reasoning_callback=(lambda _delta: asyncio.sleep(0)) if streamed else None,
     ))
     assert response.finish_reason == "length"
     assert response.content == ""
     assert response.reasoning_content == "Checking."
+    assert response.tool_calls == []
+
+
+def test_openai_stream_rejects_tool_calls_without_terminal_completion():
+    """Even complete arguments are unusable when transport ends prematurely."""
+    async def stream():
+        """End after a function item, without response.completed."""
+        yield SimpleNamespace(type="response.output_item.done", item={
+            "type": "function_call", "call_id": "call-1", "name": "write_file",
+            "arguments": '{"path":"example.txt"}', "status": "completed",
+        })
+
+    async def create(**_kwargs):
+        """Return the interrupted provider fixture."""
+        return stream()
+
+    client = LLMClient("openai", "fixture", "fixture-key")
+    client._openai_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    with pytest.raises(ResponseInterruptedError, match="without a completion event"):
+        asyncio.run(client._openai_responses_stream({}, None))
+
+
+def test_provider_does_not_retry_after_visible_output():
+    """A transient failure cannot append a replacement response to partial text."""
+    calls = []
+    deltas = []
+
+    async def provider(messages, tools, system_prompt, callback, tool_choice):
+        """Emit a partial answer before a retryable transport failure."""
+        calls.append(True)
+        await callback("Partial answer")
+        raise ConnectionResetError("connection reset")
+
+    async def receive(delta):
+        """Capture the text visible to the caller."""
+        deltas.append(delta)
+
+    client = LLMClient("openai", "fixture", "fixture-key")
+    client.provider_adapter = SimpleNamespace(chat_with_tools=provider)
+    with pytest.raises(ResponseInterruptedError, match="after streaming began"):
+        asyncio.run(client.chat_with_tools([], [], stream_callback=receive))
+    assert calls == [True]
+    assert deltas == ["Partial answer"]
+
+
+def test_model_budget_counts_helpers_and_failed_attempts_before_next_request(monkeypatch):
+    """Compaction-style chat calls and retries share the turn's spending limit."""
+    from app.agent import llm_client as module
+    from app.agent.model_usage import ModelUsageBudget, TokenBudgetExceeded, current_model_budget, current_output_limit
+    from app.agent.observability.recorder import UsageStats
+
+    limits = []
+
+    async def provider(*_args, **_kwargs):
+        """Report real usage except for one interrupted, unreported attempt."""
+        limits.append(current_output_limit.get())
+        if len(limits) == 2:
+            raise ConnectionResetError("fixture disconnect")
+        return module.LLMResponse("summary", usage=UsageStats(total_tokens=20 if len(limits) == 1 else 30))
+
+    async def retry_once(call):
+        """Exercise a retry without a wall-clock delay."""
+        try:
+            return await call()
+        except ConnectionResetError:
+            return await call()
+
+    monkeypatch.setattr(module, "estimate_request_tokens", lambda *_: 10)
+    monkeypatch.setattr(module, "_with_retry", retry_once)
+    client = LLMClient("openai", "fixture", "fixture-key")
+    client.provider_adapter = SimpleNamespace(chat_with_tools=provider)
+    budget = ModelUsageBudget(70)
+
+    async def scenario():
+        """Use a helper, retry the main request, then reject overspending."""
+        token = current_model_budget.set(budget)
+        try:
+            await client.chat([], system_prompt="Compact this context")
+            await client.chat_with_tools([], [])
+            with pytest.raises(TokenBudgetExceeded):
+                await client.chat_with_tools([], [])
+        finally:
+            current_model_budget.reset(token)
+        assert current_output_limit.get() is None
+
+    asyncio.run(scenario())
+    assert limits == [60, 40, 30]
+    assert budget.usage.total_tokens == 60
+    assert budget.requests == 3
+    assert budget.estimated_requests == 1
+    assert budget.reserved == 0
 
 
 def test_openai_tool_results_round_trip_as_responses_function_call_output():

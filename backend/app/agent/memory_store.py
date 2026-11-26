@@ -10,7 +10,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from app.agent.run_context import current_interactive
+from app.agent.run_context import current_conversation_id, current_interactive
+from app.agent.model_usage import ModelUsageBudget, current_model_budget
+from app.agent.observability.recorder import get_observability_recorder, reset_current_run_id, set_current_run_id
 
 from app.agent.memory_models import (
     DUPLICATE_SIMILARITY,
@@ -32,7 +34,6 @@ from app.agent.memory_models import (
     has_durable_signal,
     logger,
     normalize_workspace,
-    search_terms,
 )
 
 from app.agent.memory_repository import MarkdownRepository
@@ -269,14 +270,61 @@ class MemoryStore(MarkdownRepository, MemoryRetrieval, MemoryPromptPolicy):
         # tasks and other unattended runs replay old prompts and must not rewrite memory.
         if not current_interactive():
             return None
+        if len(self._learning_tasks) >= 2:
+            return None
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return None
-        task = loop.create_task(self.learn_from_message(user_message, workspace=workspace, source_refs=source_refs))
+        parent_budget = current_model_budget.get()
+        allowance = 32_768
+        if parent_budget is not None and parent_budget.limit:
+            allowance = min(allowance, parent_budget.limit - parent_budget.usage.total_tokens - parent_budget.reserved)
+            if allowance < 16:
+                return None
+            parent_budget.reserved += allowance
+        task = loop.create_task(self._learn_with_usage(
+            user_message, workspace=workspace, source_refs=source_refs,
+            allowance=allowance, parent_budget=parent_budget,
+        ))
         self._learning_tasks.add(task)
         task.add_done_callback(self._learning_done)
         return task
+
+    async def _learn_with_usage(
+        self, user_message: str, *, workspace: str, source_refs: tuple[str, ...],
+        allowance: int, parent_budget: ModelUsageBudget | None,
+    ) -> list[dict[str, Any]]:
+        """Bound and report background usage without changing a finished turn's trace."""
+        budget = ModelUsageBudget(allowance)
+        token = current_model_budget.set(budget)
+        recorder = get_observability_recorder()
+        run_id = ""
+        run_token = None
+        status = "error"
+        try:
+            run_id = recorder.start_run(
+                conversation_id=current_conversation_id(), user_message="",
+                source="memory_learning", model=getattr(self.llm_client, "model_name", ""),
+                provider=getattr(self.llm_client, "provider", ""),
+                metadata={"token_limit": allowance},
+            )
+            run_token = set_current_run_id(run_id)
+            async with asyncio.timeout(60):
+                result = await self.learn_from_message(user_message, workspace=workspace, source_refs=source_refs)
+            status = "complete"
+            return result
+        finally:
+            current_model_budget.reset(token)
+            if run_token is not None:
+                reset_current_run_id(run_token)
+            if parent_budget is not None and parent_budget.limit:
+                parent_budget.reserved -= allowance
+                parent_budget.usage = parent_budget.usage.merge(budget.usage)
+            recorder.finish_run(
+                run_id=run_id, status=status, usage=budget.usage,
+                metadata={"estimated_requests": budget.estimated_requests, "model_requests": budget.requests},
+            )
 
     def _learning_done(self, task: asyncio.Task) -> None:
         self._learning_tasks.discard(task)
