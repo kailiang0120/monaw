@@ -423,10 +423,10 @@ class ToolBatchRunner:
         self.ledger.finish(prepared.active_key)
         self.transcript.add_tool_result(tool_result, images=image_attachments)
         if recovery_prompt:
-            self.transcript.messages.append({"role": "user", "content": recovery_prompt})
+            self.transcript.append({"role": "user", "content": recovery_prompt})
         workflow_hint = self.browser_workflow.observe(tool_name, arguments, raw_tool_output, status)
         if workflow_hint and not recovery_prompt:
-            self.transcript.messages.append({"role": "user", "content": workflow_hint})
+            self.transcript.append({"role": "user", "content": workflow_hint})
 
 
     async def _flush_prepared_tool_calls(self, prepared_calls: list[PreparedToolCall]) -> None:

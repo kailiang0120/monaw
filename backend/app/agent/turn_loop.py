@@ -45,6 +45,7 @@ from app.agent.tool_observations import attachment_image_payloads
 from app.agent.harness.tool_runner import ToolBatchRunner
 from app.agent.harness.model_request import ModelRequestRunner, ModelRequestError
 from app.agent.harness.turn_transcript import TurnTranscript
+from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.harness.response_policy import TurnResponsePolicy
 from app.agent.durable.turn_run import register_active_lifecycle, unregister_active_lifecycle
@@ -308,6 +309,17 @@ class TurnLoop:
             persist_turn = getattr(self.memory, "persist_turn", None)
             if callable(persist_turn):
                 continuation_kwargs = {"persist_user_message": False} if lifecycle.is_continuation else {}
+                provider_history_kwargs = {}
+                if transcript.provider == "gemini" and transcript.current_turn_messages:
+                    transcript.close_unanswered_calls(
+                        outcome.reason_code or "turn_completed",
+                        explanation="The turn ended before this call returned. Inspect current state before retrying.",
+                    )
+                    provider_history_kwargs["provider_history"] = {
+                        "provider": "gemini",
+                        "model_name": str(getattr(self.llm_client, "model_name", "") or ""),
+                        "messages": transcript.current_turn_messages,
+                    }
                 persisted_ids = await persist_turn(
                     conversation_id,
                     message,
@@ -324,6 +336,7 @@ class TurnLoop:
                     } if steering_messages else {}),
                     **attachment_kwargs,
                     **continuation_kwargs,
+                    **provider_history_kwargs,
                 )
                 if isinstance(persisted_ids, list):
                     persisted_user_ids = [item for item in persisted_ids if isinstance(item, int)]
@@ -392,7 +405,13 @@ class TurnLoop:
                 tools=initial_visible_tools,
                 current_user_message=message,
             )
-            transcript.messages = self.memory.build_llm_messages(conversation_id)
+            history_kwargs = {}
+            if isinstance(self.memory, MemoryManager):
+                history_kwargs = {
+                    "provider": transcript.provider,
+                    "model_name": str(getattr(self.llm_client, "model_name", "") or ""),
+                }
+            transcript.messages = self.memory.build_llm_messages(conversation_id, **history_kwargs)
             durable_run = lifecycle.durable_run
             persist_recovery_input = getattr(durable_run, "persist_recovery_input", None)
             if durable_run is not None and not lifecycle.is_continuation and callable(persist_recovery_input):
@@ -406,7 +425,7 @@ class TurnLoop:
             if initial_images:
                 initial_message["images"] = initial_images
                 initial_message["ephemeral"] = True
-            transcript.messages.append(initial_message)
+            transcript.append(initial_message)
             transcript.latest_round_start = len(transcript.messages) - 1
 
             def _apply_steering() -> bool:
@@ -596,13 +615,23 @@ class TurnLoop:
                     llm_response, tools_available=bool(visible_tools), history=tool_runner.history,
                     budget_exhausted=budget.exhausted,
                 )
+                for index, call in enumerate(llm_response.tool_calls, 1):
+                    if transcript.provider == "gemini" and call.tool_name == FINAL_ANSWER_TOOL_NAME:
+                        transcript.add_tool_result(ToolCallResult.from_output(
+                            call_id=call.call_id or f"tool-{index}",
+                            name=call.tool_name,
+                            output=json.dumps({
+                                "status": "ok" if decision.action == "final" else "blocked",
+                                "result": decision.text if decision.action == "final" else "Complete the remaining work before the final answer.",
+                            }),
+                        ))
                 if decision.progress:
                     _emit_agent_progress(decision.progress)
                 if decision.action == "reprompt":
                     transcript.close_unanswered_calls(
                         "response_reprompted", explanation="The final answer needs revision before completion.",
                     )
-                transcript.messages.extend(decision.messages)
+                transcript.extend(decision.messages)
                 if decision.action == "reprompt":
                     continue
                 if decision.action in {"final", "pause"}:
@@ -748,7 +777,7 @@ class TurnLoop:
                 # A guard ended the loop, but the model is healthy: give it one
                 # tool-less call to tell the user what it did and what stopped it.
                 transcript.close_unanswered_calls(incomplete_reason_code)
-                transcript.messages.append({"role": "user", "content": guard_wrap_up_prompt(incomplete_reason_code, final_text)})
+                transcript.append({"role": "user", "content": guard_wrap_up_prompt(incomplete_reason_code, final_text)})
                 streamed_answer_text = ""
 
                 try:
@@ -764,6 +793,14 @@ class TurnLoop:
                 streamed_answer_text = model_runner.answer_text
                 wrap_up_text = ""
                 if wrap_up_response is not None:
+                    if wrap_up_response.tool_calls:
+                        transcript.begin_tool_round(wrap_up_response)
+                        transcript.close_unanswered_calls("wrap_up_completed")
+                    else:
+                        transcript.extend(wrap_up_response.provider_messages or (
+                            [{"role": "assistant", "content": wrap_up_response.content}]
+                            if wrap_up_response.content else []
+                        ))
                     wrap_up_text = str(wrap_up_response.content or "").strip()
                     if not wrap_up_text:
                         for call in wrap_up_response.tool_calls or []:

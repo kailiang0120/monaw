@@ -373,27 +373,50 @@ def test_gemini_stream_separates_thought_summaries_from_answer(monkeypatch):
     assert response.content == "answer"
 
 
-def test_gemini_tool_round_trip_uses_function_response_parts():
+def test_gemini_tool_round_trip_uses_function_response_parts(tmp_path):
+    """Parallel results share one user turn and screenshots stay inside their result."""
+    image_path = tmp_path / "screenshot.png"
+    image_path.write_bytes(b"screen bytes")
     messages = _normalise_messages_for_gemini(
         [
+            {"role": "user", "content": "Inspect the page and file."},
+            {"role": "model", "gemini_parts": [
+                {"function_call": {"id": "call-1", "name": "browser_snapshot"}, "thought_signature": "c2ln"},
+                {"function_call": {"id": "call-2", "name": "read_file"}},
+            ]},
+            {
+                "role": "user",
+                "gemini_function_response": {
+                    "id": "call-2", "name": "read_file", "response": {"text": "contents"},
+                },
+            },
+            {"role": "user", "content": "Inspect the result before changing the page."},
             {
                 "role": "user",
                 "content": "Tool result for browser_snapshot",
+                "images": [{"path": str(image_path)}],
                 "gemini_function_response": {
                     "id": "call-1",
                     "name": "browser_snapshot",
                     "response": {"status": "ok"},
                 },
-            }
+            },
         ],
         "",
+        include_images=True,
     )
 
-    response_part = messages[0]["parts"][0].function_response
-    assert messages[0]["role"] == "user"
+    response_part = messages[2]["parts"][0].function_response
+    assert messages[2]["role"] == "user"
     assert response_part.id == "call-1"
     assert response_part.name == "browser_snapshot"
     assert response_part.response == {"status": "ok"}
+    assert response_part.parts[0].inline_data.data == b"screen bytes"
+    assert len(messages) == 4
+    assert messages[2]["parts"][1].function_response.id == "call-2"
+    assert messages[1]["parts"][0]["thought_signature"] == "c2ln"
+    assert "thought_signature" not in messages[1]["parts"][1]
+    assert messages[3]["parts"] == [{"text": "Inspect the result before changing the page."}]
 
 
 def test_openai_responses_payload_can_require_tool_choice(monkeypatch):

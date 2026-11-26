@@ -61,8 +61,8 @@ export function ContextUsageBar({ usage }: Props) {
         aria-label="Context usage available after the first message"
         title="Context usage available after the first message"
       >
-        <span className="inline-flex h-[14px] w-[14px] items-center justify-center rounded-full bg-[var(--st-border-strong)]">
-          <span className="h-[8px] w-[8px] rounded-full bg-[var(--st-surface)]" />
+        <span className="inline-flex h-3 w-3 items-center justify-center rounded-full bg-[var(--st-border-strong)]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--st-surface)]" />
         </span>
       </span>
     )
@@ -97,12 +97,12 @@ export function ContextUsageBar({ usage }: Props) {
         aria-expanded={open}
       >
         <span
-          className="inline-flex h-[14px] w-[14px] items-center justify-center rounded-full"
+          className="inline-flex h-3 w-3 items-center justify-center rounded-full"
           style={{
             background: `conic-gradient(${color} ${percentage * 3.6}deg, rgba(130, 147, 112, 0.18) 0deg)`,
           }}
         >
-          <span className="h-[8px] w-[8px] rounded-full bg-[var(--st-surface)]" />
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--st-surface)]" />
         </span>
       </button>
 

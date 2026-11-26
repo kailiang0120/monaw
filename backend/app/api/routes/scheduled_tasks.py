@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.agent.database import ScheduledTaskCapacityError, ScheduledTaskConflictError, get_db
 from app.agent.conversation_workspace import validate_workspace_dir
 from app.agent.scheduler import ScheduledTaskService, get_scheduled_task_service
+from app.agent.model_registry import OptionalProviderId
 from app.agent.ui_events import publish_ui_event
 from app.integrations.telegram.session import TelegramSessionStore
 
@@ -43,7 +44,7 @@ class ScheduledTaskBase(CamelModel):
     telegram_chat_id: str = Field("", max_length=80)
     reuse_conversation: bool = False
     workspace_dir: str = Field("", max_length=4096)
-    model_provider: Literal["", "openai", "gemini", "codex"] = ""
+    model_provider: OptionalProviderId = ""
     model_name: str = Field("", max_length=200)
     model_reasoning_effort: str = Field("", max_length=32)
 
@@ -79,7 +80,7 @@ class ScheduledTaskUpdate(CamelModel):
     telegram_chat_id: str | None = Field(None, max_length=80)
     reuse_conversation: bool | None = None
     workspace_dir: str | None = Field(None, max_length=4096)
-    model_provider: Literal["", "openai", "gemini", "codex"] | None = None
+    model_provider: OptionalProviderId | None = None
     model_name: str | None = Field(None, max_length=200)
     model_reasoning_effort: str | None = Field(None, max_length=32)
 

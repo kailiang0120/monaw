@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { MessageDialog } from '../../components/ui/MessageDialog'
 import {
   Activity,
   AlertTriangle,
@@ -134,6 +135,7 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
   const [detailLoading, setDetailLoading] = useState(false)
   const [actionRunId, setActionRunId] = useState('')
   const [deletingData, setDeletingData] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const refreshAbortRef = useRef<AbortController | null>(null)
@@ -315,9 +317,6 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
   }
 
   const deleteData = async () => {
-    if (!window.confirm('Delete runtime diagnostics, observability data, support artifacts, memory files, approvals, and scheduled-task output?')) {
-      return
-    }
     setDeletingData(true)
     setNotice('')
     setError('')
@@ -341,6 +340,19 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
 
   return (
     <div className="space-y-4">
+      {confirmDelete && (
+        <MessageDialog
+          title="Delete runtime data?"
+          message="Delete runtime diagnostics, observability data, support artifacts, memory files, approvals, and scheduled-task output?"
+          confirmLabel="Delete data"
+          cancelLabel="Cancel"
+          destructive
+          onClose={(confirmed) => {
+            setConfirmDelete(false)
+            if (confirmed) void deleteData()
+          }}
+        />
+      )}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium text-neutral-200">Runtime traces, token usage, local errors, and replay diagnosis.</p>
@@ -351,7 +363,7 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
-            onClick={() => void deleteData()}
+            onClick={() => setConfirmDelete(true)}
             disabled={loading || deletingData}
             className="st-btn st-btn-danger"
           >

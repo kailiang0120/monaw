@@ -77,6 +77,62 @@ def test_gemini_sdk_terminal_contract_and_model_limit(streaming, finish_reason):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('streaming', [False, True])
+def test_gemini4_sdk_keeps_thinking_level_and_final_signature(streaming):
+    """Gemini 4 controls and signed final text survive an actual SDK round trip."""
+    from app.agent.harness.response_policy import TurnResponsePolicy
+
+    requests = []
+    payload = {'candidates': [{'content': {'role': 'model', 'parts': [
+        {'text': 'Finished.', 'thoughtSignature': 'c2lnbmVk'},
+    ]}, 'finishReason': 'STOP'}]}
+
+    def transport(request):
+        """Return a signed text response without making provider requests."""
+        if request.method == 'GET':
+            return httpx.Response(200, json={'name': 'models/gemini-4-neon', 'outputTokenLimit': 65536})
+        requests.append(json.loads(request.content))
+        if streaming:
+            return httpx.Response(200, headers={'Content-Type': 'text/event-stream'},
+                                  content='data: ' + json.dumps(payload) + '\n\n')
+        return httpx.Response(200, json=payload)
+
+    async def scenario():
+        """Send the returned provider parts back through the SDK serializer."""
+        client = LLMClient('gemini', 'gemini-4-neon', '', reasoning_effort='xhigh')
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            client._genai_client = genai.Client(api_key='fixture-key', http_options=types.HttpOptions(
+                base_url='https://fixture.invalid', httpx_async_client=http,
+            ))
+
+            async def receive(_text):
+                """Enable streaming without writing test output."""
+                pass
+
+            try:
+                result = await client.chat_with_tools(
+                    [{'role': 'user', 'content': 'Begin.'}], [],
+                    stream_callback=receive if streaming else None,
+                )
+                assert result.content == 'Finished.' and not result.tool_calls
+                decision = TurnResponsePolicy().decide(
+                    result, tools_available=False, history=[], budget_exhausted=False,
+                )
+                assert decision.messages == result.provider_messages
+                await client.chat_with_tools(
+                    [{'role': 'user', 'content': 'Begin.'}] + decision.messages
+                    + [{'role': 'user', 'content': 'Continue.'}], [],
+                    stream_callback=receive if streaming else None,
+                )
+                assert requests[0]['generationConfig']['thinkingConfig']['thinking_level'] == 'XHIGH'
+                assert 'thinking_budget' not in requests[0]['generationConfig']['thinkingConfig']
+                assert requests[1]['contents'][1]['parts'][0]['thoughtSignature'] == 'c2lnbmVk'
+            finally:
+                await client._genai_client.aio.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_account_and_unreported_reasoning_keep_conservative_reservations():
     """Account calls cannot promise an API cap and summaries omit hidden tokens."""
     from app.agent.model_capabilities import model_capabilities

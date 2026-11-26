@@ -36,80 +36,30 @@ describe('InputBar model picker', () => {
     expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
   })
 
-  it('hides Google models until a Google API key is saved', () => {
-    const common = {
-      onSend: vi.fn(),
-      onStop: vi.fn(),
-      isStreaming: false,
-      conversationId: null,
-      contextRefreshKey: 0,
-      approvalMode: 'default' as const,
-      onApprovalModeChange: vi.fn(),
-      modelOptions: FALLBACK_MODEL_OPTIONS,
-      onModelSelectionChange: vi.fn(),
-      modelSelection: {
-        provider: 'openai' as const,
-        model_name: 'gpt-6-luna',
-        reasoning_effort: 'medium' as const,
-      },
-    }
-    const { rerender } = render(<InputBar {...common} hasGoogleKey={false} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
-    expect(screen.queryByRole('option', { name: /Google ·/ })).not.toBeInTheDocument()
-
-    rerender(<InputBar {...common} hasGoogleKey />)
-    expect(screen.getByRole('option', { name: /Google · gemini-pro-latest/ })).toBeInTheDocument()
-  })
-
-  it('shows a ChatGPT account\'s own models with their names and reasoning levels', () => {
-    const modelOptions = {
-      providers: [
-        ...FALLBACK_MODEL_OPTIONS.providers.filter((provider) => provider.id !== 'codex'),
-        {
-          id: 'codex' as const, label: 'OpenAI account', source: 'account',
-          models: ['gpt-6.1-terra', 'gpt-6-luna', 'my-model'],
-          labels: { 'gpt-6.1-terra': 'GPT-6.1 Terra', 'gpt-6-luna': 'GPT-6-Luna' },
-          reasoning_efforts: { 'gpt-6.1-terra': ['low' as const, 'high' as const] },
-        },
-      ],
-    }
-    render(<InputBar
-      onSend={vi.fn()} onStop={vi.fn()} isStreaming={false} conversationId={null} contextRefreshKey={0}
-      approvalMode="default" onApprovalModeChange={vi.fn()} modelOptions={modelOptions} onModelSelectionChange={vi.fn()}
-      modelSelection={{ provider: 'codex', model_name: 'gpt-6.1-terra', reasoning_effort: 'low' }}
-    />)
-    expect(screen.getByRole('button', { name: 'Model' })).toHaveTextContent('ChatGPT · GPT-6.1 Terra')
-    fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
-    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['Low', 'High'])
-    fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
-    expect(screen.getByRole('option', { name: /OpenAI account · GPT-6-Luna/ })).toBeInTheDocument()
-    // A custom model has no display name, so its own name shows.
-    expect(screen.getByRole('option', { name: /OpenAI account · my-model/ })).toBeInTheDocument()
-  })
-
-  it('blocks a previously selected Google model when its key is removed', () => {
+  it('uses the same catalog labels and prevents sending through an unconfigured connection', () => {
     const onSend = vi.fn()
-    render(<InputBar
-      onSend={onSend}
-      onStop={vi.fn()}
-      isStreaming={false}
-      conversationId={null}
-      contextRefreshKey={0}
-      approvalMode="default"
-      onApprovalModeChange={vi.fn()}
-      modelOptions={FALLBACK_MODEL_OPTIONS}
-      onModelSelectionChange={vi.fn()}
-      modelSelection={{
-        provider: 'gemini', model_name: 'gemini-pro-latest', reasoning_effort: 'medium',
-      }}
-      hasGoogleKey={false}
-    />)
-
+    const catalog = { providers: [{
+      id: 'gemini' as const, label: 'Google', models: ['remote:model'],
+      labels: { 'remote:model': 'My model' }, available: false,
+      unavailable_reason: 'Add credentials in Settings.', reasoning_efforts: { 'remote:model': [] },
+    }] }
+    const common = {
+      onSend, onStop: vi.fn(), isStreaming: false, conversationId: null, contextRefreshKey: 0,
+      approvalMode: 'default' as const, onApprovalModeChange: vi.fn(), onModelSelectionChange: vi.fn(),
+      modelSelection: { provider: 'gemini' as const, model_name: 'remote:model', reasoning_effort: 'medium' as const },
+    }
+    const { rerender } = render(<InputBar {...common} modelOptions={catalog} />)
+    expect(screen.getByRole('button', { name: 'Model' })).toHaveTextContent('My model · Google')
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    expect(screen.getByRole('option', { name: 'My model · Google · unavailable' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Reasoning effort' })).not.toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: 'Message' }), { target: { value: 'Hello' } })
     expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
-    expect(screen.getByRole('status')).toHaveTextContent('Add a Google API key in Settings')
-    expect(onSend).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent('Add credentials in Settings.')
+    rerender(<InputBar {...common} modelOptions={{ providers: [{ ...catalog.providers[0], available: true }] }} />)
+    expect(screen.getByRole('option', { name: 'My model · Google' })).not.toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(onSend).toHaveBeenCalledTimes(1)
   })
 
   it.each(['modelSelectionDisabled', 'approvalModeDisabled'] as const)('waits for %s settings to save before sending', (savingProp) => {
@@ -134,85 +84,13 @@ describe('InputBar model picker', () => {
     expect(onSend).toHaveBeenCalledWith('Hello', [])
   })
 
-  it('offers GPT-6 models in the composer and limits Astra effort choices', () => {
-    const onModelSelectionChange = vi.fn()
-    const common = {
-      onSend: vi.fn(),
-      onStop: vi.fn(),
-      isStreaming: false,
-      conversationId: null,
-      contextRefreshKey: 0,
-      approvalMode: 'default' as const,
-      onApprovalModeChange: vi.fn(),
-      modelOptions: FALLBACK_MODEL_OPTIONS,
-      onModelSelectionChange,
-    }
-    const { rerender } = render(<InputBar {...common} modelSelection={{
-      provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'none',
-    }} />)
-
-    expect(screen.getByPlaceholderText('Enter to send · Shift+Enter for newline')).toBeInTheDocument()
-    expect(screen.getByLabelText('Context usage available after the first message')).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Permission mode' }))
-    expect(screen.getByRole('option', { name: 'Default' })).toHaveAttribute('aria-selected', 'true')
-    fireEvent.click(screen.getByRole('option', { name: 'Full Access' }))
-    expect(common.onApprovalModeChange).toHaveBeenCalledWith('full_access')
-    expect(screen.queryByRole('listbox', { name: 'Permission mode' })).not.toBeInTheDocument()
-
-    rerender(<InputBar {...common} disabled focusRequestKey={1} modelSelection={{
-      provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'none',
-    }} />)
-    const composer = screen.getByPlaceholderText('Enter to send · Shift+Enter for newline')
-    expect(composer).not.toHaveFocus()
-    // Closing Settings can request focus while another operation still disables the input.
-    rerender(<InputBar {...common} focusRequestKey={1} modelSelection={{
-      provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'none',
-    }} />)
-    expect(composer).toHaveFocus()
-    fireEvent.change(composer, { target: { value: 'Typing after Settings closes' } })
-    expect(composer).toHaveValue('Typing after Settings closes')
-
-    // The closed control uses a short name that fits; the full name stays in the tooltip and menu.
-    expect(screen.getByRole('button', { name: 'Model' })).toHaveTextContent('API · gpt-6-luna')
-    expect(screen.getByRole('button', { name: 'Model' })).toHaveAttribute('title', 'OpenAI API · gpt-6-luna')
-    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
-    expect(screen.getByRole('option', { name: 'OpenAI account · gpt-6-astra' })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'OpenAI API · gpt-6.1-sol' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'OpenAI API · gpt-6-sol' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('option', { name: 'OpenAI API · gpt-6-astra' }))
-    expect(onModelSelectionChange).toHaveBeenCalledWith({
-      provider: 'openai', model_name: 'gpt-6-astra', reasoning_effort: 'none',
-    })
-
-    rerender(<InputBar {...common} modelSelection={{
-      provider: 'openai', model_name: 'gpt-6-astra', reasoning_effort: 'low',
-    }} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Reasoning effort' }))
-    expect(screen.queryByRole('option', { name: 'None' })).not.toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'Max' })).toBeInTheDocument()
-
-    rerender(<InputBar {...common} modelSelection={{
-      provider: 'codex', model_name: 'gpt-6-astra', reasoning_effort: 'high',
-    }} />)
-    // A ChatGPT sign-in uses the API's effort levels; Ultra was Codex-only.
-    expect(screen.queryByRole('option', { name: 'Ultra' })).not.toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'Max' })).toBeInTheDocument()
-
-    rerender(<InputBar {...common} modelSelection={{
-      provider: 'openai', model_name: 'gpt-6.1-sol', reasoning_effort: 'low',
-    }} />)
-    expect(screen.queryByRole('option', { name: 'None' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'Ultra' })).not.toBeInTheDocument()
-
-    rerender(<InputBar {...common} hasGoogleKey modelSelection={{
-      provider: 'gemini', model_name: 'gemini-flash-latest', reasoning_effort: 'low',
-    }} />)
-    expect(screen.queryByRole('option', { name: 'Minimal' })).not.toBeInTheDocument()
-    rerender(<InputBar {...common} hasGoogleKey modelSelection={{
-      provider: 'gemini', model_name: 'gemini-flash-lite-latest', reasoning_effort: 'minimal',
-    }} />)
-    expect(screen.getByRole('option', { name: 'Minimal' })).toBeInTheDocument()
+  it('keeps saved models usable while the catalog is unavailable', () => {
+    render(<InputBar onSend={vi.fn()} onStop={vi.fn()} isStreaming={false} conversationId={null} contextRefreshKey={0}
+      approvalMode="default" onApprovalModeChange={vi.fn()} modelOptions={FALLBACK_MODEL_OPTIONS}
+      onModelSelectionChange={vi.fn()} modelSelection={{ provider: 'openai', model_name: 'saved:model', reasoning_effort: 'medium' }} />)
+    expect(screen.getByRole('button', { name: 'Model' })).toHaveTextContent('Saved model')
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message' }), { target: { value: 'Hello' } })
+    expect(screen.getByRole('button', { name: 'Send message' })).not.toBeDisabled()
   })
 })
 

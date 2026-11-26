@@ -183,6 +183,15 @@ class ChatGPTAccountService:
 
     # -- Status ----------------------------------------------------------------
 
+    def catalog_identity(self) -> str:
+        """Key cached metadata by account identity without exposing credentials."""
+        with self._lock:
+            credentials = self._credentials()
+            if not credentials:
+                return ""
+            identity = [credentials.get("subject"), credentials.get("client_id"), credentials.get("scopes")]
+            return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             credentials = self._credentials()

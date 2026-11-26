@@ -9,6 +9,7 @@ const runtimeConfig = require('../config/runtime.json')
 const { backendLaunch } = require('./backend-launch.cjs')
 const { createUpdateController } = require('./updates.cjs')
 const { portInUse, startupFailureMessage } = require('./backend-startup.cjs')
+const { showStartupMessage } = require('./message-window.cjs')
 const { backendPort, useDevelopmentRenderer } = require('./runtime-options.cjs')
 const {
   generateControlSecret,
@@ -186,6 +187,7 @@ if (!hasInstanceLock) {
 }
 
 let startupFailureShown = false
+let startupFailureWindow = null
 function reportStartupFailure(reason, logPath = path.join(getBackendRuntimeDir(), 'backend.log')) {
   console.error('[main] Backend startup failed:', JSON.stringify(reason))
   // Keep the reason with the backend log, where support looks first.
@@ -198,8 +200,14 @@ function reportStartupFailure(reason, logPath = path.join(getBackendRuntimeDir()
   if (startupFailureShown) return
   startupFailureShown = true
   const { title, message, detail } = startupFailureMessage(reason, { port: BACKEND_PORT, logPath })
-  dialog.showMessageBox(mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined, { type: 'error', title, message, detail, buttons: ['Quit'] })
-    .finally(() => app.quit())
+  startupFailureWindow = showStartupMessage({
+    BrowserWindow, parent: mainWindow, title, message, detail,
+    theme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+    onClose: () => {
+      startupFailureWindow = null
+      app.quit()
+    },
+  })
 }
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID)

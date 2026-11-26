@@ -24,6 +24,9 @@ import {
   SwitchRow,
 } from '../ui/Panel'
 import { Dropdown } from '../Dropdown'
+import { ModelPicker } from '../ModelPicker'
+import { useModelCatalogState, refreshModelCatalog } from '../../hooks/useModelCatalog'
+import type { ModelSelection } from '../../lib/modelSelection'
 import { ScheduleEditor } from './ScheduleEditor'
 
 /**
@@ -71,9 +74,11 @@ export function ScheduledTaskDialog({
 }: Props) {
   const [workspaceDir, setWorkspaceDir] = useState(task?.workspaceDir ?? defaultWorkspace)
   const [followDefaultModel, setFollowDefaultModel] = useState(task ? !task.modelProvider : !defaultModel)
-  const pinnedModel = task?.modelProvider ? {
-    provider: task.modelProvider, model_name: task.modelName ?? '', reasoning_effort: task.modelReasoningEffort ?? 'medium',
-  } : defaultModel
+  const { catalog: modelOptions, status: modelCatalogStatus } = useModelCatalogState()
+  const [pinnedModel, setPinnedModel] = useState<ModelSelection>(() => task?.modelProvider ? {
+    provider: task.modelProvider, model_name: task.modelName ?? '', reasoning_effort: (task.modelReasoningEffort || 'medium') as ModelSelection['reasoning_effort'],
+  } : defaultModel ? { ...defaultModel, reasoning_effort: defaultModel.reasoning_effort as ModelSelection['reasoning_effort'] }
+    : { provider: 'openai', model_name: '', reasoning_effort: 'medium' })
   const [title, setTitle] = useState(task?.title ?? '')
   const [prompt, setPrompt] = useState(task?.prompt ?? '')
   const [scheduleKind, setScheduleKind] = useState<ScheduleKind>(task?.scheduleKind ?? 'interval')
@@ -252,12 +257,10 @@ export function ScheduledTaskDialog({
             <StackedRow label="Workspace">
               <input value={workspaceDir} onChange={(event) => setWorkspaceDir(event.target.value)} aria-label="Workspace" placeholder="Default workspace" className="st-input" />
             </StackedRow>
-            <StackedRow label="Model">
-              <select value={followDefaultModel ? 'default' : 'pinned'} onChange={(event) => setFollowDefaultModel(event.target.value === 'default')} aria-label="Scheduled task model" className="st-input">
-                {pinnedModel && <option value="pinned">{pinnedModel.model_name} · saved for this task</option>}
-                <option value="default">Follow the default model</option>
-              </select>
-            </StackedRow>
+            <ModelPicker label="Scheduled task model" value={pinnedModel} catalog={modelOptions}
+              loading={modelCatalogStatus === 'loading'} onRetry={() => { void refreshModelCatalog(true) }}
+              followDefault={followDefaultModel} onFollowDefault={() => setFollowDefaultModel(true)}
+              onChange={(selection) => { setPinnedModel(selection); setFollowDefaultModel(false) }} />
             <StackedRow label="Title" description="Shown in the sidebar so you can find this task later.">
               <input
                 value={title}

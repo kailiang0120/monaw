@@ -675,6 +675,10 @@ export interface AgentSettings {
 export interface ModelOptions {
   providers: Array<{
     id: AgentSettings['llm']['provider']
+    connection_id?: string
+    protocol?: string
+    available?: boolean
+    unavailable_reason?: string
     label: string
     models: string[]
     /** Display names by model, where the provider gives them. */

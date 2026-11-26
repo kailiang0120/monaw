@@ -1,0 +1,40 @@
+/* One scrollbar style for the app and its isolated startup dialogs. */
+* {
+  --monaw-scrollbar-thumb: var(--st-text-faint, #86837b);
+  --monaw-scrollbar-track: transparent;
+  scrollbar-width: thin;
+  scrollbar-color: var(--monaw-scrollbar-thumb) var(--monaw-scrollbar-track);
+}
+
+@media (prefers-contrast: more) {
+  * {
+    --monaw-scrollbar-thumb: var(--st-text, #f2f0ea);
+  }
+}
+
+@media (forced-colors: active) {
+  * {
+    scrollbar-color: auto;
+  }
+}
+
+/* Keep legacy styling separate so it cannot override standard scrollbars. */
+@supports not (scrollbar-color: auto) {
+  * {
+    scrollbar-width: auto;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--monaw-scrollbar-thumb);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: var(--monaw-scrollbar-track);
+  }
+}

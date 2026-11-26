@@ -22,6 +22,7 @@ from app.agent.llm_constants import (
     normalize_chat_model,
 )
 from app.agent.identity import DEFAULT_AGENT_NAME, LEGACY_AGENT_NAME
+from app.agent.model_registry import ProviderId, normalize_reasoning_effort
 from app.agent.output_workspace import default_screenshots_dir
 from app.agent.runtime_paths import RUNTIME_DIR, WORKSPACE_DIR
 
@@ -109,7 +110,7 @@ class PermissionProfileSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    provider: Literal["openai", "gemini", "codex"] = "openai"
+    provider: ProviderId = "openai"
     model_name: str = DEFAULT_OPENAI_CHAT_MODEL
     reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] = "medium"
     # Model calls per chat message; 0 is no limit. Unattended runs stop at 200.
@@ -138,14 +139,7 @@ class LLMSettings(BaseModel):
         self.model_name = normalize_chat_model(self.provider, self.model_name, self.custom_models.get(self.provider, []))
         if not re.match(MODEL_NAME_PATTERN, self.model_name):
             self.model_name = normalize_chat_model(self.provider, "")
-        if self.provider in {"openai", "codex"} and self.model_name.startswith("gpt-6"):
-            if self.reasoning_effort == "minimal" or (self.model_name in {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol"} and self.reasoning_effort == "none"):
-                self.reasoning_effort = "low"
-        # "ultra" was a Codex-only level; a ChatGPT sign-in now uses the API's levels.
-        if self.reasoning_effort == "ultra":
-            self.reasoning_effort = "max"
-        if self.provider == "gemini" and self.reasoning_effort in {"none", "minimal"}:
-            self.reasoning_effort = "minimal" if self.model_name == "gemini-flash-lite-latest" else "low"
+        self.reasoning_effort = normalize_reasoning_effort(self.provider, self.model_name, self.reasoning_effort)
         return self
 
 

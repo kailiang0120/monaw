@@ -14,11 +14,22 @@ from app.agent.llm_client import LLMResponse, build_tool_result_message
 @dataclass
 class TurnTranscript:
     messages: list[dict] = field(default_factory=list)
+    current_turn_messages: list[dict] = field(default_factory=list)
     latest_round_start: int = 0
     revision: int = 0
     round_calls: list[tuple[str, str]] = field(default_factory=list)
     answered_call_ids: set[str] = field(default_factory=set)
     provider: str = ""
+
+    def append(self, message: dict) -> None:
+        """Append live history and an independent journal unaffected by compaction."""
+        self.messages.append(message)
+        self.current_turn_messages.append(deepcopy(message))
+
+    def extend(self, messages: list[dict]) -> None:
+        """Record each new message in both live history and the durable journal."""
+        for message in messages:
+            self.append(message)
 
     def snapshot(self, *, tools: list[dict], system_prompt: str, **kwargs) -> ModelRequest:
         return ModelRequest(
@@ -36,15 +47,15 @@ class TurnTranscript:
         return True
 
     def steer(self, message: dict) -> None:
-        self.messages.append(message)
+        self.append(message)
         self.revision += 1
 
     def begin_tool_round(self, response: LLMResponse) -> None:
         self.latest_round_start = len(self.messages)
         if response.provider_messages:
-            self.messages.extend(response.provider_messages)
+            self.extend(response.provider_messages)
         elif response.content:
-            self.messages.append({"role": "assistant", "content": response.content})
+            self.append({"role": "assistant", "content": response.content})
         self.round_calls = [(call.call_id or f"tool-{index}", call.tool_name) for index, call in enumerate(response.tool_calls, 1)]
         self.answered_call_ids.clear()
 
@@ -52,7 +63,7 @@ class TurnTranscript:
         entry = build_tool_result_message(result, provider=self.provider)
         if images:
             entry.update({"images": images, "ephemeral": True})
-        self.messages.append(entry)
+        self.append(entry)
         self.answered_call_ids.add(result.call_id)
 
     def close_unanswered_calls(self, reason_code: str, *, explanation: str = "Not run: the turn stopped first.") -> None:

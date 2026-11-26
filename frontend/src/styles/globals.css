@@ -1,3 +1,5 @@
+@import '../../electron/scrollbars.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -135,20 +137,6 @@
     color: var(--st-text-faint) !important;
   }
 
-  ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: var(--st-scrollbar, rgba(255, 255, 255, 0.16));
-    border-radius: 999px;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: var(--st-border-strong);
-  }
 }
 
 @layer components {
@@ -236,6 +224,31 @@
     color: var(--st-text-faint);
   }
 
+  .chat-composer-container {
+    container: composer / inline-size;
+  }
+
+  .composer-model-icon {
+    display: none;
+  }
+
+  /* Keep model selection one click away when the composer gets narrow. */
+  @container composer (max-width: 720px) {
+    .composer-model-control {
+      flex-shrink: 0;
+      width: var(--control-height-sm);
+    }
+
+    .composer-model-icon {
+      display: block;
+    }
+
+    .composer-model-control .st-select-value,
+    .composer-model-control .st-select-chevron {
+      display: none;
+    }
+  }
+
   .control:focus {
     outline: none;
     border-color: var(--st-accent-border);
@@ -297,33 +310,6 @@
 
   .settings-scroll-area {
     scrollbar-gutter: stable;
-  }
-
-  .image-strip-scroll {
-    scrollbar-width: thin;
-  }
-
-  .image-strip-scroll::-webkit-scrollbar {
-    height: 3px;
-  }
-
-  /* The sidebar chat list: a thin bar that shows while the list is hovered. */
-  .sidebar-scroll::-webkit-scrollbar {
-    width: 4px;
-  }
-  .sidebar-scroll::-webkit-scrollbar-thumb {
-    background: transparent;
-  }
-  .sidebar-scroll:hover::-webkit-scrollbar-thumb {
-    background: var(--st-scrollbar, rgba(255, 255, 255, 0.16));
-  }
-
-  .settings-sidebar-scroll {
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-  }
-  .settings-sidebar-scroll::-webkit-scrollbar {
-    display: none;
   }
 
   /* ============================================================================

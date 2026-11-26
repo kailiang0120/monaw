@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { StorageSettings } from './StorageSettings'
 import { cleanStorage, fetchStorageUsage } from '../../lib/api/settings'
 import type { StorageCategory, StorageUsage } from '../../lib/api/types'
+import { mockNativeDialog } from '../../test/nativeDialog'
 
 vi.mock('../../lib/api/settings', () => ({ fetchStorageUsage: vi.fn(), cleanStorage: vi.fn() }))
 
@@ -23,12 +24,15 @@ const usage = (activityBytes = 120 * MB, cacheBytes = 30 * MB): StorageUsage => 
 })
 
 describe('StorageSettings', () => {
+  let restoreDialog: () => void
   beforeEach(() => {
+    restoreDialog = mockNativeDialog()
     vi.resetAllMocks()
     vi.mocked(fetchStorageUsage).mockResolvedValue(usage())
   })
   afterEach(() => {
     cleanup()
+    restoreDialog()
     delete (window as any).electronAPI
     vi.restoreAllMocks()
   })
@@ -55,12 +59,14 @@ describe('StorageSettings', () => {
   })
 
   it('asks before deleting chats and does nothing when declined', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     render(<StorageSettings />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Delete all chats' }))
 
-    expect(confirm).toHaveBeenCalledWith('Delete all chats? Every conversation is deleted.')
+    const dialog = screen.getByRole('dialog', { name: 'Delete all chats?' })
+    expect(within(dialog).getByText('Every conversation is deleted.')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(cleanStorage).not.toHaveBeenCalled()
   })
 
@@ -79,10 +85,10 @@ describe('StorageSettings', () => {
 
   it('shows why a cleanup was refused', async () => {
     vi.mocked(cleanStorage).mockRejectedValue(new Error('Wait for the current reply to finish before deleting chats.'))
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<StorageSettings />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Delete all chats' }))
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete all chats' }))
 
     await waitFor(() => expect(screen.getByText('Wait for the current reply to finish before deleting chats.')).toBeInTheDocument())
   })

@@ -4,6 +4,7 @@ import { cleanStorage, fetchStorageUsage } from '../../lib/api/settings'
 import type { StorageCategory, StorageUsage } from '../../lib/api/types'
 import { formatBytes } from '../../lib/formatBytes'
 import { Note, SettingsCard } from '../../components/ui/Panel'
+import { MessageDialog } from '../../components/ui/MessageDialog'
 
 // One colour per category, readable on both themes; "other" stays grey.
 const CATEGORY_COLORS: Record<string, string> = {
@@ -30,6 +31,7 @@ export function StorageSettings() {
   const [usage, setUsage] = useState<StorageUsage | null>(null)
   const [loading, setLoading] = useState(true)
   const [cleaning, setCleaning] = useState('')
+  const [pendingCleanup, setPendingCleanup] = useState<StorageCategory | null>(null)
   // Shown under the row that was cleaned, which may be far below the total.
   const [notice, setNotice] = useState<{ id: string; text: string } | null>(null)
   const [error, setError] = useState('')
@@ -57,7 +59,6 @@ export function StorageSettings() {
   }, [])
 
   const clean = async (category: StorageCategory) => {
-    if (category.warning && !window.confirm(`${category.clean_label}? ${category.warning}`)) return
     setCleaning(category.id)
     setNotice(null)
     setError('')
@@ -88,6 +89,20 @@ export function StorageSettings() {
 
   return (
     <div className="space-y-4">
+      {pendingCleanup && (
+        <MessageDialog
+          title={`${pendingCleanup.clean_label}?`}
+          message={pendingCleanup.warning}
+          confirmLabel={pendingCleanup.clean_label}
+          cancelLabel="Cancel"
+          destructive
+          onClose={(confirmed) => {
+            const category = pendingCleanup
+            setPendingCleanup(null)
+            if (confirmed) void clean(category)
+          }}
+        />
+      )}
       <SettingsCard
         title="Storage used"
         action={
@@ -139,7 +154,7 @@ export function StorageSettings() {
                   <button
                     type="button"
                     className={`st-btn ${item.warning ? 'st-btn-danger' : 'st-btn-secondary'}`}
-                    onClick={() => void clean(item)}
+                    onClick={() => item.warning ? setPendingCleanup(item) : void clean(item)}
                     disabled={Boolean(cleaning) || loading || item.cleanable_bytes <= 0}
                   >
                     {cleaning === item.id && <Loader2 size={13} className="animate-spin" />}

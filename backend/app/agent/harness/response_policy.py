@@ -54,8 +54,13 @@ class TurnResponsePolicy:
         return ResponseDecision("final", text, messages=messages, attachment_paths=attachment_paths or [], progress=progress)
 
     def decide(self, response: LLMResponse, *, tools_available: bool, history: list[dict], budget_exhausted: bool) -> ResponseDecision:
+        """Keep provider-native completed history when choosing the next turn action."""
         content = response.content or ""
         if not response.tool_calls:
+            native_messages = response.provider_messages if any(
+                "gemini_parts" in message for message in response.provider_messages
+            ) else []
+            messages = native_messages or ([{"role": "assistant", "content": content}] if content else [])
             text = content.strip() or "Done."
             if response.finish_reason == "length":
                 if text == "Done.":
@@ -66,7 +71,6 @@ class TurnResponsePolicy:
                 text = json_final
             elif tools_available and plain_text_describes_next_action(content):
                 self.consecutive_text_only += 1
-                messages = [{"role": "assistant", "content": content}]
                 if self.consecutive_text_only >= 2 or budget_exhausted:
                     return ResponseDecision(
                         "pause", "Paused: the model described a next action but did not call a tool. Continue to retry the task.",
@@ -76,7 +80,7 @@ class TurnResponsePolicy:
                 return ResponseDecision("reprompt", progress=content, messages=[*messages, {"role": "user", "content": TOOL_REPROMPT_MESSAGE}])
             return self._check_answer(
                 text, history=history, budget_exhausted=budget_exhausted,
-                messages=[{"role": "assistant", "content": content}] if content else [],
+                messages=messages,
             )
 
         self.consecutive_text_only = 0

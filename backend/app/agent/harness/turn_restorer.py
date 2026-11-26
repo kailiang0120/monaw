@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from typing import Callable
 
 from app.agent.database import Database
 from app.agent.state import ConversationState
+from app.agent.provider_history import decode_provider_history
 
 
 def history_message(message: dict) -> dict:
@@ -13,6 +15,7 @@ def history_message(message: dict) -> dict:
         "role": message["role"], "content": message["content"], "timestamp": message["created_at"],
         "attachments_json": message.get("attachments_json", ""),
         "id": message.get("id"), "status": message.get("status", "complete"),
+        "provider_history_json": message.get("provider_history_json", ""),
     }
 
 
@@ -27,7 +30,7 @@ class TurnRestorer:
         self.tool_evidence_limit = tool_evidence_limit
         self.images = images
 
-    def restore(self, state: ConversationState, *, context: str = "") -> list[dict]:
+    def restore(self, state: ConversationState, *, context: str = "", provider: str = "", model_name: str = "") -> list[dict]:
         """Build conversation history messages for cross-turn LLM continuity."""
         conversation_id = state.conversation_id
         compaction = self.db.get_conversation_compaction(conversation_id)
@@ -73,7 +76,32 @@ class TurnRestorer:
         if context:
             messages.append({"role": "assistant", "content": context})
 
+        native_histories = {}
+        covered_ids: set[int] = set()
         for msg in history:
+            owner_id = int(msg.get("id") or 0)
+            native = decode_provider_history(
+                msg.get("provider_history_json", ""), provider=provider, model_name=model_name,
+                owner_id=owner_id, after_id=compaction_source_id,
+            )
+            if native:
+                native_histories[owner_id] = native
+                covered_ids.update(native["covered_message_ids"])
+
+        for msg in history:
+            owner_id = int(msg.get("id") or 0)
+            native = native_histories.get(owner_id)
+            if native:
+                for entry in native["messages"]:
+                    references = entry.pop("_history_attachments", None)
+                    if references:
+                        images = self.images({"attachments_json": json.dumps(references)}, conversation_id)
+                        if images:
+                            entry.update({"images": images, "ephemeral": True})
+                    messages.append(entry)
+                continue
+            if owner_id in covered_ids:
+                continue
             content = (msg.get("content") or "").strip()
             images = self.images(msg, conversation_id)
             if not content and not images:

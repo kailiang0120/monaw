@@ -452,7 +452,8 @@ describe('SettingsModal', () => {
     const status = { ...base,
       extension: { installed: true, paired: true, installed_version: '1.0.0', bundled_version: '1.0.0',
         update_available: false, server_running: true, connected: false, connected_version: '', last_error: '' } }
-    vi.mocked(fetchBrowserDiagnostics).mockResolvedValueOnce(status)
+    // Polling must keep the fixture disconnected while clipboard work completes.
+    vi.mocked(fetchBrowserDiagnostics).mockResolvedValue(status)
     vi.mocked(installBrowserExtension).mockResolvedValue({ folder: 'C:/Monaw Test/浏览器/extension', version: '1.0.0',
       folder_opened: true, extensions_page_opened: true, status })
     const browserWrite = vi.fn().mockResolvedValue(undefined)
@@ -464,20 +465,24 @@ describe('SettingsModal', () => {
       Object.defineProperty(window, 'electronAPI', { configurable: true, value: { writeClipboardText: desktopWrite } })
     }
     if (mode === 'failure') desktopWrite.mockRejectedValue(new Error('Fixture OS clipboard failure'))
-    render(<SettingsModal onClose={() => {}} />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Set up again' }))
-    await screen.findByRole('textbox', { name: 'Extension folder' })
-    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
-    if (mode === 'failure') {
-      expect(await screen.findByRole('alert')).toHaveTextContent('Select the folder and press Ctrl+C')
-      expect(screen.queryByRole('button', { name: 'Copied' })).not.toBeInTheDocument()
-      expect(screen.getByRole('textbox', { name: 'Extension folder' })).toHaveValue('C:/Monaw Test/浏览器/extension')
-    } else {
-      expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
-      expect(mode === 'desktop' ? desktopWrite : browserWrite).toHaveBeenCalledWith('C:/Monaw Test/浏览器/extension')
+    try {
+      render(<SettingsModal onClose={() => {}} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Browser' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Set up again' }))
+      await screen.findByRole('textbox', { name: 'Extension folder' })
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+      if (mode === 'failure') {
+        expect(await screen.findByRole('alert')).toHaveTextContent('Select the folder and press Ctrl+C')
+        expect(screen.queryByRole('button', { name: 'Copied' })).not.toBeInTheDocument()
+        expect(screen.getByRole('textbox', { name: 'Extension folder' })).toHaveValue('C:/Monaw Test/浏览器/extension')
+      } else {
+        expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+        expect(mode === 'desktop' ? desktopWrite : browserWrite).toHaveBeenCalledWith('C:/Monaw Test/浏览器/extension')
+      }
+      if (mode !== 'browser') expect(browserWrite).not.toHaveBeenCalled()
+    } finally {
+      vi.mocked(fetchBrowserDiagnostics).mockResolvedValue(base)
     }
-    if (mode !== 'browser') expect(browserWrite).not.toHaveBeenCalled()
   })
 
   it('shows the extension as connected', async () => {

@@ -3,7 +3,7 @@ import { FileText, ListPlus, Loader2, Mic, Paperclip, Pause, Pencil, Play, Send,
 import { ContextUsageBar } from './ContextUsageBar'
 import { WorkspacePicker } from './WorkspacePicker'
 import { Dropdown } from './Dropdown'
-import { compactModelLabel, formatReasoningEffort, providerOptions, reasoningEffortsForProvider } from '../features/settings/settingsConfig'
+import { ModelPicker } from './ModelPicker'
 import { fetchContextUsage } from '../lib/api/conversations'
 import { transcribeSpeech } from '../lib/api/speechToText'
 import { uploadAttachment } from '../lib/api/uploads'
@@ -150,6 +150,8 @@ interface Props {
   approvalMode: ApprovalMode
   modelSelection: ModelSelection
   modelOptions: ModelOptions
+  modelCatalogLoading?: boolean
+  onRetryModelCatalog?: () => void
   hasGoogleKey?: boolean
   modelSelectionDisabled?: boolean
   modelSelectionError?: string
@@ -182,7 +184,8 @@ export function InputBar({
   approvalMode,
   modelSelection,
   modelOptions,
-  hasGoogleKey = false,
+  modelCatalogLoading = false,
+  onRetryModelCatalog,
   modelSelectionDisabled,
   modelSelectionError,
   onModelSelectionChange,
@@ -220,19 +223,8 @@ export function InputBar({
   const voiceNextTranscriptIndexRef = useRef(0)
   const voiceTranscriptQueueRef = useRef<Map<number, string>>(new Map())
   const voiceStopRequestedRef = useRef(false)
-  const modelChoices = providerOptions(modelOptions)
-    .filter((provider) => provider.id !== 'gemini' || hasGoogleKey)
-    .flatMap((provider) =>
-      provider.models.map((model) => ({
-        value: `${provider.id}:${model}`,
-        label: `${provider.label} · ${provider.labels?.[model] ?? model}`,
-        shortLabel: compactModelLabel(provider.id, provider.label, model, provider.labels?.[model]),
-      })),
-    )
-  const selectedModelAvailable = modelChoices.some(
-    (choice) => choice.value === `${modelSelection.provider}:${modelSelection.model_name}`,
-  )
-  const effortChoices = reasoningEffortsForProvider(modelSelection.provider, modelSelection.model_name, modelOptions)
+  const selectedModelAvailable = !modelCatalogLoading
+    && modelOptions.providers.find((connection) => connection.id === modelSelection.provider)?.available !== false
   const settingsSaving = modelSelectionDisabled || approvalModeDisabled
   const canSteer = Boolean(isStreaming && onSteer && steeringConversationId)
   const canQueue = Boolean(isStreaming && onQueue)
@@ -673,7 +665,7 @@ export function InputBar({
 
   return (
     <footer className="bg-[#11100f] px-4 pb-4 pt-2">
-      <div className="mx-auto max-w-3xl">
+      <div className="chat-composer-container mx-auto max-w-3xl">
         {onWorkspaceChange && <WorkspacePicker key={conversationId || 'new'} value={workspaceDir}
           disabled={disabled || isStreaming} onChange={onWorkspaceChange} />}
         {/* Unified dock panel */}
@@ -812,37 +804,15 @@ export function InputBar({
                 onChange={onApprovalModeChange}
                 disabled={approvalModeDisabled}
                 size="sm"
-                icon={<Shield size={11} className="shrink-0" />}
+                icon={<Shield size={12} className="shrink-0" />}
               />
             </div>
 
             <div className="flex min-w-0 items-center justify-end gap-2">
               {!recording && (
                 <>
-                  <Dropdown<string>
-                    ariaLabel="Model"
-                    value={`${modelSelection.provider}:${modelSelection.model_name}`}
-                    options={modelChoices}
-                    placeholder="Choose a model"
-                    onChange={(selection) => {
-                      const separator = selection.indexOf(':')
-                      const provider = selection.slice(0, separator) as ModelSelection['provider']
-                      const model_name = selection.slice(separator + 1)
-                      onModelSelectionChange({ ...modelSelection, provider, model_name })
-                    }}
-                    disabled={modelSelectionDisabled}
-                    size="sm"
-                    className="w-[170px] max-w-[42vw]"
-                  />
-                  <Dropdown<ModelSelection['reasoning_effort']>
-                    ariaLabel="Reasoning effort"
-                    value={modelSelection.reasoning_effort}
-                    options={effortChoices.map((effort) => ({ value: effort, label: formatReasoningEffort(effort) }))}
-                    onChange={(reasoning_effort) => onModelSelectionChange({ ...modelSelection, reasoning_effort })}
-                    disabled={modelSelectionDisabled}
-                    size="sm"
-                    className="w-[105px]"
-                  />
+                  <ModelPicker value={modelSelection} catalog={modelOptions} onChange={onModelSelectionChange}
+                    disabled={modelSelectionDisabled} loading={modelCatalogLoading} onRetry={onRetryModelCatalog} compact />
                 </>
               )}
 
@@ -907,13 +877,6 @@ export function InputBar({
           </div>
           {modelSelectionError && <div role="alert" className="px-3 pb-2 text-[11px] text-red-300">{modelSelectionError}</div>}
           {runControlError && <div role="alert" className="px-3 pb-2 text-[11px] text-red-300">{runControlError}</div>}
-          {!selectedModelAvailable && (
-            <div role="status" className="px-3 pb-2 text-[11px] text-amber-300">
-              {modelSelection.provider === 'gemini' && !hasGoogleKey
-                ? 'Add a Google API key in Settings or choose another model.'
-                : 'Choose an available model.'}
-            </div>
-          )}
         </div>
       </div>
     </footer>

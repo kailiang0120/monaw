@@ -358,13 +358,23 @@ def test_model_options_endpoint_returns_backend_model_catalog():
     payload = response.json()
     providers = {item["id"]: item for item in payload["providers"]}
     assert providers["openai"]["label"] == "OpenAI API"
-    assert providers["openai"]["models"] == ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
+    assert providers["openai"]["models"] == [
+        "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra",
+        "gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra",
+    ]
     assert providers["codex"]["label"] == "OpenAI account"
     assert providers["codex"]["models"] == providers["openai"]["models"]
     assert providers["gemini"]["label"] == "Google"
-    assert providers["gemini"]["models"] == ["gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    assert providers["gemini"]["models"] == [
+        "gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest",
+        "gemini-4-neon", "gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon",
+    ]
     assert "deepseek" not in providers
     assert "vision_fallback_models" not in payload
+    assert providers["openai"]["connection_id"] == "openai"
+    assert providers["openai"]["protocol"] == "openai_responses"
+    assert isinstance(providers["openai"]["available"], bool)
+    assert providers["openai"]["reasoning_efforts"]["gpt-6-astra"] == ["low", "medium", "high", "xhigh", "max"]
 
 
 def test_update_settings_key_change_does_not_restart_mcp_servers(monkeypatch):

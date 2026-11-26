@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from app.agent.memory_store import MemoryStore
 from app.agent.harness.turn_restorer import TurnRestorer, history_message
+from app.agent.provider_history import prepare_provider_history
 from app.agent.context_usage import (
     DEFAULT_CONTEXT_TOKEN_LIMIT,
     build_context_usage_report,
@@ -313,12 +314,17 @@ class MemoryManager:
             ],
         }
 
-    def build_llm_messages(self, conversation_id: str) -> list[dict]:
+    def build_llm_messages(self, conversation_id: str, *, provider: str | None = None, model_name: str | None = None) -> list[dict]:
+        """Restore visible history and matching private provider state for this model."""
         state = self.get_or_create(conversation_id)
         return TurnRestorer(
             self._db, history_limit=self.LLM_HISTORY_MESSAGES, recent_limit=self.MAX_RECENT_MESSAGES,
             tool_evidence_limit=self.MAX_TOOL_OUTCOMES, images=self._history_images,
-        ).restore(state, context=self.get_context(conversation_id, current_turn=state.task_goal))
+        ).restore(
+            state, context=self.get_context(conversation_id, current_turn=state.task_goal),
+            provider=provider if provider is not None else str(getattr(self.llm_client, "provider", "")),
+            model_name=model_name if model_name is not None else str(getattr(self.llm_client, "model_name", "")),
+        )
 
     def _messages_for_manual_compaction(
         self,
@@ -509,6 +515,7 @@ class MemoryManager:
         user_attachments: list[dict] | None = None,
         steering_attachments: list[list[dict]] | None = None,
         steering_tool_call_indexes: list[int] | None = None,
+        provider_history: dict | None = None,
         turn_id: str | None = None,
         persist_user_message: bool = True,
     ) -> list[int]:
@@ -537,6 +544,11 @@ class MemoryManager:
             "role": "assistant", "content": assistant_message, "thinking": thinking, "status": status,
             "response_duration_ms": response_duration_ms, "attachments": response_attachments,
             "tool_calls": tool_calls[tool_calls_saved:],
+            "provider_history": prepare_provider_history(provider_history, [
+                (user_message, user_attachments or []),
+                *[(text, steering_attachments[index] if steering_attachments and index < len(steering_attachments) else [])
+                  for index, text in enumerate(steering_messages or [])],
+            ]),
         })
         user_message_ids, inserted = self._db.persist_turn_messages(turn_id or uuid.uuid4().hex, conversation_id, records)
         # Cache and memory-source bookkeeping happen only after the commit. They
@@ -650,6 +662,8 @@ class MemoryManager:
         has_more = len(messages) > limit
         if has_more:
             messages = messages[1:]
+        for message in messages:
+            message.pop("provider_history_json", None)
         return messages, has_more
 
     # ── Token estimation & auto-compaction ────────────────────────────────

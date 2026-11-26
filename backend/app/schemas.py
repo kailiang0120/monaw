@@ -425,7 +425,12 @@ class AgentSettingsPayload(BaseModel):
 
 class ModelProviderOptionPayload(BaseModel):
     id: str
+    connection_id: str
     label: str
+    protocol: str
+    # Credential readiness only; this is not a live service health check.
+    available: bool
+    unavailable_reason: str = ""
     models: list[str] = Field(default_factory=list)
     # Display names and supported reasoning levels, where the provider lists them.
     labels: dict[str, str] = Field(default_factory=dict)

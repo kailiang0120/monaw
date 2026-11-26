@@ -9,7 +9,7 @@ dependencies = [
     "comtypes>=1.2.0",
     "croniter~=6.0",
     "fastapi>=0.115.0",
-    "google-genai==1.65.0",
+    "google-genai==2.34.0",
     "jsonschema>=4.18.0",
     "langchain==1.2.15",
     "langchain-core==1.2.28",

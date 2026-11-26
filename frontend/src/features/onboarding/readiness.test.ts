@@ -40,6 +40,13 @@ describe('required steps', () => {
     expect(model(requiredSteps({
       settings: settings({ llm: { provider: 'gemini', model_name: 'gemini-x' }, api_keys: { has_google_key: true } }), account: null, workspaceDir: '',
     })).state).toBe('ready')
+    expect(model(requiredSteps({
+      settings: settings(), account: null, workspaceDir: '',
+      catalog: { providers: [{
+        id: 'openai', label: 'OpenAI API', available: true, models: ['gpt-6-luna'],
+        labels: { 'gpt-6-luna': 'GPT-6 Luna' },
+      }] },
+    }))).toMatchObject({ state: 'ready', detail: 'GPT-6 Luna · OpenAI API' })
   })
 
   it('waits for the account check before judging the account provider', () => {
