@@ -138,7 +138,10 @@ class RealCDPBridge:
             raise ToolError(response['error']['message'])
         return response.get('result',{})
     async def evaluate(self,expression):
-        return (await self.cdp('Runtime.evaluate',{'expression':expression,'returnByValue':True}))['result'].get('value')
+        """Expose fixture script failures instead of silently returning None."""
+        response = await self.cdp('Runtime.evaluate', {'expression': expression, 'returnByValue': True})
+        assert not response.get('exceptionDetails'), response.get('exceptionDetails')
+        return response['result'].get('value')
 
 async def _workflow(socket_url,url):
     async with websockets.connect(socket_url,origin='http://localhost') as socket:
@@ -148,7 +151,7 @@ async def _workflow(socket_url,url):
         snapshot=await tools.call('take_snapshot',{'pageId': 1})
         session=tools.pages.session(7)
         uid=lambda name:next(n.uid for n in session.nodes.values() if n.name==name)
-        assert any(n.name=='Frame action' for n in session.nodes.values())
+        assert any(n.name=='Frame action' for n in session.nodes.values()), (session.frames, snapshot.lines)
         assert any(n.name=='Srcdoc action' for n in session.nodes.values()), (session.frames, snapshot.lines[0])
         assert any(n.name=='Blank action' for n in session.nodes.values())
         assert not any(n.name=='Opaque action' for n in session.nodes.values())
@@ -243,8 +246,8 @@ async def _workflow(socket_url,url):
           Object.defineProperty(button,'type',lie('button'));
           Object.defineProperty(button,'formAction',lie('https://false-destination.invalid/'));
           Object.defineProperty(button,'formMethod',lie('get'));
-          Object.defineProperty(form,'action',lie('https://false-destination.invalid/'));
-          Object.defineProperty(form,'method',lie('get'));
+          Object.defineProperty(HTMLFormElement.prototype,'action',lie('https://false-destination.invalid/'));
+          Object.defineProperty(HTMLFormElement.prototype,'method',lie('get'));
         })()""")
         click_args={'pageId': 1, 'uid':uid('Submit locally'),'includeSnapshot':False}
         guarded=(await tools.call('__monaw_action_context',{'tool_name':'click','arguments':click_args})).structured_content['browser_action_context']

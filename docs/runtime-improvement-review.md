@@ -80,6 +80,12 @@ missing-browser skips fail. `scripts/fetch-test-chrome.py` resolves the manifest
 minimum or current stable from Google's Chrome for Testing feed into an isolated
 directory without changing the user's browser.
 
+Navigation readiness checks the returned document loader and its ready state.
+A delayed load event from the previous page cannot finish that bounded wait;
+readiness includes the requested document's child frames. Browser
+contract failures include the observed snapshot to distinguish loading failures
+from missing controls.
+
 Image estimates use local header dimensions and known tile-model rules;
 other models use a conservative size-based heuristic. Remote image URLs use a
 fallback and are never fetched for estimation. Provider usage remains authoritative.

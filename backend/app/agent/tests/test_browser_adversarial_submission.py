@@ -58,10 +58,16 @@ async def _context(socket_url, url, tool, build_args, *, visual=False):
         bridge = RealCDPBridge(socket)
         tools = BrowserTools(bridge)
         try:
-            await tools.call('navigate_page', {'pageId': 1, 'url': url, 'includeSnapshot': False})
-            await tools.call('take_snapshot', {'pageId': 1})
+            navigation = await tools.call('navigate_page', {'pageId': 1, 'url': url, 'includeSnapshot': False})
+            snapshot = await tools.call('take_snapshot', {'pageId': 1})
             session = tools.pages.session(7)
-            uid = lambda name: next(n.uid for n in session.nodes.values() if n.name == name)
+
+            def uid(name):
+                """Include the actual page state when a fixture target is missing."""
+                match = next((n.uid for n in session.nodes.values() if n.name == name), None)
+                assert match is not None, (name, navigation.lines, snapshot.lines, session.frames)
+                return match
+
             args = {"pageId": 1, **await build_args(bridge, uid)}
             if visual:
                 screenshot = await tools.call('take_screenshot', {'pageId': 1})

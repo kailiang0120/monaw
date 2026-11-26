@@ -712,18 +712,24 @@ class BrowserTools:
     def _action_deadline(arguments: dict[str, Any]) -> float:
         return time.monotonic() + min(_timeout_seconds(arguments.get("timeout"), DEFAULT_ACTION_TIMEOUT_S), 30.0)
 
-    async def _wait_for_navigation(self, session: TabSession, loads: int, navigations: int, timeout: float) -> bool:
+    async def _wait_for_navigation(self, session: TabSession, navigations: int, timeout: float,
+                                   *, loader_id: str = "") -> bool:
+        """Wait for the requested document, ignoring a previous page's late load."""
         deadline = time.monotonic() + timeout
         next_ready_check = 0.0
         while time.monotonic() < deadline:
-            if session.load_count > loads or session.dialog is not None:
+            if session.dialog is not None:
                 return True
-            # Pages restored from the back/forward cache fire no load event.
-            if session.navigation > navigations and time.monotonic() >= next_ready_check:
-                next_ready_check = time.monotonic() + 0.5
+            committed = session.loader_id == loader_id if loader_id else session.navigation > navigations
+            # Checking the committed document also supports back/forward cache
+            # restores, which do not fire a new load event.
+            if committed and time.monotonic() >= next_ready_check:
+                next_ready_check = time.monotonic() + 0.1
+                inspected_loader = session.loader_id
                 try:
                     state = await evaluate_fixed(session, "document.readyState", timeout=2)
-                    if (state.get("result") or {}).get("value") == "complete":
+                    if (session.loader_id == inspected_loader
+                            and (state.get("result") or {}).get("value") == "complete"):
                         return True
                 except (ToolError, ExtensionError):
                     pass
@@ -733,7 +739,7 @@ class BrowserTools:
     async def _run_navigation(self, session: TabSession, method: str, params: dict[str, Any],
                               timeout: float, before_unload: str) -> tuple[dict[str, Any], bool, bool]:
         """Run a navigation command; returns (result, loaded, beforeunload handled)."""
-        loads, navigations = session.load_count, session.navigation
+        navigations = session.navigation
         task = asyncio.ensure_future(session.send(method, params, timeout=timeout))
         handled = False
         while not task.done():
@@ -748,7 +754,9 @@ class BrowserTools:
             return result, False, handled
         if method == "Page.navigate" and not result.get("loaderId"):
             return result, True, handled  # Same-document navigation, such as a #fragment.
-        loaded = await self._wait_for_navigation(session, loads, navigations, timeout)
+        loaded = await self._wait_for_navigation(
+            session, navigations, timeout, loader_id=str(result.get("loaderId") or ""),
+        )
         return result, loaded, handled
 
     # -- pages ---------------------------------------------------------------
