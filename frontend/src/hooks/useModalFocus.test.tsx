@@ -102,4 +102,18 @@ describe('useModalFocus', () => {
     expect(innerEscape).toHaveBeenCalledTimes(1)
     expect(outerEscape).not.toHaveBeenCalled()
   })
+
+  it('leaves native confirmation dismissal to the browser without closing its parent', () => {
+    const onEscape = vi.fn()
+    render(
+      <Dialog label="Settings" onEscape={onEscape}>
+        <dialog open aria-label="Confirm deletion"><button type="button">Cancel deletion</button></dialog>
+      </Dialog>,
+    )
+    screen.getByRole('button', { name: 'Cancel deletion' }).focus()
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(onEscape).not.toHaveBeenCalled()
+    tab()
+    expect(screen.getByRole('button', { name: 'Cancel deletion' })).toHaveFocus()
+  })
 })

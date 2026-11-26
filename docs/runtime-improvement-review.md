@@ -3,6 +3,70 @@
 Scope: runtime correctness, persistence, resource limits and everyday task flows.
 Release, packaging and distribution changes are outside this review.
 
+## Whole-task reliability follow-up
+
+Three additional improvements address work that spans several tool batches:
+
+| Area | Updated behavior |
+| --- | --- |
+| Task outcomes | Persist original goals, pending/failed outcomes, and returned evidence independently of the current batch. Preserve them through pause, restart, and compaction; reject stale updates and unsupported completion claims. |
+| Useful progress | Compare observation results across rounds, give one recovery hint when results stop changing, then pause a bounded loop. Status polling gets a longer finite window. |
+| Outcome evaluations | Run six isolated tasks against real tools and durable state; grade exact files, read-back, missing-input handling, recovery, and duplicate effects. Report model requests, tokens, and duration. |
+
+The live long-context evaluation exposed a planning dead end: a read-back check
+was labeled as a file mutation, and immutable kind metadata prevented correction.
+Unfinished outcomes can now correct that classification with a recorded reason
+without replacing their acceptance criteria or repeating completed file edits.
+See [task outcomes and evaluations](harness-evaluations.md) for the protocol,
+commands, evidence boundaries, and limits.
+
+## Turn completion follow-up
+
+The harness runs provider requests through `ModelRequestRunner`, checks each
+response with `TurnResponsePolicy`, executes accepted calls through
+`ToolBatchRunner`, and saves one outcome through `TurnLifecycle`. Tool schemas,
+permissions, durable operation journals and cancellation remain separate from
+the decision to finish a turn.
+
+The completion review found several cases where the user-visible ending did not
+match the available evidence:
+
+| Trigger | Previous behavior | Updated behavior |
+| --- | --- | --- |
+| Empty or reasoning-only response | Saved a successful `Done.` | Ask once for an answer or necessary action, then pause if the response is still unusable. Alternating empty output and progress cannot reset this limit. |
+| Gemini rejects a response or produces an invalid function call | Normalized the ending to an ordinary stop | Preserve blocked or incomplete status, suppress its calls, and keep the task resumable. Record the original provider reason in diagnostics. |
+| OpenAI refusal or content filtering | Could lose refusal text or label filtering as an output-length limit | Preserve the refusal and distinguish a blocked response from truncation. |
+| Text promises another action | Forced the next provider request to call a tool | Reprompt once with automatic tool choice, allowing a clarification or final answer without an unrelated action. Check closing prose in longer replies as well. |
+| JSON answer contains `summary` or `answer` | Replaced the entire JSON value with that field | Preserve ordinary JSON verbatim. Only explicit legacy `final_answer` envelopes are unwrapped. |
+| Pause arrives during a guard's final summary | Waited for the summary request to finish | Cancel that request through the same pause boundary as the main model call. |
+| Guard summary is truncated or promises more work | Replaced the pause notice with the unusable summary | Keep the original notice and exclude the rejected summary from saved provider history. |
+| Pause or Stop arrives while the final outcome is being saved | Accepted a control after completion had been selected; Pause could turn a successful run into `needs_review` | Reject new controls once finalization owns the outcome. Direct pause requests obey the same boundary, and snapshots stop advertising unavailable controls. |
+
+Normal final answers do not acquire an additional model-verification call.
+Existing token, iteration and wall-clock budgets still apply, including to the
+single repair attempt. A guard summary cannot change a paused run into a
+completed one.
+
+Live checks used Gemini Flash-Lite with the real Electron app and backend, an
+isolated profile and synthetic files. They verified exact JSON output, a
+read/write/approval/read-back task, and a same-conversation follow-up that reused
+the verified results. An initial lower test allowance also exercised
+the token-budget pause; the file task completed with sufficient allowance.
+
+The broader runtime suite passed 581 checks. After the desktop workflow exposed
+the late-control race, 129 focused completion, lifecycle and Run API checks
+passed, including deterministic Pause/Stop requests during persistence. The
+affected desktop Pause/Continue workflow passed three consecutive runs; the
+other 18 desktop workflows passed in the full application run. These test sets
+overlap. The desktop pause test now waits for an accepted command before
+releasing its model barrier, so it tests an intentional pause rather than racing
+the final answer.
+
+These checks improve the completion protocol; they do not prove semantic task
+completion for every prompt. The model still has to judge whether its verified
+results satisfy the user's request. The progress-text detector is a bounded
+heuristic, not an authorization decision or a general language classifier.
+
 ## Changes
 
 | Area | Problem | Improvement |
@@ -106,10 +170,28 @@ non-resumable. It preserves their transcript and operation history rather than
 guessing that resuming is safe. New checkpoints remain resumable after clock
 changes and event-log pruning because both sequence values are stored durably.
 
+## Task completion and compaction follow-up
+
+Two reproduced completion defects are fixed: changing an unfinished file outcome
+to `answer` could bypass its evidence requirements, and a required task save could
+fail after history had already reported success. Kind changes cannot convert
+existing work into delivery-only outcomes. Answer completion now joins the history
+transaction, restores in-memory state on rollback, and reports save failures.
+An idempotent failure checkpoint preserves the failed turn when storage permits it.
+
+Compaction keeps the original goal and every current outcome outside summaries.
+The goal is saved before any model request. Failed or paused turns in the active
+task restore all saved requests, applied steering, final status, and tool results,
+including beyond the recent-message window. Failed live tool rounds are protected
+as complete units. If protected records exceed the budget, the turn pauses instead
+of truncating them. Legacy summarization uses the same checkpoint policy.
+See [conversation compaction](context-compaction.md) for the exact retention policy,
+provider boundaries, and storage limits.
+
 Focused regressions cover interrupted streams, nested schemas, bounded replay,
 checkpoint cancellation, old-history paging/search, model budget exhaustion,
 schema upgrades and notification recovery across a database restart. The
-branch was verified locally with 1,834 backend tests passing (8 environment-dependent
+initial runtime review was verified locally with 1,834 backend tests passing (8 environment-dependent
 skips), 282 renderer tests, 44 Electron unit tests, type checks and renderer builds,
 and all 18 isolated application workflows. Real-browser checks passed on Chrome
 125.0.6422.141 and stable 158.0.8127.88. The SDK contract fixtures, generated API

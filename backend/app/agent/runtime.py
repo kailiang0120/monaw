@@ -387,12 +387,11 @@ def _settings_cache_key(settings) -> str:
 
 
 def _provider_api_key(settings) -> str:
+    """Resolve credentials through the same connection registry used by the picker."""
+    from app.agent.model_registry import get_connection
+
     provider = str(getattr(settings, "model_provider", "openai") or "openai").lower()
-    if provider == "codex":
-        return ""
-    if provider == "gemini":
-        return getattr(settings, "google_api_key", "")
-    return getattr(settings, "openai_api_key", "")
+    return get_connection(provider).api_key(settings)
 
 
 def reset_runtime_cache(*, reset_mcp: bool = True) -> None:

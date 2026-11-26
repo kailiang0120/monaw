@@ -1,6 +1,6 @@
 import type { OpenAIAccountStatus } from '../../lib/api/settings'
-import type { AgentSettings, BrowserUseDiagnostics, DiagnosticsSummary } from '../../lib/api/types'
-import { providerLabel } from '../settings/settingsConfig'
+import type { AgentSettings, BrowserUseDiagnostics, DiagnosticsSummary, ModelOptions } from '../../lib/api/types'
+import { FALLBACK_MODEL_OPTIONS, modelLabel, providerLabel } from '../../lib/modelSelection'
 import { PERMISSION_MODE_COPY, type SettingsPageId } from '../settings/settingsCopy'
 
 /** `ready` needs nothing; `action` needs the user; `problem` failed a check; `checking` is waiting on one. */
@@ -43,19 +43,25 @@ export function shouldShowGuide({
 export const EXAMPLE_PROMPT = 'Look at the files in my workspace folder and give me a short summary of what is there. Do not change anything.'
 
 /** Whether the selected provider has the credential it needs, from saved key status or the account check. */
-function modelStep(settings: AgentSettings, account: OpenAIAccountStatus | null): GuideStep {
+function modelStep(settings: AgentSettings, account: OpenAIAccountStatus | null, catalog: ModelOptions): GuideStep {
   const provider = settings.llm.provider
-  const label = providerLabel(provider)
+  const label = providerLabel(provider, catalog)
+  const detail = modelLabel(settings.llm, catalog)
+  const connection = catalog.providers.find((entry) => entry.id === provider)
   const base = { id: 'model', title: 'Connect a model', settingsPage: 'apiKeys' as const }
+  if (connection?.available === true) return { ...base, state: 'ready', detail }
+  if (connection?.available === false) {
+    return { ...base, state: 'action', detail: connection.unavailable_reason || `Configure ${label} in Settings.`, actionLabel: 'Connect' }
+  }
   if (provider === 'codex') {
     if (!account) return { ...base, state: 'checking', detail: 'Checking your OpenAI account…' }
     return account.connected
-      ? { ...base, state: 'ready', detail: `${label} · ${settings.llm.model_name}` }
+      ? { ...base, state: 'ready', detail }
       : { ...base, state: 'action', detail: 'Sign in with ChatGPT to use your OpenAI account.', actionLabel: 'Sign in' }
   }
   const hasKey = provider === 'gemini' ? settings.api_keys?.has_google_key : settings.api_keys?.has_openai_key
   return hasKey
-    ? { ...base, state: 'ready', detail: `${label} · ${settings.llm.model_name}` }
+    ? { ...base, state: 'ready', detail }
     : { ...base, state: 'action', detail: `Add an API key for ${label}, or choose another provider.`, actionLabel: 'Add key' }
 }
 
@@ -63,14 +69,16 @@ export function requiredSteps({
   settings,
   account,
   workspaceDir,
+  catalog = FALLBACK_MODEL_OPTIONS,
 }: {
   settings: AgentSettings
   account: OpenAIAccountStatus | null
   workspaceDir: string
+  catalog?: ModelOptions
 }): GuideStep[] {
   const mode = PERMISSION_MODE_COPY[settings.permissions?.mode] ?? PERMISSION_MODE_COPY.default
   return [
-    modelStep(settings, account),
+    modelStep(settings, account, catalog),
     {
       id: 'workspace',
       title: 'Pick a working folder',

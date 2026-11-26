@@ -82,9 +82,13 @@ def isolated_chrome(tmp_path, handler=None):
             stderr = (tmp_path/'chrome-stderr.log').read_text(errors='replace')[-2000:]
             state = f'exited with code {process.returncode}' if process.poll() is not None else 'still running after 45s'
             pytest.fail(f'Isolated Chrome did not expose DevTools endpoint ({executable} {state}).\n{stderr}')
-        # Own a target instead of depending on the browser's startup tab.
+        # Port publication precedes renderer readiness on cold Windows starts.
+        # Give our owned target the remaining shared startup budget as well.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pytest.fail('Isolated Chrome exhausted its startup budget before target creation.')
         request = Request(f'http://127.0.0.1:{port}/json/new?about:blank', method='PUT')
-        with urlopen(request, timeout=10) as response:
+        with urlopen(request, timeout=remaining) as response:
             page = json.load(response)
         yield page['webSocketDebuggerUrl'],f'http://127.0.0.1:{http.server_port}/'
     except BaseException:

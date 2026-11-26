@@ -1,116 +1,8 @@
-import type { AgentSettings, ModelOptions } from '../../lib/api/types'
+import type { AgentSettings } from '../../lib/api/types'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from '../../lib/identity'
 
-export type ModelOptionsCatalog = ModelOptions
-
-export const OPENAI_MODELS = ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']
-export const GEMINI_MODELS = [
-  'gemini-pro-latest',
-  'gemini-flash-latest',
-  'gemini-flash-lite-latest',
-]
-export const FALLBACK_MODEL_OPTIONS: ModelOptionsCatalog = {
-  providers: [
-    { id: 'openai', label: 'OpenAI API', models: OPENAI_MODELS },
-    { id: 'codex', label: 'OpenAI account', models: OPENAI_MODELS },
-    { id: 'gemini', label: 'Google', models: GEMINI_MODELS },
-  ],
-}
-export const LLM_PROVIDERS: Array<AgentSettings['llm']['provider']> = FALLBACK_MODEL_OPTIONS.providers.map((provider) => provider.id)
-
-export const OPENAI_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_effort']> = [
-  'none',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-]
-export const GEMINI_PRO_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_effort']> = [
-  'low',
-  'medium',
-  'high',
-]
-export const GEMINI_FLASH_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_effort']> = [
-  'minimal',
-  'low',
-  'medium',
-  'high',
-]
-export const GEMINI_25_PRO_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_effort']> = [
-  'low',
-  'medium',
-  'high',
-]
-export const GEMINI_25_FLASH_REASONING_EFFORTS: Array<AgentSettings['llm']['reasoning_effort']> = [
-  'none',
-  'low',
-  'medium',
-  'high',
-]
-
-export function providerOptions(catalog: ModelOptionsCatalog = FALLBACK_MODEL_OPTIONS) {
-  return catalog.providers.length > 0 ? catalog.providers : FALLBACK_MODEL_OPTIONS.providers
-}
-
-const COMPACT_PROVIDER_LABELS: Record<string, string> = {
-  openai: 'API',
-  codex: 'ChatGPT',
-  gemini: 'Gemini',
-}
-
-/** Short "provider · model" text for the composer's model control, e.g. "ChatGPT · gpt-6-luna". */
-export function compactModelLabel(provider: string, label: string, model: string, displayName?: string): string {
-  const name = COMPACT_PROVIDER_LABELS[provider] ?? label
-  const shortModel = displayName
-    || (provider === 'gemini' ? model.replace(/^gemini-/, '').replace(/-latest$/, '') : model)
-  return `${name} · ${shortModel}`
-}
-
-/** Comma- or newline-separated model names, trimmed and without repeats. */
-export function parseModelNames(text: string): string[] {
-  return [...new Set(text.split(/[,\n]/).map((name) => name.trim()).filter(Boolean))]
-}
-
-export function providerLabel(
-  provider: AgentSettings['llm']['provider'],
-  catalog: ModelOptionsCatalog = FALLBACK_MODEL_OPTIONS,
-): string {
-  return providerOptions(catalog).find((item) => item.id === provider)?.label
-    ?? FALLBACK_MODEL_OPTIONS.providers.find((item) => item.id === provider)?.label
-    ?? provider
-}
-
-export function modelsForProvider(
-  provider: AgentSettings['llm']['provider'],
-  catalog: ModelOptionsCatalog = FALLBACK_MODEL_OPTIONS,
-): string[] {
-  const catalogModels = providerOptions(catalog).find((item) => item.id === provider)?.models
-  if (catalogModels && catalogModels.length > 0) return catalogModels
-  return FALLBACK_MODEL_OPTIONS.providers.find((item) => item.id === provider)?.models
-    ?? OPENAI_MODELS
-}
-
-export function reasoningEffortsForProvider(
-  provider: AgentSettings['llm']['provider'],
-  modelName = '',
-  catalog?: ModelOptionsCatalog,
-): Array<AgentSettings['llm']['reasoning_effort']> {
-  // A ChatGPT account lists the levels each of its models supports.
-  const listed = catalog?.providers.find((item) => item.id === provider)?.reasoning_efforts?.[modelName]
-  if (listed?.length) return listed
-  if (provider === 'gemini') {
-    if (modelName === 'gemini-flash-lite-latest') return GEMINI_FLASH_REASONING_EFFORTS
-    if (modelName === 'gemini-pro-latest' || modelName === 'gemini-flash-latest') return GEMINI_PRO_REASONING_EFFORTS
-    if (modelName.startsWith('gemini-3') && modelName.includes('flash')) return GEMINI_FLASH_REASONING_EFFORTS
-    if (modelName.startsWith('gemini-3') && modelName.includes('pro')) return GEMINI_PRO_REASONING_EFFORTS
-    if (modelName.startsWith('gemini-2.5') && modelName.includes('pro')) return GEMINI_25_PRO_REASONING_EFFORTS
-    return GEMINI_25_FLASH_REASONING_EFFORTS
-  }
-  return modelName === 'gpt-6-astra' || modelName === 'gpt-6.1-sol'
-    ? OPENAI_REASONING_EFFORTS.filter((effort) => effort !== 'none')
-    : OPENAI_REASONING_EFFORTS
-}
+import { FALLBACK_MODEL_OPTIONS, type ModelOptionsCatalog } from '../../lib/modelSelection'
+export { FALLBACK_MODEL_OPTIONS, providerOptions, providerLabel, modelsForProvider, reasoningEffortsForProvider, parseModelNames, type ModelOptionsCatalog } from '../../lib/modelSelection'
 
 /** Model tokens one chat message may use before the task pauses (backend DEFAULT_MAX_TOKENS_PER_TURN). */
 export const DEFAULT_MAX_TOKENS_PER_TURN = 5_000_000
@@ -334,14 +226,11 @@ export function normalizeDraft(
   settings: AgentSettings,
   catalog: ModelOptionsCatalog = FALLBACK_MODEL_OPTIONS,
 ): AgentSettings {
-  const providers = providerOptions(catalog).map((option) => option.id)
-  const provider = providers.includes(settings.llm.provider) ? settings.llm.provider : 'openai'
-  const modelOptions = modelsForProvider(provider, catalog)
-  const modelName = modelOptions.includes(settings.llm.model_name) ? settings.llm.model_name : modelOptions[0]
-  const reasoningOptions = reasoningEffortsForProvider(provider, modelName, catalog)
-  const reasoningEffort = reasoningOptions.includes(settings.llm.reasoning_effort)
-    ? settings.llm.reasoning_effort
-    : reasoningOptions[0]
+  // Catalog refreshes never rewrite a saved selection or unsupported reasoning value.
+  const provider = settings.llm.provider
+  const modelName = settings.llm.model_name
+  const reasoningEffort = settings.llm.reasoning_effort
+  void catalog
   const customProfile = settings.permissions.custom_profile
     ? clonePermissionProfile(settings.permissions.custom_profile)
     : settings.permissions.mode === 'custom'

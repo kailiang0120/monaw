@@ -19,6 +19,7 @@ export async function updateSettings(settings: SettingsUpdatePayload): Promise<A
     body: JSON.stringify(settings),
   })
   if (!res.ok) await throwApiError(res, 'Failed to update settings')
+  window.dispatchEvent(new Event('monaw:model-catalog-changed'))
   return res.json()
 }
 
@@ -70,6 +71,7 @@ export async function startOpenAIAccountLogin(): Promise<{ auth_url: string; log
 export async function logoutOpenAIAccount(): Promise<OpenAIAccountStatus> {
   const res = await apiFetch(`${BASE}/api/openai-account/logout`, { method: 'POST' })
   if (!res.ok) await throwApiError(res, 'Failed to sign out of OpenAI account')
+  window.dispatchEvent(new Event('monaw:model-catalog-changed'))
   return res.json()
 }
 

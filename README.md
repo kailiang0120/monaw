@@ -97,7 +97,7 @@ Browser profiles and allowed domains are configured under **Settings > Browser**
 
 ## Workspaces, Memory, and Local Data
 
-Each conversation can use its own project folder. Chats without a selected project get a separate folder under `Documents\monaw\YYYY-MM-DD\chat-<id>` (using your Windows Documents location, including redirection). The saved workspace determines relative file paths, command locations, and project `AGENTS.md` instructions. Change it while the agent is idle, or reset it to that chat's default folder. Existing chats keep their saved workspace.
+Each conversation can use its own project folder. Chats without a selected project work directly in `Documents\monaw\YYYY-MM-DD` (using your Windows Documents location, including redirection). Chats created on the same local date share that working folder and appear under **Default workspace**. The saved workspace determines relative file paths, command locations, and project `AGENTS.md` instructions. Change it while the agent is idle, or reset it to that chat's creation-date folder. Existing chats keep their saved workspace and files. Chat history stays in `.monaw\runtime\agent.db`.
 
 Memory has two scopes: **global** for your preferences and **workspace** for project context. Manage it under **Settings > Identity**. See the [memory guide](docs/memory.md).
 

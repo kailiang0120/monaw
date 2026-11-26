@@ -37,6 +37,7 @@ def test_backend_code_uses_no_undefined_names():
 
 
 def test_release_version_metadata_and_installer_filename_are_synchronized():
+    """Require one valid release version across the app, backend, locks and docs."""
     repo_root = Path(__file__).resolve().parents[4]
     frontend_dir = repo_root / "frontend"
     backend_dir = repo_root / "backend"
@@ -46,7 +47,7 @@ def test_release_version_metadata_and_installer_filename_are_synchronized():
     backend_lock = tomllib.loads((backend_dir / "uv.lock").read_text(encoding="utf-8"))
 
     version = frontend_package["version"]
-    assert version == "1.1.0"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
     assert frontend_lock["version"] == version
     assert frontend_lock["packages"][""]["version"] == version
     assert backend_project["project"]["version"] == version

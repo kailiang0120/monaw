@@ -40,6 +40,8 @@ import {
   type ConnectionSecretStatuses,
 } from './connectionPortals/connectionPortalConfig'
 import { Dropdown } from '../../components/Dropdown'
+import { ModelPicker } from '../../components/ModelPicker'
+import { useModelCatalogState, refreshModelCatalog } from '../../hooks/useModelCatalog'
 import {
   Badge,
   ChoiceCard,
@@ -69,7 +71,6 @@ import {
   reconnectBrowser,
 } from '../../lib/api/diagnostics'
 import {
-  fetchModelOptions,
   fetchOpenAIAccountStatus,
   fetchSettings,
   fetchSandboxStatus,
@@ -94,7 +95,6 @@ import {
   activeKeyProvider,
   applyPermissionProfile,
   duplicateMcpServerNames,
-  FALLBACK_MODEL_OPTIONS,
   formatTokenLimit,
   formatUnavailableReason,
   normalizeDraft,
@@ -102,7 +102,6 @@ import {
   permissionProfileFromPermissions,
   providerLabel,
   TOKEN_LIMIT_OPTIONS,
-  type ModelOptionsCatalog,
 } from './settingsConfig'
 
 /** Model names for one provider, typed as a comma-separated list. */
@@ -211,11 +210,12 @@ export function SettingsModal({
     reconcileMcpCredentials,
     save: saveDraft,
   } = useSettingsDraft()
-  const [modelOptions, setModelOptions] = useState<ModelOptionsCatalog>(FALLBACK_MODEL_OPTIONS)
+  const { catalog: modelOptions, status: modelCatalogStatus } = useModelCatalogState()
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
   const [toolsTab, setToolsTab] = useState<ToolsTab>('skills')
   const [navQuery, setNavQuery] = useState('')
   const [openaiAccount, setOpenaiAccount] = useState<OpenAIAccountStatus | null>(null)
+  const accountConnectedRef = useRef(false)
   const [openaiAccountBusy, setOpenaiAccountBusy] = useState(false)
   const [refreshingOpenAIUsage, setRefreshingOpenAIUsage] = useState(false)
   const [openaiAccountError, setOpenaiAccountError] = useState('')
@@ -266,7 +266,13 @@ export function SettingsModal({
         const status = await fetchOpenAIAccountStatus(controller.signal)
         if (!controller.signal.aborted) {
           setOpenaiAccount(status)
-          if (status.connected && !status.login_pending) setOpenaiAccountAuthUrl('')
+          if (status.connected !== accountConnectedRef.current) {
+            accountConnectedRef.current = status.connected
+            void refreshModelCatalog(true)
+          }
+          if (status.connected && !status.login_pending) {
+            setOpenaiAccountAuthUrl('')
+          }
           if (openaiAccountAuthUrl && status.login_error && !status.login_pending) {
             setOpenaiAccountAuthUrl('')
             setOpenaiAccountError(status.login_error)
@@ -390,13 +396,6 @@ export function SettingsModal({
     const signal = controller.signal
 
     const load = async () => {
-      const modelOptionsPromise = fetchModelOptions(signal).catch(() => FALLBACK_MODEL_OPTIONS)
-      modelOptionsPromise.then((loadedModelOptions) => {
-        if (cancelled) return
-        setModelOptions(loadedModelOptions)
-        updateDraft((current) => normalizeDraft(current, loadedModelOptions))
-      })
-
       try {
         const settings = normalizeDraft(await fetchSettings(signal))
         if (!cancelled) {
@@ -550,6 +549,7 @@ export function SettingsModal({
     const outcome = await saveDraft(modelOptions)
     if (!mountedRef.current || outcome === 'failed') return
     setSaved(outcome === 'saved')
+    void refreshModelCatalog(true)
     // Saving is complete. Diagnostics must not delay success or outlive the dialog.
     saveDiagnosticsRef.current?.abort()
     const controller = new AbortController()
@@ -807,6 +807,18 @@ export function SettingsModal({
                 <>
                   <PageHeader title={PAGE_COPY.model.label} />
                   <div className="space-y-3">
+                    <SettingsCard>
+                      <div className="p-4">
+                        <ModelPicker
+                          label="Default model"
+                          value={draft.llm}
+                          catalog={modelOptions}
+                          loading={modelCatalogStatus === 'loading'}
+                          onRetry={() => { void refreshModelCatalog(true) }}
+                          onChange={(selection) => updateDraft((current) => ({ ...current, llm: { ...current.llm, ...selection } }))}
+                        />
+                      </div>
+                    </SettingsCard>
                     <SettingsCard
                       title="Voice input"
                       action={
@@ -871,7 +883,7 @@ export function SettingsModal({
                   <div className="space-y-3">
                     <SettingsCard
                       title="OpenAI account"
-                      description="Use your ChatGPT plan for Monaw's model requests, instead of an API key."
+                      description="Use your ChatGPT paid plan for Monaw’s model requests, instead of an API key."
                       action={
                         <Badge tone={openaiAccount?.connected && openaiAccount.plan_usage !== false ? 'ok' : 'warn'}>
                           {openaiAccount?.connected
@@ -1005,8 +1017,8 @@ export function SettingsModal({
                     )}
 
                     <SettingsCard title="Extra models" description={MODEL_COPY.customModels}>
-                      {(['codex', 'openai', 'gemini'] as const).map((provider) => {
-                        const catalog = modelOptions.providers.find((item) => item.id === provider)
+                      {modelOptions.providers.map((catalog) => {
+                        const provider = catalog.id
                         const fromAccount = provider === 'codex' && catalog?.source === 'account'
                         return (
                           <CustomModelsRow

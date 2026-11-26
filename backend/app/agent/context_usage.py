@@ -34,8 +34,15 @@ _OPENAI_CONTEXT_WINDOWS = {
     "gpt-6-sol": 1_050_000,
     "gpt-6.1-sol": 1_050_000,
     "gpt-6-astra": 1_050_000,
+    "gpt-6.2-sol": 1_050_000,
+    "gpt-6.2-astra": 1_050_000,
+    "gpt-6.1-terra": 1_050_000,
 }
 _GEMINI_CONTEXT_WINDOWS = {
+    "gemini-4-neon": 1_048_576,
+    "gemini-4-hydrogen": 1_048_576,
+    "gemini-4-carbon": 1_048_576,
+    "gemini-4-argon": 1_048_576,
     "gemini-pro-latest": 1_048_576,
     "gemini-flash-latest": 1_048_576,
     "gemini-flash-lite-latest": 1_048_576,

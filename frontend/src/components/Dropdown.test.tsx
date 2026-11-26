@@ -104,4 +104,34 @@ describe('Dropdown keyboard use', () => {
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
     expect(trigger()).toHaveFocus()
   })
+
+  it('searches grouped choices and skips unavailable options during keyboard selection', async () => {
+    const onChange = vi.fn()
+    render(<Dropdown
+      ariaLabel="Level"
+      value="blocked"
+      options={[
+        { value: 'blocked', label: 'Unavailable', group: 'Connection', disabled: true },
+        { value: 'low', label: 'Low', group: 'Connection' },
+        { value: 'high', label: 'High', group: 'Connection' },
+      ]}
+      onChange={onChange}
+      searchable
+    />)
+    fireEvent.click(trigger())
+    const search = screen.getByRole('searchbox', { name: 'Search options' })
+    await waitFor(() => expect(search).toHaveFocus())
+    expect(screen.getByRole('group', { name: 'Connection' })).toBeInTheDocument()
+    expect(option('Unavailable')).toBeDisabled()
+    fireEvent.keyDown(search, { key: 'ArrowDown' })
+    expect(option('Low')).toHaveFocus()
+    fireEvent.keyDown(option('Low'), { key: 'h' })
+    expect(search).toHaveFocus()
+    expect(search).toHaveValue('h')
+    expect(screen.queryByRole('option', { name: 'Low' })).not.toBeInTheDocument()
+    fireEvent.keyDown(search, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledWith('high')
+    expect(trigger()).toHaveFocus()
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+  })
 })

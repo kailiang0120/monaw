@@ -33,7 +33,7 @@ function getBarColor(percentage: number): string {
 }
 
 function getStatusLabel(percentage: number): string {
-  if (percentage >= 90) return 'Compaction imminent'
+  if (percentage >= 90) return 'Summarizing soon'
   if (percentage >= 80) return 'Approaching limit'
   if (percentage >= 60) return 'Getting warm'
   return 'Plenty of room'
@@ -61,8 +61,8 @@ export function ContextUsageBar({ usage }: Props) {
         aria-label="Context usage available after the first message"
         title="Context usage available after the first message"
       >
-        <span className="inline-flex h-[14px] w-[14px] items-center justify-center rounded-full bg-[var(--st-border-strong)]">
-          <span className="h-[8px] w-[8px] rounded-full bg-[var(--st-surface)]" />
+        <span className="inline-flex h-3 w-3 items-center justify-center rounded-full bg-[var(--st-border-strong)]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--st-surface)]" />
         </span>
       </span>
     )
@@ -97,12 +97,12 @@ export function ContextUsageBar({ usage }: Props) {
         aria-expanded={open}
       >
         <span
-          className="inline-flex h-[14px] w-[14px] items-center justify-center rounded-full"
+          className="inline-flex h-3 w-3 items-center justify-center rounded-full"
           style={{
             background: `conic-gradient(${color} ${percentage * 3.6}deg, rgba(130, 147, 112, 0.18) 0deg)`,
           }}
         >
-          <span className="h-[8px] w-[8px] rounded-full bg-[var(--st-surface)]" />
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--st-surface)]" />
         </span>
       </button>
 
@@ -129,7 +129,7 @@ export function ContextUsageBar({ usage }: Props) {
             </div>
             <div className="mt-1 flex items-center justify-between">
               <span className="text-[9px] text-neutral-600">{getStatusLabel(percentage)}</span>
-              <span className="text-[9px] text-neutral-700">compact at {formatTokens(usage.compaction_at)}</span>
+              <span className="text-[9px] text-neutral-700">summarizes at {formatTokens(usage.compaction_at)}</span>
             </div>
           </div>
 
@@ -153,8 +153,11 @@ export function ContextUsageBar({ usage }: Props) {
           </div>
 
           {usage.estimator && (
-            <p className="border-t border-white/[0.05] px-3 py-1.5 text-[9px] text-neutral-700" title={usage.notes}>
-              {usage.estimator}
+            <p
+              className="border-t border-white/[0.05] px-3 py-1.5 text-[9px] text-neutral-700"
+              title="Approximate tokens used by your messages, instructions, and tools. Actual model usage may vary."
+            >
+              Estimated token usage
             </p>
           )}
         </div>

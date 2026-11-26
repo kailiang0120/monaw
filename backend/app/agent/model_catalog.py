@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from app.agent.llm_constants import CHAT_MODELS_BY_PROVIDER
+from app.agent.model_registry import CONNECTIONS, MODEL_LABELS, reasoning_efforts
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ ACCOUNT_MODELS_TTL_SECONDS = 600
 _REASONING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 _account_cache: tuple[float, list["AccountModel"]] | None = None
+_account_cache_identity = ""
 _account_lock = threading.Lock()
 
 
@@ -32,27 +33,23 @@ class AccountModel:
     reasoning_efforts: list[str] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class ProviderModelOptions:
-    id: str
-    label: str
-    models: list[str]
-    labels: dict[str, str] = field(default_factory=dict)
-    reasoning_efforts: dict[str, list[str]] = field(default_factory=dict)
-    source: str = "built_in"
+def _account_identity() -> str:
+    """Read the signed-in identity before consulting account-specific metadata."""
+    from app.agent.chatgpt_account import chatgpt_account
 
-
-def _provider_label(provider: str) -> str:
-    if provider == "gemini":
-        return "Google"
-    if provider == "codex":
-        return "OpenAI account"
-    return "OpenAI API"
+    return chatgpt_account.catalog_identity()
 
 
 def parse_account_models(payload: object) -> list[AccountModel]:
     """The models an account offers in its picker, in the account's order."""
     entries = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) and isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        # Standard /v1/models also lists embeddings/audio/image models. Only
+        # known chat IDs are eligible; no reasoning contract is implied.
+        chat_ids = set(CONNECTIONS["codex"].models)
+        return [AccountModel(id=entry["id"].strip(), label=MODEL_LABELS.get(entry["id"].strip(), entry["id"].strip()))
+                for entry in payload["data"] if isinstance(entry, dict)
+                and isinstance(entry.get("id"), str) and entry["id"].strip() in chat_ids]
     if not isinstance(entries, list):
         return []
     listed = [
@@ -89,8 +86,14 @@ def _fetch_account_models() -> list[AccountModel] | None:
 
 def account_models(*, refresh: bool = False) -> list[AccountModel]:
     """The signed-in account's models, cached briefly; empty when unavailable."""
-    global _account_cache
+    global _account_cache, _account_cache_identity
+    identity = _account_identity()
     with _account_lock:
+        if identity != _account_cache_identity or not identity:
+            _account_cache = None
+            _account_cache_identity = identity
+        if not identity:
+            return []
         if not refresh and _account_cache is not None and time.monotonic() - _account_cache[0] < ACCOUNT_MODELS_TTL_SECONDS:
             return _account_cache[1]
     try:
@@ -99,6 +102,8 @@ def account_models(*, refresh: bool = False) -> list[AccountModel]:
         logger.warning("Could not load the ChatGPT account's models: %s", exc)
         models = []
     with _account_lock:
+        if identity != _account_identity():
+            return []  # A completed request from an old account cannot refill the cache.
         if models is None:
             _account_cache = None  # signed out
             return []
@@ -109,20 +114,35 @@ def account_models(*, refresh: bool = False) -> list[AccountModel]:
         return _account_cache[1] if _account_cache is not None else []
 
 
-def model_options_payload(custom_models: dict[str, list[str]] | None = None) -> dict:
+def model_options_payload(custom_models: dict[str, list[str]] | None = None, *, settings=None) -> dict:
+    """Publish one secret-free registry for every model selection surface."""
+    from app.agent.chatgpt_account import chatgpt_account
+
     custom_models = custom_models or {}
     live = account_models()
+    account = chatgpt_account.status()
     providers = []
-    for provider, built_in in CHAT_MODELS_BY_PROVIDER.items():
+    for provider, connection in CONNECTIONS.items():
+        models = list(connection.models)
+        labels = {model: MODEL_LABELS.get(model, model) for model in models}
+        efforts = {model: reasoning_efforts(provider, model) for model in models}
+        source = "built_in"
         if provider == "codex" and live:
-            option = ProviderModelOptions(
-                id=provider, label=_provider_label(provider), models=[model.id for model in live],
-                labels={model.id: model.label for model in live},
-                reasoning_efforts={model.id: model.reasoning_efforts for model in live if model.reasoning_efforts},
-                source="account",
-            )
-        else:
-            option = ProviderModelOptions(id=provider, label=_provider_label(provider), models=list(built_in))
-        extra = [name for name in custom_models.get(provider, []) if name not in option.models]
-        providers.append({**option.__dict__, "models": [*option.models, *extra]})
+            models = list(dict.fromkeys(model.id for model in live))
+            labels = {model.id: model.label for model in live}
+            efforts = {model.id: model.reasoning_efforts for model in live}
+            source = "account"
+        for model in custom_models.get(provider, []):
+            if model not in models:
+                models.append(model)
+                labels[model] = MODEL_LABELS.get(model, model)
+                efforts[model] = reasoning_efforts(provider, model)
+        available, reason = connection.readiness(
+            settings, account_connected=bool(account.get("connected") and account.get("plan_usage")),
+        )
+        providers.append({
+            "id": provider, "connection_id": connection.id, "label": connection.label,
+            "protocol": connection.protocol, "available": available, "unavailable_reason": reason,
+            "models": models, "labels": labels, "reasoning_efforts": efforts, "source": source,
+        })
     return {"providers": providers}

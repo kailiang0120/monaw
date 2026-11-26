@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ObservabilityPanel } from './ObservabilityPanel'
+import { mockNativeDialog } from '../../test/nativeDialog'
 import {
   deleteRuntimeData,
   fetchBackendLogTail,
@@ -168,19 +169,22 @@ describe('ObservabilityPanel', () => {
     })
   })
 
-  it('confirms and deletes runtime data', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+  it('requires a themed confirmation before deleting runtime data', async () => {
+    const restoreDialog = mockNativeDialog()
+    try {
+      render(<ObservabilityPanel />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Delete Data' }))
+      const confirmation = screen.getByRole('dialog', { name: 'Delete runtime data?' })
+      expect(deleteRuntimeData).not.toHaveBeenCalled()
+      fireEvent.click(within(confirmation).getByRole('button', { name: 'Cancel' }))
+      expect(deleteRuntimeData).not.toHaveBeenCalled()
 
-    render(<ObservabilityPanel />)
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete Data' }))
-
-    await waitFor(() => {
-      expect(deleteRuntimeData).toHaveBeenCalled()
-    })
-    expect(confirmSpy).toHaveBeenCalled()
-    expect(await screen.findByText('Runtime data deleted across 3 stored items.')).toBeInTheDocument()
-
-    confirmSpy.mockRestore()
+      fireEvent.click(screen.getByRole('button', { name: 'Delete Data' }))
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete data' }))
+      expect(await screen.findByText('Runtime data deleted across 3 stored items.')).toBeInTheDocument()
+      expect(deleteRuntimeData).toHaveBeenCalledTimes(1)
+    } finally {
+      restoreDialog()
+    }
   })
 })

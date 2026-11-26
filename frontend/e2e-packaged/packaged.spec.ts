@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { createServer, type Server } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomInt, randomUUID } from 'node:crypto'
 
 // Drives the packaged app (release/win-unpacked by default, or MONAW_PACKAGED_APP)
 // with no development tools on PATH. The model is never called: a frozen
@@ -23,11 +23,24 @@ const windows = process.env.SystemRoot || 'C:\\Windows'
 test.skip(!existsSync(appExe), `Packaged app not found at ${appExe}; run scripts/package-windows.ps1 -Unpacked`)
 
 async function freePort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
-  const { port } = server.address() as { port: number }
-  await new Promise((done) => server.close(done))
-  return port
+  // Keep restartable backend ports outside the debugger's dynamic port pool.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const server = createServer()
+    try {
+      await new Promise<void>((done, reject) => {
+        server.once('error', reject)
+        server.listen(randomInt(20_000, 30_000), '127.0.0.1', done)
+      })
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('No packaged-test port')
+      return address.port
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error
+    } finally {
+      if (server.listening) await new Promise<void>((done) => server.close(() => done()))
+    }
+  }
+  throw new Error('No free packaged-test port after 20 attempts')
 }
 
 function packagedEnv(home: string, port: number, extra: Record<string, string> = {}): Record<string, string> {
@@ -43,6 +56,7 @@ function packagedEnv(home: string, port: number, extra: Record<string, string> =
     APPDATA: join(home, 'AppData', 'Roaming'),
     LOCALAPPDATA: join(home, 'AppData', 'Local'),
     MONAW_HOME: home,
+    AGENT_WORKSPACE_DIR: join(home, 'workspace'),
     MONAW_BACKEND_PORT: String(port),
     ...extra,
   }
@@ -210,6 +224,8 @@ for (const corrupted of [false, true]) test(corrupted ? 'rejects an update with 
 test('installs a newer version and preserves settings', async ({}, testInfo) => {
   const installer = process.env.MONAW_UPDATE_TEST_INSTALLER
   test.skip(!installer, 'Run only on a disposable Windows runner with an installed test build')
+  const updateVersion = process.env.MONAW_UPDATE_TEST_VERSION
+  expect(updateVersion, 'The installed-update runner must supply its candidate version').toMatch(/^\d+\.\d+\.\d+$/)
   test.setTimeout(180_000)
   const installRoot = resolve(appDir).toLowerCase()
   if (!installRoot.startsWith(realpathSync.native(tmpdir()).toLowerCase() + '\\')) throw new Error('Installed-update test must use a temporary install directory')
@@ -218,7 +234,7 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
   const server = createHttpServer((request, response) => {
     if (request.url?.split('?')[0] === '/latest.yml') {
       response.writeHead(200, { 'Content-Type': 'text/yaml' })
-      response.end(`version: 1.1.1\nfiles:\n  - url: test-update.exe\n    sha512: ${checksum}\n    size: ${payload.length}\npath: test-update.exe\nsha512: ${checksum}\nreleaseDate: '2026-01-01T00:00:00.000Z'\n`)
+      response.end(`version: ${updateVersion}\nfiles:\n  - url: test-update.exe\n    sha512: ${checksum}\n    size: ${payload.length}\npath: test-update.exe\nsha512: ${checksum}\nreleaseDate: '2026-01-01T00:00:00.000Z'\n`)
     } else if (request.url?.split('?')[0] === '/test-update.exe') {
       response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length })
       response.end(payload)
@@ -267,7 +283,7 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await page.getByRole('button', { name: 'About', exact: true }).click()
     await page.getByRole('button', { name: 'Check for updates' }).click()
-    await expect(page.getByText('Version 1.1.1 is ready to install.')).toBeVisible({ timeout: 60_000 })
+    await expect(page.getByText(`Version ${updateVersion} is ready to install.`)).toBeVisible({ timeout: 60_000 })
     await page.getByRole('button', { name: 'Restart to update' }).click()
     await page.getByRole('button', { name: 'Restart and install' }).click()
     await expect.poll(() => child.exitCode, { timeout: 45_000 }).not.toBeNull()
@@ -275,9 +291,11 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
     browser = undefined
     await expect.poll(() => {
       try {
-        return execFileSync('powershell', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:MONAW_PACKAGED_APP).VersionInfo.ProductVersion'], { encoding: 'utf8' }).trim()
+        // Windows version resources may append a zero revision to the app version.
+        return execFileSync('powershell', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:MONAW_PACKAGED_APP).VersionInfo.ProductVersion'], { encoding: 'utf8' })
+          .trim().replace(/^(\d+\.\d+\.\d+)\.0$/, '$1')
       } catch { return '' }
-    }, { timeout: 90_000 }).toMatch(/^1\.1\.1/)
+    }, { timeout: 90_000 }).toBe(updateVersion)
     await expect.poll(() => packagedProcesses('Monaw.exe').length, { timeout: 60_000 }).toBeGreaterThan(0)
     // The installer relaunches the app. Stop only this temporary installation,
     // then attach a fresh inspector session and verify persisted data.
@@ -285,7 +303,7 @@ test('installs a newer version and preserves settings', async ({}, testInfo) => 
     await expect.poll(() => packagedProcesses().length, { timeout: 30_000 }).toBe(0)
     const updated = track(new PackagedApp(home, await freePort()))
     await updated.start()
-    expect(await updated.app.evaluate(({ app }) => app.getVersion())).toBe('1.1.1')
+    expect(await updated.app.evaluate(({ app }) => app.getVersion())).toBe(updateVersion)
     await expect.poll(async () => updated.api('/api/settings').then(result => result.data.identity?.user_name, () => ''), { timeout: 30_000 }).toBe('Update test')
     await updated.quit()
   } finally {
@@ -305,7 +323,7 @@ test('keeps settings across a restart', async () => {
   await first.page.getByRole('button', { name: 'Identity', exact: true }).click()
   await first.page.getByLabel('Your name').fill('Kai')
   await first.page.getByRole('button', { name: 'Save changes' }).click()
-  await expect(first.page.getByText('Settings saved.')).toBeVisible()
+  await expect(first.page.getByRole('button', { name: 'Saved', exact: true })).toBeDisabled()
   await first.quit()
 
   const second = track(new PackagedApp(home, port))

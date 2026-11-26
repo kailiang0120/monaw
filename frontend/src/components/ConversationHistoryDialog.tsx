@@ -105,7 +105,10 @@ export function ConversationHistoryDialog({ onClose, onSelect }: Props) {
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm">{chat.title}</span>
                 <span className="st-hint block truncate">
-                  {new Date(chat.updated_at ?? chat.created_at).toLocaleDateString()}{chat.workspace_dir ? ` · ${chat.workspace_dir}` : ''}
+                  {new Date(chat.updated_at ?? chat.created_at).toLocaleDateString()}
+                  {chat.workspace_is_default
+                    ? ' · Default workspace'
+                    : chat.workspace_dir ? ` · ${chat.workspace_dir}` : ''}
                 </span>
               </span>
             </button>

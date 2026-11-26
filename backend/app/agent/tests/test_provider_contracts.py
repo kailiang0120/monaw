@@ -14,7 +14,7 @@ from app.agent.model_usage import ModelUsageBudget, current_model_budget
 
 
 @pytest.mark.parametrize('streaming', [False, True])
-@pytest.mark.parametrize('finish_reason', ['STOP', 'MAX_TOKENS', 'SAFETY', None])
+@pytest.mark.parametrize('finish_reason', ['STOP', 'MAX_TOKENS', 'SAFETY', 'MALFORMED_FUNCTION_CALL', None])
 def test_gemini_sdk_terminal_contract_and_model_limit(streaming, finish_reason):
     """Only completed calls survive SDK parsing; metadata constrains the request."""
     requests = []
@@ -62,7 +62,12 @@ def test_gemini_sdk_terminal_contract_and_model_limit(streaming, finish_reason):
                     result = await call
                     assert bool(result.tool_calls) is (finish_reason == 'STOP')
                     assert bool(result.provider_messages) is (finish_reason == 'STOP')
-                    assert result.finish_reason == ('length' if finish_reason == 'MAX_TOKENS' else 'tool_calls' if finish_reason == 'STOP' else 'stop')
+                    expected = {
+                        'STOP': 'tool_calls', 'MAX_TOKENS': 'length',
+                        'SAFETY': 'blocked', 'MALFORMED_FUNCTION_CALL': 'incomplete',
+                    }
+                    assert result.finish_reason == expected[finish_reason]
+                    assert result.provider_finish_reason == finish_reason
                     assert budget.usage.total_tokens == 23
             finally:
                 current_model_budget.reset(token)
@@ -73,6 +78,62 @@ def test_gemini_sdk_terminal_contract_and_model_limit(streaming, finish_reason):
         assert requests[0]['tools'][0]['functionDeclarations'][0]['parameters_json_schema']['properties']['query']['anyOf'] == [
             {'type': 'string'}, {'type': 'null'},
         ]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_gemini4_sdk_keeps_thinking_level_and_final_signature(streaming):
+    """Gemini 4 controls and signed final text survive an actual SDK round trip."""
+    from app.agent.harness.response_policy import TurnResponsePolicy
+
+    requests = []
+    payload = {'candidates': [{'content': {'role': 'model', 'parts': [
+        {'text': 'Finished.', 'thoughtSignature': 'c2lnbmVk'},
+    ]}, 'finishReason': 'STOP'}]}
+
+    def transport(request):
+        """Return a signed text response without making provider requests."""
+        if request.method == 'GET':
+            return httpx.Response(200, json={'name': 'models/gemini-4-neon', 'outputTokenLimit': 65536})
+        requests.append(json.loads(request.content))
+        if streaming:
+            return httpx.Response(200, headers={'Content-Type': 'text/event-stream'},
+                                  content='data: ' + json.dumps(payload) + '\n\n')
+        return httpx.Response(200, json=payload)
+
+    async def scenario():
+        """Send the returned provider parts back through the SDK serializer."""
+        client = LLMClient('gemini', 'gemini-4-neon', '', reasoning_effort='xhigh')
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            client._genai_client = genai.Client(api_key='fixture-key', http_options=types.HttpOptions(
+                base_url='https://fixture.invalid', httpx_async_client=http,
+            ))
+
+            async def receive(_text):
+                """Enable streaming without writing test output."""
+                pass
+
+            try:
+                result = await client.chat_with_tools(
+                    [{'role': 'user', 'content': 'Begin.'}], [],
+                    stream_callback=receive if streaming else None,
+                )
+                assert result.content == 'Finished.' and not result.tool_calls
+                decision = TurnResponsePolicy().decide(
+                    result, tools_available=False, history=[], budget_exhausted=False,
+                )
+                assert decision.messages == result.provider_messages
+                await client.chat_with_tools(
+                    [{'role': 'user', 'content': 'Begin.'}] + decision.messages
+                    + [{'role': 'user', 'content': 'Continue.'}], [],
+                    stream_callback=receive if streaming else None,
+                )
+                assert requests[0]['generationConfig']['thinkingConfig']['thinking_level'] == 'XHIGH'
+                assert 'thinking_budget' not in requests[0]['generationConfig']['thinkingConfig']
+                assert requests[1]['contents'][1]['parts'][0]['thoughtSignature'] == 'c2lnbmVk'
+            finally:
+                await client._genai_client.aio.aclose()
 
     asyncio.run(scenario())
 
@@ -95,7 +156,7 @@ def test_account_and_unreported_reasoning_keep_conservative_reservations():
     assert gemini.total_tokens == 25 and gemini.image_tokens == 7
 
 
-@pytest.mark.parametrize('terminal', ['completed', 'incomplete', None, 'late_content'])
+@pytest.mark.parametrize('terminal', ['completed', 'incomplete', 'content_filter', 'refusal', None, 'late_content'])
 def test_openai_sdk_stream_requires_terminal_evidence(terminal):
     """Real SDK parsing must preserve completion guards and output-cap fields."""
     from openai import AsyncOpenAI
@@ -105,10 +166,14 @@ def test_openai_sdk_stream_requires_terminal_evidence(terminal):
             'name': 'inspect', 'arguments': '{}', 'status': 'completed'}
     events = [{'type': 'response.output_item.done', 'output_index': 0, 'sequence_number': 1, 'item': item}]
     if terminal is not None:
-        status = 'completed' if terminal == 'late_content' else terminal
+        status = 'completed' if terminal in {'late_content', 'refusal'} else 'incomplete' if terminal == 'content_filter' else terminal
+        output = [{'type': 'message', 'id': 'msg-1', 'role': 'assistant', 'status': 'completed',
+                   'content': [{'type': 'refusal', 'refusal': 'I cannot fulfill this request.'}]}] if terminal == 'refusal' else []
         events.append({'type': 'response.' + status, 'sequence_number': 2, 'response': {
             'id': 'resp-1', 'object': 'response', 'created_at': 1, 'model': 'gpt-4.1', 'status': status,
-            'output': [], 'usage': {'input_tokens': 5, 'output_tokens': 10, 'total_tokens': 15},
+            'output': output, 'usage': {'input_tokens': 5, 'output_tokens': 10, 'total_tokens': 15},
+            **({'incomplete_details': {'reason': 'content_filter' if terminal == 'content_filter' else 'max_output_tokens'}}
+               if status == 'incomplete' else {}),
         }})
     if terminal == 'late_content':
         events.append({'type': 'response.output_item.done', 'output_index': 1, 'sequence_number': 3, 'item': item})
@@ -138,7 +203,10 @@ def test_openai_sdk_stream_requires_terminal_evidence(terminal):
                 else:
                     result = await call
                     assert bool(result.tool_calls) is (terminal == 'completed')
-                    assert result.finish_reason == ('tool_calls' if terminal == 'completed' else 'length')
+                    expected = 'tool_calls' if terminal == 'completed' else 'blocked' if terminal in {'content_filter', 'refusal'} else 'length'
+                    assert result.finish_reason == expected
+                    if terminal == 'refusal':
+                        assert result.content == 'I cannot fulfill this request.'
                 assert len(requests) == 1
                 assert 0 < requests[0]['max_output_tokens'] < 1000
                 assert budget.reserved == 0

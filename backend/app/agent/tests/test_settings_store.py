@@ -291,20 +291,24 @@ def test_retired_provider_in_stored_settings_migrates_to_openai_default(tmp_path
     assert not hasattr(loaded.llm, "vision_fallback_enabled")
 
 
-def test_retired_openai_model_in_stored_settings_migrates_to_current_model(tmp_path):
+def test_unlisted_openai_model_in_stored_settings_is_preserved(tmp_path):
+    """A changing catalog cannot silently redirect a saved model selection."""
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(
         json.dumps({"llm": {"provider": "openai", "model_name": "gpt-5.4-mini"}}),
         encoding="utf-8",
     )
 
-    assert load_agent_settings(settings_path=settings_path).llm.model_name == "gpt-6-luna"
+    assert load_agent_settings(settings_path=settings_path).llm.model_name == "gpt-5.4-mini"
 
 
 def test_gpt6_astra_normalizes_unsupported_reasoning_effort():
+    """Legacy low and minimum choices retain their effective reasoning level."""
     assert LLMSettings(model_name="gpt-6-astra", reasoning_effort="none").reasoning_effort == "low"
     assert LLMSettings(model_name="gpt-6-sol", reasoning_effort="minimal").reasoning_effort == "low"
     assert LLMSettings(model_name="gpt-6-luna", reasoning_effort="none").reasoning_effort == "none"
+    for provider in ("openai", "codex"):
+        assert LLMSettings(provider=provider, model_name="gpt-6-luna", reasoning_effort="minimal").reasoning_effort == "low"
     for provider, model in (("openai", "gpt-6.1-sol"), ("codex", "gpt-6-sol")):
         migrated = LLMSettings(provider=provider, model_name="gpt-6-sol", reasoning_effort="none")
         assert migrated.model_name == model
@@ -348,6 +352,8 @@ def test_gemini_latest_aliases_preserve_family_and_supported_reasoning(old_model
     assert migrated.model_name == new_model
     assert migrated.reasoning_effort == ("minimal" if new_model == "gemini-flash-lite-latest" else "low")
     assert LLMSettings(provider="gemini", model_name=new_model).model_name == new_model
+    for effort in ("xhigh", "max", "ultra"):
+        assert LLMSettings(provider="gemini", model_name=new_model, reasoning_effort=effort).reasoning_effort == "high"
 
 
 def test_default_skills_use_recommended_profile():
@@ -695,6 +701,7 @@ def test_account_models_follow_the_accounts_list_order_and_levels():
 def test_model_options_use_the_account_list_and_custom_models(monkeypatch):
     import app.agent.model_catalog as model_catalog
 
+    monkeypatch.setattr(model_catalog, "_account_identity", lambda: "account-one")
     monkeypatch.setattr(model_catalog, "_fetch_account_models", lambda: model_catalog.parse_account_models(ACCOUNT_CATALOG))
     payload = model_catalog.model_options_payload({"openai": ["gpt-6-mini"], "codex": ["gpt-6-luna", "my-model"]})
     providers = {item["id"]: item for item in payload["providers"]}
@@ -710,6 +717,7 @@ def test_model_options_use_the_account_list_and_custom_models(monkeypatch):
 def test_model_options_fall_back_and_keep_the_last_good_account_list(monkeypatch):
     import app.agent.model_catalog as model_catalog
 
+    monkeypatch.setattr(model_catalog, "_account_identity", lambda: "account-one")
     monkeypatch.setattr(model_catalog, "_fetch_account_models", lambda: model_catalog.parse_account_models(ACCOUNT_CATALOG))
     assert model_catalog.account_models(refresh=True)
 
@@ -729,8 +737,8 @@ def test_model_options_fall_back_and_keep_the_last_good_account_list(monkeypatch
 def test_settings_keep_any_valid_model_name_and_clean_custom_models():
     # The account's list changes, so any name it offered is kept.
     assert LLMSettings(provider="codex", model_name="gpt-6.1-terra").model_name == "gpt-6.1-terra"
-    # Elsewhere a name must be built in or one the user added.
-    assert LLMSettings(provider="openai", model_name="gpt-6-mini").model_name == "gpt-6-luna"
+    # A model disappearing from the catalog cannot change a saved selection.
+    assert LLMSettings(provider="openai", model_name="gpt-6-mini").model_name == "gpt-6-mini"
     added = LLMSettings(provider="openai", model_name="gpt-6-mini", custom_models={"openai": ["gpt-6-mini"]})
     assert added.model_name == "gpt-6-mini"
     # The API retired gpt-6-sol; the ChatGPT account still offers it.
@@ -743,3 +751,66 @@ def test_settings_keep_any_valid_model_name_and_clean_custom_models():
         "openai": [" gpt-6-mini ", "gpt-6-mini", "bad name", ""], "gemini": ["models/gemini-exp"], "other": ["x"],
     }).custom_models
     assert cleaned == {"openai": ["gpt-6-mini"], "gemini": ["models/gemini-exp"]}
+
+
+def test_model_registry_exposes_readiness_without_credentials_or_guessed_capabilities(monkeypatch):
+    """The public catalog and runtime resolve the same credential-backed connection."""
+    from app.agent.chatgpt_account import chatgpt_account
+    from app.agent.model_catalog import model_options_payload
+    from app.agent.model_registry import get_connection
+    from app.agent.llm_provider_requests import gemini_thinking_config, openai_reasoning_effort
+    from google.genai import types
+
+    monkeypatch.setattr(chatgpt_account, "status", lambda: {"connected": True, "plan_usage": False})
+    settings = _base_settings()
+    settings.google_api_key = ""
+    payload = model_options_payload({"openai": ["gpt-6-unlisted-custom"]}, settings=settings)
+    providers = {item["id"]: item for item in payload["providers"]}
+    assert providers["openai"]["available"] is True
+    assert providers["openai"]["connection_id"] == "openai"
+    assert providers["openai"]["protocol"] == "openai_responses"
+    assert providers["openai"]["reasoning_efforts"]["gpt-6-unlisted-custom"] == []
+    for model in ("gpt-6.2-sol", "gpt-6.2-astra"):
+        assert providers["openai"]["reasoning_efforts"][model] == ["low", "medium", "high", "xhigh", "max"]
+        assert openai_reasoning_effort("none", model) == "low"
+    assert providers["openai"]["reasoning_efforts"]["gpt-6.1-terra"] == ["none", "low", "medium", "high", "xhigh", "max"]
+    assert providers["openai"]["labels"]["gpt-6.2-sol"] == "GPT-6.2 Sol"
+    for model in ("gemini-4-neon", "gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"):
+        levels = ["low", "medium", "high"]
+        if model in {"gemini-4-neon", "gemini-4-hydrogen"}:
+            levels.append("xhigh")
+        assert providers["gemini"]["reasoning_efforts"][model] == levels
+        assert gemini_thinking_config(model, "xhigh", types).thinking_level.value == levels[-1].upper()
+        assert gemini_thinking_config(model, "minimal", types).thinking_level.value == "LOW"
+    assert providers["gemini"]["available"] is False
+    assert providers["codex"]["available"] is False
+    assert "secret-openai-key" not in json.dumps(payload)
+    assert get_connection("openai").api_key(settings) == "secret-openai-key"
+    with pytest.raises(ValueError, match="Unsupported model connection"):
+        get_connection("missing-provider")
+
+
+def test_account_catalog_cache_is_scoped_to_identity_and_preserves_empty_capabilities(monkeypatch):
+    """Account changes and logout cannot reuse another account's cached model list."""
+    import app.agent.model_catalog as catalog
+
+    identity = ["first"]
+    monkeypatch.setattr(catalog, "_account_identity", lambda: identity[0])
+    monkeypatch.setattr(catalog, "_fetch_account_models", lambda: catalog.parse_account_models({
+        "data": [{"id": "gpt-6-luna"}, {"id": "text-embedding-3-small"}, {"id": "gpt-image-1"}],
+    }))
+    assert [(model.id, model.reasoning_efforts) for model in catalog.account_models()] == [("gpt-6-luna", [])]
+    identity[0] = "second"
+    monkeypatch.setattr(catalog, "_fetch_account_models", lambda: [])
+    assert catalog.account_models() == []
+    identity[0] = ""
+    assert catalog.account_models() == []
+
+    def fetch_during_account_switch():
+        """Simulate signing out while a previous account's request is in flight."""
+        identity[0] = ""
+        return [catalog.AccountModel("old-model", "Old model")]
+
+    identity[0] = "first"
+    monkeypatch.setattr(catalog, "_fetch_account_models", fetch_during_account_switch)
+    assert catalog.account_models() == []

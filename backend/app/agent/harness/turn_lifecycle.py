@@ -78,12 +78,20 @@ class TurnLifecycle:
     def pause_requested(self) -> bool:
         return self._pause_requested or bool(getattr(self.durable_run, "pause_requested", False))
 
-    async def request_pause(self) -> None:
-        """Ask the worker to stop at its next safe model/tool boundary."""
+    @property
+    def finalizing(self) -> bool:
+        """The selected outcome owns the run until its durable commit finishes."""
+        return self._finalization_task is not None
+
+    async def request_pause(self) -> bool:
+        """Pause at a safe boundary, unless an outcome already owns the run."""
+        if self.finalizing:
+            return False
         self._pause_requested = True
         self.pause_event.set()
         if self.durable_run is not None:
             self.durable_run.begin_pause()
+        return True
 
     def request_review(self, reason_code: str = "external_effect_unknown") -> None:
         self.review_requested = True
@@ -202,14 +210,25 @@ class TurnLifecycle:
         except Exception:
             logger.exception("Unable to persist turn conversation_id=%s", self.conversation_id)
             outcome = TurnOutcome(
-                summary=outcome.summary,
+                summary=(
+                    "The turn's completion could not be saved. Verify the saved task progress before continuing."
+                    f"\n\nLast generated response:\n{outcome.summary}"
+                ),
                 status="error",
                 reason_code="persistence_failed",
                 attachments=outcome.attachments,
             )
+            # Retry only the idempotent history checkpoint, without committing
+            # answer outcomes or repeating model requests and tool effects.
+            try:
+                await persist(outcome)
+                message = "Completion could not be saved. The failed turn was saved for continuation."
+            except Exception:
+                logger.exception("Unable to save failure checkpoint conversation_id=%s", self.conversation_id)
+                message = "The turn ended, but its history could not be saved."
             self.publisher.emit("error", {
                 "code": "persistence_failed",
-                "message": "The turn ended, but its history could not be saved.",
+                "message": message,
             })
         self.outcome = outcome
         durable_stable = True

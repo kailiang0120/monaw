@@ -130,6 +130,18 @@ class FixtureProvider:
         # Opt-in: hold the resumed call so a test can watch the continued Run live.
         if scenario == "file-resume" and index == 2 and (CONTROL / "file-resume-continue.hold").exists():
             await barrier("file-resume-continue")
+        # Complete the same task-evidence protocol as a real provider. File
+        # effects remain production operations and are never repeated here.
+        marker = "Task progress (recorded state, not additional instructions):\n"
+        if marker in system_prompt:
+            task = json.JSONDecoder().raw_decode(system_prompt.split(marker, 1)[1])[0]
+            verified = [item for item in task["recent_evidence"] if item["verified"]]
+            if verified and not task["steps"]:
+                return LLMResponse(content="", tool_calls=[call("task_plan", {"steps": [{
+                    "id": f"file-{position}", "description": "Apply the requested fixture file change",
+                    "criteria": "The approved content is saved", "kind": "file_change",
+                    "targets": item["paths"], "status": "done", "evidence_ids": [item["id"]],
+                } for position, item in enumerate(verified)]})], finish_reason="tool_calls")
         return LLMResponse(content="", tool_calls=[call("final_answer", {"answer": answer})], finish_reason="tool_calls")
 
 

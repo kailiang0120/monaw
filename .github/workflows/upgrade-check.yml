@@ -10,7 +10,7 @@ on:
       from_tag:
         description: Release to upgrade from
         required: true
-        default: v1.0.0
+        default: v1.1.0
 
 permissions:
   contents: read
@@ -47,6 +47,10 @@ jobs:
         shell: pwsh
         run: ./scripts/package-windows.ps1
 
+      - name: Verify the packaged application
+        working-directory: frontend
+        run: npm run test:packaged
+
       - name: Download the ${{ inputs.from_tag }} installer
         shell: pwsh
         env:
@@ -78,6 +82,17 @@ jobs:
             -WorkDir "$env:RUNNER_TEMP/monaw-upgrade" `
             -ExpectedVersion ((Get-Content frontend/package.json -Raw | ConvertFrom-Json).version) `
             -ExpectedCandidateSha256 $env:CANDIDATE_SHA256
+
+      - name: Upload verified installer and update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: monaw-windows-${{ github.sha }}
+          path: |
+            frontend/release/Monaw-Setup-*-x64.exe
+            frontend/release/Monaw-Setup-*-x64.exe.blockmap
+            frontend/release/latest.yml
+            candidate-checksum.txt
+          if-no-files-found: error
 
       - name: Upload logs
         if: always()
@@ -115,18 +130,21 @@ jobs:
         run: |
           ./scripts/package-windows.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Initial build failed' }
-          Copy-Item frontend/release/Monaw-Setup-1.1.0-x64.exe "$env:RUNNER_TEMP/monaw-initial.exe"
+          $initialVersion = (Get-Content frontend/package.json -Raw | ConvertFrom-Json).version
+          Copy-Item "frontend/release/Monaw-Setup-$initialVersion-x64.exe" "$env:RUNNER_TEMP/monaw-initial.exe"
       - name: Build a newer test installer
         shell: pwsh
         run: |
           Push-Location frontend
-          try { npm version 1.1.1 --no-git-tag-version --ignore-scripts; if ($LASTEXITCODE -ne 0) { throw 'Version change failed' } }
+          try { npm version patch --no-git-tag-version --ignore-scripts; if ($LASTEXITCODE -ne 0) { throw 'Version change failed' } }
           finally { Pop-Location }
           ./scripts/package-windows.ps1 -SkipBackend
           if ($LASTEXITCODE -ne 0) { throw 'Update build failed' }
+          $updateVersion = (Get-Content frontend/package.json -Raw | ConvertFrom-Json).version
+          "MONAW_UPDATE_TEST_VERSION=$updateVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $version = (Get-Item frontend/release/win-unpacked/Monaw.exe).VersionInfo.ProductVersion
           Write-Host "New test app product version: $version"
-          if ($version -notlike '1.1.1*') { throw 'The newer test build has the wrong executable version.' }
+          if ($version -notlike "$updateVersion*") { throw 'The newer test build has the wrong executable version.' }
       - name: Install the initial version into a disposable folder
         shell: pwsh
         run: |
@@ -136,7 +154,7 @@ jobs:
           $process = Start-Process "$env:RUNNER_TEMP/monaw-initial.exe" -ArgumentList '/S', "/D=$installDir" -Wait -PassThru -WindowStyle Hidden
           if ($process.ExitCode -ne 0 -or -not (Test-Path (Join-Path $installDir 'Monaw.exe'))) { throw 'Initial install failed' }
           "MONAW_PACKAGED_APP=$(Join-Path $installDir 'Monaw.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "MONAW_UPDATE_TEST_INSTALLER=$((Resolve-Path frontend/release/Monaw-Setup-1.1.1-x64.exe).Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MONAW_UPDATE_TEST_INSTALLER=$((Resolve-Path "frontend/release/Monaw-Setup-$env:MONAW_UPDATE_TEST_VERSION-x64.exe").Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Download, install, restart and verify retained settings
         working-directory: frontend
         run: npx playwright test -c playwright.packaged.config.ts -g 'installs a newer version and preserves settings'

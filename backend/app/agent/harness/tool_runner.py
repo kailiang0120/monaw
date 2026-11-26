@@ -45,6 +45,7 @@ class PreparedToolCall(TrackedToolCall):
     obs_tool_started_at: float = 0.0
     rejection: GuardedToolResult | None = None
     action_id: str = ""
+    operation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class ToolBatchRunner:
         self.browser_workflow = BrowserWorkflow()
         self._execution_plan: ExecutionPlan | None = None
         self._sync_plan_progress = getattr(memory, "sync_plan_progress", None)
+        self.task_progress = None
 
     def initialize_review_history(self) -> None:
         build = getattr(self.memory, "build_approval_review_context", None)
@@ -229,7 +231,7 @@ class ToolBatchRunner:
                     )
                 self._call_states[prepared.active_key] = "running"
                 self._refresh_phase()
-                if not operation_prepared:
+                if not operation_prepared and not (self.task_progress is not None and tool_name == "task_plan"):
                     metadata = tool_dict.get("metadata") if isinstance(tool_dict.get("metadata"), dict) else {}
                     operation_execution = prepare_tool_operation(
                         getattr(self.lifecycle, "durable_run", None),
@@ -238,6 +240,7 @@ class ToolBatchRunner:
                         lifecycle=self.lifecycle,
                     )
                     operation_prepared = True
+                    prepared.operation_id = getattr(operation_execution, "operation_id", "")
                 return await self.executor.execute(
                     budget=self.budget,
                     tool_dict=tool_dict,
@@ -349,9 +352,17 @@ class ToolBatchRunner:
         status = "ok" if tool_result.status == "ok" else "error"
         tool_output = tool_result.output
 
+        if self.task_progress is not None and prepared.tool_name != "task_plan":
+            evidence = self.task_progress.record(prepared, tool_result, self.lifecycle.durable_run)
+            payload = tool_result.normalized_output
+            tool_output = json.dumps({**payload, "task_evidence": evidence} if payload is not None else {
+                "status": tool_result.status, "result": tool_output, "task_evidence": evidence,
+            }, ensure_ascii=False)
+
         guarded = guarded or self.recovery.observe_result(
             tool_name=tool_name, arguments=arguments, call_id=call_id,
             tool_output=tool_output, status=self._tool_output_status(tool_output, status),
+            tool=prepared.tool_dict,
         )
         raw_tool_output, status, recovery_prompt = guarded.output, guarded.status, guarded.recovery_prompt
         self.pause = guarded.pause or self.pause
@@ -393,7 +404,7 @@ class ToolBatchRunner:
         if plan_step is not None:
             verified = status == "ok"
             plan_step.status = "done" if verified else "failed"
-            if callable(self._sync_plan_progress):
+            if self.task_progress is None and callable(self._sync_plan_progress):
                 self._sync_plan_progress(self.conversation_id, self._execution_plan)
             self.emit({
                 "event": "observation",
@@ -423,10 +434,10 @@ class ToolBatchRunner:
         self.ledger.finish(prepared.active_key)
         self.transcript.add_tool_result(tool_result, images=image_attachments)
         if recovery_prompt:
-            self.transcript.messages.append({"role": "user", "content": recovery_prompt})
+            self.transcript.append({"role": "user", "content": recovery_prompt})
         workflow_hint = self.browser_workflow.observe(tool_name, arguments, raw_tool_output, status)
         if workflow_hint and not recovery_prompt:
-            self.transcript.messages.append({"role": "user", "content": workflow_hint})
+            self.transcript.append({"role": "user", "content": workflow_hint})
 
 
     async def _flush_prepared_tool_calls(self, prepared_calls: list[PreparedToolCall]) -> None:
@@ -483,7 +494,7 @@ class ToolBatchRunner:
         return PreparedToolCall("", call_id, name, step_id, step, arguments, tool, decision, rejection=rejection)
 
     def _sync_plan(self) -> None:
-        if callable(self._sync_plan_progress):
+        if self.task_progress is None and callable(self._sync_plan_progress):
             self._sync_plan_progress(self.conversation_id, self._execution_plan)
 
     def _start(self, prepared: PreparedToolCall) -> None:
@@ -564,4 +575,7 @@ class ToolBatchRunner:
             if self.pause is not None:
                 break
         self.pause = self.pause or self.recovery.finish_round(len(calls))
+        if self.recovery.round_hint and self.pause is None:
+            self.transcript.append({"role": "user", "content": self.recovery.round_hint})
+            self.emit({"event": "progress", "data": {"content": "The recent results are unchanged; checking another approach."}})
         return BatchOutcome(self.pause)

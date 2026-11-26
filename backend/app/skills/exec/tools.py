@@ -801,7 +801,7 @@ def register_tools(registry, _settings=None) -> None:
             "domain": "general",
             "execution_mode": "sync_stateless",
             "affinity_group": None,
-            "metadata": {"parallel_safe": True, "resource_locks": [], "mutates_state": False, "risk_level": "low"},
+            "metadata": {"parallel_safe": True, "resource_locks": [], "mutates_state": False, "risk_level": "low", "progress_polling": True},
         },
         {
             "name": "exec_write_stdin",

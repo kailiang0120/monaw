@@ -9,6 +9,8 @@ export interface Conversation {
   /** Last activity. */
   updated_at?: string
   workspace_dir?: string
+  /** A default working folder, including saved folders from earlier versions. */
+  workspace_is_default?: boolean
   /** A turn is running in it now. */
   running?: boolean
 }
@@ -675,6 +677,10 @@ export interface AgentSettings {
 export interface ModelOptions {
   providers: Array<{
     id: AgentSettings['llm']['provider']
+    connection_id?: string
+    protocol?: string
+    available?: boolean
+    unavailable_reason?: string
     label: string
     models: string[]
     /** Display names by model, where the provider gives them. */

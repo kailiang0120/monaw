@@ -23,6 +23,8 @@ import app.agent.memory_manager as memory_manager_mod
 import app.api.routes.conversations as routes_mod
 from app.agent.database import Database
 from app.agent.memory_manager import MemoryManager
+from app.agent.harness.context_protection import PROTECTED_CONTEXT
+from app.agent.harness.task_progress import TaskProgress
 from app.agent.skill_loader import SkillSpec
 from app.agent.state import ConversationState
 from app.main import app
@@ -148,7 +150,8 @@ def test_a_steered_turn_is_saved_in_the_order_it_happened(monkeypatch, tmp_path)
     ]
 
 
-def test_uploaded_images_survive_reopen_and_steering_without_cross_session_access(monkeypatch, tmp_path):
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+def test_uploaded_images_survive_reopen_and_steering_without_cross_session_access(monkeypatch, tmp_path, provider):
     from app.agent import response_attachments as attachment_module
     from app.agent.response_attachments import register_attachment_path, public_attachment_payload
     from app.agent.run_context import (
@@ -165,15 +168,26 @@ def test_uploaded_images_survive_reopen_and_steering_without_cross_session_acces
     references = [public_attachment_payload(register_attachment_path(
         f"history-image-{index}", path, control_session_id="owner", principal_id="owner", conversation_id="image-chat",
     )) for index, path in enumerate(paths)]
-    manager = MemoryManager(RecordingLLM())
+    client = RecordingLLM()
+    client.provider = provider
+    client.model_name = "gemini-4-neon" if provider == "gemini" else client.model_name
+    manager = MemoryManager(client)
+    native_history = {
+        "provider": provider, "model_name": client.model_name, "messages": [
+            {"role": "user", "content": "Analyze the image", "images": [{"path": str(paths[0])}], "ephemeral": True},
+            {"role": "user", "content": "Compare with this", "images": [{"path": str(paths[1])}], "ephemeral": True},
+            {"role": "model", "gemini_parts": [{"text": "Compared them", "thought_signature": "c2ln"}]},
+        ],
+    } if provider == "gemini" else None
     asyncio.run(manager.persist_turn(
         "image-chat", "Analyze the image", "Compared them", tool_calls=[],
         user_attachments=[references[0]], steering_messages=["Compare with this"], steering_attachments=[[references[1]]],
+        provider_history=native_history,
     ))
     session_token = set_current_control_session_id("owner")
     principal_token = set_current_principal_id("owner")
     try:
-        reopened = MemoryManager(RecordingLLM()).build_llm_messages("image-chat")
+        reopened = MemoryManager(client).build_llm_messages("image-chat")
         image_paths = [image["path"] for message in reopened for image in message.get("images", [])]
         assert image_paths == [str(path.resolve()) for path in paths]
         foreign_session = set_current_control_session_id("other-session")
@@ -189,21 +203,136 @@ def test_uploaded_images_survive_reopen_and_steering_without_cross_session_acces
         reset_current_principal_id(principal_token)
 
 
-def test_failed_turn_restores_bounded_tool_evidence_for_continuation():
+def test_failed_turn_restores_exact_tool_evidence_for_continuation():
+    """Preserve the complete saved result instead of a preview of the failed turn."""
     manager = MemoryManager(RecordingLLM())
     raw_result = "Start: saved report " + "detail " * 4000 + " End: report.pdf"
-    asyncio.run(manager.persist_turn(
-        "failed-tool-evidence", "Create a report", "Paused after an internal error", status="error",
-        tool_calls=[{"tool_name": "fs_write", "input": '{"path":"report.pdf"}', "output": raw_result, "status": "complete"}],
-    ))
+    asyncio.run(
+        manager.persist_turn(
+            "failed-tool-evidence",
+            "Create a report",
+            "Paused after an internal error",
+            status="error",
+            tool_calls=[
+                {
+                    "tool_name": "fs_write",
+                    "input": '{"path":"report.pdf"}',
+                    "output": raw_result,
+                    "status": "complete",
+                }
+            ],
+        )
+    )
     history = MemoryManager(RecordingLLM()).build_llm_messages("failed-tool-evidence")
     checkpoint = history[-1]["content"]
     assert "Interrupted task tool checkpoint" in checkpoint
     assert '"path":"report.pdf"' in checkpoint
     assert "Start: saved report" in checkpoint and "End: report.pdf" in checkpoint
-    assert len(checkpoint) < 3000
+    assert raw_result in checkpoint
+    assert history[-1][PROTECTED_CONTEXT] is True
     assistant = manager._db.get_messages("failed-tool-evidence")[-1]
     assert manager._db.get_tool_calls_for_message(assistant["id"])[0]["output"] == raw_result
+
+
+def test_compaction_preserves_goal_progress_and_failed_turn_across_reopen(isolated_memory_db, tmp_path):
+    """A lossy summary and the recent-history cap cannot replace unfinished work."""
+    db = isolated_memory_db
+    llm = RecordingLLM(reply="Earlier completed background work.")
+    manager = MemoryManager(llm)
+    conversation = "protected-task"
+    manager.get_or_create(conversation)
+    asyncio.run(
+        manager.persist_turn(conversation, "Old completed request", "Old completed answer", tool_calls=[])
+    )
+    goal = "  Create the report using exact account identifiers; do not publish it.  "
+    progress = TaskProgress(db, conversation, goal, str(tmp_path))
+    progress.update(
+        [
+            {
+                "id": "report",
+                "description": "Create the report",
+                "kind": "general",
+                "criteria": "Check the source and preserve its exact identifiers",
+                "status": "failed",
+                "reason": "Source lookup failed; the report has not been created.",
+            }
+        ]
+    )
+    before = progress.snapshot()
+    exact_error = (
+        "error-prefix " + "detail " * 3000 + "MIDDLE-FAILURE-ID-7742 " + "detail " * 3000 + " error-suffix"
+    )
+    calls = [
+        {
+            "tool_name": f"lookup_{index}",
+            "input": json.dumps({"id": f"account-{index}"}),
+            "output": exact_error if index == 0 else f"Exact failure {index}",
+            "status": "error",
+        }
+        for index in range(7)
+    ]
+    asyncio.run(
+        manager.persist_turn(
+            conversation,
+            goal,
+            "Source lookup failed.",
+            tool_calls=calls,
+            status="paused",
+            turn_id="failed-report",
+            steering_messages=["Preserve leading zeros."],
+            steering_tool_call_indexes=[3],
+        )
+    )
+    # More than the normal 24-message window follows while the task stays open.
+    for index in range(13):
+        asyncio.run(
+            manager.persist_turn(conversation, f"Clarification {index}", f"Recorded {index}", tool_calls=[])
+        )
+    later_failure = "Paused: protected records exceed the context budget."
+    asyncio.run(
+        manager.persist_turn(
+            conversation,
+            "Continue with the same goal",
+            later_failure,
+            tool_calls=[],
+            status="paused",
+            turn_id="context-budget-pause",
+        )
+    )
+    result = asyncio.run(manager.compact_conversation(conversation))
+    assert result["status"] == "compacted"
+    assert exact_error not in str(llm.calls) and "Preserve leading zeros." not in str(llm.calls)
+    assert later_failure not in str(llm.calls)
+    assert asyncio.run(manager.compact_conversation(conversation))["status"] == "unchanged"
+
+    reopened = MemoryManager(RecordingLLM())
+    history = reopened.build_llm_messages(conversation)
+    exact = [item for item in history if item.get(PROTECTED_CONTEXT)]
+    text = "\n".join(item.get("content", "") for item in exact)
+    assert later_failure in text
+    assert any(item.get("content") == goal for item in exact)
+    assert "Preserve leading zeros." in text and exact_error in text
+    assert all(f"lookup_{index}" in text and f"account-{index}" in text for index in range(7))
+    restored = TaskProgress(db, conversation, "Continue", str(tmp_path), continuation=True)
+    assert restored.snapshot() == before
+    assert goal in restored.context() and "Source lookup failed" in restored.context()
+
+    # Explicit replacement ends protection for the previous task, so a failure
+    # in an unrelated old task cannot permanently consume the model's context.
+    replacement = TaskProgress(db, conversation, "Explain the schedule", str(tmp_path))
+    replacement.update(
+        [
+            {
+                "id": "explain",
+                "description": "Explain the schedule",
+                "kind": "answer",
+                "criteria": "Answer clearly",
+            }
+        ],
+        new_task=True,
+    )
+    assert asyncio.run(reopened.compact_conversation(conversation))["status"] == "compacted"
+    assert not any(item.get(PROTECTED_CONTEXT) for item in reopened.build_llm_messages(conversation))
 
 
 def test_turn_checkpoint_rolls_back_and_retries_without_duplicate_history(isolated_memory_db):
@@ -244,6 +373,129 @@ def test_turn_checkpoint_rolls_back_and_retries_without_duplicate_history(isolat
         assert reopened_db.fetchone("SELECT COUNT(*) FROM turn_checkpoints")[0] == 0
     finally:
         reopened_db.close()
+
+
+def test_gemini_signed_turn_survives_atomic_save_restart_and_archive(isolated_memory_db):
+    """Real SQLite and SDK round-trip retains signatures, paired tools, and model isolation."""
+    from google.genai import types
+    from app.agent.llm_provider_requests import normalise_messages_for_gemini
+
+    db = isolated_memory_db
+    client = RecordingLLM()
+    client.provider, client.model_name = "gemini", "gemini-4-neon"
+    memory = MemoryManager(client)
+    memory.get_or_create("signed-chat")
+    call_signature, final_signature = b"\x00\xffcall-signature", b"\x00\xfefinal-signature"
+    history = {
+        "provider": client.provider, "model_name": client.model_name,
+        "messages": [
+            {"role": "user", "content": "Inspect both files"},
+            {"role": "model", "gemini_parts": [
+                types.Part(function_call=types.FunctionCall(id="a", name="read", args={"path": "a"}), thought_signature=call_signature),
+                types.Part(function_call=types.FunctionCall(id="b", name="read", args={"path": "b"})),
+            ]},
+            {"role": "user", "gemini_function_response": {"id": "b", "name": "read", "response": {"result": "B"}}},
+            {"role": "user", "content": "Compare them briefly"},
+            {"role": "user", "gemini_function_response": {"id": "a", "name": "read", "response": {"result": "A"}},
+             "images": [{"path": "transient-screenshot.png"}], "ephemeral": True},
+            {"role": "model", "gemini_parts": [types.Part(text="They differ.", thought_signature=final_signature)]},
+        ],
+    }
+    kwargs = dict(turn_id="signed-turn", tool_calls=[], steering_messages=["Compare them briefly"], provider_history=history)
+    db.execute("""CREATE TRIGGER fail_provider_save BEFORE UPDATE OF provider_history_json ON messages
+                  BEGIN SELECT RAISE(ABORT, 'provider history write failed'); END""")
+    db.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="provider history write failed"):
+        asyncio.run(memory.persist_turn("signed-chat", "Inspect both files", "They differ.", **kwargs))
+    assert db.get_messages("signed-chat") == []
+    db.execute("DROP TRIGGER fail_provider_save")
+    db.commit()
+    saved_ids = asyncio.run(memory.persist_turn("signed-chat", "Inspect both files", "They differ.", **kwargs))
+    assert asyncio.run(memory.persist_turn("signed-chat", "Inspect both files", "They differ.", **kwargs)) == saved_ids
+    saved = db.get_messages("signed-chat")
+    assert len(saved) == 3
+    assert "transient-screenshot" not in saved[-1]["provider_history_json"]
+    assert all("provider_history_json" not in row for row in memory.get_messages_for_conversation("signed-chat")[0])
+
+    reopened_db = Database(db._path)
+    reopened_db.init_db()
+    reopened = MemoryManager(client)
+    reopened._db = reopened_db
+    try:
+        restored = reopened.build_llm_messages("signed-chat")
+        wire = normalise_messages_for_gemini(restored + [{"role": "user", "content": "What next?"}], "")
+        contents = [types.Content.model_validate(item) for item in wire]
+        native = contents[-6:]
+        assert [item.role for item in native] == ["user", "model", "user", "user", "model", "user"]
+        assert native[0].parts[0].text == "Inspect both files"
+        assert native[1].parts[0].thought_signature == call_signature
+        assert [part.function_response.id for part in native[2].parts] == ["a", "b"]
+        assert native[3].parts[0].text == "Compare them briefly"
+        assert native[4].parts[0].thought_signature == final_signature
+        assert native[5].parts[0].text == "What next?"
+        for provider, model in [("openai", "gpt-6-luna"), ("gemini", "gemini-flash-latest")]:
+            fallback = reopened.build_llm_messages("signed-chat", provider=provider, model_name=model)
+            assert not any("gemini_parts" in item for item in fallback)
+            assert [item["content"] for item in fallback][-3:] == ["Inspect both files", "Compare them briefly", "They differ."]
+        assert reopened_db.archive_old_messages("signed-chat", keep_recent=0) == 3
+        for row in saved:
+            reopened_db.restore_message(row["id"])
+        assert reopened_db.get_messages("signed-chat")[-1]["provider_history_json"] == saved[-1]["provider_history_json"]
+        assert any("gemini_parts" in item for item in reopened.build_llm_messages("signed-chat"))
+        # Finalization can fail after the provider generated a successful reply.
+        # Keep the signed tool history and the actual saved failure outcome.
+        failure = "Completion could not be saved. The task is still pending."
+        asyncio.run(
+            reopened.persist_turn(
+                "signed-chat",
+                "Inspect both files",
+                failure,
+                status="error",
+                **{**kwargs, "turn_id": "signed-failed-turn"},
+            )
+        )
+        restored = reopened.build_llm_messages("signed-chat")
+        protected = [item for item in restored if item.get(PROTECTED_CONTEXT)]
+        assert any("gemini_parts" in item for item in protected)
+        assert any(failure in item.get("content", "") for item in protected)
+        assert any("Saved turn status: error" in item.get("content", "") for item in protected)
+        assert all(types.Content.model_validate(item) for item in normalise_messages_for_gemini(restored, ""))
+    finally:
+        reopened_db.close()
+
+
+@pytest.mark.parametrize("payload", ["arguments", "result", "private_input"])
+def test_gemini_native_history_does_not_bypass_tool_redaction(isolated_memory_db, payload):
+    """Sensitive tool turns keep only the existing sanitized visible history."""
+    from google.genai import types
+    from app.agent.action_security.sensitive_data import public_tool_arguments, redact_sensitive
+
+    client = RecordingLLM()
+    client.provider, client.model_name = "gemini", "gemini-4-neon"
+    memory = MemoryManager(client)
+    secret = "private-journal-password-123"
+    arguments = {"password": secret} if payload == "arguments" else {"path": "report.txt"}
+    if payload == "private_input":
+        arguments = {"text": secret}
+    result = {"password": secret} if payload == "result" else {"result": "done"}
+    raw_output = json.dumps(result)
+    asyncio.run(memory.persist_turn("private-journal", "Continue safely", "Done", tool_calls=[{
+        "tool_name": "read", "input": json.dumps(public_tool_arguments("read", arguments)),
+        "output": redact_sensitive(raw_output), "status": "complete",
+    }], provider_history={
+        "provider": client.provider, "model_name": client.model_name, "messages": [
+            {"role": "user", "content": "Continue safely"},
+            {"role": "model", "gemini_parts": [types.Part(
+                function_call=types.FunctionCall(id="read-1", name="read", args=arguments), thought_signature=b"signed",
+            )]},
+            {"role": "user", "gemini_function_response": {"id": "read-1", "name": "read", "response": result}},
+            {"role": "model", "gemini_parts": [types.Part(text="Done", thought_signature=b"final-signed")]},
+        ],
+    }))
+    rows = isolated_memory_db.get_messages("private-journal")
+    assert all(row["provider_history_json"] == "" for row in rows)
+    assert secret not in json.dumps(rows + isolated_memory_db.get_tool_calls_for_message(rows[-1]["id"]))
+    assert not any("gemini_parts" in entry for entry in memory.build_llm_messages("private-journal"))
 
 
 def test_deferred_summary_preserves_older_history_after_reopening():

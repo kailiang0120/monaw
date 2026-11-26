@@ -19,8 +19,9 @@ import {
   runScheduledTaskNow,
   updateScheduledTask,
 } from './lib/api/scheduledTasks'
-import { fetchModelOptions, fetchSettings, updateSettings } from './lib/api/settings'
-import { FALLBACK_MODEL_OPTIONS, reasoningEffortsForProvider } from './features/settings/settingsConfig'
+import { fetchSettings, updateSettings } from './lib/api/settings'
+import { selectModel } from './lib/modelSelection'
+import { useModelCatalogState, refreshModelCatalog } from './hooks/useModelCatalog'
 import type { SettingsPageId } from './features/settings/settingsCopy'
 import { FirstRunGuide } from './features/onboarding/FirstRunGuide'
 import { useSetupReadiness } from './features/onboarding/useSetupReadiness'
@@ -33,7 +34,7 @@ import type { OperationResolution, RunOperation } from './lib/api/runs'
 import { composerRunControl } from './lib/runControl'
 import { subscribeServerEvents, type ServerEvent } from './lib/api/serverEvents'
 import { DEFAULT_AGENT_NAME, resolveAgentName } from './lib/identity'
-import type { AgentSettings, Conversation, ModelOptions, ScheduledTask, UploadedAttachment } from './lib/api/types'
+import type { AgentSettings, Conversation, ScheduledTask, UploadedAttachment } from './lib/api/types'
 
 type ApprovalMode = AgentSettings['permissions']['mode']
 type ThemeMode = 'dark' | 'light'
@@ -77,6 +78,7 @@ function sameConversations(a: Conversation[], b: Conversation[]): boolean {
       && item.created_at === other.created_at
       && item.updated_at === other.updated_at
       && item.workspace_dir === other.workspace_dir
+      && Boolean(item.workspace_is_default) === Boolean(other.workspace_is_default)
       && Boolean(item.running) === Boolean(other.running)
   })
 }
@@ -115,7 +117,7 @@ export default function App() {
   const [modelSelection, setModelSelection] = useState<ModelSelection>({
     provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'medium',
   })
-  const [modelOptions, setModelOptions] = useState<ModelOptions>(FALLBACK_MODEL_OPTIONS)
+  const { catalog: modelOptions, status: modelCatalogStatus } = useModelCatalogState()
   const [hasGoogleKey, setHasGoogleKey] = useState(false)
   const [savingModelSelection, setSavingModelSelection] = useState(false)
   const [modelSelectionError, setModelSelectionError] = useState('')
@@ -277,6 +279,8 @@ export default function App() {
   const loadVisibleSettings = useCallback(async () => {
     try {
       const settings = await fetchSettings()
+      // A catalog request may have failed before the backend finished starting.
+      void refreshModelCatalog(true)
       setIsBackendReady(true)
       setApprovalMode(settings.permissions.mode)
       setExecutionDetail(settings.execution_detail ?? 'simple')
@@ -296,17 +300,6 @@ export default function App() {
   const refreshVisibleSettings = async () => {
     await loadVisibleSettings()
   }
-
-  const loadModelOptions = useCallback(() => {
-    void fetchModelOptions().then(setModelOptions).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    loadModelOptions()
-    // A ChatGPT sign-in finishes in the browser; coming back picks up its models.
-    window.addEventListener('focus', loadModelOptions)
-    return () => window.removeEventListener('focus', loadModelOptions)
-  }, [loadModelOptions])
 
   const loadPendingAccessGrant = useCallback(async () => {
     try {
@@ -398,7 +391,6 @@ export default function App() {
       }
       if (event.event === 'settings.changed') {
         void loadVisibleSettings()
-        loadModelOptions()
         setDiagnosticsRefreshKey((value) => value + 1)
         return
       }
@@ -413,7 +405,6 @@ export default function App() {
     })
   }, [
     loadConversations,
-    loadModelOptions,
     loadPendingAccessGrant,
     loadScheduledTasks,
     loadVisibleSettings,
@@ -463,13 +454,7 @@ export default function App() {
   const handleModelSelectionChange = async (next: ModelSelection) => {
     if (savingModelSelection) return
     const previous = modelSelection
-    const supportedEfforts = reasoningEffortsForProvider(next.provider, next.model_name, modelOptions)
-    const normalized = {
-      ...next,
-      reasoning_effort: supportedEfforts.includes(next.reasoning_effort)
-        ? next.reasoning_effort
-        : supportedEfforts.includes('medium') ? 'medium' as const : supportedEfforts[0],
-    }
+    const normalized = selectModel(next, next.provider, next.model_name, modelOptions)
     setModelSelection(normalized)
     setModelSelectionError('')
     setSavingModelSelection(true)
@@ -502,6 +487,7 @@ export default function App() {
     enabled: isBackendReady && inEmptyNewChat,
     workspaceDir: draftWorkspaceDir,
     refreshKey: guideRefreshKey,
+    catalog: modelOptions,
   })
   const showGuide = shouldShowGuide({
     inEmptyNewChat,
@@ -779,6 +765,7 @@ export default function App() {
             )}
             <InputBar
               workspaceDir={activeConvId ? activeConversation?.workspace_dir || '' : draftWorkspaceDir}
+              workspaceIsDefault={activeConvId ? activeConversation?.workspace_is_default : !draftWorkspaceDir}
               onWorkspaceChange={handleWorkspaceChange}
               onSend={handleSend}
               onSteer={steerMessage}
@@ -800,6 +787,8 @@ export default function App() {
               approvalMode={approvalMode}
               modelSelection={modelSelection}
               modelOptions={modelOptions}
+              modelCatalogLoading={!isBackendReady || modelCatalogStatus === 'loading'}
+              onRetryModelCatalog={() => { void refreshModelCatalog(true) }}
               hasGoogleKey={hasGoogleKey}
               modelSelectionDisabled={savingModelSelection}
               modelSelectionError={modelSelectionError}

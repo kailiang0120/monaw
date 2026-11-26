@@ -75,7 +75,7 @@ function workspaceLabel(dir: string): string {
 function groupByWorkspace(conversations: Conversation[]): WorkspaceGroup[] {
   const groups = new Map<string, WorkspaceGroup & { latest: string }>()
   for (const c of conversations) {
-    const dir = c.workspace_dir || ''
+    const dir = c.workspace_is_default ? '' : c.workspace_dir || ''
     const group = groups.get(dir) ?? { dir, label: workspaceLabel(dir), chats: [], latest: '' }
     group.chats.push(c)
     const activity = c.updated_at || c.created_at

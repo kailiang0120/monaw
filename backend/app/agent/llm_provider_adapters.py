@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+from functools import partial
+
+from app.agent.model_registry import get_connection
 
 
 class LLMProviderAdapter(Protocol):
@@ -92,12 +95,14 @@ class CodexAccountProviderAdapter:
         )
 
 
+_ADAPTER_FACTORIES = {
+    "gemini_generate_content": GeminiProviderAdapter,
+    "openai_responses": partial(OpenAICompatibleProviderAdapter, provider="openai"),
+    "chatgpt_account": CodexAccountProviderAdapter,
+}
+
+
 def create_llm_provider_adapter(provider: str, client: Any) -> LLMProviderAdapter:
-    provider_name = str(provider or "").lower()
-    if provider_name == "gemini":
-        return GeminiProviderAdapter(client)
-    if provider_name == "openai":
-        return OpenAICompatibleProviderAdapter(client, provider=provider_name)
-    if provider_name == "codex":
-        return CodexAccountProviderAdapter(client)
-    raise ValueError(f"Unsupported provider adapter: {provider!r}")
+    """Dispatch by registered protocol, independently of UI connection labels."""
+    connection = get_connection(provider)
+    return _ADAPTER_FACTORIES[connection.protocol](client)

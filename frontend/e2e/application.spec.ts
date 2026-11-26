@@ -1,12 +1,70 @@
 import { test, expect } from './desktop'
 import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, basename, join } from 'node:path'
 
 async function toolRows(desktop: import('./desktop').Desktop) {
   const conversations = (await desktop.api('/api/conversations')).data
   const messages = (await desktop.api(`/api/conversations/${conversations[0].id}/messages`)).data.messages
   return messages.flatMap((message: { tool_calls?: unknown[] }) => message.tool_calls || [])
 }
+
+// Exercise the shared catalog through real settings persistence and task snapshots.
+test('model labels agree across screens and scheduled selections survive default changes', async ({ desktop }, testInfo) => {
+  const { page } = desktop
+  const catalog = (await desktop.api('/api/settings/model-options')).data
+  const connection = catalog.providers.find((item: { id: string }) => item.id === 'openai')
+  const first = connection.models[0]
+  const second = connection.models[1]
+  const label = `${connection.labels[first]} · ${connection.label}`
+  const otherLabel = `${connection.labels[second]} · ${connection.label}`
+  const composerModel = page.getByRole('button', { name: 'Model', exact: true })
+  await composerModel.click()
+  await page.getByRole('option', { name: label, exact: true }).click()
+  await expect.poll(async () => (await desktop.api('/api/settings')).data.llm.model_name).toBe(first)
+  // Capture the same control at both supported window sizes for layout review.
+  await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(800, 700))
+  await composerModel.click()
+  await page.screenshot({ path: testInfo.outputPath('model-compact.png') })
+  await page.keyboard.press('Escape')
+  await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1200, 800))
+  await page.screenshot({ path: testInfo.outputPath('model-expanded.png') })
+
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+  await settings.locator('nav').getByRole('button', { name: 'Model', exact: true }).click()
+  await expect(settings.getByRole('button', { name: 'Default model', exact: true })).toContainText(label)
+  await settings.locator('nav').getByRole('button', { name: 'Activity log', exact: true }).click()
+  const deleteData = settings.getByRole('button', { name: 'Delete Data', exact: true })
+  await deleteData.click()
+  const confirmation = page.getByRole('dialog', { name: 'Delete runtime data?', exact: true })
+  await expect(confirmation.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
+  await confirmation.screenshot({ path: testInfo.outputPath('themed-confirmation.png') })
+  await page.keyboard.press('Escape')
+  await expect(confirmation).toHaveCount(0)
+  await expect(settings).toBeVisible()
+  await expect(deleteData).toBeFocused()
+  await settings.getByRole('button', { name: 'Close settings', exact: true }).click()
+
+  await page.getByRole('button', { name: 'Create scheduled task', exact: true }).click()
+  const taskDialog = page.getByRole('dialog', { name: 'New scheduled task' })
+  await taskDialog.getByRole('textbox', { name: 'Title', exact: true }).fill('Pinned model selection')
+  await taskDialog.getByRole('textbox', { name: 'Prompt', exact: true }).fill('[e2e:recover]')
+  await taskDialog.getByRole('button', { name: 'Scheduled task model', exact: true }).click()
+  await page.getByRole('option', { name: label, exact: true }).click()
+  await taskDialog.getByRole('button', { name: 'Create task', exact: true }).click()
+  await expect(taskDialog).toHaveCount(0)
+  await composerModel.click()
+  await page.getByRole('option', { name: otherLabel, exact: true }).click()
+  await expect.poll(async () => (await desktop.api('/api/settings')).data.llm.model_name).toBe(second)
+  await desktop.close()
+  await desktop.start()
+  const tasks = (await desktop.api('/api/scheduled-tasks')).data
+  const saved = tasks.find((item: { title: string }) => item.title === 'Pinned model selection')
+  expect(saved.model_provider ?? saved.modelProvider).toBe('openai')
+  expect(saved.model_name ?? saved.modelName).toBe(first)
+  await expect(desktop.page.getByRole('button', { name: 'Model', exact: true })).toContainText(otherLabel)
+  expect(desktop.errors).toEqual([])
+})
 
 test('typing resumes after saving a model API key and closing settings', async ({ desktop }, testInfo) => {
   const { page } = desktop
@@ -94,12 +152,20 @@ test('authenticated startup, streamed response, and persistence after reopening'
   await expect(page.getByRole('button', { name: 'Stop response', exact: true })).toHaveCount(0)
   const conversations = (await desktop.api('/api/conversations')).data
   expect(conversations).toHaveLength(1)
+  const workingFolder = conversations[0].workspace_dir
+  expect(dirname(workingFolder)).toBe(join(desktop.root, 'workspace'))
+  expect(basename(workingFolder)).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  expect(conversations[0].workspace_is_default).toBe(true)
+  await expect(page.getByRole('button', { name: 'Choose working folder' })).toHaveText('Default workspace')
+  await expect(page.getByRole('button', { name: 'Choose working folder' })).toHaveAttribute('title', workingFolder)
   const messages = (await desktop.api(`/api/conversations/${conversations[0].id}/messages`)).data.messages
   expect(messages.some((m: { role: string; content: string }) => m.role === 'assistant' && m.content.includes('Fixture stream completed.'))).toBe(true)
   await desktop.close()
   await desktop.start()
   await desktop.page.getByText('[e2e:stream]', { exact: true }).last().click()
   await expect(desktop.page.getByText('Fixture stream completed.', { exact: false }).last()).toBeVisible()
+  await expect(desktop.page.getByRole('button', { name: 'Choose working folder' })).toHaveText('Default workspace')
+  expect((await desktop.api('/api/conversations')).data[0].workspace_dir).toBe(workingFolder)
   expect(desktop.errors).toEqual([])
 })
 

@@ -6,6 +6,7 @@ import asyncio
 import json
 from copy import deepcopy
 
+from app.agent.harness.context_protection import PROTECTED_CONTEXT
 from app.agent.context_usage import (
     count_text_tokens, estimate_message_tokens, estimate_tool_schema_tokens,
     model_compaction_threshold, model_context_token_limit,
@@ -47,7 +48,8 @@ async def fit_live_context(
 
     Large observations are shortened only when needed. If that is insufficient,
     summarize the older complete rounds with a separately bounded request.
-    Never silently send an oversized request or drop user instructions.
+    Never shorten protected failure records, silently send an oversized request,
+    or drop user instructions.
     """
     fixed_tokens = count_text_tokens(system_prompt, llm_client=llm_client) + estimate_tool_schema_tokens(tools, llm_client=llm_client)
     budget = input_budget(llm_client)
@@ -61,6 +63,8 @@ async def fit_live_context(
 
     bounded = deepcopy(messages)
     for item in bounded:
+        if item.get(PROTECTED_CONTEXT):
+            continue
         if item.get("type") == "function_call_output":
             item["output"] = _shorten_observation(str(item.get("output") or ""))
         elif item.get("gemini_function_response"):
@@ -78,10 +82,16 @@ async def fit_live_context(
         return bounded, latest_round_start, info
 
     prefix, tail = bounded[:latest_round_start], bounded[latest_round_start:]
-    pinned = [item for item in prefix if _is_user_instruction(item)]
-    older_context = [item for item in prefix if not _is_user_instruction(item)]
+    pinned = [item for item in prefix if _is_user_instruction(item) or item.get(PROTECTED_CONTEXT)]
+    older_context = [
+        item for item in prefix if not _is_user_instruction(item) and not item.get(PROTECTED_CONTEXT)
+    ]
     if not older_context or measure(pinned + tail) >= budget:
-        raise ContextBudgetExceeded("Paused: the current instructions, images, or tool schemas exceed the context budget. Reduce the input or selected tools, then continue.")
+        raise ContextBudgetExceeded(
+            "Paused: the protected task instructions, failure records, images, or tool schemas "
+            "exceed the context budget. Use a model with more context or reduce the selected tools; "
+            "protected records have not been shortened."
+        )
 
     transcript = json.dumps(older_context, ensure_ascii=False, default=str)
     summary_prompt = (

@@ -1,24 +1,14 @@
 """Shared model identifiers for LLM settings and runtime wiring."""
 
-DEFAULT_OPENAI_CHAT_MODEL = "gpt-6-luna"
-OPENAI_CHAT_MODELS = (
-    "gpt-6-luna",
-    "gpt-6.1-sol",
-    "gpt-6-astra",
-)
+from app.agent.model_registry import CONNECTIONS, GEMINI_MODELS, OPENAI_MODELS
 
-DEFAULT_GEMINI_CHAT_MODEL = "gemini-pro-latest"
-GEMINI_CHAT_MODELS = (
-    "gemini-pro-latest",
-    "gemini-flash-latest",
-    "gemini-flash-lite-latest",
-)
+DEFAULT_OPENAI_CHAT_MODEL = OPENAI_MODELS[0]
+OPENAI_CHAT_MODELS = OPENAI_MODELS
 
-CHAT_MODELS_BY_PROVIDER = {
-    "openai": OPENAI_CHAT_MODELS,
-    "codex": OPENAI_CHAT_MODELS,
-    "gemini": GEMINI_CHAT_MODELS,
-}
+DEFAULT_GEMINI_CHAT_MODEL = GEMINI_MODELS[0]
+GEMINI_CHAT_MODELS = GEMINI_MODELS
+
+CHAT_MODELS_BY_PROVIDER = {key: connection.models for key, connection in CONNECTIONS.items()}
 
 
 MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$"
@@ -39,7 +29,7 @@ def normalize_chat_model(provider: str, model_name: str, custom_models: tuple[st
     if provider == "openai":
         # The API retired gpt-6-sol; a ChatGPT account still lists it.
         model = "gpt-6.1-sol" if model_name == "gpt-6-sol" else model_name
-        return model if model in OPENAI_CHAT_MODELS else DEFAULT_OPENAI_CHAT_MODEL
+        return model or DEFAULT_OPENAI_CHAT_MODEL
     if provider == "gemini":
         migrations = {
             "gemini-2.5-pro": "gemini-pro-latest",
@@ -57,5 +47,5 @@ def normalize_chat_model(provider: str, model_name: str, custom_models: tuple[st
             "gemini-3.5-flash-lite": "gemini-flash-lite-latest",
         }
         model = migrations.get(model_name, model_name)
-        return model if model in GEMINI_CHAT_MODELS else DEFAULT_GEMINI_CHAT_MODEL
+        return model or DEFAULT_GEMINI_CHAT_MODEL
     return DEFAULT_OPENAI_CHAT_MODEL

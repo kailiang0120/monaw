@@ -586,6 +586,7 @@ class PersistingFakeMemory(FakeMemory):
         response_duration_ms: int | None = None,
         response_attachments: list[dict] | None = None,
         turn_id: str | None = None,
+        provider_history: dict | None = None,
     ) -> None:
         self.persisted_turns.append(
             {
@@ -597,6 +598,7 @@ class PersistingFakeMemory(FakeMemory):
                 "status": status,
                 "response_duration_ms": response_duration_ms,
                 "response_attachments": response_attachments or [],
+                "provider_history": provider_history,
             }
         )
 
@@ -885,7 +887,7 @@ class TextWithoutToolLLM:
         return LLMResponse(content="Let me take another screenshot.", tool_calls=[], finish_reason="stop")
 
 
-class TextOnlyThenForcedFinalLLM:
+class TextOnlyThenClarificationLLM:
     def __init__(self) -> None:
         self.calls = 0
         self.tool_choices: list[str | dict | None] = []
@@ -900,8 +902,8 @@ class TextOnlyThenForcedFinalLLM:
     ):
         self.calls += 1
         self.tool_choices.append(tool_choice)
-        if tool_choice == "required":
-            return final_answer_response("Finished after forced tool choice.")
+        if self.calls == 2:
+            return LLMResponse(content="Which source should I search?")
         return LLMResponse(
             content=f"Searching without a tool call {self.calls}.",
             tool_calls=[],
@@ -2209,7 +2211,7 @@ def test_turn_loop_completes_substantial_plain_text_without_generic_rewrite():
     assert memory.persisted_turns[-1]["assistant_message"] == llm.summary
 
 
-def test_turn_loop_accepts_json_text_matching_final_answer_schema():
+def test_turn_loop_preserves_json_text_containing_an_answer_field():
     registry = ToolRegistry(
         [
             {
@@ -2240,9 +2242,9 @@ def test_turn_loop_accepts_json_text_matching_final_answer_schema():
     assert not any(event["event"] == "progress" for event in events)
     assert not any(event["event"] == "tool_start" for event in events)
     assert events[-1]["event"] == "done"
-    assert events[-1]["data"]["summary"] == "Finished from JSON text."
+    assert events[-1]["data"]["summary"] == json.dumps({"answer": "Finished from JSON text."})
     assert events[-1]["data"].get("incomplete") is not True
-    assert memory.added_messages[-1] == ("assistant", "Finished from JSON text.")
+    assert memory.added_messages[-1] == ("assistant", json.dumps({"answer": "Finished from JSON text."}))
 
 
 def test_turn_loop_pauses_after_repeated_progress_without_tool():
@@ -2282,7 +2284,7 @@ def test_turn_loop_pauses_after_repeated_progress_without_tool():
 
     # The third call is the tool-less wrap-up after the guard stops the loop.
     assert llm.calls == 3
-    assert llm.tool_choices == [None, "required", None]
+    assert llm.tool_choices == [None, None, None]
     assert len(progress_events) == 2
     assert done_event["data"]["status"] == "paused"
     assert done_event["data"]["incomplete"] is True
@@ -2290,7 +2292,7 @@ def test_turn_loop_pauses_after_repeated_progress_without_tool():
     assert memory.clear_task_progress_calls == 0
 
 
-def test_turn_loop_forces_tool_choice_after_progress_without_tool():
+def test_turn_loop_allows_clarification_after_progress_without_tool():
     registry = ToolRegistry(
         [
             {
@@ -2309,7 +2311,7 @@ def test_turn_loop_forces_tool_choice_after_progress_without_tool():
         ]
     )
     memory = FakeMemory()
-    llm = TextOnlyThenForcedFinalLLM()
+    llm = TextOnlyThenClarificationLLM()
     loop = TurnLoop(llm_client=llm, registry=registry, memory=memory)
 
     async def collect():
@@ -2319,13 +2321,13 @@ def test_turn_loop_forces_tool_choice_after_progress_without_tool():
     progress_events = [event for event in events if event["event"] == "progress"]
 
     assert llm.calls == 2
-    assert llm.tool_choices == [None, "required"]
+    assert llm.tool_choices == [None, None]
     assert [event["data"]["content"] for event in progress_events] == [
         "Searching without a tool call 1.",
     ]
     assert events[-1]["event"] == "done"
     assert events[-1]["data"]["status"] == "complete"
-    assert events[-1]["data"]["summary"] == "Finished after forced tool choice."
+    assert events[-1]["data"]["summary"] == "Which source should I search?"
     assert memory.clear_task_progress_calls == 1
 
 
@@ -2365,7 +2367,7 @@ def test_turn_loop_bounds_progress_without_a_tool_call():
     error_events = [event for event in events if event["event"] == "error"]
 
     assert llm.calls == 3
-    assert llm.tool_choices == [None, "required", None]
+    assert llm.tool_choices == [None, None, None]
     assert len(progress_events) == 2
     assert error_events == []
     assert events[-1]["event"] == "done"
@@ -2523,7 +2525,7 @@ def test_turn_loop_bounds_post_tool_progress_without_action():
     progress_events = [event for event in events if event["event"] == "progress"]
 
     assert llm.calls == 4
-    assert llm.tool_choices == [None, None, "required", None]
+    assert llm.tool_choices == [None, None, None, None]
     assert len(progress_events) == 2
     assert done_event["data"]["status"] == "paused"
     assert done_event["data"]["incomplete"] is True
@@ -2840,18 +2842,44 @@ def test_turn_loop_emits_plan_and_step_events_for_tool_calls():
     assert complete_event["data"]["status"] == "done"
 
 
-def test_turn_loop_persists_tool_calls_when_memory_supports_persist_turn():
+@pytest.mark.parametrize("provider", ["", "gemini"])
+def test_turn_loop_persists_tool_calls_when_memory_supports_persist_turn(provider, monkeypatch, tmp_path):
+    """Persist tool evidence and a paired Gemini protocol journal when available."""
+    from google.genai import types
+
+    class SignedLLM(FakeLLM):
+        """Supply native Gemini parts alongside the existing test tool workflow."""
+        model_name = "gemini-4-neon"
+
+        async def chat_with_tools(self, *args, **kwargs):
+            """Keep the signed call exactly as a real Gemini response would."""
+            self.last_messages = list(args[0])
+            response = await super().chat_with_tools(*args, **kwargs)
+            if self.provider == "gemini":
+                for call in response.tool_calls:
+                    if call.tool_name == "echo_tool":
+                        call.tool_name = "read_file"
+                        call.arguments = {"path": call.arguments["text"]}
+                response.provider_messages = [{"role": "model", "gemini_parts": [
+                    types.Part(
+                        function_call=types.FunctionCall(id=call.call_id, name=call.tool_name, args=call.arguments),
+                        thought_signature=b"signature" if index == 0 else None,
+                    )
+                    for index, call in enumerate(response.tool_calls)
+                ]}]
+            return response
+
     registry = ToolRegistry(
         [
             {
-                "name": "echo_tool",
+                "name": "read_file" if provider == "gemini" else "echo_tool",
                 "description": "Echo text",
                 "parameters": {
                     "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                    "required": ["text"],
+                    "properties": {"path" if provider == "gemini" else "text": {"type": "string"}},
+                    "required": ["path" if provider == "gemini" else "text"],
                 },
-                "callable": lambda text: f"echo:{text}",
+                "callable": lambda text="", path="": f"echo:{text or path}",
                 "domain": "general",
                 "execution_mode": "sync_stateless",
                 "affinity_group": None,
@@ -2859,7 +2887,9 @@ def test_turn_loop_persists_tool_calls_when_memory_supports_persist_turn():
         ]
     )
     memory = PersistingFakeMemory()
-    loop = TurnLoop(llm_client=FakeLLM(), registry=registry, memory=memory)
+    llm = SignedLLM()
+    llm.provider = provider
+    loop = TurnLoop(llm_client=llm, registry=registry, memory=memory)
 
     async def collect():
         return [event async for event in loop.run("say hello", "conv-persist", system_prompt="system")]
@@ -2869,8 +2899,48 @@ def test_turn_loop_persists_tool_calls_when_memory_supports_persist_turn():
     assert memory.persisted_turns[0]["user_message"] == "say hello"
     assert memory.persisted_turns[0]["assistant_message"] == "All done."
     assert memory.persisted_turns[0]["status"] == "complete"
-    assert memory.persisted_turns[0]["tool_calls"][0]["tool_name"] == "echo_tool"
+    assert memory.persisted_turns[0]["tool_calls"][0]["tool_name"] == ("read_file" if provider == "gemini" else "echo_tool")
     assert memory.persisted_turns[0]["tool_calls"][0]["status"] == "complete"
+    history = memory.persisted_turns[0]["provider_history"]
+    if provider == "gemini":
+        assert history["provider"] == "gemini" and history["model_name"] == "gemini-4-neon"
+        assert history["messages"][0] == {"role": "user", "content": "say hello"}
+        signed_turns = [message for message in history["messages"] if "gemini_parts" in message]
+        results = [message["gemini_function_response"] for message in history["messages"] if "gemini_function_response" in message]
+        assert len(signed_turns) == len(results) == 2
+        assert all(message["gemini_parts"][0].thought_signature == b"signature" for message in signed_turns)
+        assert results[-1]["name"] == "final_answer"
+        assert results[-1]["response"]["status"] == "ok"
+
+        import app.agent.memory_manager as memory_module
+        from app.agent.database import Database
+        from app.agent.memory_manager import MemoryManager
+
+        db = Database(tmp_path / "gemini-history.db")
+        db.init_db()
+        monkeypatch.setattr(memory_module, "get_db", lambda: db)
+        real_llm = SignedLLM()
+        real_llm.provider = "gemini"
+
+        async def resumed_turns():
+            """Exercise the real persistence contract and a fresh manager's next turn."""
+            first = TurnLoop(llm_client=real_llm, registry=registry, memory=MemoryManager(real_llm))
+            first_events = [event async for event in first.run("say hello", "conv-real-history", system_prompt="system")]
+            assert first_events[-1]["data"]["status"] == "complete"
+            resumed = TurnLoop(llm_client=real_llm, registry=registry, memory=MemoryManager(real_llm))
+            resumed_events = [event async for event in resumed.run("continue", "conv-real-history", system_prompt="system")]
+            assert resumed_events[-1]["data"]["status"] == "complete"
+
+        try:
+            asyncio.run(resumed_turns())
+            restored_parts = [part for message in real_llm.last_messages for part in message.get("gemini_parts", [])]
+            assert len(restored_parts) == 2
+            assert all(types.Part.model_validate(part).thought_signature == b"signature" for part in restored_parts)
+            assert sum("gemini_function_response" in message for message in real_llm.last_messages) == 2
+        finally:
+            db.close()
+    else:
+        assert history is None
 
 
 def test_turn_loop_preserves_native_partial_progress_on_stop():
@@ -2912,7 +2982,26 @@ def test_turn_loop_preserves_native_partial_progress_on_stop():
     assert json.loads(call["output"])["completed_actions"] == 1
 
 
-def test_turn_loop_persists_partial_turn_when_stream_is_cancelled():
+@pytest.mark.parametrize("provider", ["", "gemini"])
+def test_turn_loop_persists_partial_turn_when_stream_is_cancelled(provider):
+    """Cancellation keeps its existing checkpoint and closes native calls before replay."""
+    from google.genai import types
+    from app.agent.llm_provider_requests import normalise_messages_for_gemini
+
+    class SignedSlowLLM(SlowToolCallLLM):
+        """Supply the signed native call that must survive cancellation safely."""
+        model_name = "gemini-4-neon"
+
+        async def chat_with_tools(self, *args, **kwargs):
+            """Return a signed Gemini call with the same slow-tool behavior."""
+            response = await super().chat_with_tools(*args, **kwargs)
+            if self.provider == "gemini":
+                response.provider_messages = [{"role": "model", "gemini_parts": [types.Part(
+                    function_call=types.FunctionCall(id="slow-1", name="slow_tool", args={"text": "wait"}),
+                    thought_signature=b"cancel-signature",
+                )]}]
+            return response
+
     async def slow_tool(text: str):  # noqa: ARG001
         await asyncio.sleep(999)
         return "never"
@@ -2935,7 +3024,9 @@ def test_turn_loop_persists_partial_turn_when_stream_is_cancelled():
         ]
     )
     memory = PersistingFakeMemory()
-    loop = TurnLoop(llm_client=SlowToolCallLLM(), registry=registry, memory=memory)
+    llm = SignedSlowLLM()
+    llm.provider = provider
+    loop = TurnLoop(llm_client=llm, registry=registry, memory=memory)
 
     async def collect_until_tool_start():
         stream = loop.run("start slow work", "conv-cancel", system_prompt="system")
@@ -2961,6 +3052,17 @@ def test_turn_loop_persists_partial_turn_when_stream_is_cancelled():
     assert persisted["tool_calls"][0]["tool_name"] == "slow_tool"
     assert persisted["tool_calls"][0]["status"] == "cancelled"
     assert json.loads(persisted["tool_calls"][0]["output"])["reason_code"] == "user_stopped"
+    if provider == "gemini":
+        wire = normalise_messages_for_gemini(
+            persisted["provider_history"]["messages"] + [{"role": "user", "content": "Continue safely."}], "",
+        )
+        contents = [types.Content.model_validate(item) for item in wire]
+        assert contents[1].parts[0].thought_signature == b"cancel-signature"
+        result = contents[2].parts[0].function_response
+        assert result.id == "slow-1" and result.name == "slow_tool"
+        assert result.response["status"] == "cancelled"
+        assert "Inspect current state" in result.response["error"]
+        assert contents[3].parts[0].text == "Continue safely."
 
 
 def test_turn_loop_attaches_browser_screenshot_ephemerally():

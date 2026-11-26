@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 from app.agent.harness.context_budget import ContextBudgetExceeded, fit_live_context
+from app.agent.harness.context_protection import PROTECTED_CONTEXT
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.llm_client import LLMClient, LLMResponse
 from app.agent.model_usage import TokenBudgetExceeded
@@ -23,6 +24,7 @@ class ModelRequest:
     revision: int
     tool_choice: Literal["auto", "required", "none"] = "auto"
     stream_reasoning: bool = True
+    stream_answer: bool = True
     metadata: dict = field(default_factory=dict)
 
 
@@ -89,11 +91,12 @@ class ModelRequestRunner:
                     kwargs["tool_choice"] = "required"
                 if request.stream_reasoning and isinstance(self.client, LLMClient):
                     kwargs["reasoning_callback"] = self._reasoning
-                # Buffer text while tools are available until the coordinator
-                # decides whether it is progress or the final answer.
+                # Buffer tool-round and wrap-up text until the coordinator
+                # accepts it as progress or a usable final answer.
                 response = await self.client.chat_with_tools(
-                    messages, request.tools, system_prompt=request.system_prompt,
-                    stream_callback=None if request.tools else self._answer, **kwargs,
+                    [{key: value for key, value in item.items() if key != PROTECTED_CONTEXT} for item in messages],
+                    request.tools, system_prompt=request.system_prompt,
+                    stream_callback=self._answer if request.stream_answer and not request.tools else None, **kwargs,
                 )
         except asyncio.CancelledError:
             raise
@@ -117,7 +120,9 @@ class ModelRequestRunner:
         self.observer.event(
             "llm_call_finished", status="ok", duration_ms=round((time.perf_counter() - started) * 1000),
             output={
-                "finish_reason": response.finish_reason, "content": response.content,
+                "finish_reason": response.finish_reason,
+                "provider_finish_reason": getattr(response, "provider_finish_reason", ""),
+                "content": response.content,
                 "tool_calls": [{"call_id": call.call_id, "tool_name": call.tool_name, "arguments": call.arguments} for call in response.tool_calls],
             },
             tokens=usage, metadata=request.metadata,

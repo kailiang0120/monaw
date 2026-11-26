@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from app.agent.memory_store import MemoryStore
 from app.agent.harness.turn_restorer import TurnRestorer, history_message
+from app.agent.provider_history import prepare_provider_history
 from app.agent.context_usage import (
     DEFAULT_CONTEXT_TOKEN_LIMIT,
     build_context_usage_report,
@@ -31,6 +32,7 @@ from app.agent.database import get_db
 from app.agent.runtime_paths import RUNTIME_DIR
 from app.agent.response_attachments import resolve_attachment_record, revalidate_attachment_path
 from app.agent.run_context import current_control_session_id, current_principal_id
+from app.agent.harness.context_protection import protected_failure_ranges
 
 _RUNTIME_DIR = RUNTIME_DIR
 _CONVERSATIONS_DIR = _RUNTIME_DIR / "conversations"
@@ -313,12 +315,17 @@ class MemoryManager:
             ],
         }
 
-    def build_llm_messages(self, conversation_id: str) -> list[dict]:
+    def build_llm_messages(self, conversation_id: str, *, provider: str | None = None, model_name: str | None = None) -> list[dict]:
+        """Restore visible history and matching private provider state for this model."""
         state = self.get_or_create(conversation_id)
         return TurnRestorer(
             self._db, history_limit=self.LLM_HISTORY_MESSAGES, recent_limit=self.MAX_RECENT_MESSAGES,
             tool_evidence_limit=self.MAX_TOOL_OUTCOMES, images=self._history_images,
-        ).restore(state, context=self.get_context(conversation_id, current_turn=state.task_goal))
+        ).restore(
+            state, context=self.get_context(conversation_id, current_turn=state.task_goal),
+            provider=provider if provider is not None else str(getattr(self.llm_client, "provider", "")),
+            model_name=model_name if model_name is not None else str(getattr(self.llm_client, "model_name", "")),
+        )
 
     def _messages_for_manual_compaction(
         self,
@@ -371,6 +378,11 @@ class MemoryManager:
             conversation_id,
             after_id=previous_source_id,
         )
+        protected = protected_failure_ranges(self._db, conversation_id)
+        if protected:
+            # Stop before the earliest protected turn so a subsequent failure
+            # cannot hide the original error or advance the checkpoint past it.
+            messages = [item for item in messages if int(item["id"]) < protected[0][0]]
         if not messages and not existing_summary:
             return {
                 "status": "empty",
@@ -509,8 +521,10 @@ class MemoryManager:
         user_attachments: list[dict] | None = None,
         steering_attachments: list[list[dict]] | None = None,
         steering_tool_call_indexes: list[int] | None = None,
+        provider_history: dict | None = None,
         turn_id: str | None = None,
         persist_user_message: bool = True,
+        task_progress=None,
     ) -> list[int]:
         """Atomically checkpoint history without waiting on model summarization.
 
@@ -537,8 +551,22 @@ class MemoryManager:
             "role": "assistant", "content": assistant_message, "thinking": thinking, "status": status,
             "response_duration_ms": response_duration_ms, "attachments": response_attachments,
             "tool_calls": tool_calls[tool_calls_saved:],
+            "provider_history": prepare_provider_history(provider_history, [
+                (user_message, user_attachments or []),
+                *[(text, steering_attachments[index] if steering_attachments and index < len(steering_attachments) else [])
+                  for index, text in enumerate(steering_messages or [])],
+            ]),
         })
-        user_message_ids, inserted = self._db.persist_turn_messages(turn_id or uuid.uuid4().hex, conversation_id, records)
+        checkpoint_id = turn_id or uuid.uuid4().hex
+        if task_progress is not None and status == "complete":
+            if task_progress.db is not self._db or task_progress.conversation_id != conversation_id:
+                raise ValueError("Task completion must share the turn's database and conversation.")
+            with task_progress.answer_commit(assistant_message) as commit_answer:
+                user_message_ids, inserted = self._db.persist_turn_messages(
+                    checkpoint_id, conversation_id, records, before_commit=commit_answer,
+                )
+        else:
+            user_message_ids, inserted = self._db.persist_turn_messages(checkpoint_id, conversation_id, records)
         # Cache and memory-source bookkeeping happen only after the commit. They
         # must never turn a successful checkpoint into a failed persistence call.
         if inserted:
@@ -587,6 +615,12 @@ class MemoryManager:
         state.task_goal = goal.strip()
         state.updated_at = datetime.now(timezone.utc)
         self._db.update_conversation(conversation_id, task_goal=state.task_goal)
+
+    def open_task_progress(self, conversation_id: str, goal: str, workspace: str, *, continuation: bool = False):
+        """Restore durable outcomes independently of the current tool batch."""
+        from app.agent.harness.task_progress import TaskProgress
+
+        return TaskProgress(self._db, conversation_id, goal, workspace, continuation=continuation)
 
     def sync_plan_progress(self, conversation_id: str, plan) -> None:
         """Persist current pending/completed plan progress."""
@@ -650,6 +684,8 @@ class MemoryManager:
         has_more = len(messages) > limit
         if has_more:
             messages = messages[1:]
+        for message in messages:
+            message.pop("provider_history_json", None)
         return messages, has_more
 
     # ── Token estimation & auto-compaction ────────────────────────────────
@@ -724,6 +760,8 @@ class MemoryManager:
                 break
             result = await self.compact_conversation(conversation_id)
             if result.get("status") != "compacted":
+                if result.get("status") in {"unchanged", "empty"}:
+                    break
                 # A failed summary must not block the turn: answer from the
                 # recent history and try compacting again on the next turn.
                 logger.warning(
@@ -762,37 +800,8 @@ class MemoryManager:
         return state.context_tokens_estimate < before
 
     async def _summarize(self, conversation_id: str) -> None:
-        """Summarize older messages into the summary field."""
-        state = self.get_or_create(conversation_id)
-        if len(state.recent_messages) <= 5:
-            return
-
-        messages_to_summarize = state.recent_messages[:-5]
-        messages_to_keep = state.recent_messages[-5:]
-
-        messages_text = "\n".join(
-            f"{m.get('role', 'unknown')}: {m.get('content', '')}"
-            for m in messages_to_summarize
-        )
-
-        prompt = f"Summarize this conversation history concisely (2-3 sentences):\n{messages_text}"
-        try:
-            new_summary = await self.llm_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt="You are a helpful assistant that summarizes conversations.",
-            )
-            state.summary = self._merge_summaries(str(new_summary), state.summary)
-        except Exception:
-            pass
-
-        state.recent_messages = messages_to_keep
-        state.context_tokens_estimate = self.estimate_context_tokens(conversation_id, "")
-        state.updated_at = datetime.now(timezone.utc)
-        self._db.update_conversation(
-            conversation_id,
-            summary=state.summary,
-            context_tokens_estimate=state.context_tokens_estimate,
-        )
+        """Route legacy callers through the same protected checkpoint policy."""
+        await self.compact_conversation(conversation_id)
 
 
 # ── Singleton management ──────────────────────────────────────────────────────

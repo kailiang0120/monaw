@@ -825,14 +825,18 @@ class Database:
 
     # Message CRUD
 
-    def persist_turn_messages(self, turn_id: str, conv_id: str, messages: list[dict]) -> tuple[list[int], bool]:
+    def persist_turn_messages(
+        self, turn_id: str, conv_id: str, messages: list[dict], *,
+        before_commit: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> tuple[list[int], bool]:
         """Commit all turn messages and tool results together; retries are idempotent.
 
         The checkpoint survives process restarts, so retrying an uncertain commit
         returns its original user IDs without inserting duplicate history. A
         durable turn may first have committed its user input as a recovery
         checkpoint; in that case this call appends the remaining turn messages
-        and seals that checkpoint atomically.
+        and seals that checkpoint atomically. Required task completion can join
+        this same transaction through before_commit; retries never repeat it.
         """
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -888,6 +892,8 @@ class Database:
                     user_ids = []
                     records_to_insert = messages
                 assistant_message_id = None
+                covered_message_ids = list(user_ids)
+                provider_history = None
                 for message in records_to_insert:
                     cursor = conn.execute(
                         """INSERT INTO messages (
@@ -899,8 +905,10 @@ class Database:
                          json.dumps(message["attachments"], ensure_ascii=False) if message.get("attachments") else "", now),
                     )
                     message_id = cursor.lastrowid
+                    covered_message_ids.append(int(message_id))
                     if message["role"] == "assistant":
                         assistant_message_id = int(message_id)
+                        provider_history = message.get("provider_history")
                     if message["role"] == "user":
                         user_ids.append(message_id)
                     for call in message.get("tool_calls", []):
@@ -911,6 +919,13 @@ class Database:
                             (message_id, conv_id, str(call.get("tool_name", "")), str(call.get("input", "")),
                              str(call.get("output", "")), str(call.get("status", "complete")), now),
                         )
+                if assistant_message_id is not None and provider_history:
+                    from app.agent.provider_history import encode_provider_history
+
+                    conn.execute(
+                        "UPDATE messages SET provider_history_json = ? WHERE id = ?",
+                        (encode_provider_history(provider_history, covered_message_ids), assistant_message_id),
+                    )
                 conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conv_id))
                 if existing is None:
                     conn.execute(
@@ -932,6 +947,8 @@ class Database:
                     ) WHERE turn_id = ?""",
                     (turn_id, conv_id, turn_id),
                 )
+                if before_commit is not None:
+                    before_commit(conn)
                 conn.commit()
                 return user_ids, True
             except BaseException:
@@ -1045,6 +1062,7 @@ class Database:
                    COALESCE(status, 'complete') AS status,
                    response_duration_ms,
                    COALESCE(attachments_json, '') AS attachments_json,
+                   provider_history_json,
                    created_at
             FROM messages
             WHERE conversation_id = ?
@@ -1071,9 +1089,9 @@ class Database:
                 """
                 INSERT OR IGNORE INTO messages_archive (
                     id, conversation_id, role, content, thinking, status,
-                    response_duration_ms, attachments_json, created_at, archived_at
+                    response_duration_ms, attachments_json, provider_history_json, created_at, archived_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1085,6 +1103,7 @@ class Database:
                         row["status"],
                         row["response_duration_ms"],
                         row["attachments_json"],
+                        row["provider_history_json"],
                         row["created_at"],
                         now,
                     )
@@ -1110,9 +1129,9 @@ class Database:
                     """
                     INSERT INTO messages (
                         id, conversation_id, role, content, thinking, status,
-                        response_duration_ms, attachments_json, created_at
+                        response_duration_ms, attachments_json, provider_history_json, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"],
@@ -1123,6 +1142,7 @@ class Database:
                         row["status"],
                         row["response_duration_ms"],
                         row["attachments_json"] if "attachments_json" in row.keys() else "",
+                        row["provider_history_json"],
                         row["created_at"],
                     ),
                 )

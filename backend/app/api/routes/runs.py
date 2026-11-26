@@ -99,12 +99,15 @@ def _public_snapshot(dto: dict[str, Any], scope: dict[str, Any], request: Reques
     if not scope.get("verify_available"):
         actions = [action for action in actions if action != "verify"]
     current_session = _session_id(request)
+    lifecycle = get_active_lifecycle(str(snapshot.get("run_id") or ""))
     same_live_session = (
         bool(current_session)
         and str(scope.get("control_session_id") or "") == current_session
-        and get_active_lifecycle(str(snapshot.get("run_id") or "")) is not None
+        and lifecycle is not None
     )
-    if not same_live_session:
+    # Persistence and workspace checkpointing can yield while the Journal still
+    # says running. Late controls must not overwrite the already selected end.
+    if not same_live_session or getattr(lifecycle, "finalizing", False):
         actions = [action for action in actions if action not in {"pause", "stop", "approve", "reject"}]
     snapshot["available_actions"] = actions
     return snapshot

@@ -5,6 +5,11 @@ preload bridge, a built renderer, and an authenticated Python backend. It exerci
 UI actions, HTTP/SSE, the execution gate and SQLite together. It complements the
 Python groups, jsdom components and Electron unit tests.
 
+The [six-task harness evaluation](harness-evaluations.md) complements these
+desktop workflows with filesystem outcome checks, saved-task continuation,
+compaction, and bounded no-progress loops. Its default CI run makes no paid
+provider calls; optional live trials use the same graders.
+
 From an installed development checkout, run:
 
 ```powershell

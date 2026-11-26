@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { fetchBrowserDiagnostics, fetchDiagnosticsSummary } from '../../lib/api/diagnostics'
 import { fetchOpenAIAccountStatus, fetchSettings, type OpenAIAccountStatus } from '../../lib/api/settings'
-import type { AgentSettings, BrowserUseDiagnostics, DiagnosticsSummary } from '../../lib/api/types'
+import type { AgentSettings, BrowserUseDiagnostics, DiagnosticsSummary, ModelOptions } from '../../lib/api/types'
 import { optionalSteps, requiredSteps, type GuideStep } from './readiness'
 
 export interface SetupReadiness {
@@ -22,10 +22,12 @@ export function useSetupReadiness({
   enabled,
   workspaceDir,
   refreshKey,
+  catalog,
 }: {
   enabled: boolean
   workspaceDir: string
   refreshKey: number
+  catalog: ModelOptions
 }): SetupReadiness {
   const [settings, setSettings] = useState<AgentSettings | null>(null)
   const [account, setAccount] = useState<OpenAIAccountStatus | null>(null)
@@ -57,7 +59,7 @@ export function useSetupReadiness({
   }, [enabled, refreshKey])
 
   if (!enabled || !settings) return NOT_LOADED
-  const required = requiredSteps({ settings, account, workspaceDir })
+  const required = requiredSteps({ settings, account, workspaceDir, catalog })
   return {
     loaded: true,
     required,

@@ -163,16 +163,20 @@ describe('chat list by workspace', () => {
     const conversations = [
       chat('old', 'C:\\Projects\\alpha', 90),
       chat('def', '', 30),
+      chat('dated', 'C:\\Documents\\monaw\\2026-11-26', 40, { workspace_is_default: true }),
+      chat('legacy', 'C:\\Documents\\monaw\\2026-11-25\\chat-old', 50, { workspace_is_default: true }),
       chat('new', 'D:/work/beta/', 5),
     ]
     const props = renderSidebar({ conversations })
     const headers = screen.getAllByRole('button', { expanded: true }).map((button) => button.textContent)
-    expect(headers).toEqual(['Scheduled0', 'beta1', 'Default workspace1', 'alpha1'])
+    expect(headers).toEqual(['Scheduled0', 'beta1', 'Default workspace3', 'alpha1'])
     expect(screen.getByRole('button', { name: /^beta/ })).toHaveAttribute('title', 'D:/work/beta/')
     expect(screen.queryByText('Today')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'New chat in alpha' }))
     expect(props.onNewChat).toHaveBeenCalledWith('C:\\Projects\\alpha')
+    fireEvent.click(screen.getByRole('button', { name: 'New chat in Default workspace' }))
+    expect(props.onNewChat).toHaveBeenLastCalledWith('')
   })
 
   it('shows five chats per group, keeps the open and running ones, and remembers folding', () => {

@@ -45,8 +45,11 @@ from app.agent.tool_observations import attachment_image_payloads
 from app.agent.harness.tool_runner import ToolBatchRunner
 from app.agent.harness.model_request import ModelRequestRunner, ModelRequestError
 from app.agent.harness.turn_transcript import TurnTranscript
+from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.harness.response_policy import TurnResponsePolicy
+from app.agent.harness.task_tools import TASK_PROTOCOL, TaskToolRegistry
+from app.agent.harness.context_budget import ContextBudgetExceeded
 from app.agent.durable.turn_run import register_active_lifecycle, unregister_active_lifecycle
 from app.agent.durable.models import is_safe_identifier, sanitize_public_evidence
 from app.agent.turn_text import (
@@ -56,7 +59,6 @@ from app.agent.turn_text import (
     conversation_title_from_prompt,
     emit_progress_message,
     emit_typewriter_tokens,
-    final_answer_text,
     guard_wrap_up_prompt,
 )
 
@@ -203,6 +205,7 @@ class TurnLoop:
         _obs_event, _obs_error = observer.event, observer.error
         transcript = TurnTranscript(provider=str(getattr(self.llm_client, "provider", "") or ""))
         response_policy = TurnResponsePolicy()
+        task_progress = None
 
         def _current_user_request() -> str:
             applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
@@ -308,6 +311,17 @@ class TurnLoop:
             persist_turn = getattr(self.memory, "persist_turn", None)
             if callable(persist_turn):
                 continuation_kwargs = {"persist_user_message": False} if lifecycle.is_continuation else {}
+                provider_history_kwargs = {}
+                if transcript.provider == "gemini" and transcript.current_turn_messages:
+                    transcript.close_unanswered_calls(
+                        outcome.reason_code or "turn_completed",
+                        explanation="The turn ended before this call returned. Inspect current state before retrying.",
+                    )
+                    provider_history_kwargs["provider_history"] = {
+                        "provider": "gemini",
+                        "model_name": str(getattr(self.llm_client, "model_name", "") or ""),
+                        "messages": transcript.current_turn_messages,
+                    }
                 persisted_ids = await persist_turn(
                     conversation_id,
                     message,
@@ -324,6 +338,8 @@ class TurnLoop:
                     } if steering_messages else {}),
                     **attachment_kwargs,
                     **continuation_kwargs,
+                    **provider_history_kwargs,
+                    **({"task_progress": task_progress} if task_progress is not None and outcome.status == "complete" else {}),
                 )
                 if isinstance(persisted_ids, list):
                     persisted_user_ids = [item for item in persisted_ids if isinstance(item, int)]
@@ -356,7 +372,14 @@ class TurnLoop:
             self.memory.get_or_create(
                 conversation_id, title=conversation_title_from_prompt(message)
             )
-            self.memory.set_task_goal(conversation_id, message)
+            open_task_progress = getattr(self.memory, "open_task_progress", None)
+            if callable(open_task_progress):
+                task_progress = open_task_progress(
+                    conversation_id, message, selected_workspace_dir(), continuation=lifecycle.is_continuation,
+                )
+                tool_runner.task_progress = task_progress
+                tool_runner.registry = TaskToolRegistry(self.registry, task_progress)
+            self.memory.set_task_goal(conversation_id, task_progress.data["goal"] if task_progress else message)
             self.memory.set_active_task(conversation_id, None)
             if unfinished_workers(conversation_id):
                 final_text = "Paused: a previous tool is still stopping. Wait for it to finish, then continue and verify its last action."
@@ -383,16 +406,24 @@ class TurnLoop:
                     base_prompt = f"{base_prompt}\n\n{recovery_context}" if base_prompt else recovery_context
                 if tool_runner.review_state.denials:
                     base_prompt = f"{base_prompt}\n\n{tool_runner.review_state.instructions()}"
+                if task_progress is not None:
+                    base_prompt = f"{base_prompt}\n\n{TASK_PROTOCOL}\n{task_progress.context()}"
                 return completion_protocol_prompt(base_prompt)
 
-            initial_visible_tools = self.registry.get_all_tools(visible_only=True)
+            initial_visible_tools = tool_runner.registry.get_all_tools(visible_only=True)
             await self.memory.ensure_context_fits(
                 conversation_id,
                 _current_system_prompt(),
                 tools=initial_visible_tools,
                 current_user_message=message,
             )
-            transcript.messages = self.memory.build_llm_messages(conversation_id)
+            history_kwargs = {}
+            if isinstance(self.memory, MemoryManager):
+                history_kwargs = {
+                    "provider": transcript.provider,
+                    "model_name": str(getattr(self.llm_client, "model_name", "") or ""),
+                }
+            transcript.messages = self.memory.build_llm_messages(conversation_id, **history_kwargs)
             durable_run = lifecycle.durable_run
             persist_recovery_input = getattr(durable_run, "persist_recovery_input", None)
             if durable_run is not None and not lifecycle.is_continuation and callable(persist_recovery_input):
@@ -406,7 +437,7 @@ class TurnLoop:
             if initial_images:
                 initial_message["images"] = initial_images
                 initial_message["ephemeral"] = True
-            transcript.messages.append(initial_message)
+            transcript.append(initial_message)
             transcript.latest_round_start = len(transcript.messages) - 1
 
             def _apply_steering() -> bool:
@@ -429,6 +460,9 @@ class TurnLoop:
                 if pending:
                     streamed_answer_text = ""
                     model_runner.answer_text = ""
+                    tool_runner.recovery.progress.steer()
+                    if task_progress is not None:
+                        task_progress.steer(_current_user_request())
                     self.memory.set_task_goal(conversation_id, _current_user_request())
                 return bool(pending)
 
@@ -529,10 +563,9 @@ class TurnLoop:
 
                 streamed_answer_text = ""
                 try:
-                    visible_tools = self.registry.get_all_tools(visible_only=True)
-                    tool_choice = response_policy.take_tool_choice()
+                    visible_tools = tool_runner.registry.get_all_tools(visible_only=True)
                     model_result = await _model_request_or_pause(model_runner.request(transcript.snapshot(
-                        tools=visible_tools, system_prompt=_current_system_prompt(), tool_choice=tool_choice,
+                        tools=visible_tools, system_prompt=_current_system_prompt(),
                         metadata={"iteration": iteration_index + 1, "consumed": budget.consumed},
                     )), lifecycle)
                     if model_result is None:
@@ -596,16 +629,40 @@ class TurnLoop:
                     llm_response, tools_available=bool(visible_tools), history=tool_runner.history,
                     budget_exhausted=budget.exhausted,
                 )
+                if decision.action == "final" and task_progress is not None:
+                    blocker = task_progress.completion_blocker()
+                    if blocker:
+                        from app.agent.harness.response_policy import ResponseDecision
+
+                        if task_progress.repair_sent or budget.exhausted:
+                            decision = ResponseDecision("pause", f"Paused: {blocker}", "task_outcomes_incomplete")
+                        else:
+                            task_progress.repair_sent = True
+                            decision = ResponseDecision("reprompt", messages=[*decision.messages, {
+                                "role": "user", "content": f"{blocker}\nUse task_plan to update recorded evidence, continue the work, or explicitly report a blocker or missing user input.",
+                            }])
+                for index, call in enumerate(llm_response.tool_calls, 1):
+                    if transcript.provider == "gemini" and call.tool_name == FINAL_ANSWER_TOOL_NAME:
+                        transcript.add_tool_result(ToolCallResult.from_output(
+                            call_id=call.call_id or f"tool-{index}",
+                            name=call.tool_name,
+                            output=json.dumps({
+                                "status": "ok" if decision.action == "final" else "blocked",
+                                "result": decision.text if decision.action == "final" else "Complete the remaining work before the final answer.",
+                            }),
+                        ))
                 if decision.progress:
                     _emit_agent_progress(decision.progress)
                 if decision.action == "reprompt":
                     transcript.close_unanswered_calls(
                         "response_reprompted", explanation="The final answer needs revision before completion.",
                     )
-                transcript.messages.extend(decision.messages)
+                transcript.extend(decision.messages)
                 if decision.action == "reprompt":
                     continue
                 if decision.action in {"final", "pause"}:
+                    if decision.action == "pause":
+                        transcript.close_unanswered_calls(decision.reason_code)
                     final_text = decision.text
                     final_attachment_paths = decision.attachment_paths
                     completed_normally = decision.action == "final"
@@ -744,41 +801,47 @@ class TurnLoop:
                 not completed_normally
                 and incomplete_reason_code in GUARD_WRAP_UP_REASON_CODES
                 and budget.consumed > 0
+                and not lifecycle.pause_requested
             ):
                 # A guard ended the loop, but the model is healthy: give it one
                 # tool-less call to tell the user what it did and what stopped it.
                 transcript.close_unanswered_calls(incomplete_reason_code)
-                transcript.messages.append({"role": "user", "content": guard_wrap_up_prompt(incomplete_reason_code, final_text)})
+                transcript.append({"role": "user", "content": guard_wrap_up_prompt(incomplete_reason_code, final_text)})
                 streamed_answer_text = ""
 
                 try:
-                    wrap_up_result = await model_runner.request(transcript.snapshot(
-                        tools=[], system_prompt=_current_system_prompt(), tool_choice="none", stream_reasoning=False,
+                    wrap_up_result = await _model_request_or_pause(model_runner.request(transcript.snapshot(
+                        tools=[], system_prompt=_current_system_prompt(), tool_choice="none",
+                        stream_reasoning=False, stream_answer=False,
                         metadata={"wrap_up": True, "reason_code": incomplete_reason_code},
-                    ))
-                    transcript.accept(wrap_up_result)
-                    wrap_up_response = wrap_up_result.response
-                    obs_usage_total = obs_usage_total.merge(wrap_up_result.usage)
+                    )), lifecycle)
+                    wrap_up_response = None
+                    if wrap_up_result is not None:
+                        obs_usage_total = obs_usage_total.merge(wrap_up_result.usage)
+                        if not lifecycle.pause_requested and transcript.accept(wrap_up_result):
+                            wrap_up_response = wrap_up_result.response
                 except ModelRequestError:
                     wrap_up_response = None
-                streamed_answer_text = model_runner.answer_text
-                wrap_up_text = ""
-                if wrap_up_response is not None:
-                    wrap_up_text = str(wrap_up_response.content or "").strip()
-                    if not wrap_up_text:
-                        for call in wrap_up_response.tool_calls or []:
-                            if call.tool_name == FINAL_ANSWER_TOOL_NAME:
-                                call_args = call.arguments if isinstance(call.arguments, dict) else {}
-                                wrap_up_text = final_answer_text(call_args, "").strip()
+                wrap_up_text = response_policy.wrap_up_text(wrap_up_response) if wrap_up_response is not None else ""
                 if wrap_up_text:
+                    # Rejected summaries must not become the next turn's history.
+                    if wrap_up_response.tool_calls:
+                        transcript.begin_tool_round(wrap_up_response)
+                        transcript.close_unanswered_calls("wrap_up_completed")
+                    else:
+                        transcript.extend(wrap_up_response.provider_messages or (
+                            [{"role": "assistant", "content": wrap_up_response.content}]
+                            if wrap_up_response.content else []
+                        ))
                     final_text = wrap_up_text
                     pause_error_event = None
-                    if not streamed_answer_text:
-                        await emit_typewriter_tokens(_emit_response_event, final_text)
+                    await emit_typewriter_tokens(_emit_response_event, final_text)
                     streamed_answer_text = final_text
-                elif streamed_answer_text:
-                    final_text = streamed_answer_text.strip() or final_text
-                    pause_error_event = None
+            if lifecycle.pause_requested and not completed_normally:
+                stop_requested = True
+                incomplete_reason_code = "user_pause"
+                final_text = "Paused at a safe point. Continue to resume from the saved conversation."
+                pause_error_event = None
             if pause_error_event is not None:
                 _put(pause_error_event)
             if lifecycle.review_requested:
@@ -789,6 +852,10 @@ class TurnLoop:
 
             if steering is not None:
                 steering.closed = True
+            if not final_text.strip():
+                terminal_error = True
+                incomplete_reason_code = "model_empty_response"
+                final_text = "Paused: the model returned no answer. Continue to retry from the saved results."
             run_status = "error" if lifecycle.review_requested else turn_status(
                 stop_requested=stop_requested,
                 iteration_limit_hit=iteration_limit_hit,
@@ -810,8 +877,14 @@ class TurnLoop:
                 explicit_paths=final_attachment_paths,
                 tool_calls=tool_runner.history,
             )
+            def finish_task_progress() -> None:
+                """Clear legacy hints after required task/history persistence succeeds."""
+                if task_progress is not None and task_progress.data["status"] in {"blocked", "waiting_user"}:
+                    return
+                self.memory.clear_task_progress(conversation_id)
+
             await lifecycle.finalize(
-                TurnOutcome(final_text or "Done.", run_status, incomplete_reason_code, response_attachments),
+                TurnOutcome(final_text, run_status, incomplete_reason_code, response_attachments),
                 persist=_persist_turn,
                 usage=_turn_usage(),
                 tool_calls=_tool_calls_for_persist(),
@@ -822,7 +895,7 @@ class TurnLoop:
                     "estimated_requests": model_budget.estimated_requests if model_budget is not None else 0,
                     "model_requests": model_budget.requests if model_budget is not None else 0,
                 },
-                clear_progress=lambda: self.memory.clear_task_progress(conversation_id),
+                clear_progress=finish_task_progress,
             )
 
             # Memory learning reads only the user's words (including steering sent
@@ -864,13 +937,15 @@ class TurnLoop:
             await tool_runner.cancel()
             logger.exception("react_worker error: %s", exc)
             _obs_error(str(exc), error_type=type(exc).__name__, metadata={"phase": "turn_loop"})
-            failure_text = "Paused after an internal error. The saved tool results can be used to continue."
+            context_limit = isinstance(exc, ContextBudgetExceeded)
+            reason_code = exc.reason_code if context_limit else "internal_error"
+            failure_text = str(exc) if context_limit else "Paused after an internal error. The saved tool results can be used to continue."
             partial_text = final_text.strip() or streamed_answer_text.strip() or latest_progress_text.strip()
             if partial_text:
                 failure_text += f"\n\nLast response: {partial_text}"
-            _put({"event": "error", "data": {"code": "internal_error", "message": str(exc)}})
+            _put({"event": "error", "data": {"code": reason_code, "message": str(exc)}})
             await lifecycle.finalize(
-                TurnOutcome(failure_text, "error", "internal_error"),
+                TurnOutcome(failure_text, "paused" if context_limit else "error", reason_code),
                 persist=_persist_turn, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
             )
         finally:

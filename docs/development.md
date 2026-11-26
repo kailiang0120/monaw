@@ -13,6 +13,10 @@ This document is for contributors and maintainers. The root README is for end us
 
 ## Development Commands
 
+Node 22.13.0 is the development and frontend CI baseline. The package engine
+range still accepts Node 20.19+, 22.13+, and 24.x, but the 20.x and 24.x lines
+are not matrix-tested on every pull request.
+
 Run the full dev app from the frontend folder:
 
 ```powershell
@@ -131,7 +135,7 @@ Runtime layout:
 
 ```text
 %USERPROFILE%\.monaw\runtime\        settings.json, agent.db, backend.log, Electron store
-Documents\monaw\                    default workdir for agent shell commands
+Documents\monaw\YYYY-MM-DD\         daily default working folder for chat tools
 %USERPROFILE%\.monaw\browser\        browser artifacts
 %USERPROFILE%\.monaw\memory\         global and workspace memory markdown files
 ```
@@ -217,7 +221,50 @@ The model dropdown uses:
 GET /api/settings/model-options
 ```
 
-The local catalog is defined in `backend\app\agent\llm_constants.py`.
+Connection definitions and model metadata live in
+`backend/app/agent/model_registry.py`. `model_catalog.py` combines that registry
+with custom model names, account discovery and credential readiness. The API
+returns stable connection IDs, display labels, protocol names, readiness reasons
+and supported reasoning efforts. Readiness means credentials are configured; it
+does not promise that a remote service is reachable or that a subscription can
+use every model.
+
+The current connections are `openai` (OpenAI API), `codex` (ChatGPT account) and
+`gemini` (Google). These IDs retain the existing persisted `provider` and
+scheduled `model_provider` values, so existing settings and pinned occurrences
+do not need a database rewrite. Valid saved model IDs remain intact when absent
+from the current catalog. Explicit legacy aliases still migrate within their
+connection. An unavailable selection is displayed instead of silently replaced.
+
+Chat, Settings and scheduled tasks use `frontend/src/components/ModelPicker.tsx`
+with the global `Dropdown`, a shared catalog cache and selection helpers. All use the display format
+`Model name · Connection name`; protocol and credential details remain in
+connection settings. An explicitly empty reasoning list hides the reasoning
+control. Unknown models do not acquire guessed reasoning capabilities from
+their brand or name.
+
+The chat picker becomes a brain icon when its composer is at most 720px wide.
+Its menu and tooltip retain the full model and connection names.
+
+The catalog includes GPT-6.2 Sol, GPT-6.2 Astra, GPT-6.1 Terra and the Gemini 4
+Neon, Hydrogen, Carbon and Argon models. Existing default selections remain
+unchanged. Model IDs and reasoning levels follow the
+[OpenAI model catalog](https://developers.openai.com/api/docs/models) and
+[Google's Gemini model documentation](https://aistudio.google.com/docs/latest-model).
+Gemini 4 uses `google-genai` 2.34.0 and preserves thought signatures across turns.
+Migration 0029 adds private provider-history columns to live and archived
+messages. Complete Gemini turn journals are committed atomically and replayed
+only for the same provider/model. Existing rows retain their text fallback;
+uploaded images still require attachment validation when restored. The private
+wire history is excluded from conversation API responses. Incomplete journals
+and tool payloads that require secret redaction use sanitized text history
+instead of persisting raw provider data.
+
+To add a future provider, register its connection metadata and execution adapter,
+then verify discovery, streaming, cancellation, tool calls and usage accounting.
+The picker consumes the catalog without its own provider-specific model lists.
+This change supports the three existing cloud/account connections only; local
+servers and configurable custom endpoints are not enabled.
 
 Default backend settings:
 
@@ -230,12 +277,8 @@ reasoning_effort: medium
 Images and screenshots are sent to the configured chat model, which reads them
 natively. There is no separate vision model.
 
-Current curated chat model groups:
-
-```text
-OpenAI API or account: gpt-6-luna, gpt-6.1-sol, gpt-6-astra
-Google:   gemini-pro-latest, gemini-flash-latest, gemini-flash-lite-latest
-```
+ChatGPT account discovery replaces the curated fallback with the models and
+reasoning levels reported for the signed-in account.
 
 ## Harness continuity and recovery
 
@@ -387,7 +430,8 @@ printed rather than the dozens of submodules that inherit it.
 
 ## Continuous integration
 
-`.github/workflows/verify.yml` runs on every push and pull request:
+`.github/workflows/verify.yml` runs on pull requests and pushes to `main`.
+Feature branches use the pull-request run without a duplicate push run:
 
 - **Backend (Python 3.11)** — each test group as a separate Windows job, including
   persisted scheduling/reconciliation, scoped API mutations, approval replay,
@@ -407,7 +451,8 @@ printed rather than the dozens of submodules that inherit it.
   `MONAW_REQUIRE_DOCKER_TESTS=1` makes unavailable Docker prerequisites a failure.
 - **Per-commit integrity** — the checks above, capped at 20 commits.
 - **Frontend** — `npm run verify:ci` (Vitest, Electron tests, type-check, build),
-  on Node 20.19.0, 22.13.0 and 24. The 22.x floor includes jsdom's requirement.
+  once on Node 22.13.0, matching the application job and packaging baseline.
+  The check remains named `Frontend (Node 22.13.0)`.
 - **Electron and backend workflows (Windows)** — `npm run test:app` on Python
   3.11 / Node 22.13, covering authenticated startup, streaming/persistence,
   approval and rejection, parallel stop, scheduling, uncertain run reconciliation

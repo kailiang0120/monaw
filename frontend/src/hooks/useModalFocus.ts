@@ -73,6 +73,8 @@ export function useModalFocus(dialogRef: RefObject<HTMLElement | null>, { onEsca
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isTopmost(dialog)) return
+      // A native modal owns its focus and Escape, including when nested in Settings.
+      if (document.activeElement?.closest('dialog[open]')) return
       if (event.key === 'Escape') {
         // A control inside the dialog (a picker, an inline edit) already used this Escape.
         if (event.defaultPrevented) return
