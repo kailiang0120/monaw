@@ -79,6 +79,10 @@ claiming every intervening Chrome version was tested. The fixture accepts
 missing-browser skips fail. `scripts/fetch-test-chrome.py` resolves the manifest's
 minimum or current stable from Google's Chrome for Testing feed into an isolated
 directory without changing the user's browser.
+On Windows it runs Chrome's bundled configuration-only helper to grant its
+sandbox capabilities access to the extracted browser files. This fixes network
+service crashes on CI directories with restrictive inherited permissions while
+keeping the browser sandbox enabled.
 The fixture owns a dedicated DevTools target and reports browser version and
 network evidence when a test navigation fails.
 

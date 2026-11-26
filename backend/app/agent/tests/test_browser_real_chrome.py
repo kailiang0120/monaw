@@ -62,7 +62,7 @@ def isolated_chrome(tmp_path, handler=None):
     profile.mkdir()
     chrome_log = open(tmp_path/'chrome-stderr.log','wb')
     process = subprocess.Popen([executable,'--headless=new','--no-first-run','--no-default-browser-check',
-        '--enable-automation','--disable-search-engine-choice-screen','--enable-logging=stderr',
+        '--enable-logging=stderr',
         '--disable-background-networking','--remote-debugging-port=0','--remote-allow-origins=http://localhost',
         '--user-data-dir='+str(profile),'about:blank'],stdout=subprocess.DEVNULL,stderr=chrome_log)
     try:

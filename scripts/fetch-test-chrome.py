@@ -2,10 +2,28 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
+import subprocess
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 from zipfile import ZipFile
+
+
+def configure_sandbox(binary: Path) -> None:
+    """Grant Chrome's own sandbox capabilities access to this extracted build."""
+    setup = binary.parent / "setup.exe"
+    if os.name != "nt" or not setup.is_file():
+        return  # Older supported Chrome builds do not ship the configuration tool.
+    result = subprocess.run(
+        [str(setup), "--configure-browser-in-directory=" + str(binary.parent)],
+        capture_output=True, text=True, timeout=60,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    # Chrome's configuration-only mode returns this explicit success status;
+    # it does not install a browser or change the user's default browser.
+    if result.returncode != 78:  # CONFIGURE_APP_CONTAINER_SANDBOX_SUCCESS
+        raise RuntimeError(f"Chrome sandbox configuration failed ({result.returncode}): {result.stderr[-2000:]}")
 
 
 def fetch_browser(channel: str, destination: Path) -> Path:
@@ -27,6 +45,7 @@ def fetch_browser(channel: str, destination: Path) -> Path:
     root = (destination / version).resolve()
     binary = root / "chrome-win64/chrome.exe"
     if binary.is_file():
+        configure_sandbox(binary)
         return binary
     root.mkdir(parents=True, exist_ok=True)
     archive = root / "chrome.zip"
@@ -40,6 +59,7 @@ def fetch_browser(channel: str, destination: Path) -> Path:
         zipped.extractall(root)
     if not binary.is_file():
         raise RuntimeError("Chrome download did not contain the expected executable")
+    configure_sandbox(binary)
     return binary
 
 
