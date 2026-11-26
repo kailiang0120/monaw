@@ -1,4 +1,5 @@
 import { test, expect, type Desktop } from './desktop'
+import type { Response } from '@playwright/test'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -73,9 +74,15 @@ test('file diff, approval, safe pause, real app/backend restart, Continue and Un
   const conversationId = conversations[0].id as string
   const run = await runFor(desktop, conversationId)
   const pausePosts: string[] = []
+  const pauseResponses: Response[] = []
   desktop.page.on('request', (request) => {
     if (request.method() === 'POST' && new URL(request.url()).pathname === `/api/runs/${run.run_id}/pause`) {
       pausePosts.push(request.url())
+    }
+  })
+  desktop.page.on('response', (response) => {
+    if (response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/runs/${run.run_id}/pause`) {
+      pauseResponses.push(response)
     }
   })
 
@@ -90,16 +97,33 @@ test('file diff, approval, safe pause, real app/backend restart, Continue and Un
   }).toEqual(['file_write:verified'])
 
   const pause = desktop.page.getByRole('button', { name: 'Pause execution' })
-  const pauseResponse = desktop.page.waitForResponse((response) => response.url().endsWith(`/api/runs/${run.run_id}/pause`))
+  const pauseResponse = desktop.page.waitForResponse((response) =>
+    response.request().method() === 'POST'
+    && response.url().endsWith(`/api/runs/${run.run_id}/pause`))
   await pause.focus()
   await desktop.page.keyboard.press('Enter')
-  await expect.poll(() => pausePosts.length).toBe(1)
-  expect((await pauseResponse).status()).toBe(202)
+  let acceptedPause = await pauseResponse
+  if (acceptedPause.status() === 409) {
+    expect(await acceptedPause.json(), 'Pause may retry only a stale Run revision')
+      .toMatchObject({ code: 'revision_conflict' })
+    await expect.poll(() => pauseResponses.length, { message: 'Pause must retry a revision conflict once' }).toBe(2)
+    acceptedPause = pauseResponses[1]
+  }
+  expect(acceptedPause.status(), JSON.stringify(await acceptedPause.json())).toBe(202)
   await desktop.signal('file-resume.release')
   await expect.poll(async () => (await desktop.api(`/api/runs/${run.run_id}`)).data.status).toBe('paused')
   const paused = (await desktop.api(`/api/runs/${run.run_id}`)).data
   expect(paused.available_actions).toContain('resume')
-  expect(pausePosts).toHaveLength(1)
+  // Verification can advance the revision before the renderer receives it.
+  // One keyboard action permits the controller's single stale-revision retry,
+  // while duplicate accepted commands or any other rejection must still fail.
+  expect([[202], [409, 202]]).toContainEqual(pauseResponses.map((response) => response.status()))
+  expect(pauseResponses.filter((response) => response.status() === 202)).toHaveLength(1)
+  expect(pausePosts).toHaveLength(pauseResponses.length)
+  if (pauseResponses[0].status() === 409) {
+    expect(pauseResponses[1].request().postDataJSON().expected_revision)
+      .toBeGreaterThan(pauseResponses[0].request().postDataJSON().expected_revision)
+  }
   expect((await desktop.api(`/api/runs/${run.run_id}/recovery`)).data.run.status).toBe('paused')
 
   const oldElectronPid = desktop.app.process().pid
