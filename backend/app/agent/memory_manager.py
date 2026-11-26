@@ -600,6 +600,12 @@ class MemoryManager:
         state.updated_at = datetime.now(timezone.utc)
         self._db.update_conversation(conversation_id, task_goal=state.task_goal)
 
+    def open_task_progress(self, conversation_id: str, goal: str, workspace: str, *, continuation: bool = False):
+        """Restore durable outcomes independently of the current tool batch."""
+        from app.agent.harness.task_progress import TaskProgress
+
+        return TaskProgress(self._db, conversation_id, goal, workspace, continuation=continuation)
+
     def sync_plan_progress(self, conversation_id: str, plan) -> None:
         """Persist current pending/completed plan progress."""
         state = self.get_or_create(conversation_id)

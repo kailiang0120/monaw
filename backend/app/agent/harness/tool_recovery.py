@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from app.agent.harness.tool_policy import ToolPolicyDecision, tool_call_signature
 from app.agent.harness.turn_lifecycle import TurnOutcome
 from app.agent.harness.turn_observer import TurnObserver
+from app.agent.harness.progress_monitor import ProgressMonitor
 from app.agent.tool_observations import (
     blocked_tool_key, browser_repeat_key, build_repeat_recovery_prompt,
     is_browser_observation_action, is_browser_repeat_guarded, parse_tool_json,
@@ -41,6 +42,8 @@ class ToolRecovery:
         self._last_guard_code = ""
         self._stop_requested = False
         self._pause_text = self._pause_reason = ""
+        self.progress = ProgressMonitor()
+        self.round_hint = ""
 
     @property
     def pause(self) -> TurnOutcome | None:
@@ -48,12 +51,15 @@ class ToolRecovery:
 
     def begin_round(self) -> None:
         self._round_guard_blocks = 0
+        self.round_hint = ""
+        self.progress.begin_round()
 
     def record_result(self, name: str, arguments: dict, decision: ToolPolicyDecision, output: str) -> None:
         signature = str(decision.metadata.get("signature") or tool_call_signature(name, arguments))
         self._last_tool_outputs_by_signature[signature] = output
 
-    def observe_result(self, *, tool_name: str, arguments: dict, call_id: str, tool_output: str, status: str) -> GuardedToolResult:
+    def observe_result(self, *, tool_name: str, arguments: dict, call_id: str, tool_output: str, status: str, tool: dict | None = None) -> GuardedToolResult:
+        self.progress.observe(tool_name, arguments, tool_output, status, tool)
         recovery_prompt = ""
         review_result = parse_tool_json(tool_output)
         review_code = str(review_result.get("reason_code") or "")
@@ -313,6 +319,15 @@ class ToolRecovery:
         return GuardedToolResult(tool_output, "error", recovery_prompt)
 
     def finish_round(self, call_count: int) -> TurnOutcome | None:
+        hint, stalled = self.progress.finish_round()
+        self.round_hint = hint
+        if stalled and not self._stop_requested:
+            self._stop_requested = True
+            self._pause_reason, self._pause_text = "no_progress", hint
+            self.observer.event(
+                "guardrail_triggered", level="warning", status="error", error_code="no_progress",
+                metadata={"stalled_rounds": self.progress.stalled_rounds, "redundant_calls": self.progress.redundant_calls},
+            )
         if call_count and not self._stop_requested:
             self._stuck_rounds = self._stuck_rounds + 1 if self._round_guard_blocks >= call_count else 0
             if self._stuck_rounds >= self.STUCK_ROUNDS_LIMIT or self._guard_blocks >= self.GUARD_BLOCKS_LIMIT:

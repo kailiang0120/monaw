@@ -48,6 +48,7 @@ from app.agent.harness.turn_transcript import TurnTranscript
 from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.harness.response_policy import TurnResponsePolicy
+from app.agent.harness.task_tools import TASK_PROTOCOL, TaskToolRegistry
 from app.agent.durable.turn_run import register_active_lifecycle, unregister_active_lifecycle
 from app.agent.durable.models import is_safe_identifier, sanitize_public_evidence
 from app.agent.turn_text import (
@@ -203,6 +204,7 @@ class TurnLoop:
         _obs_event, _obs_error = observer.event, observer.error
         transcript = TurnTranscript(provider=str(getattr(self.llm_client, "provider", "") or ""))
         response_policy = TurnResponsePolicy()
+        task_progress = None
 
         def _current_user_request() -> str:
             applied = [item.message for item in steering.messages if item.applied] if steering is not None else []
@@ -368,7 +370,14 @@ class TurnLoop:
             self.memory.get_or_create(
                 conversation_id, title=conversation_title_from_prompt(message)
             )
-            self.memory.set_task_goal(conversation_id, message)
+            open_task_progress = getattr(self.memory, "open_task_progress", None)
+            if callable(open_task_progress):
+                task_progress = open_task_progress(
+                    conversation_id, message, selected_workspace_dir(), continuation=lifecycle.is_continuation,
+                )
+                tool_runner.task_progress = task_progress
+                tool_runner.registry = TaskToolRegistry(self.registry, task_progress)
+            self.memory.set_task_goal(conversation_id, task_progress.data["goal"] if task_progress else message)
             self.memory.set_active_task(conversation_id, None)
             if unfinished_workers(conversation_id):
                 final_text = "Paused: a previous tool is still stopping. Wait for it to finish, then continue and verify its last action."
@@ -395,9 +404,11 @@ class TurnLoop:
                     base_prompt = f"{base_prompt}\n\n{recovery_context}" if base_prompt else recovery_context
                 if tool_runner.review_state.denials:
                     base_prompt = f"{base_prompt}\n\n{tool_runner.review_state.instructions()}"
+                if task_progress is not None:
+                    base_prompt = f"{base_prompt}\n\n{TASK_PROTOCOL}\n{task_progress.context()}"
                 return completion_protocol_prompt(base_prompt)
 
-            initial_visible_tools = self.registry.get_all_tools(visible_only=True)
+            initial_visible_tools = tool_runner.registry.get_all_tools(visible_only=True)
             await self.memory.ensure_context_fits(
                 conversation_id,
                 _current_system_prompt(),
@@ -447,6 +458,9 @@ class TurnLoop:
                 if pending:
                     streamed_answer_text = ""
                     model_runner.answer_text = ""
+                    tool_runner.recovery.progress.steer()
+                    if task_progress is not None:
+                        task_progress.steer(_current_user_request())
                     self.memory.set_task_goal(conversation_id, _current_user_request())
                 return bool(pending)
 
@@ -547,7 +561,7 @@ class TurnLoop:
 
                 streamed_answer_text = ""
                 try:
-                    visible_tools = self.registry.get_all_tools(visible_only=True)
+                    visible_tools = tool_runner.registry.get_all_tools(visible_only=True)
                     model_result = await _model_request_or_pause(model_runner.request(transcript.snapshot(
                         tools=visible_tools, system_prompt=_current_system_prompt(),
                         metadata={"iteration": iteration_index + 1, "consumed": budget.consumed},
@@ -613,6 +627,18 @@ class TurnLoop:
                     llm_response, tools_available=bool(visible_tools), history=tool_runner.history,
                     budget_exhausted=budget.exhausted,
                 )
+                if decision.action == "final" and task_progress is not None:
+                    blocker = task_progress.completion_blocker()
+                    if blocker:
+                        from app.agent.harness.response_policy import ResponseDecision
+
+                        if task_progress.repair_sent or budget.exhausted:
+                            decision = ResponseDecision("pause", f"Paused: {blocker}", "task_outcomes_incomplete")
+                        else:
+                            task_progress.repair_sent = True
+                            decision = ResponseDecision("reprompt", messages=[*decision.messages, {
+                                "role": "user", "content": f"{blocker}\nUse task_plan to update recorded evidence, continue the work, or explicitly report a blocker or missing user input.",
+                            }])
                 for index, call in enumerate(llm_response.tool_calls, 1):
                     if transcript.provider == "gemini" and call.tool_name == FINAL_ANSWER_TOOL_NAME:
                         transcript.add_tool_result(ToolCallResult.from_output(
@@ -849,6 +875,14 @@ class TurnLoop:
                 explicit_paths=final_attachment_paths,
                 tool_calls=tool_runner.history,
             )
+            def finish_task_progress() -> None:
+                """Clear a completed task only after its durable turn is committed."""
+                if task_progress is not None:
+                    task_progress.finish_answer(final_text)
+                    if task_progress.data["status"] in {"blocked", "waiting_user"}:
+                        return
+                self.memory.clear_task_progress(conversation_id)
+
             await lifecycle.finalize(
                 TurnOutcome(final_text, run_status, incomplete_reason_code, response_attachments),
                 persist=_persist_turn,
@@ -861,7 +895,7 @@ class TurnLoop:
                     "estimated_requests": model_budget.estimated_requests if model_budget is not None else 0,
                     "model_requests": model_budget.requests if model_budget is not None else 0,
                 },
-                clear_progress=lambda: self.memory.clear_task_progress(conversation_id),
+                clear_progress=finish_task_progress,
             )
 
             # Memory learning reads only the user's words (including steering sent

@@ -44,7 +44,8 @@ def test_fresh_database_has_no_sqlite_memory_tables(tmp_path):
     assert "conversation_compactions" in tables
     # Memory lives in markdown files; no memory table survives the migrations.
     assert not {name for name in tables if name.startswith("memor")}
-    assert versions == list(range(5, 30))
+    assert versions == list(range(5, 31))
+    assert "task_progress" in tables
     assert {
         "idx_conversations_updated",
         "idx_tool_calls_conversation",

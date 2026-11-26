@@ -188,7 +188,8 @@ test('file diff, approval, safe pause, real app/backend restart, Continue and Un
   await expect(desktop.page.getByRole('region', { name: 'Changes in this reply' }).first()).toContainText('file-resume.txt')
   const operations = (await desktop.api(`/api/runs/${run.run_id}/operations`)).data.operations
   expect(operations.filter((operation: { operation_kind: string }) => operation.operation_kind === 'file_write')).toHaveLength(1)
-  expect((await desktop.events()).filter((event) => event.kind === 'model' && event.scenario === 'file-resume').map((event) => event.index)).toEqual([0, 1, 2])
+  // The resumed provider records task evidence before delivering its final answer.
+  expect((await desktop.events()).filter((event) => event.kind === 'model' && event.scenario === 'file-resume').map((event) => event.index)).toEqual([0, 1, 2, 3])
   expect((await desktop.api('/api/settings')).data.permissions.mode).toBe('default')
 
   await desktop.page.getByRole('button', { name: 'Changes', exact: true }).click()
@@ -264,7 +265,7 @@ test('hard backend crash after a verified write exposes Continue without duplica
   const messages = (await desktop.api(`/api/conversations/${conversationId}/messages`)).data.messages
   expect(messages.filter((message: { role: string; content: string }) =>
     message.role === 'user' && message.content === '[e2e:file-resume]')).toHaveLength(1)
-  expect((await desktop.events()).filter((event) => event.kind === 'model' && event.scenario === 'file-resume').map((event) => event.index)).toEqual([0, 1, 2])
+  expect((await desktop.events()).filter((event) => event.kind === 'model' && event.scenario === 'file-resume').map((event) => event.index)).toEqual([0, 1, 2, 3])
   expect(desktop.errors).toEqual([])
 })
 

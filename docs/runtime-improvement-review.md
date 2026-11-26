@@ -3,6 +3,23 @@
 Scope: runtime correctness, persistence, resource limits and everyday task flows.
 Release, packaging and distribution changes are outside this review.
 
+## Whole-task reliability follow-up
+
+Three additional improvements address work that spans several tool batches:
+
+| Area | Updated behavior |
+| --- | --- |
+| Task outcomes | Persist original goals, pending/failed outcomes, and returned evidence independently of the current batch. Preserve them through pause, restart, and compaction; reject stale updates and unsupported completion claims. |
+| Useful progress | Compare observation results across rounds, give one recovery hint when results stop changing, then pause a bounded loop. Status polling gets a longer finite window. |
+| Outcome evaluations | Run six isolated tasks against real tools and durable state; grade exact files, read-back, missing-input handling, recovery, and duplicate effects. Report model requests, tokens, and duration. |
+
+The live long-context evaluation exposed a planning dead end: a read-back check
+was labeled as a file mutation, and immutable kind metadata prevented correction.
+Unfinished outcomes can now correct that classification with a recorded reason
+without replacing their acceptance criteria or repeating completed file edits.
+See [task outcomes and evaluations](harness-evaluations.md) for the protocol,
+commands, evidence boundaries, and limits.
+
 ## Turn completion follow-up
 
 The harness runs provider requests through `ModelRequestRunner`, checks each
