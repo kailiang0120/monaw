@@ -825,14 +825,18 @@ class Database:
 
     # Message CRUD
 
-    def persist_turn_messages(self, turn_id: str, conv_id: str, messages: list[dict]) -> tuple[list[int], bool]:
+    def persist_turn_messages(
+        self, turn_id: str, conv_id: str, messages: list[dict], *,
+        before_commit: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> tuple[list[int], bool]:
         """Commit all turn messages and tool results together; retries are idempotent.
 
         The checkpoint survives process restarts, so retrying an uncertain commit
         returns its original user IDs without inserting duplicate history. A
         durable turn may first have committed its user input as a recovery
         checkpoint; in that case this call appends the remaining turn messages
-        and seals that checkpoint atomically.
+        and seals that checkpoint atomically. Required task completion can join
+        this same transaction through before_commit; retries never repeat it.
         """
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -943,6 +947,8 @@ class Database:
                     ) WHERE turn_id = ?""",
                     (turn_id, conv_id, turn_id),
                 )
+                if before_commit is not None:
+                    before_commit(conn)
                 conn.commit()
                 return user_ids, True
             except BaseException:

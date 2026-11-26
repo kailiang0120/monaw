@@ -170,10 +170,28 @@ non-resumable. It preserves their transcript and operation history rather than
 guessing that resuming is safe. New checkpoints remain resumable after clock
 changes and event-log pruning because both sequence values are stored durably.
 
+## Task completion and compaction follow-up
+
+Two reproduced completion defects are fixed: changing an unfinished file outcome
+to `answer` could bypass its evidence requirements, and a required task save could
+fail after history had already reported success. Kind changes cannot convert
+existing work into delivery-only outcomes. Answer completion now joins the history
+transaction, restores in-memory state on rollback, and reports save failures.
+An idempotent failure checkpoint preserves the failed turn when storage permits it.
+
+Compaction keeps the original goal and every current outcome outside summaries.
+The goal is saved before any model request. Failed or paused turns in the active
+task restore all saved requests, applied steering, final status, and tool results,
+including beyond the recent-message window. Failed live tool rounds are protected
+as complete units. If protected records exceed the budget, the turn pauses instead
+of truncating them. Legacy summarization uses the same checkpoint policy.
+See [conversation compaction](context-compaction.md) for the exact retention policy,
+provider boundaries, and storage limits.
+
 Focused regressions cover interrupted streams, nested schemas, bounded replay,
 checkpoint cancellation, old-history paging/search, model budget exhaustion,
 schema upgrades and notification recovery across a database restart. The
-branch was verified locally with 1,834 backend tests passing (8 environment-dependent
+initial runtime review was verified locally with 1,834 backend tests passing (8 environment-dependent
 skips), 282 renderer tests, 44 Electron unit tests, type checks and renderer builds,
 and all 18 isolated application workflows. Real-browser checks passed on Chrome
 125.0.6422.141 and stable 158.0.8127.88. The SDK contract fixtures, generated API

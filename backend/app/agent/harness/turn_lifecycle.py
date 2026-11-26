@@ -210,14 +210,25 @@ class TurnLifecycle:
         except Exception:
             logger.exception("Unable to persist turn conversation_id=%s", self.conversation_id)
             outcome = TurnOutcome(
-                summary=outcome.summary,
+                summary=(
+                    "The turn's completion could not be saved. Verify the saved task progress before continuing."
+                    f"\n\nLast generated response:\n{outcome.summary}"
+                ),
                 status="error",
                 reason_code="persistence_failed",
                 attachments=outcome.attachments,
             )
+            # Retry only the idempotent history checkpoint, without committing
+            # answer outcomes or repeating model requests and tool effects.
+            try:
+                await persist(outcome)
+                message = "Completion could not be saved. The failed turn was saved for continuation."
+            except Exception:
+                logger.exception("Unable to save failure checkpoint conversation_id=%s", self.conversation_id)
+                message = "The turn ended, but its history could not be saved."
             self.publisher.emit("error", {
                 "code": "persistence_failed",
-                "message": "The turn ended, but its history could not be saved.",
+                "message": message,
             })
         self.outcome = outcome
         durable_stable = True

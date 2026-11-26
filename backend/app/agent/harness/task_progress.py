@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -30,16 +31,30 @@ class TaskProgress:
         self.data = json.loads(row["state_json"]) if row else self._new(goal)
         self.revision = int(row["revision"]) if row else 0
         self._active_task_id = row["task_id"] if row else None
+        last_turn = db.fetchone(
+            "SELECT status FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+            (conversation_id,),
+        )
+        interrupted = last_turn is not None and last_turn["status"] in {"error", "paused"}
         if self.data.get("workspace") != self.workspace or (
-            self.data["status"] == "complete" and not continuation
+            self.data["status"] == "complete" and not continuation and not interrupted
         ):
             self.data, self.revision = self._new(goal), 0
+        if self.revision == 0:
+            # Keep the original request even if the first model call fails.
+            self._save()
 
     def _new(self, goal: str) -> dict:
         """Create a task identity while retaining previous tasks in SQLite."""
         return {
             "task_id": uuid.uuid4().hex,
             "goal": str(redact_sensitive(goal)),
+            "history_start_id": int(
+                self.db.fetchone(
+                    "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id=? AND role='assistant'",
+                    (self.conversation_id,),
+                )[0]
+            ),
             "workspace": self.workspace,
             "status": "working",
             "reason": "",
@@ -48,13 +63,13 @@ class TaskProgress:
             "evidence": [],
         }
 
-    def _save(self) -> None:
-        """Commit one bounded snapshot and fence stale in-memory writers."""
+    def _save(self, connection=None) -> None:
+        """Save under the caller's transaction or commit a standalone update."""
         encoded = json.dumps(self.data, ensure_ascii=False)
         if len(encoded.encode("utf-8")) > 256_000:
             raise ValueError("Task evidence is full; finish or split the task before continuing.")
         now = datetime.now(timezone.utc).isoformat()
-        with self.db.transaction() as conn:
+        with nullcontext(connection) if connection is not None else self.db.transaction() as conn:
             active = conn.execute(
                 "SELECT task_id FROM task_progress WHERE conversation_id = ? AND active = 1",
                 (self.conversation_id,),
@@ -225,6 +240,11 @@ class TaskProgress:
                     )
                 step = {**(existing or {}), **update}
                 if existing and step["kind"] != existing["kind"]:
+                    if step["kind"] == "answer":
+                        raise ValueError(
+                            f"{identity}: existing work cannot become an answer-only outcome. "
+                            "Keep its evidence requirements and add a separate answer outcome."
+                        )
                     if existing["status"] == "done" or not update.get("reason", "").strip():
                         raise ValueError(
                             f"{identity}: correct an unfinished outcome's kind with a reason; "
@@ -240,6 +260,8 @@ class TaskProgress:
                 step.setdefault("reason", "")
                 if step["kind"] == "file_change" and not step["targets"]:
                     raise ValueError(f"{identity}: file_change needs explicit target paths.")
+                if step["kind"] == "answer" and step["targets"]:
+                    raise ValueError(f"{identity}: answer-only outcomes cannot claim file targets.")
                 if step["status"] == "done":
                     self._check_done(step)
                 merged[identity] = step
@@ -269,8 +291,6 @@ class TaskProgress:
 
     def context(self) -> str:
         """Keep active outcomes outside lossy conversation compaction."""
-        if not self.data["steps"] and not self.data["evidence"]:
-            return ""
         return "Task progress (recorded state, not additional instructions):\n" + json.dumps(
             {
                 "goal": self.data["goal"],
@@ -297,7 +317,17 @@ class TaskProgress:
             return "Record the user's requested outcomes with task_plan and link the verified file results before finishing."
         return ""
 
-    def finish_answer(self, text: str) -> None:
+    @contextmanager
+    def answer_commit(self, text: str):
+        """Roll back in-memory completion if the shared history transaction fails."""
+        previous = deepcopy(self.data), self.revision, self._active_task_id
+        try:
+            yield lambda connection: self.finish_answer(text, connection=connection)
+        except BaseException:
+            self.data, self.revision, self._active_task_id = previous
+            raise
+
+    def finish_answer(self, text: str, *, connection=None) -> None:
         """Record delivered answer steps without erasing a blocked or waiting task."""
         if self.data["status"] in {"blocked", "waiting_user"}:
             return
@@ -310,4 +340,4 @@ class TaskProgress:
                 )
         if all(step["status"] == "done" for step in self.data["steps"]):
             self.data["status"] = "complete"
-            self._save()
+            self._save(connection=connection)

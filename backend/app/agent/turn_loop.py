@@ -49,6 +49,7 @@ from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.harness.response_policy import TurnResponsePolicy
 from app.agent.harness.task_tools import TASK_PROTOCOL, TaskToolRegistry
+from app.agent.harness.context_budget import ContextBudgetExceeded
 from app.agent.durable.turn_run import register_active_lifecycle, unregister_active_lifecycle
 from app.agent.durable.models import is_safe_identifier, sanitize_public_evidence
 from app.agent.turn_text import (
@@ -338,6 +339,7 @@ class TurnLoop:
                     **attachment_kwargs,
                     **continuation_kwargs,
                     **provider_history_kwargs,
+                    **({"task_progress": task_progress} if task_progress is not None and outcome.status == "complete" else {}),
                 )
                 if isinstance(persisted_ids, list):
                     persisted_user_ids = [item for item in persisted_ids if isinstance(item, int)]
@@ -876,11 +878,9 @@ class TurnLoop:
                 tool_calls=tool_runner.history,
             )
             def finish_task_progress() -> None:
-                """Clear a completed task only after its durable turn is committed."""
-                if task_progress is not None:
-                    task_progress.finish_answer(final_text)
-                    if task_progress.data["status"] in {"blocked", "waiting_user"}:
-                        return
+                """Clear legacy hints after required task/history persistence succeeds."""
+                if task_progress is not None and task_progress.data["status"] in {"blocked", "waiting_user"}:
+                    return
                 self.memory.clear_task_progress(conversation_id)
 
             await lifecycle.finalize(
@@ -937,13 +937,15 @@ class TurnLoop:
             await tool_runner.cancel()
             logger.exception("react_worker error: %s", exc)
             _obs_error(str(exc), error_type=type(exc).__name__, metadata={"phase": "turn_loop"})
-            failure_text = "Paused after an internal error. The saved tool results can be used to continue."
+            context_limit = isinstance(exc, ContextBudgetExceeded)
+            reason_code = exc.reason_code if context_limit else "internal_error"
+            failure_text = str(exc) if context_limit else "Paused after an internal error. The saved tool results can be used to continue."
             partial_text = final_text.strip() or streamed_answer_text.strip() or latest_progress_text.strip()
             if partial_text:
                 failure_text += f"\n\nLast response: {partial_text}"
-            _put({"event": "error", "data": {"code": "internal_error", "message": str(exc)}})
+            _put({"event": "error", "data": {"code": reason_code, "message": str(exc)}})
             await lifecycle.finalize(
-                TurnOutcome(failure_text, "error", "internal_error"),
+                TurnOutcome(failure_text, "paused" if context_limit else "error", reason_code),
                 persist=_persist_turn, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
             )
         finally:

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import json
 
 from app.agent.harness.model_request import ModelRequest, ModelResult
+from app.agent.harness.context_protection import PROTECTED_CONTEXT
 from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.llm_client import LLMResponse, build_tool_result_message
 
@@ -20,6 +21,7 @@ class TurnTranscript:
     round_calls: list[tuple[str, str]] = field(default_factory=list)
     answered_call_ids: set[str] = field(default_factory=set)
     provider: str = ""
+    round_failed: bool = False
 
     def append(self, message: dict) -> None:
         """Append live history and an independent journal unaffected by compaction."""
@@ -51,7 +53,9 @@ class TurnTranscript:
         self.revision += 1
 
     def begin_tool_round(self, response: LLMResponse) -> None:
+        """Start a complete tool round whose failure can be pinned as one unit."""
         self.latest_round_start = len(self.messages)
+        self.round_failed = False
         if response.provider_messages:
             self.extend(response.provider_messages)
         elif response.content:
@@ -60,10 +64,15 @@ class TurnTranscript:
         self.answered_call_ids.clear()
 
     def add_tool_result(self, result: ToolCallResult, *, images: list[dict] | None = None) -> None:
+        """Keep a failed call and every sibling result exact until the turn ends."""
         entry = build_tool_result_message(result, provider=self.provider)
         if images:
             entry.update({"images": images, "ephemeral": True})
         self.append(entry)
+        self.round_failed = self.round_failed or result.status != "ok"
+        if self.round_failed:
+            for message in self.messages[self.latest_round_start:]:
+                message[PROTECTED_CONTEXT] = True
         self.answered_call_ids.add(result.call_id)
 
     def close_unanswered_calls(self, reason_code: str, *, explanation: str = "Not run: the turn stopped first.") -> None:

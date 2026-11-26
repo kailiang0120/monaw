@@ -17,6 +17,10 @@ Each memory also has a kind:
 
 Chat history stays in SQLite. Memory is plain markdown, and there is no memory data in the database.
 
+Conversation summaries and task progress are separate from these long-term
+memories. [Conversation compaction](context-compaction.md) explains which goals,
+outcomes, and failure records stay exact and which older history can be summarized.
+
 ## Turning It On or Off
 
 Settings -> Identity has a **Memory** switch. When it is off, nothing is read from or written to memory. The `memory` section of the runtime `settings.json` file has a few advanced values:

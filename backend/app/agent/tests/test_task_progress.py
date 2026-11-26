@@ -11,6 +11,7 @@ from app.agent.harness.progress_monitor import ProgressMonitor
 from app.agent.harness.task_progress import TaskProgress
 from app.agent.harness.tool_protocol import ToolCallResult
 from app.agent.llm_client import LLMResponse, ToolCallRequest
+from app.agent.memory_manager import MemoryManager
 from app.agent.tests.test_file_mutation_integration import (
     native_context as native_file_context,
     _start_operation,
@@ -100,6 +101,58 @@ def test_task_retains_all_outcomes_and_verified_evidence_after_database_reopen(n
         assert [step["status"] for step in restored.data["steps"]] == ["done", "done", "failed"]
         assert len(restored.data["evidence"]) == 2
         assert "third" in restored.context()
+    finally:
+        reopened.close()
+
+
+def test_original_goal_survives_failure_before_any_plan_or_tool(native_context, monkeypatch):
+    """An early provider failure must not replace the original goal with Continue."""
+    context = native_context
+    monkeypatch.setattr("app.agent.memory_manager.get_db", lambda: context["db"])
+    goal = "  Inspect the files.\nKeep every original file unchanged.  "
+
+    class FailingModel:
+        """Fail before planning so only task-start persistence can retain the goal."""
+
+        provider, model_name = "openai", "gpt-6-luna"
+
+        async def chat_with_tools(self, *args, **kwargs):
+            """Simulate a provider failure without making a network request."""
+            raise RuntimeError("Provider unavailable")
+
+    model = FailingModel()
+    loop = TurnLoop(model, ToolRegistry(), MemoryManager(model), observability=FakeObservability())
+
+    async def collect():
+        """Exercise the actual path that saves task state before requesting the model."""
+        return [event async for event in loop.run(goal, "chat-native-file-integration", system_prompt="")]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert events[-1]["data"]["status"] == "paused"
+    assert events[-1]["data"]["reason_code"] == "provider_error"
+    reopened = Database(context["root"].parent / "agent.db")
+    try:
+        saved = json.loads(reopened.fetchone("SELECT state_json FROM task_progress WHERE active=1")[0])
+        restored = TaskProgress(
+            reopened,
+            "chat-native-file-integration",
+            "Continue",
+            saved["workspace"],
+            continuation=True,
+        )
+        assert restored.data["goal"] == goal
+        assert restored.data["steps"] == [] and restored.data["evidence"] == []
+        assert json.loads(restored.context().split("\n", 1)[1])["goal"] == goal
+        # Outcomes can be finished before a later turn-level failure. A typed
+        # Continue must still retain the task, just like the resume button.
+        restored.finish_answer("The work is finished, but the saved turn failed.")
+        typed_continue = TaskProgress(
+            reopened, "chat-native-file-integration", "Continue", saved["workspace"]
+        )
+        assert typed_continue.data["goal"] == goal
     finally:
         reopened.close()
 
@@ -243,7 +296,8 @@ def test_unchanged_observations_warn_then_pause_with_bounded_polling(polling):
     assert not monitor.seen and monitor.redundant_calls == repeats
 
 
-def test_coordinator_cannot_finish_a_task_with_unresolved_outcomes(native_context):
+@pytest.mark.parametrize("reclassifications", [[], ["answer"], ["general", "answer"]])
+def test_coordinator_cannot_finish_a_task_with_unresolved_outcomes(native_context, reclassifications):
     """The actual loop gives one repair opportunity and keeps the task resumable."""
     context = native_context
 
@@ -277,6 +331,25 @@ def test_coordinator_cannot_finish_a_task_with_unresolved_outcomes(native_contex
                         )
                     ],
                 )
+            if self.calls - 2 < len(reclassifications):
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(
+                            f"reclassify-{self.calls}",
+                            "task_plan",
+                            {
+                                "steps": [
+                                    {
+                                        "id": "file",
+                                        "kind": reclassifications[self.calls - 2],
+                                        "reason": "Correct the outcome classification.",
+                                    }
+                                ]
+                            },
+                        )
+                    ],
+                )
             return LLMResponse(content="All done.")
 
     model, memory = Model(), Memory()
@@ -293,6 +366,129 @@ def test_coordinator_cannot_finish_a_task_with_unresolved_outcomes(native_contex
         events = asyncio.run(collect())
     finally:
         loop.shutdown()
-    assert model.calls == 3
+    assert model.calls == 3 + len(reclassifications)
     assert events[-1]["data"]["reason_code"] == "task_outcomes_incomplete"
     assert memory.clear_task_progress_calls == 0
+
+
+def test_completion_save_failure_is_atomic_and_cannot_report_success(native_context, monkeypatch):
+    """A failed task write rolls back the answer and keeps the durable run failed."""
+    context = native_context
+    db = context["db"]
+    monkeypatch.setattr("app.agent.memory_manager.get_db", lambda: db)
+    db.execute("""CREATE TRIGGER reject_task_completion BEFORE UPDATE ON task_progress
+        WHEN json_extract(NEW.state_json, '$.status') = 'complete'
+        BEGIN SELECT RAISE(ABORT, 'task completion write failed'); END""")
+    db.commit()
+
+    class Model:
+        """Finish a real answer-only plan without contacting a provider."""
+
+        provider, model_name, calls = "openai", "gpt-6-luna", 0
+
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            """Declare delivery before the final answer reaches persistence."""
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(
+                            "plan",
+                            "task_plan",
+                            {
+                                "steps": [
+                                    {
+                                        "id": "answer",
+                                        "description": "Answer the question",
+                                        "criteria": "Deliver the answer",
+                                        "kind": "answer",
+                                    }
+                                ]
+                            },
+                        )
+                    ],
+                )
+            return LLMResponse(content="The answer is 7.")
+
+    model = Model()
+    memory = MemoryManager(model)
+    progress_instances = []
+    original_open = memory.open_task_progress
+
+    def capture_progress(*args, **kwargs):
+        """Inspect the same in-memory state whose transaction will be rolled back."""
+        progress = original_open(*args, **kwargs)
+        progress_instances.append(progress)
+        return progress
+
+    monkeypatch.setattr(memory, "open_task_progress", capture_progress)
+    loop = TurnLoop(model, ToolRegistry(), memory, observability=FakeObservability())
+
+    async def collect():
+        """Exercise the real coordinator, memory, database, and durable finalizer."""
+        return [
+            event
+            async for event in loop.run(
+                "What is the answer?",
+                "chat-native-file-integration",
+                system_prompt="",
+                durable_run_factory=lambda: context["run"],
+            )
+        ]
+
+    try:
+        events = asyncio.run(collect())
+    finally:
+        loop.shutdown()
+    assert events[-1]["data"]["status"] == "error"
+    assert events[-1]["data"]["reason_code"] == "persistence_failed"
+    assert (
+        db.fetchone("SELECT status FROM agent_runs WHERE run_id=?", (context["run"].run_id,))[0] == "failed"
+    )
+    failure = db.fetchone("SELECT content, status FROM messages WHERE role='assistant'")
+    assert failure["status"] == "error"
+    assert "completion could not be saved" in failure["content"]
+    assert "The answer is 7." in failure["content"]
+    restored_history = memory.build_llm_messages("chat-native-file-integration")
+    assert any(item.get("content") == failure["content"] for item in restored_history)
+    progress = progress_instances[0]
+    saved = json.loads(db.fetchone("SELECT state_json FROM task_progress WHERE active=1")[0])
+    assert saved == progress.snapshot()
+    assert saved["status"] == "working" and saved["steps"][0]["status"] == "pending"
+
+    # Retrying a sealed failure cannot promote the task. A new successful turn
+    # commits the answer and task together, once, including after a retry.
+    db.execute("DROP TRIGGER reject_task_completion")
+    db.commit()
+    asyncio.run(
+        memory.persist_turn(
+            "chat-native-file-integration",
+            "What is the answer?",
+            "The answer is 7.",
+            tool_calls=[],
+            turn_id=context["run"].turn_id,
+            task_progress=progress,
+        )
+    )
+    assert progress.snapshot() == saved
+    assert db.fetchone("SELECT COUNT(*) FROM messages WHERE role='assistant'")[0] == 1
+    for _ in range(2):
+        asyncio.run(
+            memory.persist_turn(
+                "chat-native-file-integration",
+                "Continue",
+                "The answer is 7.",
+                tool_calls=[],
+                turn_id="completion-retry",
+                task_progress=progress,
+            )
+        )
+    assert db.fetchone("SELECT COUNT(*) FROM messages WHERE role='assistant'")[0] == 2
+    assert db.fetchone("SELECT COUNT(*) FROM messages WHERE role='assistant' AND status='complete'")[0] == 1
+    reopened = Database(context["root"].parent / "agent.db")
+    try:
+        saved = json.loads(reopened.fetchone("SELECT state_json FROM task_progress WHERE active=1")[0])
+        assert saved["status"] == "complete" and saved["steps"][0]["status"] == "done"
+    finally:
+        reopened.close()

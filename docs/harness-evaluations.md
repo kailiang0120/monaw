@@ -11,6 +11,9 @@ conversation; deleting the conversation also deletes its task records.
 The turn-local `task_plan` tool declares outcomes with stable IDs and acceptance
 criteria. Partial updates merge by ID; omitting an outcome does not remove it.
 The current task context is included outside summarized conversation history.
+The original goal is saved before the first model request, even without a plan.
+See [conversation compaction](context-compaction.md) for protected failure history,
+restart behavior, and explicit budget limits.
 One completion repair is allowed before an unfinished task pauses with
 `task_outcomes_incomplete`. A normal completed answer needs no extra verification
 model request.
@@ -26,7 +29,9 @@ each path survive pruning.
 Reads and checks use `general`; delivery uses `answer`. An unfinished outcome's
 mistaken kind can be corrected with a reason while retaining its criteria and
 targets. The correction is recorded. This avoids forcing repeated file edits
-just to repair a planning mistake. Shell, MCP, and other effects without native
+just to repair a planning mistake. Existing work cannot become an `answer`
+outcome, including through an intermediate kind; add a separate delivery outcome.
+Answer-only outcomes cannot claim file targets. Shell, MCP, and other effects without native
 file verification use general outcomes and independent checks. This is task
 tracking, not another permission system or proof of arbitrary semantic correctness.
 The model still judges whether results satisfy the requested outcome. Changes
@@ -37,6 +42,11 @@ while the unfinished task remains available to the next turn. Inspecting its
 saved evidence does not clear that state. An explicit replacement request can
 start a new task; a resumed run cannot silently replace its original goal.
 Revision and active-task checks reject stale writers.
+
+Answer completion and the final history checkpoint commit in the same SQLite
+transaction. A required task write failure rolls back both and reports an error.
+One idempotent error-checkpoint attempt preserves the failed turn when storage
+allows it, without repeating tools or marking pending answer outcomes done.
 
 Each task has at most 32 outcomes and a 256 KB stored snapshot. It retains 64
 recent unreferenced tool results plus referenced evidence and latest mutations.

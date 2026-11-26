@@ -14,6 +14,7 @@ Tool results include task_evidence IDs. Mark outcomes done only with matching su
 file changes require verified_file_change evidence for every target. Do not invent evidence IDs.
 Existing outcomes can be updated using only id, status, evidence_ids, and reason. Use steps=[] to inspect saved evidence.
 Correct an unfinished outcome's mistaken kind with a reason, preserving its criteria and targets.
+Existing work cannot become an answer-only outcome. Add a separate answer outcome for final delivery.
 Reuse recorded evidence. Never repeat or alter completed file edits just to fix task bookkeeping.
 Use status=waiting_user or blocked with a specific reason when information or permission is missing,
 then explain it to the user. Continue preserves the existing task and its criteria.

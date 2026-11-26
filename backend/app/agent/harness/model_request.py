@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 from app.agent.harness.context_budget import ContextBudgetExceeded, fit_live_context
+from app.agent.harness.context_protection import PROTECTED_CONTEXT
 from app.agent.harness.turn_observer import TurnObserver
 from app.agent.llm_client import LLMClient, LLMResponse
 from app.agent.model_usage import TokenBudgetExceeded
@@ -93,7 +94,8 @@ class ModelRequestRunner:
                 # Buffer tool-round and wrap-up text until the coordinator
                 # accepts it as progress or a usable final answer.
                 response = await self.client.chat_with_tools(
-                    messages, request.tools, system_prompt=request.system_prompt,
+                    [{key: value for key, value in item.items() if key != PROTECTED_CONTEXT} for item in messages],
+                    request.tools, system_prompt=request.system_prompt,
                     stream_callback=self._answer if request.stream_answer and not request.tools else None, **kwargs,
                 )
         except asyncio.CancelledError:

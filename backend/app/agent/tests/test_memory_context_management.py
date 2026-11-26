@@ -23,6 +23,8 @@ import app.agent.memory_manager as memory_manager_mod
 import app.api.routes.conversations as routes_mod
 from app.agent.database import Database
 from app.agent.memory_manager import MemoryManager
+from app.agent.harness.context_protection import PROTECTED_CONTEXT
+from app.agent.harness.task_progress import TaskProgress
 from app.agent.skill_loader import SkillSpec
 from app.agent.state import ConversationState
 from app.main import app
@@ -201,21 +203,136 @@ def test_uploaded_images_survive_reopen_and_steering_without_cross_session_acces
         reset_current_principal_id(principal_token)
 
 
-def test_failed_turn_restores_bounded_tool_evidence_for_continuation():
+def test_failed_turn_restores_exact_tool_evidence_for_continuation():
+    """Preserve the complete saved result instead of a preview of the failed turn."""
     manager = MemoryManager(RecordingLLM())
     raw_result = "Start: saved report " + "detail " * 4000 + " End: report.pdf"
-    asyncio.run(manager.persist_turn(
-        "failed-tool-evidence", "Create a report", "Paused after an internal error", status="error",
-        tool_calls=[{"tool_name": "fs_write", "input": '{"path":"report.pdf"}', "output": raw_result, "status": "complete"}],
-    ))
+    asyncio.run(
+        manager.persist_turn(
+            "failed-tool-evidence",
+            "Create a report",
+            "Paused after an internal error",
+            status="error",
+            tool_calls=[
+                {
+                    "tool_name": "fs_write",
+                    "input": '{"path":"report.pdf"}',
+                    "output": raw_result,
+                    "status": "complete",
+                }
+            ],
+        )
+    )
     history = MemoryManager(RecordingLLM()).build_llm_messages("failed-tool-evidence")
     checkpoint = history[-1]["content"]
     assert "Interrupted task tool checkpoint" in checkpoint
     assert '"path":"report.pdf"' in checkpoint
     assert "Start: saved report" in checkpoint and "End: report.pdf" in checkpoint
-    assert len(checkpoint) < 3000
+    assert raw_result in checkpoint
+    assert history[-1][PROTECTED_CONTEXT] is True
     assistant = manager._db.get_messages("failed-tool-evidence")[-1]
     assert manager._db.get_tool_calls_for_message(assistant["id"])[0]["output"] == raw_result
+
+
+def test_compaction_preserves_goal_progress_and_failed_turn_across_reopen(isolated_memory_db, tmp_path):
+    """A lossy summary and the recent-history cap cannot replace unfinished work."""
+    db = isolated_memory_db
+    llm = RecordingLLM(reply="Earlier completed background work.")
+    manager = MemoryManager(llm)
+    conversation = "protected-task"
+    manager.get_or_create(conversation)
+    asyncio.run(
+        manager.persist_turn(conversation, "Old completed request", "Old completed answer", tool_calls=[])
+    )
+    goal = "  Create the report using exact account identifiers; do not publish it.  "
+    progress = TaskProgress(db, conversation, goal, str(tmp_path))
+    progress.update(
+        [
+            {
+                "id": "report",
+                "description": "Create the report",
+                "kind": "general",
+                "criteria": "Check the source and preserve its exact identifiers",
+                "status": "failed",
+                "reason": "Source lookup failed; the report has not been created.",
+            }
+        ]
+    )
+    before = progress.snapshot()
+    exact_error = (
+        "error-prefix " + "detail " * 3000 + "MIDDLE-FAILURE-ID-7742 " + "detail " * 3000 + " error-suffix"
+    )
+    calls = [
+        {
+            "tool_name": f"lookup_{index}",
+            "input": json.dumps({"id": f"account-{index}"}),
+            "output": exact_error if index == 0 else f"Exact failure {index}",
+            "status": "error",
+        }
+        for index in range(7)
+    ]
+    asyncio.run(
+        manager.persist_turn(
+            conversation,
+            goal,
+            "Source lookup failed.",
+            tool_calls=calls,
+            status="paused",
+            turn_id="failed-report",
+            steering_messages=["Preserve leading zeros."],
+            steering_tool_call_indexes=[3],
+        )
+    )
+    # More than the normal 24-message window follows while the task stays open.
+    for index in range(13):
+        asyncio.run(
+            manager.persist_turn(conversation, f"Clarification {index}", f"Recorded {index}", tool_calls=[])
+        )
+    later_failure = "Paused: protected records exceed the context budget."
+    asyncio.run(
+        manager.persist_turn(
+            conversation,
+            "Continue with the same goal",
+            later_failure,
+            tool_calls=[],
+            status="paused",
+            turn_id="context-budget-pause",
+        )
+    )
+    result = asyncio.run(manager.compact_conversation(conversation))
+    assert result["status"] == "compacted"
+    assert exact_error not in str(llm.calls) and "Preserve leading zeros." not in str(llm.calls)
+    assert later_failure not in str(llm.calls)
+    assert asyncio.run(manager.compact_conversation(conversation))["status"] == "unchanged"
+
+    reopened = MemoryManager(RecordingLLM())
+    history = reopened.build_llm_messages(conversation)
+    exact = [item for item in history if item.get(PROTECTED_CONTEXT)]
+    text = "\n".join(item.get("content", "") for item in exact)
+    assert later_failure in text
+    assert any(item.get("content") == goal for item in exact)
+    assert "Preserve leading zeros." in text and exact_error in text
+    assert all(f"lookup_{index}" in text and f"account-{index}" in text for index in range(7))
+    restored = TaskProgress(db, conversation, "Continue", str(tmp_path), continuation=True)
+    assert restored.snapshot() == before
+    assert goal in restored.context() and "Source lookup failed" in restored.context()
+
+    # Explicit replacement ends protection for the previous task, so a failure
+    # in an unrelated old task cannot permanently consume the model's context.
+    replacement = TaskProgress(db, conversation, "Explain the schedule", str(tmp_path))
+    replacement.update(
+        [
+            {
+                "id": "explain",
+                "description": "Explain the schedule",
+                "kind": "answer",
+                "criteria": "Answer clearly",
+            }
+        ],
+        new_task=True,
+    )
+    assert asyncio.run(reopened.compact_conversation(conversation))["status"] == "compacted"
+    assert not any(item.get(PROTECTED_CONTEXT) for item in reopened.build_llm_messages(conversation))
 
 
 def test_turn_checkpoint_rolls_back_and_retries_without_duplicate_history(isolated_memory_db):
@@ -325,6 +442,24 @@ def test_gemini_signed_turn_survives_atomic_save_restart_and_archive(isolated_me
             reopened_db.restore_message(row["id"])
         assert reopened_db.get_messages("signed-chat")[-1]["provider_history_json"] == saved[-1]["provider_history_json"]
         assert any("gemini_parts" in item for item in reopened.build_llm_messages("signed-chat"))
+        # Finalization can fail after the provider generated a successful reply.
+        # Keep the signed tool history and the actual saved failure outcome.
+        failure = "Completion could not be saved. The task is still pending."
+        asyncio.run(
+            reopened.persist_turn(
+                "signed-chat",
+                "Inspect both files",
+                failure,
+                status="error",
+                **{**kwargs, "turn_id": "signed-failed-turn"},
+            )
+        )
+        restored = reopened.build_llm_messages("signed-chat")
+        protected = [item for item in restored if item.get(PROTECTED_CONTEXT)]
+        assert any("gemini_parts" in item for item in protected)
+        assert any(failure in item.get("content", "") for item in protected)
+        assert any("Saved turn status: error" in item.get("content", "") for item in protected)
+        assert all(types.Content.model_validate(item) for item in normalise_messages_for_gemini(restored, ""))
     finally:
         reopened_db.close()
 
