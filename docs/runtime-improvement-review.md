@@ -79,8 +79,8 @@ claiming every intervening Chrome version was tested. The fixture accepts
 missing-browser skips fail. `scripts/fetch-test-chrome.py` resolves the manifest's
 minimum or current stable from Google's Chrome for Testing feed into an isolated
 directory without changing the user's browser.
-The fixture creates its own DevTools target: Chrome's startup tab can otherwise
-abort the first test navigation while completing its initial `about:blank` load.
+The fixture owns a dedicated DevTools target and reports browser version and
+network evidence when a test navigation fails.
 
 Navigation readiness checks the returned document loader and its ready state.
 A delayed load event from the previous page cannot finish that bounded wait;

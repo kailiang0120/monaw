@@ -81,8 +81,7 @@ def isolated_chrome(tmp_path, handler=None):
             stderr = (tmp_path/'chrome-stderr.log').read_text(errors='replace')[-2000:]
             state = f'exited with code {process.returncode}' if process.poll() is not None else 'still running after 45s'
             pytest.fail(f'Isolated Chrome did not expose DevTools endpoint ({executable} {state}).\n{stderr}')
-        # The startup tab can still have a pending about:blank navigation when
-        # DevTools starts listening. Own a new target so it cannot cancel ours.
+        # Own a target instead of depending on the browser's startup tab.
         request = Request(f'http://127.0.0.1:{port}/json/new?about:blank', method='PUT')
         with urlopen(request, timeout=10) as response:
             page = json.load(response)
@@ -103,6 +102,7 @@ class RealCDPBridge:
     connected = True
     def __init__(self,socket):
         self.socket,self.pending,self.listeners,self.counter,self.url,self.calls=socket,{},[],0,'about:blank',[]
+        self.navigation_events = []
         self.reader=asyncio.create_task(self._read())
     def add_listener(self,callback):
         self.listeners.append(callback)
@@ -115,6 +115,13 @@ class RealCDPBridge:
                     future.set_result(message)
             elif 'method' in message:
                 params=message.get('params',{})
+                if message['method'] in {'Network.requestWillBeSent', 'Network.responseReceived', 'Network.loadingFailed', 'Page.downloadWillBegin'}:
+                    payload = params.get('response') or params.get('request') or params
+                    self.navigation_events.append({
+                        'event': message['method'], 'type': params.get('type'),
+                        **{key: payload[key] for key in ('url', 'status', 'mimeType', 'errorText', 'blockedReason', 'canceled') if key in payload},
+                    })
+                    self.navigation_events = self.navigation_events[-20:]
                 if message['method']=='Page.frameNavigated' and not params.get('frame',{}).get('parentId'):
                     self.url=params['frame'].get('url',self.url)
                 if message['method']=='Page.navigatedWithinDocument':
@@ -130,6 +137,10 @@ class RealCDPBridge:
         assert method=='cdp',method
         return await self.cdp(params['method'],params['params'],timeout)
     async def cdp(self,method,params=None,timeout=30):
+        """Relay protocol commands and retain diagnostics for fixture navigation."""
+        if method == 'Page.navigate':
+            self.navigation_events.clear()
+            await self.cdp('Network.enable')
         self.calls.append((method,params or {}))
         self.counter+=1
         request_id=self.counter
@@ -139,6 +150,11 @@ class RealCDPBridge:
         response=await asyncio.wait_for(future,timeout)
         if 'error' in response:
             raise ToolError(response['error']['message'])
+        if method == 'Page.navigate' and response.get('result', {}).get('errorText'):
+            pytest.fail(json.dumps({
+                'navigation': response['result'], 'events': self.navigation_events,
+                'browser': await self.cdp('Browser.getVersion'),
+            }, indent=2), pytrace=False)
         return response.get('result',{})
     async def evaluate(self,expression):
         """Expose fixture script failures instead of silently returning None."""
