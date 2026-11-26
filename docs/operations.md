@@ -117,12 +117,15 @@ skills\                   skills you created with the skill creator
 browser\                  browser screenshots
 ```
 
-New desktop chats without a project use separate folders under
-`Documents\monaw\YYYY-MM-DD\chat-<id>`. The Documents location follows Windows
+New desktop chats without a project work directly in
+`Documents\monaw\YYYY-MM-DD`. Chats created on the same day share that working
+folder. Chat history stays in `.monaw\runtime\agent.db`.
+The Documents location follows Windows
 folder redirection; `AGENT_WORKSPACE_DIR` can override the root. The date is the
 chat's local creation date, and its saved folder remains stable across restarts
 and title changes. Existing chats keep their saved workspace (an empty legacy
-workspace continues to use the shared root). Back up `Documents\monaw` and any
+workspace continues to use the shared root). Older generated `chat-…` folders
+are still labeled **Default workspace**. Back up `Documents\monaw` and any
 selected project folders separately from application data.
 If Windows cannot provide Documents, the desktop app falls back to the
 `workspace` folder inside Monaw home.

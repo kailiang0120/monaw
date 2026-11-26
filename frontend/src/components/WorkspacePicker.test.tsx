@@ -9,11 +9,14 @@ describe('conversation working folder', () => {
     const selectDirectory = vi.fn().mockResolvedValue('C:\\Projects\\demo')
     Object.defineProperty(window, 'electronAPI', { configurable: true, writable: true, value: { selectDirectory } })
     const onChange = vi.fn().mockResolvedValue(undefined)
-    render(<WorkspacePicker value="" onChange={onChange} />)
+    const workingFolder = 'C:\\Users\\Test\\Documents\\monaw\\2026-11-26'
+    render(<WorkspacePicker value={workingFolder} isDefault onChange={onChange} />)
     expect(screen.getByText('Default workspace')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Choose working folder' })).toHaveAttribute('title', workingFolder)
+    expect(screen.queryByRole('button', { name: 'Use default workspace' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Choose working folder' }))
     await waitFor(() => expect(onChange).toHaveBeenCalledWith('C:\\Projects\\demo'))
-    expect(selectDirectory).toHaveBeenCalledWith(undefined)
+    expect(selectDirectory).toHaveBeenCalledWith(workingFolder)
   })
 
   it('leaves the selected folder alone when the native dialog is cancelled', async () => {

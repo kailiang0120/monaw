@@ -9,6 +9,8 @@ export interface Conversation {
   /** Last activity. */
   updated_at?: string
   workspace_dir?: string
+  /** A default working folder, including saved folders from earlier versions. */
+  workspace_is_default?: boolean
   /** A turn is running in it now. */
   running?: boolean
 }

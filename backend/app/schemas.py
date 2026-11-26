@@ -132,8 +132,17 @@ class ConversationOut(BaseModel):
     # Last activity, so the sidebar can put the most recent project first.
     updated_at: str = ""
     workspace_dir: str = ""
+    workspace_is_default: bool = False
     # A turn is running in it now (a chat, scheduled task or Telegram message).
     running: bool = False
+
+    @model_validator(mode="after")
+    def identify_default_workspace(self):
+        """Expose folder intent without asking renderers to recognize internal paths."""
+        from app.agent.conversation_workspace import is_default_chat_workspace
+
+        self.workspace_is_default = is_default_chat_workspace(self.workspace_dir, self.id)
+        return self
 
 
 class ContextUsageBreakdownItemPayload(BaseModel):

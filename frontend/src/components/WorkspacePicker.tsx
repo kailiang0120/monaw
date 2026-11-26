@@ -3,11 +3,13 @@ import { FolderOpen, Loader2, X } from 'lucide-react'
 
 interface Props {
   value: string
+  isDefault?: boolean
   disabled?: boolean
   onChange: (path: string) => Promise<void>
 }
 
-export function WorkspacePicker({ value, disabled, onChange }: Props) {
+/** Label default folders consistently while the picker uses their actual path. */
+export function WorkspacePicker({ value, isDefault = !value, disabled, onChange }: Props) {
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState(false)
   const [path, setPath] = useState('')
@@ -53,9 +55,9 @@ export function WorkspacePicker({ value, disabled, onChange }: Props) {
           aria-label="Choose working folder" title={value || 'Use the default workspace, or choose a folder for this chat'}
           className="flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1 transition-colors hover:bg-white/[0.06] hover:text-neutral-200 disabled:opacity-50">
           {busy ? <Loader2 size={14} className="shrink-0 animate-spin" /> : <FolderOpen size={14} className="shrink-0" />}
-          <span className="truncate">{value ? folderName : 'Default workspace'}</span>
+          <span className="truncate">{isDefault ? 'Default workspace' : folderName}</span>
         </button>
-        {value && <button type="button" onClick={() => void save('')} disabled={blocked}
+        {value && !isDefault && <button type="button" onClick={() => void save('')} disabled={blocked}
           aria-label="Use default workspace" title="Use default workspace"
           className="rounded p-1 hover:bg-white/[0.06] hover:text-neutral-200 disabled:opacity-50"><X size={13} /></button>}
       </div>

@@ -13,13 +13,30 @@ DEFAULT_CHAT_WORKSPACE_ROOT = WORKSPACE_DIR
 
 
 def create_default_chat_workspace(conversation_id: str, created_at: str) -> str:
-    """Give a chat a stable, date-grouped folder without using its editable title."""
+    """Use the chat's creation-date folder as its stable default working folder."""
     day = datetime.fromisoformat(created_at).astimezone().date().isoformat()
-    # Conversation IDs may also come from integrations: never use raw path input.
-    chat_id = uuid.uuid5(uuid.NAMESPACE_URL, conversation_id).hex
-    path = DEFAULT_CHAT_WORKSPACE_ROOT / day / f"chat-{chat_id}"
+    path = DEFAULT_CHAT_WORKSPACE_ROOT / day
     path.mkdir(parents=True, exist_ok=True)
     return str(path.resolve())
+
+
+def is_default_chat_workspace(value: str, conversation_id: str) -> bool:
+    """Recognize default folders centrally, including this chat's legacy child."""
+    if not value:
+        return True
+    try:
+        relative = Path(value).resolve().relative_to(DEFAULT_CHAT_WORKSPACE_ROOT.resolve())
+        if not relative.parts:
+            return True
+        day = relative.parts[0]
+        if datetime.strptime(day, "%Y-%m-%d").date().isoformat() != day:
+            return False
+        if len(relative.parts) == 1:
+            return True
+        legacy_name = "chat-" + uuid.uuid5(uuid.NAMESPACE_URL, conversation_id).hex
+        return len(relative.parts) == 2 and relative.parts[1] == legacy_name
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def selected_workspace_dir() -> str:

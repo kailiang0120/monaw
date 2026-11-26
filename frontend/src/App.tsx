@@ -78,6 +78,7 @@ function sameConversations(a: Conversation[], b: Conversation[]): boolean {
       && item.created_at === other.created_at
       && item.updated_at === other.updated_at
       && item.workspace_dir === other.workspace_dir
+      && Boolean(item.workspace_is_default) === Boolean(other.workspace_is_default)
       && Boolean(item.running) === Boolean(other.running)
   })
 }
@@ -764,6 +765,7 @@ export default function App() {
             )}
             <InputBar
               workspaceDir={activeConvId ? activeConversation?.workspace_dir || '' : draftWorkspaceDir}
+              workspaceIsDefault={activeConvId ? activeConversation?.workspace_is_default : !draftWorkspaceDir}
               onWorkspaceChange={handleWorkspaceChange}
               onSend={handleSend}
               onSteer={steerMessage}

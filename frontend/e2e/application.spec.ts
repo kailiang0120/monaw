@@ -1,6 +1,6 @@
 import { test, expect } from './desktop'
 import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, basename, join } from 'node:path'
 
 async function toolRows(desktop: import('./desktop').Desktop) {
   const conversations = (await desktop.api('/api/conversations')).data
@@ -152,12 +152,20 @@ test('authenticated startup, streamed response, and persistence after reopening'
   await expect(page.getByRole('button', { name: 'Stop response', exact: true })).toHaveCount(0)
   const conversations = (await desktop.api('/api/conversations')).data
   expect(conversations).toHaveLength(1)
+  const workingFolder = conversations[0].workspace_dir
+  expect(dirname(workingFolder)).toBe(join(desktop.root, 'workspace'))
+  expect(basename(workingFolder)).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  expect(conversations[0].workspace_is_default).toBe(true)
+  await expect(page.getByRole('button', { name: 'Choose working folder' })).toHaveText('Default workspace')
+  await expect(page.getByRole('button', { name: 'Choose working folder' })).toHaveAttribute('title', workingFolder)
   const messages = (await desktop.api(`/api/conversations/${conversations[0].id}/messages`)).data.messages
   expect(messages.some((m: { role: string; content: string }) => m.role === 'assistant' && m.content.includes('Fixture stream completed.'))).toBe(true)
   await desktop.close()
   await desktop.start()
   await desktop.page.getByText('[e2e:stream]', { exact: true }).last().click()
   await expect(desktop.page.getByText('Fixture stream completed.', { exact: false }).last()).toBeVisible()
+  await expect(desktop.page.getByRole('button', { name: 'Choose working folder' })).toHaveText('Default workspace')
+  expect((await desktop.api('/api/conversations')).data[0].workspace_dir).toBe(workingFolder)
   expect(desktop.errors).toEqual([])
 })
 

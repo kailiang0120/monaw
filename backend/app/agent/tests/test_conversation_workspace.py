@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from datetime import datetime
 from types import SimpleNamespace
@@ -18,20 +19,24 @@ from app.skills.filesystem import file_ops
 
 @pytest.fixture
 def db(tmp_path, monkeypatch):
+    """Keep conversation history and generated working folders inside the fixture."""
     instance = database.Database(tmp_path / "agent.db")
     instance.init_db()
     monkeypatch.setattr(database, "_db", instance)
     monkeypatch.setattr(memory_manager, "peek_memory_manager", lambda: None)
+    monkeypatch.setattr(workspace, "DEFAULT_CHAT_WORKSPACE_ROOT", tmp_path / "Documents" / "monaw")
     yield instance
     instance.close()
 
 
 def test_saved_folder_survives_reopen_and_can_be_reset(db, tmp_path):
+    """Custom working folders persist and can return to the daily default."""
     client = TestClient(app)
     project = tmp_path / "project"
     project.mkdir()
     created = client.post("/api/conversations", json={"title": "Project", "workspace_dir": str(project)})
     assert created.status_code == 200
+    assert created.json()["workspace_is_default"] is False
     conv_id = created.json()["id"]
     db.close()
     assert db.get_conversation(conv_id)["workspace_dir"] == str(project.resolve())
@@ -44,6 +49,7 @@ def test_saved_folder_survives_reopen_and_can_be_reset(db, tmp_path):
     assert Path(reset.json()["workspace_dir"]).is_dir()
     assert reset.json()["workspace_dir"] != str(project.resolve())
     assert reset.json()["title"] == "Renamed"
+    assert reset.json()["workspace_is_default"] is True
 
 
 def test_history_search_reaches_old_chats_and_cursor_handles_equal_timestamps(db):
@@ -69,17 +75,21 @@ def test_history_search_reaches_old_chats_and_cursor_handles_equal_timestamps(db
     assert [chat["id"] for chat in found] == ["chat-000"]
 
 
-def test_default_chats_have_separate_dated_workspaces_and_reuse_them(db, tmp_path, monkeypatch):
+def test_default_chats_share_their_creation_date_folder_and_reuse_it(db, tmp_path, monkeypatch):
+    """A day's chats work directly in its shared folder, including after reset."""
     root = tmp_path / "Documents" / "monaw"
     monkeypatch.setattr(workspace, "DEFAULT_CHAT_WORKSPACE_ROOT", root)
     client = TestClient(app)
     first = client.post("/api/conversations", json={"title": "First"}).json()
     second = client.post("/api/conversations", json={"title": "Second"}).json()
     folder = Path(first["workspace_dir"])
-    assert folder.parent == root / datetime.fromisoformat(first["created_at"]).astimezone().date().isoformat()
-    assert folder.name.startswith("chat-")
+    assert folder == root / datetime.fromisoformat(first["created_at"]).astimezone().date().isoformat()
     assert folder.is_dir() and Path(second["workspace_dir"]).is_dir()
-    assert folder != Path(second["workspace_dir"])
+    assert folder == Path(second["workspace_dir"])
+    assert first["workspace_is_default"] is True
+    assert second["workspace_is_default"] is True
+    other_day = workspace.create_default_chat_workspace("another-day", "2025-01-01T12:00:00")
+    assert Path(other_day) == root / "2025-01-01"
     (folder / "notes.txt").write_text("Keep this chat's files")
     saved = db.get_conversation(first["id"])
     client.patch(f"/api/conversations/{first['id']}", json={"workspace_dir": ""})
@@ -93,6 +103,29 @@ def test_default_chats_have_separate_dated_workspaces_and_reuse_them(db, tmp_pat
     reset = client.patch(f"/api/conversations/{first['id']}", json={"workspace_dir": ""})
     assert reset.json()["workspace_dir"] == str(folder)
     assert (folder / "notes.txt").read_text() == "Keep this chat's files"
+
+
+def test_api_identifies_default_folders_without_relabeling_custom_projects(db, tmp_path):
+    """Legacy generated folders stay usable without exposing their IDs as projects."""
+    root = workspace.DEFAULT_CHAT_WORKSPACE_ROOT
+    legacy_name = "chat-" + uuid.uuid5(uuid.NAMESPACE_URL, "legacy").hex
+    paths = {
+        "empty": ("", True),
+        "root": (str(root), True),
+        "daily": (str(root / "2026-11-26"), True),
+        "legacy": (str(root / "2026-11-26" / legacy_name), True),
+        "outside": (str(tmp_path / "project" / "2026-11-26"), False),
+        "invalid-date": (str(root / "2026-02-30"), False),
+        "custom-child": (str(root / "2026-11-26" / "project"), False),
+        "other-chat": (str(root / "2026-11-26" / legacy_name), False),
+    }
+    for conv_id, (path, _expected) in paths.items():
+        db.create_conversation(conv_id, conv_id, path)
+    listed = TestClient(app).get("/api/conversations").json()
+    assert {row["id"]: row["workspace_is_default"] for row in listed} == {
+        conv_id: expected for conv_id, (_path, expected) in paths.items()
+    }
+    assert db.get_conversation("legacy")["workspace_dir"] == paths["legacy"][0]
 
 
 def test_older_conversations_keep_default_after_migration(db):
@@ -193,6 +226,7 @@ def test_first_message_saves_folder_before_starting_agent(db, tmp_path, monkeypa
 
 
 def test_first_message_without_project_saves_default_before_starting_agent(db, monkeypatch):
+    """The first task and later turns receive the same daily working folder."""
     from app.agent import runtime
 
     calls = []
@@ -207,7 +241,7 @@ def test_first_message_without_project_saves_default_before_starting_agent(db, m
     assert response.status_code == 200
     folder = Path(calls[0]["workspace_dir"])
     assert folder.is_dir()
-    assert workspace.DEFAULT_CHAT_WORKSPACE_ROOT in folder.parents
+    assert folder.parent == workspace.DEFAULT_CHAT_WORKSPACE_ROOT
     response = client.post("/api/chat", json={"message": "Continue", "conversation_id": calls[0]["id"]})
     assert response.status_code == 200
     assert calls[1]["workspace_dir"] == str(folder)

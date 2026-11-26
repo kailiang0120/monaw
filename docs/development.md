@@ -135,7 +135,7 @@ Runtime layout:
 
 ```text
 %USERPROFILE%\.monaw\runtime\        settings.json, agent.db, backend.log, Electron store
-Documents\monaw\                    default workdir for agent shell commands
+Documents\monaw\YYYY-MM-DD\         daily default working folder for chat tools
 %USERPROFILE%\.monaw\browser\        browser artifacts
 %USERPROFILE%\.monaw\memory\         global and workspace memory markdown files
 ```

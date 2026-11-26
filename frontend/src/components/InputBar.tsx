@@ -129,6 +129,7 @@ function QueuedMessages({ items, paused, isStreaming, onEdit, onRemove, onSendNo
 
 interface Props {
   workspaceDir?: string
+  workspaceIsDefault?: boolean
   onWorkspaceChange?: (path: string) => Promise<void>
   onSend: (text: string, attachments?: UploadedAttachment[]) => void
   onSteer?: (text: string, attachments?: UploadedAttachment[]) => Promise<void>
@@ -163,6 +164,7 @@ interface Props {
 
 export function InputBar({
   workspaceDir = '',
+  workspaceIsDefault,
   onWorkspaceChange,
   onSend,
   onSteer,
@@ -666,7 +668,7 @@ export function InputBar({
   return (
     <footer className="bg-[#11100f] px-4 pb-4 pt-2">
       <div className="chat-composer-container mx-auto max-w-3xl">
-        {onWorkspaceChange && <WorkspacePicker key={conversationId || 'new'} value={workspaceDir}
+        {onWorkspaceChange && <WorkspacePicker key={conversationId || 'new'} value={workspaceDir} isDefault={workspaceIsDefault}
           disabled={disabled || isStreaming} onChange={onWorkspaceChange} />}
         {/* Unified dock panel */}
         <div className="panel relative rounded-2xl transition-colors focus-within:border-accent/40">

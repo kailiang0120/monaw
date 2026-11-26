@@ -39,10 +39,12 @@ Monaw keeps application data in the Monaw home folder, not in the install folder
 ```
 
 New chats without a selected project save their work in
-`Documents\monaw\YYYY-MM-DD\chat-<id>`, using your Windows Documents location
-(including redirected or OneDrive Documents folders). Each chat has its own
-folder, saved before the first task starts and reused after reopening or renaming
-the chat. Resetting a selected project returns to that chat's default folder.
+`Documents\monaw\YYYY-MM-DD`, using your Windows Documents location
+(including redirected or OneDrive Documents folders). Chats created on the same
+local date share that working folder, saved before the first task starts and
+reused after reopening or renaming the chat. Resetting a selected project returns
+to that chat's creation-date folder. These chats appear under **Default workspace**;
+chat history is stored separately in `.monaw\runtime\agent.db`.
 Existing chats keep their current workspace and files; no files are moved.
 `AGENT_WORKSPACE_DIR` overrides the root under which new dated chat folders are created.
 If Windows cannot provide the Documents location, the desktop app uses
