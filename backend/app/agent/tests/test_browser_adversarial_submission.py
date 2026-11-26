@@ -59,6 +59,7 @@ async def _context(socket_url, url, tool, build_args, *, visual=False):
         tools = BrowserTools(bridge)
         try:
             navigation = await tools.call('navigate_page', {'pageId': 1, 'url': url, 'includeSnapshot': False})
+            assert bridge.url == url, navigation.lines
             snapshot = await tools.call('take_snapshot', {'pageId': 1})
             session = tools.pages.session(7)
 

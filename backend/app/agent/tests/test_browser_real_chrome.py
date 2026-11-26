@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import pytest
 import websockets
 from app.skills.browser_use.extension.session import ToolError
@@ -81,8 +81,11 @@ def isolated_chrome(tmp_path, handler=None):
             stderr = (tmp_path/'chrome-stderr.log').read_text(errors='replace')[-2000:]
             state = f'exited with code {process.returncode}' if process.poll() is not None else 'still running after 45s'
             pytest.fail(f'Isolated Chrome did not expose DevTools endpoint ({executable} {state}).\n{stderr}')
-        with urlopen(f'http://127.0.0.1:{port}/json/list',timeout=5) as response:
-            page = next(t for t in json.load(response) if t['type']=='page')
+        # The startup tab can still have a pending about:blank navigation when
+        # DevTools starts listening. Own a new target so it cannot cancel ours.
+        request = Request(f'http://127.0.0.1:{port}/json/new?about:blank', method='PUT')
+        with urlopen(request, timeout=10) as response:
+            page = json.load(response)
         yield page['webSocketDebuggerUrl'],f'http://127.0.0.1:{http.server_port}/'
     finally:
         process.terminate()
@@ -147,7 +150,8 @@ async def _workflow(socket_url,url):
     async with websockets.connect(socket_url,origin='http://localhost') as socket:
         bridge=RealCDPBridge(socket)
         tools=BrowserTools(bridge)
-        await tools.call('navigate_page',{'pageId': 1, 'url':url,'includeSnapshot':False})
+        navigation = await tools.call('navigate_page', {'pageId': 1, 'url': url, 'includeSnapshot': False})
+        assert bridge.url == url, navigation.lines
         snapshot=await tools.call('take_snapshot',{'pageId': 1})
         session=tools.pages.session(7)
         uid=lambda name:next(n.uid for n in session.nodes.values() if n.name==name)
