@@ -2,6 +2,7 @@ name: Verify
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -295,20 +296,16 @@ jobs:
         run: ./scripts/check-commits.ps1 -MaxCommits 20
 
   frontend:
-    name: Frontend (Node ${{ matrix.node }})
+    name: Frontend (Node 22.13.0)
     runs-on: windows-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["20.19.0", "22.13.0", "24"]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: "22.13.0"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -326,6 +323,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-node-${{ matrix.node }}
+          name: frontend-node-22.13.0
           path: frontend/test-results/*.xml
           if-no-files-found: warn

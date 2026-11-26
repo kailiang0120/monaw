@@ -13,6 +13,10 @@ This document is for contributors and maintainers. The root README is for end us
 
 ## Development Commands
 
+Node 22.13.0 is the development and frontend CI baseline. The package engine
+range still accepts Node 20.19+, 22.13+, and 24.x, but the 20.x and 24.x lines
+are not matrix-tested on every pull request.
+
 Run the full dev app from the frontend folder:
 
 ```powershell
@@ -426,7 +430,8 @@ printed rather than the dozens of submodules that inherit it.
 
 ## Continuous integration
 
-`.github/workflows/verify.yml` runs on every push and pull request:
+`.github/workflows/verify.yml` runs on pull requests and pushes to `main`.
+Feature branches use the pull-request run without a duplicate push run:
 
 - **Backend (Python 3.11)** — each test group as a separate Windows job, including
   persisted scheduling/reconciliation, scoped API mutations, approval replay,
@@ -446,7 +451,8 @@ printed rather than the dozens of submodules that inherit it.
   `MONAW_REQUIRE_DOCKER_TESTS=1` makes unavailable Docker prerequisites a failure.
 - **Per-commit integrity** — the checks above, capped at 20 commits.
 - **Frontend** — `npm run verify:ci` (Vitest, Electron tests, type-check, build),
-  on Node 20.19.0, 22.13.0 and 24. The 22.x floor includes jsdom's requirement.
+  once on Node 22.13.0, matching the application job and packaging baseline.
+  The check remains named `Frontend (Node 22.13.0)`.
 - **Electron and backend workflows (Windows)** — `npm run test:app` on Python
   3.11 / Node 22.13, covering authenticated startup, streaming/persistence,
   approval and rejection, parallel stop, scheduling, uncertain run reconciliation
