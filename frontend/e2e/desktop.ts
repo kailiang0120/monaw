@@ -6,6 +6,7 @@ import { resolve, join, sep } from 'node:path'
 import { createServer, connect } from 'node:net'
 import { createRequire } from 'node:module'
 import { execFileSync } from 'node:child_process'
+import { randomInt } from 'node:crypto'
 
 const require = createRequire(import.meta.url)
 const frontend = resolve(import.meta.dirname, '..')
@@ -17,12 +18,24 @@ const python = execFileSync('uv', ['--color', 'never', 'python', 'find', '--proj
 const venv = process.env.MONAW_E2E_VENV ?? ''
 
 async function freePort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((done, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', done) })
-  const address = server.address()
-  if (!address || typeof address === 'string') throw new Error('No application-test port')
-  await new Promise<void>((done) => server.close(() => done()))
-  return address.port
+  // Keep restartable backend ports below Windows' dynamic/debugger port pool.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const server = createServer()
+    try {
+      await new Promise<void>((done, reject) => {
+        server.once('error', reject)
+        server.listen(randomInt(20_000, 30_000), '127.0.0.1', done)
+      })
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('No application-test port')
+      return address.port
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error
+    } finally {
+      if (server.listening) await new Promise<void>((done) => server.close(() => done()))
+    }
+  }
+  throw new Error('No free application-test backend port after 20 attempts')
 }
 
 async function portIsOpen(port: number): Promise<boolean> {
