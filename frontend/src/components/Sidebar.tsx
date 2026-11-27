@@ -254,7 +254,7 @@ export function Sidebar({
                 ? <Loader2 size={12} aria-label="Running" className="shrink-0 animate-spin text-accent-light" />
                 : <MessageSquare size={12} className={`shrink-0 ${active ? 'text-accent-light' : 'text-neutral-700'}`} />}
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[11px] leading-snug">{c.title}</span>
+                <span className="block truncate text-[11px] leading-snug text-[var(--st-text)]">{c.title}</span>
                 <span className="block max-h-0 overflow-hidden text-[10px] leading-none text-neutral-700 transition-[max-height] duration-150 group-hover:max-h-4 group-focus-within:max-h-4">
                   {formatTimestamp(c.created_at)}
                 </span>
@@ -428,7 +428,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={() => onNewChat()}
-            className="flex w-full items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-[13px] font-medium text-neutral-200 transition-colors hover:border-accent/30 hover:bg-accent/10 hover:text-accent-light"
+            className="flex w-full items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-[13px] font-medium text-neutral-200 transition-colors hover:border-accent/30 hover:bg-accent/10"
             aria-label="New chat"
             tabIndex={collapsed ? -1 : 0}
           >
@@ -519,9 +519,9 @@ export function Sidebar({
             <button
               type="button"
               onClick={onOpenSettings}
-              className="ghost-button h-8 min-w-0 flex-1 justify-start rounded-lg px-2.5 text-[11px]"
+              className="ghost-button h-8 min-w-0 flex-1 justify-start rounded-lg px-2.5 text-sm"
             >
-              <Settings size={13} />
+              <Settings size={16} />
               Settings
             </button>
             <button

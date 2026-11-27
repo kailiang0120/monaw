@@ -10,6 +10,23 @@ vi.mock('../lib/api/uploads', () => ({ uploadAttachment: vi.fn() }))
 describe('InputBar model picker', () => {
   afterEach(cleanup)
 
+  it('allows choosing a folder only before a chat is created', () => {
+    const common = { onSend: vi.fn(), onStop: vi.fn(), isStreaming: false, modelOptions: FALLBACK_MODEL_OPTIONS,
+      contextRefreshKey: 0, approvalMode: 'default' as const, onApprovalModeChange: vi.fn(),
+      onModelSelectionChange: vi.fn(), onWorkspaceChange: vi.fn(), workspaceDir: 'C:/Projects/demo',
+      modelSelection: { provider: 'openai' as const, model_name: 'gpt-6-luna', reasoning_effort: 'medium' as const } }
+    const { rerender } = render(<InputBar {...common} conversationId={null} />)
+    expect(screen.getByRole('button', { name: 'Choose working folder' })).toBeEnabled()
+    rerender(<InputBar {...common} conversationId="saved-chat" />)
+    expect(screen.queryByRole('button', { name: 'Choose working folder' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Use default workspace' })).not.toBeInTheDocument()
+    expect(screen.queryByText('demo')).not.toBeInTheDocument()
+    rerender(<InputBar {...common} conversationId={null} isStreaming />)
+    expect(screen.queryByRole('button', { name: 'Choose working folder' })).not.toBeInTheDocument()
+    rerender(<InputBar {...common} conversationId={null} />)
+    expect(screen.getByRole('button', { name: 'Choose working folder' })).toBeEnabled()
+  })
+
   it('keeps Send and Stop next to Pause and Continue', async () => {
     const control = vi.fn().mockResolvedValue(undefined)
     const common = {

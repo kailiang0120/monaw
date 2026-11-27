@@ -136,11 +136,12 @@ def _drain(subscription) -> list[bytes]:
     return asyncio.run(collect())
 
 
-def test_the_replay_merges_text_deltas_into_one_event():
+@pytest.mark.parametrize("event_name", ["token", "response_preview"])
+def test_the_replay_merges_text_deltas_into_one_event(event_name):
     stream = RunStream()
     stream.publish("turn_started", {"run_id": "r"})
     for piece in ("Hel", "lo", " there"):
-        stream.publish("token", {"content": piece})
+        stream.publish(event_name, {"content": piece})
     stream.publish("tool_start", {"tool": "read_file", "call_id": "c1"})
     stream.publish("token", {"content": "Done"})
     stream.close()
@@ -148,7 +149,7 @@ def test_the_replay_merges_text_deltas_into_one_event():
     chunks = _drain(stream.subscribe())
     assert chunks == [
         sse_chunk("turn_started", {"run_id": "r"}),
-        sse_chunk("token", {"content": "Hello there"}),
+        sse_chunk(event_name, {"content": "Hello there"}),
         sse_chunk("tool_start", {"tool": "read_file", "call_id": "c1"}),
         sse_chunk("token", {"content": "Done"}),
         None,

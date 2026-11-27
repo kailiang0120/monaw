@@ -53,7 +53,7 @@ export function WorkspacePicker({ value, isDefault = !value, disabled, onChange 
       <div className="flex min-w-0 items-center gap-2">
         <button type="button" onClick={() => void choose()} disabled={blocked}
           aria-label="Choose working folder" title={value || 'Use the default workspace, or choose a folder for this chat'}
-          className="flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1 transition-colors hover:bg-white/[0.06] hover:text-neutral-200 disabled:opacity-50">
+          className="flex min-h-7 min-w-0 items-center gap-1.5 rounded-lg border border-[var(--st-text-muted)] bg-[var(--st-surface)] px-2 py-1 text-[var(--st-text)] transition-colors hover:bg-[var(--st-surface-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--st-accent)] disabled:opacity-50">
           {busy ? <Loader2 size={14} className="shrink-0 animate-spin" /> : <FolderOpen size={14} className="shrink-0" />}
           <span className="truncate">{isDefault ? 'Default workspace' : folderName}</span>
         </button>

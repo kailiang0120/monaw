@@ -13,6 +13,38 @@ from app.agent.harness.turn_transcript import TurnTranscript
 from app.agent.llm_client import LLMResponse, ToolCallRequest
 
 
+def test_tool_capable_request_previews_text_before_completion():
+    """Prose is visible while the provider runs, without accepting tools early."""
+    events = []
+
+    class StreamingClient:
+        async def chat_with_tools(self, messages, tools, stream_callback, **kwargs):
+            """Assert the preview is delivered before the completed tool response."""
+            await stream_callback("Reading the repository")
+            assert events[-1] == {
+                "event": "response_preview", "data": {"content": "Reading the repository"},
+            }
+            assert not any(event["event"] == "token" for event in events)
+            return LLMResponse(
+                content="Reading the repository", finish_reason="tool_calls",
+                tool_calls=[ToolCallRequest("read-1", "read_file", {"path": "README.md"})],
+            )
+
+    runner = ModelRequestRunner(
+        StreamingClient(), timeout_seconds=5,
+        observer=SimpleNamespace(event=lambda *a, **k: None, error=lambda *a, **k: None),
+        emit=events.append, on_request=lambda: None,
+    )
+    result = asyncio.run(runner.request(ModelRequest(
+        messages=[{"role": "user", "content": "Explain this repository"}],
+        tools=[{"name": "read_file", "parameters": {"type": "object", "properties": {}}}],
+        system_prompt="", latest_round_start=0, revision=0,
+    )))
+    assert events[0]["data"].get("reset") is True
+    assert result.answer_text == ""
+    assert result.response.tool_calls[0].call_id == "read-1"
+
+
 def test_compaction_covers_all_old_context_and_keeps_current_tool_round(monkeypatch):
     monkeypatch.setattr(context_budget, "input_budget", lambda _client: 3000)
 

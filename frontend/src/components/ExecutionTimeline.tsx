@@ -111,6 +111,22 @@ function formatRunTime(value: string | null): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
+/** Keep diagnostics in the transcript, available on demand without crowding the composer. */
+export function ExecutionDetails(props: ExecutionTimelineProps) {
+  const { snapshot, operations = [] } = props
+  if (!snapshot) return null
+  const operationCount = operations.filter((operation) => operation.run_id === snapshot.run_id).length
+  return (
+    <details key={snapshot.run_id} className="mt-3 mb-4 rounded-xl border border-white/[0.08] bg-white/[0.025]">
+      <summary className="cursor-pointer rounded-xl px-3 py-3 text-xs text-neutral-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/40">
+        <span className="font-medium">Execution details</span>
+        <span className="ml-3 text-neutral-500">{RUN_STATUS_LABELS[snapshot.status]} · {operationCount} operation{operationCount === 1 ? '' : 's'}</span>
+      </summary>
+      <div className="pb-3"><ExecutionTimeline {...props} /></div>
+    </details>
+  )
+}
+
 export function ExecutionTimeline({
   runs = [],
   snapshot,
@@ -248,7 +264,7 @@ export function ExecutionTimeline({
           </div>
         </div>
 
-        {snapshot.reason_code && (
+        {snapshot.reason_code && snapshot.reason_code !== snapshot.status && (
           <p className="border-t border-white/[0.06] px-3 py-2 text-[11px] text-amber-200" role="status">
             {reasonText(snapshot.reason_code)}
           </p>
@@ -276,34 +292,37 @@ export function ExecutionTimeline({
           </dl>
         )}
         {detailMode === 'developer' && (
-          <dl aria-label="Run diagnostics" className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-white/[0.06] px-3 py-2.5 text-[11px] sm:grid-cols-3">
-            <div className="min-w-0">
-              <dt className="text-neutral-500">Run ID</dt>
-              <dd className="mt-0.5 break-all font-mono text-neutral-300">{snapshot.run_id}</dd>
-            </div>
-            <div>
-              <dt className="text-neutral-500">Revision</dt>
-              <dd className="mt-0.5 font-mono text-neutral-300">{snapshot.revision}</dd>
-            </div>
-            <div>
-              <dt className="text-neutral-500">Event cursor</dt>
-              <dd className="mt-0.5 font-mono text-neutral-300">{snapshot.last_seq}</dd>
-            </div>
-            {runEvents.length > 0 && (
-              <div className="col-span-full min-w-0">
-                <dt className="text-neutral-500">Recent Run events</dt>
-                <dd>
-                  <ol className="mt-1 space-y-1 font-mono text-neutral-300">
-                    {runEvents.slice(-8).map((event) => (
-                      <li key={`${event.run_id}:${event.seq}`} className="break-words">
-                        #{event.seq} {event.type} · {formatRunTime(event.at)}
-                      </li>
-                    ))}
-                  </ol>
-                </dd>
+          <details className="border-t border-white/[0.06]">
+            <summary className="cursor-pointer px-3 py-2 text-[11px] font-medium text-neutral-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/40">Technical diagnostics</summary>
+            <dl aria-label="Run diagnostics" className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-white/[0.06] px-3 py-2.5 text-[11px] sm:grid-cols-3">
+              <div className="min-w-0">
+                <dt className="text-neutral-500">Run ID</dt>
+                <dd className="mt-0.5 break-all font-mono text-neutral-300">{snapshot.run_id}</dd>
               </div>
-            )}
-          </dl>
+              <div>
+                <dt className="text-neutral-500">Revision</dt>
+                <dd className="mt-0.5 font-mono text-neutral-300">{snapshot.revision}</dd>
+              </div>
+              <div>
+                <dt className="text-neutral-500">Event cursor</dt>
+                <dd className="mt-0.5 font-mono text-neutral-300">{snapshot.last_seq}</dd>
+              </div>
+              {runEvents.length > 0 && (
+                <div className="col-span-full min-w-0">
+                  <dt className="text-neutral-500">Recent Run events</dt>
+                  <dd>
+                    <ol className="mt-1 space-y-1 font-mono text-neutral-300">
+                      {runEvents.slice(-8).map((event) => (
+                        <li key={`${event.run_id}:${event.seq}`} className="break-words">
+                          #{event.seq} {event.type} · {formatRunTime(event.at)}
+                        </li>
+                      ))}
+                    </ol>
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </details>
         )}
         {connected === false && snapshot.status === 'running' && (
           <p className="border-t border-white/[0.06] px-3 py-2 text-[11px] text-amber-200" role="status" aria-live="polite">

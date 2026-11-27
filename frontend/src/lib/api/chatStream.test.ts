@@ -10,6 +10,27 @@ vi.mock('./client', async (importOriginal) => ({
 describe('chat stream completion', () => {
   afterEach(() => vi.resetAllMocks())
 
+  it('delivers preview text while the response stream is still open', async () => {
+    let source!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { source = controller },
+    })
+    vi.mocked(apiFetch).mockResolvedValue(new Response(body))
+    const onDone = vi.fn()
+    const onPreview = vi.fn()
+    const args: Parameters<typeof chatStream> = [
+      'Explain', null, [], vi.fn(), vi.fn(), vi.fn(), onDone, vi.fn(),
+    ]
+    args[28] = onPreview
+    chatStream(...args)
+    source.enqueue(new TextEncoder().encode('event: response_preview\ndata: {"content":"Live explanation"}\n\n'))
+    await vi.waitFor(() => expect(onPreview).toHaveBeenCalledWith({ content: 'Live explanation' }))
+    expect(onDone).not.toHaveBeenCalled()
+    source.enqueue(new TextEncoder().encode('event: done\ndata: {"status":"complete"}\n\n'))
+    source.close()
+    await vi.waitFor(() => expect(onDone).toHaveBeenCalled())
+  })
+
   it('includes the selected folder in a new chat request', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response('event: done\ndata: {"status":"complete"}\n\n'))
     const onDone = vi.fn()

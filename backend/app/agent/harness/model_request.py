@@ -60,8 +60,14 @@ class ModelRequestRunner:
         self.reasoning_text = ""
 
     async def _answer(self, delta: str) -> None:
+        """Publish accepted answer text as it arrives."""
         self.answer_text += str(delta or "")
         self.emit({"event": "token", "data": {"content": delta}})
+
+    async def _preview(self, delta: str) -> None:
+        """Show tool-capable response text without accepting unfinished tool calls."""
+        self.answer_text += str(delta or "")
+        self.emit({"event": "response_preview", "data": {"content": delta}})
 
     async def _reasoning(self, delta: str) -> None:
         self.reasoning_text += str(delta or "")
@@ -70,6 +76,8 @@ class ModelRequestRunner:
     async def request(self, request: ModelRequest) -> ModelResult:
         self.answer_text = ""
         self.reasoning_text = ""
+        if request.stream_answer:
+            self.emit({"event": "response_preview", "data": {"content": "", "reset": True}})
         started = time.perf_counter()
         self.on_request()
         self.observer.event(
@@ -91,12 +99,13 @@ class ModelRequestRunner:
                     kwargs["tool_choice"] = "required"
                 if request.stream_reasoning and isinstance(self.client, LLMClient):
                     kwargs["reasoning_callback"] = self._reasoning
-                # Buffer tool-round and wrap-up text until the coordinator
-                # accepts it as progress or a usable final answer.
+                # Preview prose live; the coordinator still accepts completed
+                # tool calls and decides whether prose is progress or the answer.
+                callback = self._preview if request.tools else self._answer
                 response = await self.client.chat_with_tools(
                     [{key: value for key, value in item.items() if key != PROTECTED_CONTEXT} for item in messages],
                     request.tools, system_prompt=request.system_prompt,
-                    stream_callback=self._answer if request.stream_answer and not request.tools else None, **kwargs,
+                    stream_callback=callback if request.stream_answer else None, **kwargs,
                 )
         except asyncio.CancelledError:
             raise
@@ -127,4 +136,5 @@ class ModelRequestRunner:
             },
             tokens=usage, metadata=request.metadata,
         )
-        return ModelResult(response, messages, round_start, request.revision, usage, self.answer_text, self.reasoning_text)
+        accepted_text = "" if request.tools else self.answer_text
+        return ModelResult(response, messages, round_start, request.revision, usage, accepted_text, self.reasoning_text)

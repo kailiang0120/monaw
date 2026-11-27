@@ -11,6 +11,7 @@
     "dev": "concurrently \"vite\" \"electron .\"",
     "dev:vite": "vite",
     "dev:electron": "electron .",
+    "check:electron": "node scripts/check-electron-install.cjs",
     "build:renderer": "vite build",
     "build": "vite build",
     "test": "vitest run && npm run test:electron",
@@ -116,5 +117,9 @@
     "electronLanguages": [
       "en-US"
     ]
+  },
+  "allowScripts": {
+    "electron@41.3.0": true,
+    "electron-winstaller@5.4.0": true
   }
 }

@@ -964,7 +964,7 @@ class GreetingThenFinalAnswerLLM:
 
     async def chat_with_tools(self, messages, tools, system_prompt="", stream_callback=None):  # noqa: ARG002
         self.calls += 1
-        assert stream_callback is None
+        assert callable(stream_callback)
         if self.calls == 1:
             return LLMResponse(content="I'm doing well, thanks for asking!", tool_calls=[], finish_reason="stop")
         return final_answer_response("I'm ready. What's the task?")

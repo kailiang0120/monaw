@@ -12,20 +12,20 @@ const EXECUTION_DETAIL_CHOICES: Array<{
   {
     value: 'simple',
     title: 'Concise',
-    summary: 'Status and controls at a glance.',
-    description: 'Keeps the execution card compact. You can still expand operation details whenever you need them.',
+    summary: 'Keep the chat focused.',
+    description: 'Show tool activity and essential controls without an execution diagnostics panel.',
   },
   {
     value: 'detailed',
     title: 'Detailed',
-    summary: 'Show Run timing and operation summaries.',
-    description: 'Adds timing and operation context from the selected Run. Operation details can still be collapsed temporarily.',
+    summary: 'Inspect timing and operations.',
+    description: 'Adds an expandable Execution details section below the conversation.',
   },
   {
     value: 'developer',
     title: 'Developer',
-    summary: 'Show Run identifiers and diagnostic metadata.',
-    description: 'Adds the selected Run ID, revision and event cursor, plus matching operation evidence and event metadata.',
+    summary: 'Troubleshoot a run.',
+    description: 'Includes Detailed mode plus technical IDs, event history and operation metadata inside the same section.',
   },
 ]
 

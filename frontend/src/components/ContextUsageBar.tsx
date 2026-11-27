@@ -39,6 +39,7 @@ function getStatusLabel(percentage: number): string {
   return 'Plenty of room'
 }
 
+/** Show context as a full-size ring that opens the token breakdown. */
 export function ContextUsageBar({ usage }: Props) {
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -57,13 +58,11 @@ export function ContextUsageBar({ usage }: Props) {
   if (!usage) {
     return (
       <span
-        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg"
+        className="context-usage-ring context-usage-ring-empty"
         aria-label="Context usage available after the first message"
         title="Context usage available after the first message"
       >
-        <span className="inline-flex h-3 w-3 items-center justify-center rounded-full bg-[var(--st-border-strong)]">
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--st-surface)]" />
-        </span>
+        <span className="context-usage-ring-track" aria-hidden="true" />
       </span>
     )
   }
@@ -88,22 +87,21 @@ export function ContextUsageBar({ usage }: Props) {
 
   return (
     <div ref={containerRef} className="relative flex items-center">
-      {/* Mini ring button — h-7 matches the permission dropdown height */}
+      {/* Keep a 28px hit area while the visible ring stays slightly smaller. */}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.03] transition-colors hover:border-white/[0.12] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 ${pulseClass}`}
+        className={`context-usage-ring ${pulseClass}`}
         aria-label={`Context usage ${Math.round(percentage)}% — click to ${open ? 'hide' : 'show'} breakdown`}
         aria-expanded={open}
       >
         <span
-          className="inline-flex h-3 w-3 items-center justify-center rounded-full"
+          className="context-usage-ring-track"
+          aria-hidden="true"
           style={{
-            background: `conic-gradient(${color} ${percentage * 3.6}deg, rgba(130, 147, 112, 0.18) 0deg)`,
+            background: `conic-gradient(${color} ${percentage * 3.6}deg, var(--st-border-strong) 0deg)`,
           }}
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--st-surface)]" />
-        </span>
+        />
       </button>
 
       {/* Upward popover */}
@@ -114,7 +112,7 @@ export function ContextUsageBar({ usage }: Props) {
             <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500">
               Context
             </span>
-            <span className="text-[10px] font-semibold tabular-nums" style={{ color }}>
+            <span className="text-[10px] font-semibold tabular-nums text-[var(--st-text)]">
               {Math.round(percentage)}% · {formatTokens(usage.used)} / {formatTokens(usage.limit)}
             </span>
           </div>

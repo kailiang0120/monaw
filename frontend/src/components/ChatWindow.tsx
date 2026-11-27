@@ -12,8 +12,16 @@ const VIRTUAL_VIEWPORT_FALLBACK_PX = 720
 const MIN_ESTIMATED_MESSAGE_HEIGHT_PX = 88
 const MAX_ESTIMATED_MESSAGE_HEIGHT_PX = 760
 
+/** Keep the latest user turn expanded; older turns may fold long content. */
+function latestTurnStart(messages: Message[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user') return index
+  }
+  return Math.max(0, messages.length - 1)
+}
+
 function estimateMessageHeight(message: Message): number {
-  const contentLength = message.content.length
+  const contentLength = (message.previewContent || message.content).length
   const attachmentCount = message.attachments?.length ?? 0
   if (message.role === 'user') {
     return Math.min(
@@ -175,6 +183,12 @@ export function ChatWindow({
         <div
           ref={scrollContainerRef}
           aria-label="Chat transcript"
+          onClickCapture={(event) => {
+            // Keep the reading position when the user opens or closes older content.
+            if (event.target instanceof Element && event.target.closest('summary')) {
+              followLatestRef.current = false
+            }
+          }}
           onScroll={(event) => handleTranscriptScroll(event.currentTarget)}
           className="flex-1 overflow-y-auto px-4 pb-6 pt-8"
         >
@@ -218,11 +232,12 @@ function MessageList({
   scrollContainerRef: RefObject<HTMLDivElement>
   viewport: { scrollTop: number; height: number }
 }) {
+  const currentTurnStart = latestTurnStart(messages)
   if (messages.length < VIRTUALIZE_MESSAGE_THRESHOLD) {
     return (
       <>
-        {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} agentName={agentName} />
+        {messages.map((msg, index) => (
+          <MessageBubble key={msg.id} message={msg} agentName={agentName} foldLongContent={index < currentTurnStart} />
         ))}
       </>
     )
@@ -249,6 +264,7 @@ function VirtualizedMessageList({
   scrollContainerRef: RefObject<HTMLDivElement>
   viewport: { scrollTop: number; height: number }
 }) {
+  const currentTurnStart = latestTurnStart(messages)
   const heightByIdRef = useRef<Map<string, number>>(new Map())
   const previousLayoutRef = useRef<{ firstId?: string; lastId?: string; totalHeight: number } | null>(null)
   const [heightRevision, setHeightRevision] = useState(0)
@@ -328,11 +344,12 @@ function VirtualizedMessageList({
   return (
     <div aria-label="Conversation messages">
       {layout.topPadding > 0 && <div aria-hidden style={{ height: layout.topPadding }} />}
-      {layout.visibleMessages.map((message) => (
+      {layout.visibleMessages.map((message, index) => (
         <MeasuredMessageRow
           key={message.id}
           agentName={agentName}
           message={message}
+          foldLongContent={layout.start + index < currentTurnStart}
           onHeightChange={onHeightChange}
         />
       ))}
@@ -344,10 +361,12 @@ function VirtualizedMessageList({
 function MeasuredMessageRow({
   message,
   agentName,
+  foldLongContent,
   onHeightChange,
 }: {
   message: Message
   agentName: string
+  foldLongContent: boolean
   onHeightChange: (id: string, height: number) => void
 }) {
   const rowRef = useRef<HTMLDivElement>(null)
@@ -383,7 +402,7 @@ function MeasuredMessageRow({
 
   return (
     <div ref={rowRef} className="flow-root">
-      <MessageBubble message={message} agentName={agentName} />
+      <MessageBubble message={message} agentName={agentName} foldLongContent={foldLongContent} />
     </div>
   )
 }

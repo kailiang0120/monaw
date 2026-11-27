@@ -233,6 +233,9 @@ try {
   Write-Step "Installing frontend packages"
   Invoke-LoggedCommand -FilePath $npm -ArgumentList @('ci') -WorkingDirectory $frontendDir
 
+  Write-Step "Verifying the Electron desktop executable"
+  Invoke-LoggedCommand -FilePath $npm -ArgumentList @('run', 'check:electron') -WorkingDirectory $frontendDir
+
   Write-Step "Setup complete"
   Write-Host "You can now double-click start.bat to run Monaw Agent."
   "[$(Get-Date -Format o)] Monaw Agent setup completed" | Add-Content -Path $setupLog

@@ -1,18 +1,19 @@
 import { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react'
 import { AppBar } from './components/AppBar'
+import { StartupScreen } from './components/StartupScreen'
 import { Sidebar } from './components/Sidebar'
 import { ChatWindow } from './components/ChatWindow'
 import { InputBar } from './components/InputBar'
 import { ApprovalToast } from './components/ApprovalToast'
 import { AccessGrantCard } from './components/AccessGrantCard'
-import { ExecutionTimeline } from './components/ExecutionTimeline'
+import { ExecutionDetails } from './components/ExecutionTimeline'
 import { RecoveryPanel } from './components/RecoveryPanel'
 import { ChangesReview } from './components/ChangesReview'
 import type { RunAction } from './components/ExecutionTimeline'
 import { useChat } from './hooks/useChat'
 import { useRunController } from './hooks/useRunController'
 import { useItemActions } from './hooks/useItemActions'
-import { deleteConversation, fetchConversations, renameConversation, setConversationWorkspace, validateConversationWorkspace } from './lib/api/conversations'
+import { deleteConversation, fetchConversations, renameConversation, validateConversationWorkspace } from './lib/api/conversations'
 import {
   deleteScheduledTask,
   fetchScheduledTasks,
@@ -41,8 +42,8 @@ type ThemeMode = 'dark' | 'light'
 type ModelSelection = Pick<AgentSettings['llm'], 'provider' | 'model_name' | 'reasoning_effort'>
 
 const THEME_STORAGE_KEY = 'agent_theme'
-const STARTUP_REFRESH_RETRIES = 20
-const STARTUP_REFRESH_DELAY_MS = 1000
+const STARTUP_REFRESH_RETRIES = 80
+const STARTUP_REFRESH_DELAY_MS = 250
 const RECOVERY_POLL_MS = 60_000
 
 const GUIDE_DISMISSED_KEY = 'monaw.firstRunGuideDismissed'
@@ -107,6 +108,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [settingsPage, setSettingsPage] = useState<SettingsPageId | undefined>(undefined)
   const [conversationsLoaded, setConversationsLoaded] = useState(false)
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [startupDismissed, setStartupDismissed] = useState(false)
+  const [startupAttempt, setStartupAttempt] = useState(0)
   const [guideDismissed, setGuideDismissed] = useState(readGuideDismissed)
   const [guideRefreshKey, setGuideRefreshKey] = useState(0)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
@@ -291,6 +295,7 @@ export default function App() {
       })
       setHasGoogleKey(settings.api_keys.has_google_key)
       setAgentName(resolveAgentName(settings.identity?.agent_name))
+      setSettingsLoaded(true)
       return true
     } catch {
       return false
@@ -320,31 +325,31 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false
-    let retryTimer: number | null = null
-    let attempts = 0
+    const retryTimers = new Set<number>()
 
     void syncStoredApiKeysToBackendWithRetry().then(() => {
       if (!cancelled) void loadVisibleSettings()
     })
 
-    const refreshStartupData = async () => {
-      const [conversationsOk, scheduledTasksOk, settingsOk] = await Promise.all([
-        loadConversations(),
-        loadScheduledTasks(),
-        loadVisibleSettings(),
-      ])
-      if (cancelled || (conversationsOk && scheduledTasksOk && settingsOk)) return
-      if (attempts >= STARTUP_REFRESH_RETRIES) return
-      attempts += 1
-      retryTimer = window.setTimeout(refreshStartupData, STARTUP_REFRESH_DELAY_MS)
+    // Retry each resource independently so settings cannot hold up chat history.
+    const refreshStartupData = async (load: () => Promise<boolean>, attempts = 0) => {
+      const loaded = await load()
+      if (cancelled || loaded || attempts >= STARTUP_REFRESH_RETRIES) return
+      const timer = window.setTimeout(() => {
+        retryTimers.delete(timer)
+        void refreshStartupData(load, attempts + 1)
+      }, STARTUP_REFRESH_DELAY_MS)
+      retryTimers.add(timer)
     }
 
-    void refreshStartupData()
+    void refreshStartupData(loadConversations)
+    void refreshStartupData(loadScheduledTasks)
+    void refreshStartupData(loadVisibleSettings)
     return () => {
       cancelled = true
-      if (retryTimer) window.clearTimeout(retryTimer)
+      retryTimers.forEach((timer) => window.clearTimeout(timer))
     }
-  }, [loadConversations, loadScheduledTasks, loadVisibleSettings])
+  }, [loadConversations, loadScheduledTasks, loadVisibleSettings, startupAttempt])
 
   useEffect(() => {
     const handleServerEvent = (event: ServerEvent) => {
@@ -537,20 +542,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nextQueuedId, isStreaming, queuePaused, savingWorkspace, isBackendReady])
 
+  // Only a new chat can change folders; ignore responses after navigation.
   const handleWorkspaceChange = async (path: string) => {
     const targetId = activeConvId
     const generation = workspaceGenerationRef.current
-    if (activeConvIdRef.current !== targetId) return
+    if (targetId || activeConvIdRef.current !== targetId) return
     setSavingWorkspace(true)
     try {
-      if (!targetId) {
-        const validated = await validateConversationWorkspace(path)
-        if (activeConvIdRef.current === targetId && workspaceGenerationRef.current === generation) setDraftWorkspaceDir(validated.workspace_dir)
-        return
-      }
-      const updated = await setConversationWorkspace(targetId, path)
-      setConversations((current) => current.map((item) => item.id === targetId ? updated : item))
-      setUsageRefreshKey((value) => value + 1)
+      const validated = await validateConversationWorkspace(path)
+      if (activeConvIdRef.current === targetId && workspaceGenerationRef.current === generation) setDraftWorkspaceDir(validated.workspace_dir)
     } finally {
       setSavingWorkspace(false)
     }
@@ -647,6 +647,20 @@ export default function App() {
     : null
   const navigationGeneration = workspaceGenerationRef.current
 
+  if (!startupDismissed && (!conversationsLoaded || !settingsLoaded)) {
+    const startupStatus = !isBackendReady ? 'Starting Monaw…'
+      : !conversationsLoaded ? 'Loading chats…' : 'Loading preferences…'
+    return (
+      <div className={`app-surface theme-${theme} flex h-screen w-screen flex-col overflow-hidden`}>
+        <AppBar startup sidebarCollapsed={false} onToggleSidebar={() => {}}
+          agentName={agentName} status="starting" approvalMode={approvalMode} />
+        <StartupScreen key={startupAttempt} status={startupStatus}
+          onRetry={() => setStartupAttempt((attempt) => attempt + 1)}
+          onContinue={() => setStartupDismissed(true)} />
+      </div>
+    )
+  }
+
   return (
     <div className={`app-surface ${theme === 'light' ? 'theme-light' : 'theme-dark'} flex h-screen w-screen flex-col overflow-hidden`}>
       <AppBar
@@ -679,7 +693,7 @@ export default function App() {
               })()}
         />}
       />
-      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+      <div className="chat-interface relative flex min-h-0 flex-1 overflow-hidden">
         <Sidebar
           conversations={conversations}
           activeId={activeConvId}
@@ -720,6 +734,15 @@ export default function App() {
               agentName={agentName}
               onLoadOlderMessages={loadOlderMessages}
               onPromptSelect={handleSend}
+              afterMessages={executionDetail !== 'simple' ? (
+                <ExecutionDetails
+                  runs={runController.runs} snapshot={runController.snapshot} operations={runController.operations}
+                  events={runController.events} recovery={runController.recovery} detailMode={executionDetail}
+                  loading={runController.loading} error={runController.error?.message} connected={runController.eventsConnected}
+                  busy={runController.refreshing} onSelectRun={runController.selectRun} onAction={handleRunAction}
+                  onResolveOperation={handleOperationResolution} onUndo={handleUndoOperation} onRefresh={runController.refreshRun}
+                />
+              ) : undefined}
               emptyState={showGuide ? (
                 <FirstRunGuide
                   required={readiness.required}
@@ -732,17 +755,6 @@ export default function App() {
                 />
               ) : undefined}
             />
-            {executionDetail === 'developer' && (
-              <div className="max-h-64 shrink-0 overflow-y-auto pb-2">
-                <ExecutionTimeline
-                  runs={runController.runs} snapshot={runController.snapshot} operations={runController.operations}
-                  events={runController.events} recovery={runController.recovery} detailMode={executionDetail}
-                  loading={runController.loading} error={runController.error?.message} connected={runController.eventsConnected}
-                  busy={runController.refreshing} onSelectRun={runController.selectRun} onAction={handleRunAction}
-                  onResolveOperation={handleOperationResolution} onUndo={handleUndoOperation} onRefresh={runController.refreshRun}
-                />
-              </div>
-            )}
             {executionDetail !== 'developer' && runController.snapshot
               && ['interrupted', 'needs_review'].includes(runController.snapshot.status) && (
               <details className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-2 text-xs text-amber-200">
@@ -766,7 +778,7 @@ export default function App() {
             <InputBar
               workspaceDir={activeConvId ? activeConversation?.workspace_dir || '' : draftWorkspaceDir}
               workspaceIsDefault={activeConvId ? activeConversation?.workspace_is_default : !draftWorkspaceDir}
-              onWorkspaceChange={handleWorkspaceChange}
+              onWorkspaceChange={activeConvId ? undefined : handleWorkspaceChange}
               onSend={handleSend}
               onSteer={steerMessage}
               steeringConversationId={steeringConversationId}

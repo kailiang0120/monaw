@@ -22,6 +22,7 @@ const DEBUG_HEADERS = {
 }
 
 interface ChatStreamHandlers {
+  onResponsePreview?: (data: { content: string; reset?: boolean }) => void
   onTurnStarted?: (data: TurnStartedEvent) => void
   onSteeringApplied?: (data: SteeringAppliedEvent) => void
   onToken: (token: string) => void
@@ -106,6 +107,8 @@ function dispatchSseEvent(
     } else if (eventType === 'token') {
       bumpEvt(state, 'token')
       handlers.onToken(json.content)
+    } else if (eventType === 'response_preview') {
+      handlers.onResponsePreview?.(json)
     } else if (eventType === 'tool_start') {
       bumpEvt(state, 'tool_start')
       handlers.onToolStart(json)
@@ -249,6 +252,7 @@ export function chatStream(
   runId?: string,
   // Follow this already-running turn (replayed from its start) instead of starting one.
   followRunId?: string,
+  onResponsePreview?: (data: { content: string; reset?: boolean }) => void,
 ): () => void {
   const controller = new AbortController()
 
@@ -260,6 +264,7 @@ export function chatStream(
     }
 
     const handlers: ChatStreamHandlers = {
+      onResponsePreview,
       onTurnStarted,
       onSteeringApplied,
       onToken,

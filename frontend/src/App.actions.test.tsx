@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
 import { fetchConversations } from './lib/api/conversations'
+import { fetchSettings } from './lib/api/settings'
 import { fetchScheduledTasks, runScheduledTaskNow, updateScheduledTask } from './lib/api/scheduledTasks'
 import type { ScheduledTask } from './lib/api/types'
 
@@ -41,10 +42,59 @@ const task = (id: string): ScheduledTask => ({ id, title: id, prompt: 'Work', sc
   nextRunAt: '', consecutiveFailures: 0, running: false, createdAt: '', updatedAt: '' })
 
 beforeEach(() => {
+  vi.mocked(fetchSettings).mockResolvedValue({ permissions: { mode: 'default' },
+    llm: { provider: 'openai', model_name: 'fixture', reasoning_effort: 'low' },
+    api_keys: { has_google_key: false } } as Awaited<ReturnType<typeof fetchSettings>>)
   vi.mocked(fetchScheduledTasks).mockResolvedValue([task('A'), task('B')])
   vi.mocked(fetchConversations).mockResolvedValue([{ id: 'other', title: 'Other chat', created_at: '2026-10-20', workspace_dir: '' }])
 })
-afterEach(() => { cleanup(); vi.clearAllMocks() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks() })
+
+it('retries history promptly while scheduled tasks are still loading', async () => {
+  vi.useFakeTimers()
+  vi.mocked(fetchScheduledTasks).mockReturnValue(new Promise(() => {}))
+  let backendReady = false
+  vi.mocked(fetchConversations).mockImplementation(async () => {
+    if (!backendReady) throw new Error('Backend is starting')
+    return [{ id: 'saved', title: 'Saved chat', created_at: '2026-11-27', workspace_dir: '' }]
+  })
+  render(<App />)
+  expect(screen.getByRole('progressbar', { name: 'Loading Monaw' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Select Saved chat' })).not.toBeInTheDocument()
+  await act(async () => { await Promise.resolve() })
+  backendReady = true
+  await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+  expect(screen.getByRole('button', { name: 'Select Saved chat' })).toBeVisible()
+  expect(screen.queryByRole('progressbar', { name: 'Loading Monaw' })).not.toBeInTheDocument()
+})
+
+it('waits for preferences before showing loaded chats', async () => {
+  let finishSettings!: (value: Awaited<ReturnType<typeof fetchSettings>>) => void
+  vi.mocked(fetchSettings).mockReturnValue(new Promise((resolve) => { finishSettings = resolve }))
+  render(<App />)
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Loading preferences'))
+  expect(screen.queryByRole('button', { name: 'Select Other chat' })).not.toBeInTheDocument()
+  await act(async () => {
+    finishSettings({ permissions: { mode: 'default' },
+      llm: { provider: 'openai', model_name: 'fixture', reasoning_effort: 'low' },
+      api_keys: { has_google_key: false } } as Awaited<ReturnType<typeof fetchSettings>>)
+  })
+  expect(screen.getByRole('button', { name: 'Select Other chat' })).toBeVisible()
+})
+
+it('offers retry and an escape when startup stalls', async () => {
+  vi.useFakeTimers()
+  vi.mocked(fetchConversations).mockRejectedValue(new Error('Backend is starting'))
+  render(<App />)
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+  expect(screen.getByRole('status')).toHaveTextContent('taking longer')
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+  expect(screen.queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument()
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+  fireEvent.click(screen.getByRole('button', { name: 'Open app' }))
+  expect(screen.queryByRole('progressbar', { name: 'Loading Monaw' })).not.toBeInTheDocument()
+  expect(screen.getByTestId('active-title')).toBeVisible()
+})
 
 it('does not undo another schedule row when an overlapping mutation fails', async () => {
   let failA!: (reason: Error) => void

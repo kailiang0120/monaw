@@ -31,6 +31,7 @@ import mascotThinkingStill from '../assets/mascots/thinking.png'
 import { ImagePreviewDialog } from './ImagePreviewDialog'
 import { FileChangePreview, type FileChangePreviewData } from './FileChangePreview'
 import { TurnChanges } from './TurnChanges'
+import { FoldableMessage } from './FoldableMessage'
 import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { approveTicket, rejectTicket } from '../lib/api/approvals'
 import { fetchMessageToolCalls } from '../lib/api/conversations'
@@ -145,9 +146,11 @@ function readFileChangePreview(output?: string): FileChangePreviewData | null {
 export const MessageBubble = memo(function MessageBubble({
   message,
   agentName = DEFAULT_AGENT_NAME,
+  foldLongContent = false,
 }: {
   message: Message
   agentName?: string
+  foldLongContent?: boolean
 }) {
   const isUser = message.role === 'user'
   const assistantLabel = resolveAgentName(agentName)
@@ -161,10 +164,12 @@ export const MessageBubble = memo(function MessageBubble({
     return (
       <div className="mb-2 flex justify-end animate-slide-up">
         <div className="max-w-[78%] rounded-2xl rounded-tr-md bg-accent px-3.5 py-2 text-sm leading-relaxed text-white shadow-lg shadow-accent/10">
-          <div>{message.content}</div>
+          <FoldableMessage content={message.content} eligible={foldLongContent}>
+            <div className="whitespace-pre-wrap break-words">{message.content}</div>
+          </FoldableMessage>
           <AttachmentStrip attachments={message.attachments} compact onPreview={setPreviewAttachment} />
           {message.steeringStatus && (
-            <p className="mt-1 text-[10px] text-white/70">
+            <p className="mt-1 text-[10px] text-white">
               {message.steeringStatus === 'applied' ? 'Applied to the running task' : 'Waiting for the next step'}
             </p>
           )}
@@ -174,10 +179,11 @@ export const MessageBubble = memo(function MessageBubble({
     )
   }
 
-  const hasBody = message.content.trim().length > 0
+  const visibleContent = message.previewContent || message.content
+  const hasBody = visibleContent.trim().length > 0
   const formattedContent = useMemo(
-    () => (hasBody ? cachedFormatAgentResponse(message) : ''),
-    [hasBody, message],
+    () => (hasBody ? cachedFormatAgentResponse({ ...message, content: visibleContent }) : ''),
+    [hasBody, message, visibleContent],
   )
   const runStatus = message.streaming ? 'streaming' : message.runStatus ?? 'complete'
   const mascotSrc = runStatus === 'streaming' ? mascotThinking
@@ -202,6 +208,7 @@ export const MessageBubble = memo(function MessageBubble({
         {(message.streaming || message.responseDurationMs !== undefined) ? (
           <WorkDuration
             streaming={message.streaming === true}
+            receivingText={Boolean(message.previewContent)}
             startedAtMs={message.responseStartedAtMs}
             durationMs={message.responseDurationMs}
           />
@@ -227,95 +234,97 @@ export const MessageBubble = memo(function MessageBubble({
       )}
 
       {hasBody && (
-        <div className="agent-prose max-w-none text-sm leading-relaxed text-neutral-200">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            urlTransform={chatMarkdownUrlTransform}
-            components={{
-              pre({ children }) {
-                return (
-                  <pre className="my-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-black/30 p-4">
-                    {children}
-                  </pre>
-                )
-              },
-              code({ className, children, ...props }) {
-                const isInline = !className
-                if (isInline) {
+        <FoldableMessage content={visibleContent} eligible={foldLongContent && !message.streaming}>
+          <div className="agent-prose max-w-none text-sm leading-relaxed text-neutral-200">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              urlTransform={chatMarkdownUrlTransform}
+              components={{
+                pre({ children }) {
                   return (
-                    <code
-                      className="rounded-md border border-white/[0.08] bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs code-token"
-                      {...props}
-                    >
+                    <pre className="my-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-black/30 p-4">
+                      {children}
+                    </pre>
+                  )
+                },
+                code({ className, children, ...props }) {
+                  const isInline = !className
+                  if (isInline) {
+                    return (
+                      <code
+                        className="rounded-md border border-white/[0.08] bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs code-token"
+                        {...props}
+                      >
+                        {children}
+                      </code>
+                    )
+                  }
+
+                  return (
+                    <code className={`font-mono text-xs text-neutral-200 ${className ?? ''}`} {...props}>
                       {children}
                     </code>
                   )
-                }
-
-                return (
-                  <code className={`font-mono text-xs text-neutral-200 ${className ?? ''}`} {...props}>
-                    {children}
-                  </code>
-                )
-              },
-              table({ children }) {
-                return (
-                  <div className="my-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-white/[0.025]">
-                    <table className="min-w-full border-collapse text-left text-xs text-neutral-200">
-                      {children}
-                    </table>
-                  </div>
-                )
-              },
-              th({ children }) {
-                return (
-                  <th className="border-b border-white/[0.08] bg-white/[0.04] px-3 py-2 font-semibold text-neutral-100">
-                    {children}
-                  </th>
-                )
-              },
-              td({ children }) {
-                return (
-                  <td className="border-t border-white/[0.06] px-3 py-2 align-top">
-                    {children}
-                  </td>
-                )
-              },
-              a({ children, href }) {
-                const target = resolveChatLink(href, message.attachments)
-                if (target.kind === 'external') {
+                },
+                table({ children }) {
                   return (
-                    <a href={target.href} target="_blank" rel="noreferrer">
-                      {children}
-                    </a>
+                    <div className="my-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-white/[0.025]">
+                      <table className="min-w-full border-collapse text-left text-xs text-neutral-200">
+                        {children}
+                      </table>
+                    </div>
                   )
-                }
-                if (target.kind === 'anchor') return <a href={target.href}>{children}</a>
-                if (target.kind === 'attachment') {
-                  const { attachment } = target
-                  const isImage = attachment.mime_type.startsWith('image/')
+                },
+                th({ children }) {
                   return (
-                    <a
-                      href="#"
-                      title={attachment.name}
-                      onClick={(event) => {
-                        event.preventDefault()
-                        if (isImage) setPreviewAttachment(attachment)
-                        else void downloadAttachment(attachment)
-                      }}
-                    >
+                    <th className="border-b border-white/[0.08] bg-white/[0.04] px-3 py-2 font-semibold text-neutral-100">
                       {children}
-                    </a>
+                    </th>
                   )
-                }
-                // Local or in-app targets have nowhere to go; keep the text only.
-                return <span title={href}>{children}</span>
-              },
-            }}
-          >
-            {formattedContent}
-          </ReactMarkdown>
-        </div>
+                },
+                td({ children }) {
+                  return (
+                    <td className="border-t border-white/[0.06] px-3 py-2 align-top">
+                      {children}
+                    </td>
+                  )
+                },
+                a({ children, href }) {
+                  const target = resolveChatLink(href, message.attachments)
+                  if (target.kind === 'external') {
+                    return (
+                      <a href={target.href} target="_blank" rel="noreferrer">
+                        {children}
+                      </a>
+                    )
+                  }
+                  if (target.kind === 'anchor') return <a href={target.href}>{children}</a>
+                  if (target.kind === 'attachment') {
+                    const { attachment } = target
+                    const isImage = attachment.mime_type.startsWith('image/')
+                    return (
+                      <a
+                        href="#"
+                        title={attachment.name}
+                        onClick={(event) => {
+                          event.preventDefault()
+                          if (isImage) setPreviewAttachment(attachment)
+                          else void downloadAttachment(attachment)
+                        }}
+                      >
+                        {children}
+                      </a>
+                    )
+                  }
+                  // Local or in-app targets have nowhere to go; keep the text only.
+                  return <span title={href}>{children}</span>
+                },
+              }}
+            >
+              {formattedContent}
+            </ReactMarkdown>
+          </div>
+        </FoldableMessage>
       )}
 
       <AttachmentStrip attachments={message.attachments} onPreview={setPreviewAttachment} />
@@ -348,10 +357,12 @@ function groupDisplayActivities(activityItems: ActivityItem[], answer: string): 
 
 function WorkDuration({
   streaming,
+  receivingText,
   startedAtMs,
   durationMs,
 }: {
   streaming: boolean
+  receivingText: boolean
   startedAtMs?: number
   durationMs?: number
 }) {
@@ -360,7 +371,8 @@ function WorkDuration({
   const duration = streaming && startedAtMs !== undefined
     ? formatResponseDuration(Math.max(0, now - startedAtMs))
     : durationMs !== undefined ? formatResponseDuration(durationMs) : ''
-  const label = `${streaming ? 'Working' : 'Worked'}${duration ? ` for ${duration}` : ''}`
+  const activity = streaming ? (receivingText ? 'Writing' : 'Working') : 'Worked'
+  const label = `${activity}${duration ? ` for ${duration}` : ''}`
 
   return (
     <div className="text-xs text-neutral-500" role="status" aria-live="off">
