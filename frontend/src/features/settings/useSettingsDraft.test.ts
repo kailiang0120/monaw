@@ -40,6 +40,28 @@ function loaded(settings = buildSettings()) {
 }
 
 describe('useSettingsDraft', () => {
+  it('reconciles installed skills without losing other unsaved edits or secrets', () => {
+    const { result } = loaded()
+    act(() => {
+      result.current.updateDraft((current) => ({ ...current, identity: { ...current.identity, agent_name: 'Edited name' } }))
+      result.current.setSecret('openai', 'unsaved-key')
+    })
+    act(() => result.current.reconcileInstalledSkills(buildSettings({
+      tools: { skills: { imported: true } }, settings_version: 'v2',
+    }), ['imported']))
+    expect(result.current.draft?.identity.agent_name).toBe('Edited name')
+    expect(result.current.secrets.openai).toBe('unsaved-key')
+    expect(result.current.draft?.tools.skills.imported).toBe(true)
+    expect(result.current.draft?.settings_version).toBe('v2')
+    expect(result.current.isDirty).toBe(true)
+  })
+
+  it('does not mark an immediate skill installation as an unsaved settings edit', () => {
+    const { result } = loaded()
+    act(() => result.current.reconcileInstalledSkills(buildSettings({ tools: { skills: { imported: true } } }), ['imported']))
+    expect(result.current.isDirty).toBe(false)
+  })
+
   beforeEach(() => {
     mocks.updateSettings.mockReset()
   })

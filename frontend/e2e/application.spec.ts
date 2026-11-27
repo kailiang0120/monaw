@@ -3,6 +3,8 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { dirname, basename, join } from 'node:path'
 
 async function toolRows(desktop: import('./desktop').Desktop) {
+  // Streamed text can arrive before the atomic history commit; wait for terminal UI.
+  await expect(desktop.page.getByRole('button', { name: 'Stop response', exact: true })).toHaveCount(0)
   const conversations = (await desktop.api('/api/conversations')).data
   const messages = (await desktop.api(`/api/conversations/${conversations[0].id}/messages`)).data.messages
   return messages.flatMap((message: { tool_calls?: unknown[] }) => message.tool_calls || [])

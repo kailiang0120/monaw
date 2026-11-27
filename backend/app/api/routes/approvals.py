@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from app.agent.approval_broker import (
     approve_ticket,
@@ -58,7 +58,11 @@ async def list_pending_approvals(
 
 @router.post("/approvals/{ticket_id}/approve", response_model=ApprovalTicketOut)
 async def approve(ticket_id: str, request: Request, body: ApprovalDecisionIn | None = None):
-    _require_ticket_context(ticket_id, request)
+    current = _require_ticket_context(ticket_id, request)
+    if current.action_descriptor.get("preview_required"):
+        from app.agent.action_security.preview import get_preview
+        if get_preview(current) is None:
+            raise HTTPException(status_code=409, detail="Action details are no longer available. Reject this request and ask the agent to try again.")
     resolved_by = body.resolved_by if body else "user"
     ticket = approve_ticket(ticket_id, resolved_by=resolved_by or "user")
     if not ticket:
@@ -69,6 +73,18 @@ async def approve(ticket_id: str, request: Request, body: ApprovalDecisionIn | N
         {"ticket_id": ticket.id, "conversation_id": ticket.conversation_id, "status": ticket.status.value},
     )
     return _ticket_to_out(ticket)
+
+
+@router.get("/approvals/{ticket_id}/preview")
+async def approval_preview(ticket_id: str, request: Request, response: Response) -> dict:
+    """Show exact action details only to the pending ticket's authenticated session."""
+    from app.agent.action_security.preview import get_preview
+    ticket = _require_ticket_context(ticket_id, request)
+    preview = get_preview(ticket)
+    if preview is None:
+        raise HTTPException(status_code=409, detail="Action details are no longer available. Reject this request and ask the agent to try again.")
+    response.headers["Cache-Control"] = "no-store"
+    return preview
 
 
 @router.post("/approvals/{ticket_id}/reject", response_model=ApprovalTicketOut)

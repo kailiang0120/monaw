@@ -305,8 +305,11 @@ def test_exec_tool_offers_approval_for_untrusted_when_strong_backend_unavailable
 
 
 def test_approval_preview_matches_execution_decision(monkeypatch, tmp_path):
+    """Replay the real exec adapter and compare its approved sandbox disclosure."""
     from app.agent.approval_broker import get_ticket, approve_ticket
-    from app.agent.execution_resume import resume_approved_ticket
+    from app.agent.execution_resume import _EXECUTORS, resume_approved_ticket
+    # Registry tests and dynamic skill loading can replace the global adapter.
+    monkeypatch.setitem(_EXECUTORS, "exec", exec_tools._resume_exec)
     _allow_exec(monkeypatch, confirmation=True)
     captured_run = {}
 
@@ -333,12 +336,12 @@ def test_approval_preview_matches_execution_decision(monkeypatch, tmp_path):
     ticket = get_ticket(pending["ticket_id"])
     approve_ticket(ticket.id)
     completed = json.loads(resume_approved_ticket(ticket).execution_result)
+    assert completed["status"] == "ok", completed
 
     preview = ticket.payload["args"]["sandbox"]
     actual = captured_run["sandbox"]
 
     assert pending["status"] == "pending_approval"
-    assert completed["status"] == "ok"
     for key in ("mode", "profile", "selected_backend", "security_label", "network", "network_enforcement"):
         assert preview[key] == actual[key]
 

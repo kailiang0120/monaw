@@ -38,8 +38,8 @@ export const PAGE_COPY = {
   },
   tools: {
     label: 'Tools',
-    blurb: 'Add your own skills, MCP connections, and plugins. Built-in tools are always on.',
-    keywords: 'skills capabilities tools browser computer use memory scheduling web search mcp model context protocol stdio http server integration plugins extensions',
+    blurb: 'Connect apps, add your own skills, and manage MCP servers. Built-in tools are always on.',
+    keywords: 'connectors github gmail outlook composio skills capabilities tools browser computer use memory scheduling web search mcp model context protocol stdio http server integration',
   },
   browser: {
     label: 'Browser',
@@ -106,7 +106,6 @@ export const IDENTITY_COPY = {
 /* ----------------------------------------------------------------- skills --- */
 
 export const SKILLS_COPY = {
-  intro: 'Built-in skills such as browser use, computer use, web search and scheduling are always on, so they are not listed here.',
   title: 'Your skills',
   empty: 'No skills added yet. Ask Monaw to create one, and it will appear here.',
   unavailable: 'This skill cannot be turned on until the missing backend dependency is installed.',

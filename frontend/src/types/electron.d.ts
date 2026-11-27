@@ -18,6 +18,7 @@ declare global {
       installUpdate?: () => Promise<boolean>
       onUpdateState?: (listener: (state: UpdateState) => void) => () => void
       getControlSession: () => Promise<{ token: string; expiresAt: number }>
+      changeComposioKey?: (input: { action: 'save' | 'remove'; value?: string }) => Promise<{ ok: boolean }>
       credentialStatus: () => Promise<CredentialStatus>
       setCredential: (id: CredentialId, value: string) => Promise<CredentialStatus>
       deleteCredential: (id: CredentialId) => Promise<CredentialStatus>

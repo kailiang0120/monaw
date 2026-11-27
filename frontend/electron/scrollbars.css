@@ -1,14 +1,79 @@
 /* One scrollbar style for the app and its isolated startup dialogs. */
 * {
-  --monaw-scrollbar-thumb: var(--st-text-faint, #86837b);
+  --monaw-scrollbar-thumb: var(--st-scrollbar, rgba(255, 255, 255, 0.08));
+  --monaw-scrollbar-thumb-hover: var(--st-scrollbar-hover, rgba(255, 255, 255, 0.2));
+  --monaw-scrollbar-thumb-active: var(--st-scrollbar-active, rgba(255, 255, 255, 0.34));
   --monaw-scrollbar-track: transparent;
-  scrollbar-width: thin;
-  scrollbar-color: var(--monaw-scrollbar-thumb) var(--monaw-scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: var(--monaw-scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-color: var(--monaw-scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background-color: var(--monaw-scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-thumb:hover,
+*::-webkit-scrollbar-thumb:active {
+  background-color: var(--monaw-scrollbar-thumb-active);
+}
+
+/* Firefox fallback: Chromium/Electron skips scrollbar-color here so webkit pills remain active. */
+@supports (-moz-appearance: none) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--monaw-scrollbar-thumb) var(--monaw-scrollbar-track);
+  }
+}
+
+.st-scroll-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.st-scroll-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+.sidebar-scroll {
+  --monaw-scrollbar-thumb: transparent;
+}
+
+.sidebar-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
 
 @media (prefers-contrast: more) {
   * {
-    --monaw-scrollbar-thumb: var(--st-text, #f2f0ea);
+    --monaw-scrollbar-thumb: var(--st-text-muted, #b2afa5);
+    --monaw-scrollbar-thumb-hover: var(--st-text, #f2f0ea);
+    --monaw-scrollbar-thumb-active: var(--st-text, #f2f0ea);
+  }
+
+  .sidebar-scroll {
+    --monaw-scrollbar-thumb: var(--st-text-muted, #b2afa5);
   }
 }
 
@@ -16,25 +81,8 @@
   * {
     scrollbar-color: auto;
   }
-}
-
-/* Keep legacy styling separate so it cannot override standard scrollbars. */
-@supports not (scrollbar-color: auto) {
-  * {
-    scrollbar-width: auto;
-  }
-
-  *::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
 
   *::-webkit-scrollbar-thumb {
-    border-radius: 999px;
-    background: var(--monaw-scrollbar-thumb);
-  }
-
-  *::-webkit-scrollbar-track {
-    background: var(--monaw-scrollbar-track);
+    background-color: ButtonText;
   }
 }

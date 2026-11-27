@@ -6,9 +6,28 @@ import { FALLBACK_MODEL_OPTIONS } from '../features/settings/settingsConfig'
 import { uploadAttachment } from '../lib/api/uploads'
 
 vi.mock('../lib/api/uploads', () => ({ uploadAttachment: vi.fn() }))
+vi.mock('./ConnectorPanel', () => ({
+  ConnectorDialog: ({ onClose }: { onClose: () => void }) => <div role="dialog" aria-label="Connectors"><button onClick={onClose}>Close connectors</button></div>,
+}))
 
 describe('InputBar model picker', () => {
   afterEach(cleanup)
+
+  it('opens the generic connector command locally using arrow navigation', async () => {
+    const onSend = vi.fn()
+    render(<InputBar onSend={onSend} onStop={vi.fn()} isStreaming={false} conversationId={null}
+      modelOptions={FALLBACK_MODEL_OPTIONS} modelCatalogLoading contextRefreshKey={0} approvalMode="default"
+      onApprovalModeChange={vi.fn()} onModelSelectionChange={vi.fn()}
+      modelSelection={{ provider: 'openai', model_name: 'gpt-6-luna', reasoning_effort: 'medium' }} />)
+    const input = screen.getByRole('textbox', { name: 'Message' })
+    fireEvent.change(input, { target: { value: '/' } })
+    expect(screen.getAllByRole('option')).toHaveLength(2)
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(await screen.findByRole('dialog', { name: 'Connectors' })).toBeInTheDocument()
+    expect(onSend).not.toHaveBeenCalled()
+    expect(input).toHaveValue('')
+  })
 
   it('allows choosing a folder only before a chat is created', () => {
     const common = { onSend: vi.fn(), onStop: vi.fn(), isStreaming: false, modelOptions: FALLBACK_MODEL_OPTIONS,

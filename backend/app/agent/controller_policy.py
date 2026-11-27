@@ -115,6 +115,7 @@ class ControllerPolicyState(BaseModel):
 class PermissionDecision(BaseModel):
     allowed: bool = True
     requires_confirmation: bool = False
+    explicit_confirmation: bool = False
     requires_access_grant: bool = False
     reason: str = ""
     blocked: bool = False
@@ -1014,10 +1015,15 @@ def resolve_permission(
             reason_code="uia_not_allowed",
         )
 
+    explicit_confirmation = bool(
+        (matched_path_rule and matched_path_rule.require_confirmation)
+        or (app_rule and app_rule.require_confirmation)
+    )
     if action in {ActionType.EXEC, ActionType.PROCESS_KILL} and requires_confirmation(action, perms):
         return PermissionDecision(
             allowed=True,
             requires_confirmation=True,
+            explicit_confirmation=explicit_confirmation,
             reason=f"High-risk action '{action.value}' requires approval in current mode.",
             reason_code="confirmation_required",
         )
@@ -1037,6 +1043,7 @@ def resolve_permission(
     return PermissionDecision(
         allowed=True,
         requires_confirmation=needs_confirmation,
+        explicit_confirmation=explicit_confirmation,
         reason=reason,
         reason_code="confirmation_required" if needs_confirmation else "allowed",
     )

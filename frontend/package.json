@@ -8,6 +8,10 @@
     "node": "^20.19.0 || ^22.13.0 || ^24.0.0"
   },
   "scripts": {
+    "icons:build": "node scripts/build-connector-icons.mjs",
+    "icons:update": "npm install --save-dev --save-exact @iconify-json/logos@latest && npm run icons:build",
+    "prebuild:renderer": "npm run icons:build",
+    "prebuild": "npm run icons:build",
     "dev": "concurrently \"vite\" \"electron .\"",
     "dev:vite": "vite",
     "dev:electron": "electron .",
@@ -33,6 +37,7 @@
     "electron-updater": "^6.8.11"
   },
   "devDependencies": {
+    "@iconify-json/logos": "1.2.21",
     "@playwright/test": "1.64.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",

@@ -113,6 +113,51 @@ def test_public_preview_excludes_code_payload_paths_url_query_and_content():
     assert public["action_descriptor"]["data_scope"]["files"] == [{"name": "report.txt", "size_bytes": 7}]
 
 
+def test_exact_preview_is_session_bound_redacted_and_unavailable_after_restart(monkeypatch):
+    """Read exact shell/MCP material privately, and fail approval if its snapshot is lost."""
+    import os
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.security.control_plane import mint_control_token
+    from app.agent import run_context
+    from app.agent.action_security import preview
+    from app.security.mcp_credentials import remember_secrets
+
+    secret = "private-preview-secret-12345"
+    remember_secrets([secret])
+    tokens = [
+        (run_context.reset_current_control_session_id, run_context.set_current_control_session_id("preview-owner")),
+        (run_context.reset_current_principal_id, run_context.set_current_principal_id("preview-owner")),
+        (run_context.reset_current_permission_profile_id, run_context.set_current_permission_profile_id("desktop-current")),
+    ]
+    try:
+        original = descriptor(tool_name="mcp__example__execute", action_kind="execute_code", side_effect="unknown",
+            parameters={"command": "python script.py --name 'A B'", "api_key": secret, "env": {"MODE": "private-env"}, "body": "line1\nline2"},
+            runtime_facts={"target_verified": True, "context_verified": True, "untrusted_remote": True})
+        ticket = get_ticket(authorize_action(original)["ticket_id"])
+        client = TestClient(app)
+        owner = {"Authorization": "Bearer " + mint_control_token(os.environ["MONAW_CONTROL_SECRET"], session_id="preview-owner")}
+        foreign = {"Authorization": "Bearer " + mint_control_token(os.environ["MONAW_CONTROL_SECRET"], session_id="foreign")}
+        route = f"/api/approvals/{ticket.id}/preview"
+        assert client.get(route, headers=foreign).status_code == 403
+        response = client.get(route, headers=owner)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        data = response.json()
+        assert data["authorization_binding"] == ticket.authorization_binding
+        assert data["parameters"]["command"] == original.parameters["command"]
+        assert data["parameters"]["body"] == "line1\nline2"
+        assert secret not in response.text and "private-env" not in response.text
+        assert "script.py" not in json.dumps(public_ticket(ticket))
+        monkeypatch.setattr(preview, "_PREVIEWS", {})
+        assert client.get(route, headers=owner).status_code == 409
+        assert client.post(f"/api/approvals/{ticket.id}/approve", headers=owner).status_code == 409
+        assert ticket.status.value == "pending"
+    finally:
+        for reset, token in reversed(tokens):
+            reset(token)
+
+
 def test_journal_security_event_is_allowlisted_and_linked_to_existing_operation(tmp_path):
     from app.agent.database import Database
     from app.agent.durable import Journal

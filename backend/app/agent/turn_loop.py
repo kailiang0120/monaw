@@ -294,7 +294,7 @@ class TurnLoop:
         def _response_duration_ms() -> int:
             return lifecycle.duration_ms()
 
-        async def _persist_turn(outcome: TurnOutcome) -> None:
+        async def _persist_turn(outcome: TurnOutcome, *, before_commit=None) -> None:
             nonlocal persisted_user_ids
             if steering is not None:
                 steering.closed = True
@@ -340,6 +340,7 @@ class TurnLoop:
                     **continuation_kwargs,
                     **provider_history_kwargs,
                     **({"task_progress": task_progress} if task_progress is not None and outcome.status == "complete" else {}),
+                    **({"before_commit": before_commit} if before_commit is not None else {}),
                 )
                 if isinstance(persisted_ids, list):
                     persisted_user_ids = [item for item in persisted_ids if isinstance(item, int)]
@@ -354,6 +355,8 @@ class TurnLoop:
                 await self.memory.add_message_and_maybe_summarize(
                     conversation_id, "assistant", outcome.summary
                 )
+
+        atomic_persist = _persist_turn if getattr(self.memory, "supports_atomic_turn_finalization", False) else None
 
         try:
             checkpoint_files = getattr(lifecycle.durable_run, "checkpoint_files", None)
@@ -386,7 +389,7 @@ class TurnLoop:
                 _put({"event": "error", "data": {"code": "tool_still_running", "message": final_text}})
                 await lifecycle.finalize(
                     TurnOutcome(final_text, "paused", "tool_still_running"),
-                    persist=_persist_turn, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
+                    persist=_persist_turn, persist_atomic=atomic_persist, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
                 )
                 return
             build_long_term_context = getattr(self.memory, "build_long_term_memory_context", None)
@@ -886,6 +889,7 @@ class TurnLoop:
             await lifecycle.finalize(
                 TurnOutcome(final_text, run_status, incomplete_reason_code, response_attachments),
                 persist=_persist_turn,
+                persist_atomic=atomic_persist,
                 usage=_turn_usage(),
                 tool_calls=_tool_calls_for_persist(),
                 metadata={
@@ -930,7 +934,7 @@ class TurnLoop:
                 partial_text += "\n\nA tool is still stopping. Further actions are blocked until it finishes; verify its last action before retrying."
             await lifecycle.finalize(
                 TurnOutcome(partial_text, "paused", reason.value),
-                persist=_persist_turn, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
+                persist=_persist_turn, persist_atomic=atomic_persist, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
             )
             raise
         except Exception as exc:
@@ -946,7 +950,7 @@ class TurnLoop:
             _put({"event": "error", "data": {"code": reason_code, "message": str(exc)}})
             await lifecycle.finalize(
                 TurnOutcome(failure_text, "paused" if context_limit else "error", reason_code),
-                persist=_persist_turn, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
+                persist=_persist_turn, persist_atomic=atomic_persist, usage=_turn_usage(), tool_calls=_tool_calls_for_persist(),
             )
         finally:
             current_model_budget.reset(usage_token)

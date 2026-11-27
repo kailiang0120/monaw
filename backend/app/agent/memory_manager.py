@@ -33,6 +33,7 @@ from app.agent.runtime_paths import RUNTIME_DIR
 from app.agent.response_attachments import resolve_attachment_record, revalidate_attachment_path
 from app.agent.run_context import current_control_session_id, current_principal_id
 from app.agent.harness.context_protection import protected_failure_ranges
+from app.agent.harness.context_budget import ContextBudgetExceeded, input_budget
 
 _RUNTIME_DIR = RUNTIME_DIR
 _CONVERSATIONS_DIR = _RUNTIME_DIR / "conversations"
@@ -93,6 +94,7 @@ def delete_conversation_file(conversation_id: str) -> bool:
 class MemoryManager:
     """Manages conversation memory with SQLite persistence, summarization, and auto-compaction."""
 
+    supports_atomic_turn_finalization = True
     MAX_RECENT_MESSAGES = 10
     LLM_HISTORY_MESSAGES = 24
     MAX_TOOL_OUTCOMES = 5
@@ -525,6 +527,7 @@ class MemoryManager:
         turn_id: str | None = None,
         persist_user_message: bool = True,
         task_progress=None,
+        before_commit=None,
     ) -> list[int]:
         """Atomically checkpoint history without waiting on model summarization.
 
@@ -562,11 +565,18 @@ class MemoryManager:
             if task_progress.db is not self._db or task_progress.conversation_id != conversation_id:
                 raise ValueError("Task completion must share the turn's database and conversation.")
             with task_progress.answer_commit(assistant_message) as commit_answer:
+                def commit_completion(connection):
+                    """Commit answer outcomes and durable state in the history transaction."""
+                    commit_answer(connection)
+                    if before_commit is not None:
+                        before_commit(connection)
                 user_message_ids, inserted = self._db.persist_turn_messages(
-                    checkpoint_id, conversation_id, records, before_commit=commit_answer,
+                    checkpoint_id, conversation_id, records, before_commit=commit_completion,
                 )
         else:
-            user_message_ids, inserted = self._db.persist_turn_messages(checkpoint_id, conversation_id, records)
+            user_message_ids, inserted = self._db.persist_turn_messages(
+                checkpoint_id, conversation_id, records, before_commit=before_commit,
+            )
         # Cache and memory-source bookkeeping happen only after the commit. They
         # must never turn a successful checkpoint into a failed persistence call.
         if inserted:
@@ -577,7 +587,7 @@ class MemoryManager:
             state.updated_at = now
             try:
                 state.context_tokens_estimate = self.estimate_context_tokens(conversation_id)
-                self._db.update_conversation(conversation_id, context_tokens_estimate=state.context_tokens_estimate)
+                self._db.update_conversation(conversation_id, touch=False, context_tokens_estimate=state.context_tokens_estimate)
             except Exception:
                 logger.exception("Could not refresh context estimate after turn commit")
         if self.memory_store is not None:
@@ -747,9 +757,10 @@ class MemoryManager:
         tools: list[dict] | None = None,
         current_user_message: str = "",
     ) -> None:
-        # Check the durable history before build_llm_messages caps it. Turn
+        # Check durable history before restoring the full uncheckpointed suffix. Turn
         # persistence no longer awaits a rolling summary; compact here so
         # deferred work also survives closing and reopening the conversation.
+        summary_failed = False
         while True:
             compaction = self._db.get_conversation_compaction(conversation_id)
             source_id = int((compaction or {}).get("source_message_id") or 0)
@@ -762,13 +773,14 @@ class MemoryManager:
             if result.get("status") != "compacted":
                 if result.get("status") in {"unchanged", "empty"}:
                     break
-                # A failed summary must not block the turn: answer from the
-                # recent history and try compacting again on the next turn.
+                # Continue only with complete history that fits, never a
+                # recent-message slice missing the user's earlier constraints.
                 logger.warning(
-                    "Could not summarize older history; continuing with recent messages conversation_id=%s status=%s",
+                    "Could not summarize older history; checking full saved context conversation_id=%s status=%s",
                     conversation_id, result.get("status"),
                 )
-                return
+                summary_failed = True
+                break
         while True:
             before = self.estimate_context_tokens(
                 conversation_id,
@@ -777,6 +789,8 @@ class MemoryManager:
                 current_user_message=current_user_message,
             )
             if before <= model_compaction_threshold(self.llm_client):
+                break
+            if summary_failed:
                 break
             compacted = await self._compact(conversation_id)
             if not compacted:
@@ -789,6 +803,16 @@ class MemoryManager:
             )
             if after >= before:
                 break
+        used = self.estimate_context_tokens(
+            conversation_id, system_prompt, tools=tools,
+            current_user_message=current_user_message,
+        )
+        if used > input_budget(self.llm_client):
+            raise ContextBudgetExceeded(
+                "Paused: the complete saved conversation and task instructions exceed the context budget. "
+                "Compaction could not fit them safely; use a larger-context model or reduce selected tools, "
+                "then continue. Your saved instructions and history have not been shortened."
+            )
 
     async def _compact(self, conversation_id: str) -> bool:
         state = self.get_or_create(conversation_id)

@@ -18,7 +18,10 @@ def build_skill_prompt_sections(skills: list[SkillSpec], tool_names: set[str] | 
     for skill in skills:
         body = skill.body.strip()
         if body:
-            skill_sections.append(f"### {skill.name}\n{body}")
+            location = ""
+            if skill.metadata.get("monaw_instruction_only") is True:
+                location = f"Skill folder: {skill.path.resolve()}\nResolve this skill's relative script, reference, and asset paths against that folder.\n"
+            skill_sections.append(f"### {skill.name}\n{location}{body}")
 
     return {
         "runtime_rules": BASE_RUNTIME_PROMPT.strip(),

@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 
@@ -105,3 +106,31 @@ def test_artifact_cleanup_removes_old_runs():
     removed = cleanup_old_runs(older_than_seconds=1)
 
     assert str(workspace) in removed
+
+
+@pytest.mark.parametrize("link_kind", ["parent", "hardlink"])
+def test_copy_out_rejects_destination_links_without_touching_other_files(tmp_path, link_kind):
+    """A workspace alias must never redirect container output into another folder."""
+    output, destination, outside = [tmp_path / name for name in ("output", "destination", "outside")]
+    for root in (output, destination, outside):
+        root.mkdir()
+    victim = outside / "result.txt"
+    victim.write_text("host original", encoding="utf-8")
+    if link_kind == "parent":
+        (output / "nested").mkdir()
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(outside), str(destination / "nested"))
+        else:
+            (destination / "nested").symlink_to(outside, target_is_directory=True)
+        changed = output / "nested" / "result.txt"
+    else:
+        os.link(victim, destination / "result.txt")
+        changed = output / "result.txt"
+    changed.write_text("container replacement", encoding="utf-8")
+    (output / "safe.txt").write_text("must not partially publish", encoding="utf-8")
+    policy = SandboxPathPolicy.from_strings(allowed_output_roots=[str(destination)])
+    with pytest.raises(PermissionError, match="Unsafe sandbox path"):
+        collect_copy_out(output, destination, policy)
+    assert victim.read_text(encoding="utf-8") == "host original"
+    assert not (destination / "safe.txt").exists()

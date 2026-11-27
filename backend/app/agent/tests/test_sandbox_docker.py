@@ -181,6 +181,72 @@ def test_docker_copy_out_uses_a_run_workspace(tmp_path):
             shutil.rmtree(mount_source, ignore_errors=True)
 
 
+def test_staging_preserves_named_folders_and_excludes_protected_children(tmp_path):
+    """Copy mode preserves user folders while direct mounts cannot expose exclusions."""
+    settings = AgentSettings().sandbox
+    settings.allowed_bind_roots = [str(tmp_path)]
+    settings.blocked_bind_roots = [str(tmp_path / "private")]
+    for name in ("input", "output", "private"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "data.txt").write_text(name, encoding="utf-8")
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(tmp_path / "private"), str(tmp_path / "alias"))
+    else:
+        (tmp_path / "alias").symlink_to(tmp_path / "private", target_is_directory=True)
+    request = _request("echo ok")
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    runner = DockerRunner(settings)
+    staging, policy, _ = runner._workspace_mount(request, command_id="protected-children")
+    try:
+        assert (staging / "input/data.txt").read_text() == "input"
+        assert (staging / "output/data.txt").read_text() == "output"
+        assert not (staging / "private").exists()
+        assert not (staging / "alias").exists()
+        (staging / "private").mkdir()
+        (staging / "private/data.txt").write_text("overwrite", encoding="utf-8")
+        with pytest.raises(PermissionError, match="path is blocked"):
+            collect_copy_out(staging, tmp_path, policy)
+        assert (tmp_path / "private/data.txt").read_text() == "private"
+    finally:
+        import shutil
+        shutil.rmtree(staging)
+    request.copy_policy = {"write_strategy": "direct_rw"}
+    with pytest.raises(PermissionError, match="blocked child paths"):
+        runner._workspace_mount(request, command_id="protected-direct")
+
+
+@pytest.mark.parametrize("host_changed", [False, True])
+def test_copy_out_hashes_contents_and_preserves_concurrent_host_edits(tmp_path, host_changed):
+    """Same-size timestamp-preserving edits count, and newer host work survives."""
+    settings = AgentSettings().sandbox
+    settings.allowed_bind_roots = [str(tmp_path)]
+    settings.blocked_bind_roots = []
+    original = tmp_path / "data.txt"
+    original.write_text("before", encoding="utf-8")
+    request = _request("echo ok")
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    staging, policy, _ = DockerRunner(settings)._workspace_mount(request, command_id="hash-copy")
+    try:
+        staged = staging / "data.txt"
+        before = staged.stat()
+        staged.write_text("after!", encoding="utf-8")
+        os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
+        if host_changed:
+            original.write_text("new host work", encoding="utf-8")
+            with pytest.raises(PermissionError, match="conflicts with a host change"):
+                collect_copy_out(staging, tmp_path, policy)
+            assert original.read_text() == "new host work"
+        else:
+            assert len(collect_copy_out(staging, tmp_path, policy)) == 1
+            assert original.read_text() == "after!"
+    finally:
+        import shutil
+        shutil.rmtree(staging)
+
+
 def test_copy_out_uses_independent_resource_limit(tmp_path):
     settings = AgentSettings()
     settings.sandbox.allowed_bind_roots = [str(tmp_path)]
@@ -376,6 +442,36 @@ def test_docker_manifest_records_copy_out_files(monkeypatch, tmp_path):
     assert len(manifest["artifacts"]["copy_out"]) == 1
 
 
+@pytest.mark.parametrize("timed_out,cancelled", [(False, False), (True, False), (False, True)])
+def test_unsuccessful_container_does_not_publish_workspace_changes(monkeypatch, tmp_path, timed_out, cancelled):
+    """Failed, timed-out, and cancelled commands cannot publish staged partial writes."""
+    settings = AgentSettings().sandbox
+    settings.allowed_bind_roots = [str(tmp_path)]
+    settings.blocked_bind_roots = []
+    original = tmp_path / "data.txt"
+    original.write_text("host original", encoding="utf-8")
+    request = _request("echo ok")
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    runner = DockerRunner(settings)
+    monkeypatch.setattr(runner, "is_available", lambda: True)
+    monkeypatch.setattr(runner, "_remove_container", lambda _name: None)
+
+    def partial_write(command, _request, **_kwargs):
+        """Simulate an interrupted container after it writes its staging mount."""
+        mount = command[command.index("--mount") + 1]
+        source = mount.split("source=", 1)[1].split(",target=", 1)[0]
+        Path(source, "data.txt").write_text("partial output", encoding="utf-8")
+        return SimpleNamespace(returncode=1, stdout="", stderr="", timed_out=timed_out, cancelled=cancelled)
+
+    monkeypatch.setattr(docker_backend, "_run_command_capped", partial_write)
+    result = runner.run(request)
+    assert result.status == "error"
+    assert original.read_text() == "host original"
+    assert result.sandbox["artifacts"]["copy_out"] == []
+
+
 def test_auto_mode_selects_docker_when_strong_backend_is_available(monkeypatch):
     settings = AgentSettings()
     settings.sandbox.docker.image = "python@sha256:" + "a" * 64
@@ -519,3 +615,29 @@ print('NETWORK_DENIED ROOT_READ_ONLY')
     result = DockerRunner(settings.sandbox).run(request)
     assert result.status == "ok", result.stderr
     assert result.stdout.strip() == "NETWORK_DENIED ROOT_READ_ONLY"
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_real_container_publishes_copy_out_only_after_success(tmp_path, real_docker_image, exit_code):
+    """Exercise the actual staging mount and publication gate against Docker."""
+    settings = AgentSettings().sandbox
+    settings.allowed_bind_roots = [str(tmp_path)]
+    settings.blocked_bind_roots = [str(tmp_path / "private")]
+    (tmp_path / "input").mkdir()
+    (tmp_path / "input/data.txt").write_text("before", encoding="utf-8")
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private/secret.txt").write_text("not for the container", encoding="utf-8")
+    code = (
+        "from pathlib import Path; "
+        "assert not Path('/workspace/private').exists(); "
+        "Path('/workspace/input/data.txt').write_text('after!'); "
+        f"raise SystemExit({exit_code})"
+    )
+    request = _request("python -c " + shlex.quote(code))
+    request.shell = "bash"
+    request.workdir = str(tmp_path)
+    request.copy_policy = {"write_strategy": "copy_out"}
+    result = DockerRunner(settings).run(request)
+    assert result.exit_code == exit_code, result.model_dump()
+    assert result.status == ("ok" if exit_code == 0 else "error")
+    assert (tmp_path / "input/data.txt").read_text() == ("after!" if exit_code == 0 else "before")

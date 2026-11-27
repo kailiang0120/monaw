@@ -1,4 +1,5 @@
-import { type ClipboardEvent, KeyboardEvent, useEffect, useRef, useState } from 'react'
+import { type ClipboardEvent, KeyboardEvent, useEffect, useId, useRef, useState } from 'react'
+import { ConnectorDialog } from './ConnectorPanel'
 import { FileText, ListPlus, Loader2, Mic, Paperclip, Pause, Pencil, Play, Send, Shield, Square, Terminal, X } from 'lucide-react'
 import { ContextUsageBar } from './ContextUsageBar'
 import { WorkspacePicker } from './WorkspacePicker'
@@ -33,6 +34,11 @@ const SLASH_COMMANDS = [
     command: '/compact',
     label: 'Compact context',
     description: 'Summarize this chat and use it as future context.',
+  },
+  {
+    command: '/connector',
+    label: 'Connectors',
+    description: 'Connect and manage your apps.',
   },
 ]
 
@@ -196,6 +202,9 @@ export function InputBar({
   onApprovalModeChange,
 }: Props) {
   const [value, setValue] = useState('')
+  const [showConnectors, setShowConnectors] = useState(false)
+  const [slashIndex, setSlashIndex] = useState(0)
+  const slashId = useId()
   const [runControlPending, setRunControlPending] = useState(false)
   const [runControlError, setRunControlError] = useState('')
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
@@ -244,7 +253,8 @@ export function InputBar({
       return command.startsWith(slashQuery) || item.label.toLowerCase().includes(slashQuery)
     })
     : []
-  const showSlashCommands = !recording && !isStreaming && !disabled && !settingsSaving && slashCommandMatches.length > 0
+  const showSlashCommands = !showConnectors && !recording && !isStreaming && !disabled && !settingsSaving && slashCommandMatches.length > 0
+  const activeSlashIndex = Math.min(slashIndex, Math.max(0, slashCommandMatches.length - 1))
 
   useEffect(() => {
     if (previousFocusRequestKeyRef.current === focusRequestKey) return
@@ -298,6 +308,10 @@ export function InputBar({
   // Queueing holds the message until the running turn ends, instead of steering it.
   const handleSend = async (queue = false) => {
     const trimmed = value.trim()
+    if (trimmed === '/connector') {
+      await handleSendCommand(trimmed)
+      return
+    }
     const message = trimmed || (selectedFiles.length ? 'Please review the attached file(s).' : '')
     const queueing = queue && canQueue
     if (!message || !selectedModelAvailable || settingsSaving || (isStreaming && !canSteer && !queueing) || disabled || uploading || recording || transcribing) return
@@ -337,6 +351,13 @@ export function InputBar({
   const handleSendCommand = async (command: string) => {
     if (settingsSaving || isStreaming || disabled || uploading || recording || transcribing) return
     setUploadError('')
+    if (command === '/connector') {
+      setValue('')
+      setShowConnectors(true)
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      return
+    }
+    if (!selectedModelAvailable) return
     onSend(command, [])
     setValue('')
     setSelectedFiles([])
@@ -345,10 +366,16 @@ export function InputBar({
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return
     if (showSlashCommands && slashCommandMatches[0]) {
-      if (e.key === 'Tab' || (e.key === 'Enter' && value.trim() !== slashCommandMatches[0].command)) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault()
-        chooseSlashCommand(slashCommandMatches[0].command, e.key === 'Enter')
+        setSlashIndex((activeSlashIndex + (e.key === 'ArrowDown' ? 1 : -1) + slashCommandMatches.length) % slashCommandMatches.length)
+        return
+      }
+      if (!e.shiftKey && (e.key === 'Tab' || e.key === 'Enter')) {
+        e.preventDefault()
+        chooseSlashCommand(slashCommandMatches[activeSlashIndex].command, e.key === 'Enter')
         return
       }
       if (e.key === 'Escape') {
@@ -667,31 +694,34 @@ export function InputBar({
 
   return (
     <footer className="bg-[#11100f] px-4 pb-4 pt-2">
+      {showConnectors && <ConnectorDialog onClose={() => setShowConnectors(false)} />}
       <div className="chat-composer-container mx-auto max-w-3xl">
         {!conversationId && !isStreaming && onWorkspaceChange && <WorkspacePicker value={workspaceDir} isDefault={workspaceIsDefault}
           disabled={disabled} onChange={onWorkspaceChange} />}
         {/* Unified dock panel */}
         <div className="panel relative rounded-lg transition-colors focus-within:border-accent/40">
           {showSlashCommands && (
-            <div className="panel absolute bottom-full left-0 right-0 z-30 mb-2 overflow-hidden rounded-xl p-1">
-              {slashCommandMatches.map((item) => (
+            <div id={slashId} role="listbox" aria-label="Chat commands" className="panel absolute bottom-full left-0 right-0 z-30 mb-2 overflow-hidden rounded-xl p-1">
+              {slashCommandMatches.map((item, index) => (
                 <button
                   key={item.command}
+                  id={`${slashId}-${index}`}
+                  role="option"
+                  aria-selected={index === activeSlashIndex}
+                  tabIndex={-1}
                   type="button"
-                  onMouseDown={(event) => {
-                    event.preventDefault()
-                    chooseSlashCommand(item.command)
-                  }}
-                  className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-accent/10 focus:bg-accent/10 focus:outline-none"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => chooseSlashCommand(item.command, true)}
+                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-accent/10 focus:bg-accent/10 focus:outline-none ${index === activeSlashIndex ? 'bg-accent/10' : ''}`}
                 >
                   <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-accent/25 bg-accent/10 text-accent-light">
                     <Terminal size={13} />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block font-mono text-xs text-neutral-100">{item.command}</span>
-                    <span className="block truncate text-[11px] text-neutral-500">{item.description}</span>
+                    <span className="block font-mono text-xs text-[var(--st-text)]">{item.command}</span>
+                    <span className="block truncate text-[11px] text-[var(--st-text-muted)]">{item.description}</span>
                   </span>
-                  <span className="rounded-md border border-accent/20 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-neutral-500">
+                  <span aria-hidden="true" className="rounded-md border border-accent/20 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-neutral-500">
                     Enter
                   </span>
                 </button>
@@ -744,11 +774,14 @@ export function InputBar({
               <textarea
                 ref={textareaRef}
                 value={value}
-                onChange={(e) => setValue(e.target.value)}
+                onChange={(e) => { setValue(e.target.value); setSlashIndex(0) }}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 onInput={handleInput}
                 aria-label="Message"
+                aria-autocomplete="list"
+                aria-controls={showSlashCommands ? slashId : undefined}
+                aria-activedescendant={showSlashCommands ? `${slashId}-${activeSlashIndex}` : undefined}
                 placeholder={placeholder}
                 rows={1}
                 disabled={disabled || uploading}

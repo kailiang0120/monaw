@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Check, ShieldAlert, X } from 'lucide-react'
-import {
-  approveTicket,
-  fetchPendingApprovals,
-  rejectTicket,
-} from '../lib/api/approvals'
+import { approveTicket, fetchPendingApprovals, rejectTicket } from '../lib/api/approvals'
 import type { ApprovalTicket } from '../lib/api/types'
 import { ExecutionEnvironment } from './ExecutionEnvironment'
 import { ActionApprovalCard } from './ActionApprovalCard'
@@ -20,6 +16,13 @@ export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: P
   const [seenIds, setSeenIds] = useState<Set<string>>(new Set())
   const [acting, setActing] = useState(false)
   const [error, setError] = useState('')
+  const [previewReadyId, setPreviewReadyId] = useState('')
+  const onPreviewReady = useCallback(
+    (ready: boolean) => {
+      setPreviewReadyId(ready ? toast?.id || '' : '')
+    },
+    [toast?.id],
+  )
 
   const poll = useCallback(async () => {
     if (isStreaming) return
@@ -100,13 +103,23 @@ export function ApprovalToast({ conversationId, isStreaming, refreshKey = 0 }: P
         </p>
         <p className="mb-3 text-[10px] leading-relaxed text-neutral-500">{toast.reason}</p>
         <ExecutionEnvironment environment={toast.payload.args?.sandbox?.execution_environment} />
-        <ActionApprovalCard action={toast.action_descriptor} />
-        {error && <p role="alert" className="mb-3 text-xs text-red-300">{error}</p>}
+        <ActionApprovalCard
+          action={toast.action_descriptor}
+          ticketId={toast.id}
+          onPreviewReady={onPreviewReady}
+        />
+        {error && (
+          <p role="alert" className="mb-3 text-xs text-red-300">
+            {error}
+          </p>
+        )}
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={handleApprove}
-            disabled={acting}
+            disabled={
+              acting || (!!toast.action_descriptor?.preview_required && previewReadyId !== toast.id)
+            }
             className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-400 disabled:opacity-50"
           >
             <Check size={12} /> {toast.action_descriptor ? 'Approve once' : 'Approve'}

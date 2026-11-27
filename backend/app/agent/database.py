@@ -150,8 +150,12 @@ class Database:
         {"title", "updated_at", "summary", "task_goal", "context_tokens_estimate", "workspace_dir"}
     )
 
-    def update_conversation(self, conv_id: str, **fields) -> None:
-        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    def update_conversation(self, conv_id: str, *, touch: bool = True, **fields) -> None:
+        """Update content metadata, keeping derived estimates outside the recovery watermark."""
+        if touch:
+            fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if not fields:
+            return
         unknown = set(fields) - self._CONVERSATION_MUTABLE_COLS
         if unknown:
             raise ValueError(f"update_conversation: unknown column(s): {unknown}")

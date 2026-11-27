@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
+import { SkillImport } from './SkillImport'
 import {
   Activity,
   HardDrive,
@@ -34,6 +35,7 @@ import { StorageSettings } from './StorageSettings'
 import { useSettingsDraft } from './useSettingsDraft'
 import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
 import { useModalFocus } from '../../hooks/useModalFocus'
+import { ConnectorPanel } from '../../components/ConnectorPanel'
 import {
   DEFAULT_CONNECTION_PORTAL,
   type ConnectionPortalId,
@@ -139,12 +141,12 @@ interface Props {
 }
 
 type SettingsTab = SettingsPageId
-type ToolsTab = 'skills' | 'mcp' | 'plugins'
+type ToolsTab = 'connectors' | 'skills' | 'mcp'
 
 const TOOLS_TABS: Array<{ id: ToolsTab; label: string }> = [
+  { id: 'connectors', label: 'Connectors' },
   { id: 'skills', label: 'Skills' },
   { id: 'mcp', label: 'MCP' },
-  { id: 'plugins', label: 'Plugins' },
 ]
 
 const TAB_ICONS: Record<SettingsTab, LucideIcon> = {
@@ -208,11 +210,12 @@ export function SettingsModal({
     setSecret: updateConnectionSecret,
     applyStoredCredentialStatus,
     reconcileMcpCredentials,
+    reconcileInstalledSkills,
     save: saveDraft,
   } = useSettingsDraft()
   const { catalog: modelOptions, status: modelCatalogStatus } = useModelCatalogState()
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
-  const [toolsTab, setToolsTab] = useState<ToolsTab>('skills')
+  const [toolsTab, setToolsTab] = useState<ToolsTab>('connectors')
   const [navQuery, setNavQuery] = useState('')
   const [openaiAccount, setOpenaiAccount] = useState<OpenAIAccountStatus | null>(null)
   const accountConnectedRef = useRef(false)
@@ -1212,10 +1215,13 @@ export function SettingsModal({
                 </>
               )}
 
+              {activeTab === 'tools' && toolsTab === 'connectors' && (
+                <div role="tabpanel" id="settings-tools-panel-connectors" aria-labelledby="settings-tools-tab-connectors" tabIndex={0}><ConnectorPanel /></div>
+              )}
               {activeTab === 'tools' && toolsTab === 'skills' && (
                 <>
                   <div role="tabpanel" id="settings-tools-panel-skills" aria-labelledby="settings-tools-tab-skills" className="space-y-3" tabIndex={0}>
-                    <Note tone="info">{SKILLS_COPY.intro}</Note>
+                    <SkillImport onInstalled={reconcileInstalledSkills} />
                     <SettingsCard
                         title={SKILLS_COPY.title}
                         action={<Badge>{userSkills.length}</Badge>}
@@ -1228,7 +1234,7 @@ export function SettingsModal({
                             const isExpanded = expandedSkill === skill.name
                             return (
                               <div key={skill.name} className="st-row-stacked">
-                                <div className="flex items-start justify-between gap-4">
+                                <div className="flex items-center justify-between gap-4">
                                   <button
                                     type="button"
                                     onClick={() => setExpandedSkill(isExpanded ? null : skill.name)}
@@ -1439,23 +1445,6 @@ export function SettingsModal({
                   credentialsDisabled={isDirty || saving}
                   onCredentialsChanged={refreshMcpCredentials}
                 />
-              )}
-
-              {activeTab === 'tools' && toolsTab === 'plugins' && (
-                <div role="tabpanel" id="settings-tools-panel-plugins" aria-labelledby="settings-tools-tab-plugins" tabIndex={0}>
-                  <SettingsCard title="Plugins">
-                    <div className="flex items-start gap-3 p-5">
-                      <Puzzle size={20} className="mt-0.5 shrink-0" style={{ color: 'var(--st-text-faint)' }} />
-                      <div className="min-w-0">
-                        <p className="st-label">Plugin installation is not available yet</p>
-                        <p className="st-desc mt-1">Monaw currently supports built-in skills and external MCP connections.</p>
-                        <button type="button" className="st-btn st-btn-secondary mt-3" onClick={() => setToolsTab('mcp')}>
-                          Manage MCP connections
-                        </button>
-                      </div>
-                    </div>
-                  </SettingsCard>
-                </div>
               )}
 
               {activeTab === 'storage' && (

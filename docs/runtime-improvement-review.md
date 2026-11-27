@@ -41,6 +41,7 @@ match the available evidence:
 | Pause arrives during a guard's final summary | Waited for the summary request to finish | Cancel that request through the same pause boundary as the main model call. |
 | Guard summary is truncated or promises more work | Replaced the pause notice with the unusable summary | Keep the original notice and exclude the rejected summary from saved provider history. |
 | Pause or Stop arrives while the final outcome is being saved | Accepted a control after completion had been selected; Pause could turn a successful run into `needs_review` | Reject new controls once finalization owns the outcome. Direct pause requests obey the same boundary, and snapshots stop advertising unavailable controls. |
+| Durable finalization fails after generating success | History and answer outcomes could already say complete while `done` reported an error | Finish the workspace checkpoint first, then commit the answer, task completion and durable transition in one SQLite transaction. Roll back every completion write on failure; save a matching failure transcript and run, or report unavailable storage and require review. |
 
 Normal final answers do not acquire an additional model-verification call.
 Existing token, iteration and wall-clock budgets still apply, including to the

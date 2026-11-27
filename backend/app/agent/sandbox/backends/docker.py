@@ -6,6 +6,7 @@ import subprocess
 import time
 import uuid
 import os
+import stat
 from pathlib import Path
 
 from app.agent.sandbox.process import _format_output, _run_command_capped
@@ -18,10 +19,15 @@ from app.agent.sandbox.path_policy import (
     collect_copy_out,
     create_run_workspace,
     ensure_allowed_path,
+    ensure_plain_path,
+    is_blocked_path,
+    is_relative_to,
+    regular_workspace_files,
     write_artifact_manifest,
 )
 from app.agent.runtime_paths import WORKSPACE_DIR
 from app.agent.settings_store import SandboxSettings
+from app.agent.file_mutation.fingerprint import fingerprint_path
 
 
 _PINNED_IMAGE_RE = re.compile(r"^[^@\s]+@sha256:[0-9a-fA-F]{64}$")
@@ -57,16 +63,19 @@ class DockerRunner:
         allowed_roots = self.settings.allowed_bind_roots or [str(WORKSPACE_DIR)]
         blocked_roots = self.settings.blocked_bind_roots
         allowed = [canonical_path(root) for root in allowed_roots]
-        if any(workdir == root or workdir.is_relative_to(root) for root in [canonical_path(root) for root in blocked_roots]):
+        blocked = [canonical_path(root) for root in blocked_roots]
+        if is_blocked_path(workdir, blocked):
             raise PermissionError(f"Sandbox bind path is blocked: {workdir}")
         ensure_allowed_path(workdir, allowed, purpose="bind")
         if strategy == "discard":
             return None, None, False
         if strategy == "direct_rw":
+            if any(is_relative_to(root, workdir) for root in blocked):
+                raise PermissionError("Direct workspace mounts cannot exclude blocked child paths; use copy_out.")
             return workdir, None, False
 
         run_workspace = create_run_workspace(command_id)
-        initial_files: dict[str, tuple[int, int]] = {}
+        initial_files: dict[str, str] = {}
         total_bytes = 0
         max_copy_in_bytes = int(
             (request.resources or {}).get("max_copy_in_bytes")
@@ -74,29 +83,22 @@ class DockerRunner:
             or 104857600
         )
         try:
-            for root, directories, filenames in os.walk(workdir, followlinks=False):
-                root_path = Path(root)
-                directories[:] = [
-                    name for name in directories if not (root_path / name).is_symlink()
-                ]
-                for filename in filenames:
-                    source = root_path / filename
-                    if source.is_symlink() or not source.is_file():
-                        continue
-                    stat = source.stat()
-                    total_bytes += stat.st_size
-                    if total_bytes > max_copy_in_bytes:
-                        raise PermissionError(
-                            f"Sandbox copy-in size limit exceeded ({max_copy_in_bytes} bytes)"
-                        )
-                    relative = source.relative_to(workdir)
-                    target = run_workspace / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, target)
-                    initial_files[str(relative).replace(os.sep, "/")] = (
-                        stat.st_size,
-                        stat.st_mtime_ns,
-                    )
+            for source in regular_workspace_files(workdir, skip_unsafe=True):
+                if is_blocked_path(source, blocked):
+                    continue
+                if source.stat().st_size > max_copy_in_bytes - total_bytes:
+                    raise PermissionError(f"Sandbox copy-in size limit exceeded ({max_copy_in_bytes} bytes)")
+                before = fingerprint_path(source, include_bytes=True, max_bytes=max_copy_in_bytes - total_bytes)
+                if not before.exists:
+                    raise PermissionError(f"Sandbox input changed during staging: {source}")
+                total_bytes += before.size
+                relative = source.relative_to(workdir)
+                target = run_workspace / relative
+                ensure_plain_path(target, run_workspace)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(before.data or b"")
+                os.chmod(target, stat.S_IMODE(source.stat().st_mode) & 0o777)
+                initial_files[relative.as_posix()] = before.sha256
             policy = SandboxPathPolicy.from_strings(
                 allowed_input_roots=[str(workdir)],
                 allowed_output_roots=[str(workdir)],
@@ -107,12 +109,8 @@ class DockerRunner:
                 ),
                 max_copy_in_bytes=max_copy_in_bytes,
                 initial_files=initial_files,
+                blocked_roots=blocked_roots,
             )
-            # The staging workspace is the command's writable copy. The
-            # input/output marker directories are implementation details and
-            # must not be copied back to the user's workdir.
-            shutil.rmtree(run_workspace / "input", ignore_errors=True)
-            shutil.rmtree(run_workspace / "output", ignore_errors=True)
             return run_workspace, policy, True
         except Exception:
             shutil.rmtree(run_workspace, ignore_errors=True)
@@ -177,12 +175,17 @@ class DockerRunner:
         return command
 
     def _remove_container(self, container_name: str) -> None:
-        subprocess.run(
-            ["docker", "rm", "-f", container_name],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        """Bound cleanup so an unresponsive daemon cannot stall cancellation."""
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container_name],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def run(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
         started_at = time.monotonic()
@@ -318,7 +321,12 @@ class DockerRunner:
                 "manifest_path": "",
                 "copy_out": [],
             }
-            if copied_workspace and mount_source is not None and copy_policy is not None:
+            succeeded = completed.returncode == 0 and not completed.timed_out and not cancelled
+            if not succeeded:
+                if not completed.timed_out and not cancelled:
+                    self._remove_container(container_name)
+                metadata["warnings"].append("Workspace changes were not copied back because the command did not complete successfully.")
+            if succeeded and copied_workspace and mount_source is not None and copy_policy is not None:
                 copied_files = collect_copy_out(
                     mount_source,
                     request.workdir or str(WORKSPACE_DIR),
@@ -339,7 +347,7 @@ class DockerRunner:
             )
             metadata["artifacts"]["manifest_path"] = manifest_path
             return SandboxExecutionResult(
-                status="error" if completed.timed_out or completed.returncode != 0 else "ok",
+                status="ok" if succeeded else "error",
                 exit_code=completed.returncode,
                 duration_ms=duration_ms,
                 timed_out=completed.timed_out,
@@ -361,6 +369,7 @@ class DockerRunner:
                 ),
             )
         except Exception as exc:
+            self._remove_container(container_name)
             return SandboxExecutionResult(
                 status="error",
                 error=str(exc),

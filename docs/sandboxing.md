@@ -13,11 +13,15 @@ Monaw classifies each shell command before starting a process. The decision reco
 
 There is no WSL backend. Long-running sessions use the local host runners and are capped at a maximum lifetime; Docker sessions are not supported.
 
+The local session lifetime is enforced by a background watchdog, even if the
+agent stops polling. Both host runners create a process group and stop the
+process tree on expiration. This is cleanup, not filesystem or network isolation.
+
 ## Isolation guarantees
 
 - `strong`: Docker container isolation with `--network none` when network denial is requested, dropped capabilities, PID/memory/CPU limits, and a read-only root filesystem by default.
 - `advisory`: `local_restricted` host execution with process-tree cleanup and resource/output limits. It does not isolate the filesystem or network.
-- `none`: `local_direct` host execution. It is selected only as a compatibility fallback and follows the selected permission mode, except for the always-ask cases below.
+- `none`: `local_direct` host execution. It is selected only as a compatibility fallback and follows the selected permission mode, subject to explicit folder/app confirmation rules.
 
 The shipped Docker image is pinned as `python:3.12-slim@sha256:<64-hex-digest>`. Settings can pull a tag and resolve it to an immutable digest. Resolution also probes which standard-library modules are actually importable in that exact image and caches the inventory under the immutable reference. The probe runs without network access, capabilities, or a writable root; each import uses a separate isolated interpreter. Cached inventories are bounded to the eight most recently probed images, so repinning does not accumulate them; an evicted image fails closed until it is probed again. If the image is unpinned, capability status reports `docker_image_not_pinned` and the Docker runner will not start.
 
@@ -33,7 +37,7 @@ The agent workspace is an allowed bind root by default. `direct_rw` mounts the e
 
 ## Environment and troubleshooting
 
-Subprocesses receive a minimal environment allowlist. Secret-looking explicit variables are rejected with `secret_env_not_supported`. Explicit variables that change which code runs (`PATH`, `PATHEXT`, `COMSPEC`, `PSModulePath`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `BASH_ENV`, `LD_*`, `GIT_SSH_COMMAND`, `GIT_CONFIG*`, `NPM_CONFIG_*`, pip index URLs and similar) are rejected with `code_loading_env_not_supported`, because an approval shows the command and not its environment. All runners clamp execution time and captured output; Docker also applies container resource limits.
+Subprocesses receive a minimal environment allowlist. Secret-looking explicit variables are rejected with `secret_env_not_supported`. Explicit variables that change which code runs (`PATH`, `PATHEXT`, `COMSPEC`, `PSModulePath`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `BASH_ENV`, `LD_*`, `GIT_SSH_COMMAND`, `GIT_CONFIG*`, `NPM_CONFIG_*`, pip index URLs and similar) are rejected with `code_loading_env_not_supported`, because approval previews show the exact command while hiding explicit environment values. All runners clamp execution time and captured output; Docker also applies container resource limits.
 
 - `sandbox_backend_unavailable`: install/start Docker, resolve a pinned image, or choose auto/host mode.
 - `docker_image_not_pinned`: use **Resolve & pull** in Settings or enter an immutable `name@sha256:<digest>` reference.
@@ -45,7 +49,7 @@ Subprocesses receive a minimal environment allowlist. Secret-looking explicit va
 Before choosing a backend, each command is classified as `blocked`, `untrusted`, `host_required` or the default profile. Matching runs on the command as written and on a copy with line continuations joined and PowerShell backtick and cmd caret escapes removed, so `i`ex` and `c^url` match like `iex` and `curl`.
 
 - `blocked` (never runs): recursive deletes of a drive, the filesystem root, the home folder or a system folder in any flag order or shell (`rm -r -f /`, `rd /s /q C:\`, `ri C:\ -r -fo`); registry writes through `reg` or PowerShell registry drives; shadow-copy deletion; disk wiping; Defender preference changes; firewall changes; boot and ownership changes. Deleting an ordinary absolute path such as `/tmp/build` is not blocked.
-- `untrusted` (always asks, only you can approve on the host): download-and-run with or without a pipe (`iex (irm …)`, `bash -c "$(curl …)"`, `curl … | python`, download to a file then run it), encoded PowerShell (`-EncodedCommand`, `-enc`, `-e`), Windows downloaders and remote installers (`certutil -urlcache`, `bitsadmin /transfer`, `mshta`, `regsvr32 /i:http…`, `msiexec http…`), package installs and package runners (`npm i/add`, `yarn/pnpm/bun add`, `npx -y`, `uvx`, `pipx run`, `winget/choco/scoop/gem/cargo/go install`, `Install-Module`), and clone-then-run.
+- `untrusted` (requires direct user review on the host in Default/Auto Review): download-and-run with or without a pipe (`iex (irm …)`, `bash -c "$(curl …)"`, `curl … | python`, download to a file then run it), encoded PowerShell (`-EncodedCommand`, `-enc`, `-e`), Windows downloaders and remote installers (`certutil -urlcache`, `bitsadmin /transfer`, `mshta`, `regsvr32 /i:http…`, `msiexec http…`), package installs and package runners (`npm i/add`, `yarn/pnpm/bun add`, `npx -y`, `uvx`, `pipx run`, `winget/choco/scoop/gem/cargo/go install`, `Install-Module`), and clone-then-run.
 
 `backend/app/agent/tests/test_sandbox_adversarial.py` holds these shapes, plus ordinary lookalikes that must stay unflagged.
 
@@ -53,10 +57,10 @@ Before choosing a backend, each command is classified as `blocked`, `untrusted`,
 
 Permission mode controls approval; sandbox mode controls where a permitted command runs. Default asks once; Auto Review checks the same pending ticket. Docker/enforce stay fail-closed when Docker is unavailable or a command is incompatible.
 
-Two host cases ask regardless of permission mode, including Full Access. The decision marks them `always_ask`:
+Two host-routing hints can request approval in Default/Auto Review. Full Access suppresses these generic hints while preserving explicit folder/app confirmation rules:
 
-- A host run while Docker is available, unless the user chose `host` or `local_restricted` in settings. In `auto` this covers PowerShell/cmd syntax, developer tooling, project scripts and package commands. Choose `host` mode to let these follow the permission mode again.
-- An `untrusted` command (download-and-run pipelines, package installs, clone-and-run) on the host. These are also `user_review_only`: Auto Review never approves them, and the ticket waits for the user.
+- A host run while Docker is available, unless the user chose `host` or `local_restricted` in settings. In `auto` this covers PowerShell/cmd syntax, developer tooling, project scripts and package commands. The selected permission mode decides whether review is required.
+- An `untrusted` command (download-and-run pipelines, package installs, clone-and-run) on the host. When review is required, these are `user_review_only`: Auto Review cannot approve that ticket, so it waits for the user.
 
 Host runs are marked with an amber **On your PC** badge on the collapsed command group and on the command's own row, and the environment panel and approval card turn amber. `execution_environment.on_host`, `always_ask` and `user_review_only` carry the same facts for clients, including in the finished command's result. Conversation history also returns `on_host` for each tool call, read from the full output, because history previews are too short to contain the disclosure.
 
@@ -67,3 +71,42 @@ Approvals, resumed approval notices, session and command results expose the same
 Approval replay reclassifies under current settings and re-enters the existing permission gate when the disclosed backend, workspace, shell, network/filesystem/write policy, mode/profile, approval requirement, or Docker runtime configuration changes. A legacy ticket without this snapshot must also pass the current gate. The final manager check refuses material changes between classification and dispatch with `execution_environment_changed`; retrying obtains a fresh decision. Docker/enforce never silently switch to host execution. Long-running sessions still use host execution only and disclose that boundary; Docker/enforce sessions remain unsupported.
 
 `GET /api/sandbox/status` and Settings show a representative command under **saved** settings, not a promise about every subsequent command or an unsaved draft. Their `execution_environment` uses the same presentation; each command is classified independently. Shell isolation does not contain desktop automation, personal Chrome, or external MCP servers. See [Browser automation](browser-automation.md) for the separate navigation-target policy and its limits.
+
+## Workspace staging and copy-back
+
+With `copy_out`, Monaw stages only regular, single-link files. Symlinks, Windows
+junctions/reparse points, and special files are excluded. Blocked child paths are
+excluded as well; a `direct_rw` mount containing a blocked child is rejected
+because a bind mount cannot hide that child. User folders named `input` and
+`output` are preserved as ordinary workspace content.
+
+Copy-in and copy-out enforce their separate byte budgets and a 10,000-entry
+workspace scan limit. Content hashes identify changed files even when their size
+and timestamp stay the same. Before publication, Monaw validates every output
+path, rejects links and protected destinations, and checks the host file against
+the content staged before the command. Conflicts preserve the newer host file.
+All planned files are checked before publication starts, and each replacement
+uses a temporary file followed by an atomic rename. File deletions are not copied.
+
+Only successful commands publish staged changes. Failed, cancelled, or timed-out
+commands leave the host workspace unchanged under `copy_out`; their captured
+stdout/stderr remain available. Docker removal attempts have a bounded timeout,
+so an unresponsive daemon cannot block cancellation indefinitely. A daemon outage
+can still prevent removal; inspect Docker for remaining `monaw-sandbox-*`
+containers after such an outage. `direct_rw` changes are immediate and cannot be
+rolled back by this publication gate.
+
+These checks do not make the whole workspace a transaction: a host filesystem
+failure during publication can leave earlier files published. They also do not
+isolate Monaw from a hostile process running as the same host user and racing
+filesystem changes. Byte budgets bound staging and publication, not the amount
+a running container can write into a writable bind mount. Native Windows
+isolation and isolated long-running Docker sessions remain future work.
+
+Implementation references: [Python filesystem metadata](https://docs.python.org/3/library/os.html#os.lstat),
+[Windows reparse-point attributes](https://docs.python.org/3/library/stat.html#stat.FILE_ATTRIBUTE_REPARSE_POINT),
+and [Docker security boundaries](https://docs.docker.com/engine/security/).
+
+## Permission mode and explicit confirmation
+
+Sandbox routing and approval policy are separate. Full Access permits ordinary host commands, including commands whose sandbox routing carries an advisory `always_ask` hint; that hint is not a persistent user exception. An explicit **Require confirmation** rule on the effective working folder still requires approval, and the selected execution environment remains visible beside the exact command preview. Full Access does not override hard sandbox denials, protected paths, or disabled shell execution. In Default/Auto Review, host hints can still require review under the selected mode.

@@ -2,6 +2,8 @@
 
 This document is for contributors and maintainers. The root README is for end users.
 
+For first-time setup, use [Windows source setup and startup](source-setup.md). It explains `setup.bat` and `start.bat`, prerequisite versions, live setup output, manual installation, data locations, environment overrides, and troubleshooting. The commands here assume that setup has already completed.
+
 ## Tech Stack
 
 - Frontend: Electron, React, Vite, TypeScript, Tailwind CSS.
@@ -26,6 +28,8 @@ npm run dev
 
 This starts Vite and Electron. Electron starts the backend.
 
+Unlike `start.bat`, this command keeps Vite/Electron output attached to the terminal and does not run the launcher's prerequisite or readiness checks. The desktop backend is managed by Electron, runs with `uv run --locked --no-dev`, and does not auto-reload Python edits. Restart Electron after changing backend or Electron code. Vite normally reloads renderer edits automatically.
+
 Run only Vite:
 
 ```powershell
@@ -40,6 +44,8 @@ cd frontend
 npm run dev:electron
 ```
 
+Have Vite running on port `5275` first. Electron's renderer URL, navigation policy, and development CORS settings use that port. For a local bundled-renderer check instead, run `npm run build:renderer`, set `$env:MONAW_RENDERER_MODE = 'bundle'`, then start Electron. Remove that environment variable to return to Vite development. The source backend still needs uv and its Python environment in either renderer mode.
+
 Run only the backend:
 
 ```powershell
@@ -47,6 +53,8 @@ cd backend
 $env:MONAW_CONTROL_SECRET = 'replace-with-at-least-32-random-characters'
 uv run --locked uvicorn app.main:app --host 127.0.0.1 --port 8435 --reload
 ```
+
+This is a separate backend-only development process. Do not also start the Electron-managed backend on the same port. Replace the example secret before using it. `--reload` in this manual command enables Python reload; it is intentionally absent from the normal desktop launcher.
 
 Health check:
 
@@ -62,7 +70,10 @@ development must explicitly opt into a development token:
 $env:MONAW_CONTROL_SECRET = 'replace-with-at-least-32-random-characters'
 $env:MONAW_ALLOW_DEVELOPMENT_TOKEN = '1'
 $env:VITE_MONAW_CONTROL_TOKEN = $env:MONAW_CONTROL_SECRET
+$env:CORS_ALLOW_ORIGINS = 'http://localhost:5275,http://127.0.0.1:5275'
 ```
+
+Set these variables before starting both the standalone backend and Vite. Then open `http://localhost:5275` in a browser. Run them in the same terminal environment or provide the same values in both terminals; setting them after either process starts does not change that running process. Remove the development-token variables after testing. A normal desktop launch generates its own secret and disables this browser-development bypass.
 
 Do not expose the backend through port forwarding, a reverse proxy, a tunnel, or
 a non-loopback bind. Electron rejects non-loopback backend hosts unless
@@ -107,6 +118,7 @@ dependency, and commit both `pyproject.toml` and `uv.lock`. Use
 - [Operations](operations.md)
 - [Windows packaging](packaging.md)
 - [API route reference](api.md)
+- [Composio: automated setup, reviewed actions, and upstream attribution](composio.md)
 
 ## Runtime Layout
 
@@ -138,11 +150,12 @@ Runtime layout:
 Documents\monaw\YYYY-MM-DD\         daily default working folder for chat tools
 %USERPROFILE%\.monaw\browser\        browser artifacts
 %USERPROFILE%\.monaw\memory\         global and workspace memory markdown files
+%USERPROFILE%\.monaw\skills\         skills created or imported by the user
 ```
 
 Override the main folder with `MONAW_HOME` or `AGENT_HOME`, runtime with `AGENT_RUNTIME_DIR`, workspace with `AGENT_WORKSPACE_DIR`, and memory with `AGENT_MEMORY_DIR`.
 
-The default workspace uses the system Documents folder, including Windows folder redirection (such as OneDrive). It is created on launch. `MONAW_HOME` and `AGENT_HOME` relocate application data; use `AGENT_WORKSPACE_DIR` to override the workspace.
+The default workspace root uses the system Documents folder, including Windows folder redirection (such as OneDrive). The root is created on launch; each new chat gets its dated folder before its first task. `MONAW_HOME` and `AGENT_HOME` relocate application data; use `AGENT_WORKSPACE_DIR` to override the workspace root. Existing chats retain their saved paths. `AGENT_RUNTIME_DIR` alone does not move Electron's store or its backend output log; see the [override table](source-setup.md#paths-and-environment-overrides).
 
 ## Architecture
 
@@ -203,9 +216,7 @@ skill_creator     Skill creation and reload tools
 web_search        Web search (when Tavily is configured)
 ```
 
-Skills the user creates with the skill creator are stored in `~/.monaw/skills` (the `skills` folder of the Monaw
-home), loaded after the built-in skills, and cannot take a built-in skill's name. Agent tools cannot modify either
-folder; only the skill creator writes there, behind its approval.
+Skills created with the skill creator or imported through **Settings > Tools > Skills > Import** are stored in `~/.monaw/skills` (the `skills` folder of Monaw home), loaded after the built-in skills, and cannot take a built-in skill's name. General agent filesystem tools cannot modify either skill folder. The approved skill creator and authenticated Settings import routes provide the supported write paths. Imported skills remain instruction-only and do not load bundled `tools.py`; see [skills and plugin compatibility](skills.md).
 
 Each `SKILL.md` must begin with a closed YAML frontmatter block. It is the source of truth for a skill's trigger description, `display_name`,
 one-line `summary`, tier, default, and prompt guidance. Internal skills use
@@ -342,6 +353,8 @@ See `docs\sandboxing.md` for backend behavior and limitations.
 
 ## Testing
 
+Electron's source launch uses `--no-dev`, which can remove pytest and other development-only packages from the shared backend environment. Run `uv sync --locked` in `backend` before invoking development tools directly. The repository's backend test script prepares its required test environment.
+
 Run the complete local verification workflow from the repository root:
 
 ```powershell
@@ -449,6 +462,9 @@ Feature branches use the pull-request run without a duplicate push run:
   the image can really import. Tests are selected by path because collecting
   the whole suite would import the Windows-only `computer_use` modules.
   `MONAW_REQUIRE_DOCKER_TESTS=1` makes unavailable Docker prerequisites a failure.
+  The job also runs workspace path-policy tests and real-container copy-back
+  checks for successful and failed commands. Windows sandbox tests cover junctions,
+  hard links, host-edit conflicts, and session expiry without polling.
 - **Per-commit integrity** — the checks above, capped at 20 commits.
 - **Frontend** — `npm run verify:ci` (Vitest, Electron tests, type-check, build),
   once on Node 22.13.0, matching the application job and packaging baseline.
@@ -462,3 +478,20 @@ Backend, compatibility, real-Docker, and renderer jobs upload JUnit reports even
 after test failure when reports were produced. Artifacts have distinct names per
 matrix entry. New pushes cancel obsolete runs of the same workflow/ref. These
 jobs do not yet prove a packaged/installed Electron workflow, installer, or upgrade.
+
+When changing migrations, update the fresh-database regression's expected schema
+versions and verify the new tables. Approval integration tests must explicitly
+bind the production replay adapter they exercise: registry tests and dynamic
+skill loading can otherwise leave a different adapter in the same process.
+Application tests that inspect persisted history must wait for the turn to finish;
+visible streamed answer text does not mean the atomic history commit has completed.
+Skill-import workflows enter Settings → Tools → Skills before opening Import.
+Restart workflows retain the Electron child-process handle and verify its clean
+exit plus backend-port closure; a disposed inspector channel is not a reliable
+source for checking whether the OS process is still running.
+
+## Connector development
+
+The provider-neutral connector foundation lives in `backend/app/connectors`. Read the [connector architecture and adapter guide](connectors.md) before adding a service. [GitHub](github-connector.md) uses native device sign-in; the categorized daily-app connectors use a user-owned [Composio Platform project](composio.md) behind the same permissions and account contracts. Manage accounts through `/connector` or Settings → Tools → Connectors.
+
+For connector changes, run the core connector tests and renderer verification. `uv sync --locked` installs the pinned Composio API client; no companion build or separate runtime is needed. The user saves a Platform project key in Monaw desktop, then Monaw creates the managed OAuth configuration and hosted sign-in link. See the [setup guide](composio.md) for permissions, usage, and live-account verification. Do not expand the upstream catalog or OAuth scopes without reviewing the corresponding Monaw schemas and permissions.

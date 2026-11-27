@@ -427,6 +427,10 @@ def approve_ticket(ticket_id: str, resolved_by: str = "user") -> ApprovalTicket 
         ticket = _all_tickets.get(ticket_id)
         if not ticket or ticket.status != TicketStatus.PENDING:
             return None
+        if ticket.action_descriptor.get("preview_required"):
+            from .action_security.preview import get_preview
+            if get_preview(ticket) is None:
+                return None
         ticket.status = TicketStatus.APPROVED
         ticket.resolved_at = datetime.now(timezone.utc).isoformat()
         ticket.resolved_by = resolved_by

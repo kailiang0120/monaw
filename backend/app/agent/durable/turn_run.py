@@ -228,6 +228,47 @@ class DurableTurnRun:
             await self.checkpoint_files("after")
         return self.finalize(outcome_status, reason_code, checkpoint_files=False)
 
+    def assert_owned_transaction(self, connection):
+        """Fence every final transcript write against ownership, attempt and lease changes."""
+        if connection is not self.journal.db.conn or not connection.in_transaction:
+            raise ValueError("Durable finalization must share the turn history transaction")
+        if self.lease_lost:
+            raise LeaseConflictError("durable run lease was lost before finalization")
+        row = self.journal._require_run(connection, self.run_id)
+        self.journal._assert_owner(row, self.owner_instance_id, self.attempt)
+        expires = datetime.fromisoformat(str(row["lease_expires_at"]))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires <= datetime.now(timezone.utc):
+            raise LeaseConflictError("durable run lease expired before finalization")
+        return row
+
+    def finalize_in_transaction(self, connection, outcome_status: str, reason_code: str = "") -> dict:
+        """Join history and task completion without committing a partial successful run."""
+        row = self.assert_owned_transaction(connection)
+        target = {"complete": "completed", "paused": "paused", "error": "failed"}.get(outcome_status, "failed")
+        if outcome_status == "paused" and reason_code == "cancelled":
+            target = "cancelled"
+        revision = int(row["revision"])
+        if target == "paused" and row["status"] in {"running", "waiting_approval"}:
+            pausing = self.journal.transition_run(
+                self.run_id, to_status="pausing", owner_instance_id=self.owner_instance_id,
+                attempt=self.attempt, expected_revision=revision, reason_code="pause_requested",
+                connection=connection,
+            )
+            revision = int(pausing["revision"])
+        return self.journal.transition_run(
+            self.run_id, to_status=target, owner_instance_id=self.owner_instance_id,
+            attempt=self.attempt, expected_revision=revision,
+            reason_code={
+                "completed": "completed", "failed": "run_failed", "cancelled": "user_cancelled",
+                "paused": "user_pause" if self.pause_requested else "timeout" if reason_code == "turn_timeout"
+                else "budget_exceeded" if "budget" in reason_code or "limit" in reason_code else "checkpoint_committed",
+            }[target],
+            recovery_input_ref=self.recovery_input_ref or None if target == "paused" else None,
+            connection=connection,
+        )
+
     def finalize(self, outcome_status: str, reason_code: str = "", *, checkpoint_files: bool = True) -> bool:
         """Commit the durable outcome; return false when the run needs review."""
         if self.lease_lost:

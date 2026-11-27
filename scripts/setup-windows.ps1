@@ -4,6 +4,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendDir = Join-Path $repoRoot 'backend'
 $frontendDir = Join-Path $repoRoot 'frontend'
 . (Join-Path $PSScriptRoot 'node-prerequisites.ps1')
+. (Join-Path $PSScriptRoot 'runtime-prerequisites.ps1')
 $monawHome = if ($env:MONAW_HOME) {
   $env:MONAW_HOME
 } elseif ($env:AGENT_HOME) {
@@ -16,18 +17,6 @@ $runtimeDir = if ($env:AGENT_RUNTIME_DIR) {
 } else {
   Join-Path $monawHome 'runtime'
 }
-$backendPort = 8420
-$runtimeConfigPath = Join-Path $frontendDir 'config\runtime.json'
-if (Test-Path $runtimeConfigPath) {
-  try {
-    $configuredPort = (Get-Content -Raw -Path $runtimeConfigPath | ConvertFrom-Json).backendPort
-    if ($configuredPort) { $backendPort = [int]$configuredPort }
-  } catch {
-    # A malformed runtime.json is start.bat's problem to report; keep the default here.
-  }
-}
-# Vite and the backend.
-$monawPorts = @(5275, $backendPort)
 $setupLogDir = Join-Path $runtimeDir 'setup'
 $setupLog = Join-Path $setupLogDir 'setup.log'
 
@@ -39,12 +28,7 @@ function Write-Step {
   Write-Host "==> $Message"
 }
 
-function Update-ProcessPath {
-  $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  $env:Path = @($machinePath, $userPath, $env:Path) -join ';'
-}
-
+# Stream native output to the console and log while retaining its real exit status.
 function Invoke-LoggedCommand {
   param(
     [Parameter(Mandatory = $true)] [string] $FilePath,
@@ -62,16 +46,15 @@ function Invoke-LoggedCommand {
     # Windows PowerShell turns redirected native stderr into ErrorRecord
     # objects, which must not become terminating errors when the process exits 0.
     $ErrorActionPreference = 'Continue'
-    $output = & $FilePath @ArgumentList 2>&1
+    & $FilePath @ArgumentList 2>&1 | ForEach-Object {
+      $line = $_.ToString()
+      Add-Content -LiteralPath $setupLog -Value $line
+      Write-Host $line
+    }
     $exitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
     Pop-Location
-  }
-
-  if ($output) {
-    $output | Add-Content -Path $setupLog
-    $output | ForEach-Object { Write-Host $_ }
   }
 
   if ($exitCode -ne 0) {
@@ -178,27 +161,27 @@ function Install-WithWinget {
       '--accept-source-agreements',
       '--disable-interactivity'
     )
-  Update-ProcessPath
+  Update-MonawProcessPath
 }
 
 function Ensure-Uv {
   Write-Step "Checking uv"
-  Update-ProcessPath
-  $uv = Get-Command uv -ErrorAction SilentlyContinue
+  Update-MonawProcessPath
+  $uv = Get-MonawUvCommand
   if (-not $uv) {
     Install-WithWinget -PackageId 'astral-sh.uv' -Name 'uv'
-    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    $uv = Get-MonawUvCommand
   }
   if (-not $uv) {
     throw "uv was installed, but setup cannot find it yet. Close this window, open setup.bat again, and it should continue."
   }
-  Write-Host "Using uv: $($uv.Source)"
-  return $uv.Source
+  Write-Host "Using uv: $uv"
+  return $uv
 }
 
 function Ensure-Node {
   Write-Step "Checking Node.js and npm"
-  Update-ProcessPath
+  Update-MonawProcessPath
   $runtime = Get-MonawNodeRuntime
   $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
   if (-not $npm) {
@@ -211,7 +194,7 @@ function Ensure-Node {
 
   Write-Host "Found Node.js $($runtime.version) at '$($runtime.path)'; required: $($runtime.required)."
   Install-WithWinget -PackageId 'OpenJS.NodeJS.LTS' -Name 'Node.js LTS'
-  Update-ProcessPath
+  Update-MonawProcessPath
   # Recheck the executable the launcher will actually resolve, including stale PATH entries.
   return Assert-MonawNodeRuntime
 }
@@ -221,11 +204,16 @@ try {
   Write-Host "Log file: $setupLog"
   "[$(Get-Date -Format o)] Monaw Agent setup started" | Set-Content -Path $setupLog
 
+  $backendConfig = Get-MonawBackendConfig
+  $monawPorts = @(5275, $backendConfig.Port)
+
   Write-Step "Closing Monaw if it is running"
   Stop-MonawIfRunning
 
   $uv = Ensure-Uv
   $npm = Ensure-Node
+
+  Invoke-LoggedCommand -FilePath $uv -ArgumentList @('--version')
 
   Write-Step "Syncing the locked Python backend environment"
   Invoke-LoggedCommand -FilePath $uv -ArgumentList @('sync', '--locked') -WorkingDirectory $backendDir

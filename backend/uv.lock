@@ -393,6 +393,20 @@ wheels = [
 ]
 
 [[package]]
+name = "composio-client"
+version = "2.1.36"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e9/fb/ca702273b403cf7b2140fa7296e34cef5b4ac955e19248ff61c74473803f/composio_client-2.1.36.tar.gz", hash = "sha256:0d0efba16b4ba52e96f5a3413c36b44bfc726e1270a9bc4ec712c8fe70a2cbdc", size = 593890, upload-time = "2026-11-19T09:38:36.95Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/99/263686a344ff70bf208b281f8d333a22a9ebeac1720ff64fcdf1cae7e7d9/composio_client-2.1.36-py3-none-any.whl", hash = "sha256:a06e9090b854d9ed0074728361cdf6d794faef3929bf8a43f15da252a2883104", size = 479210, upload-time = "2026-11-19T09:38:35.585Z" },
+]
+
+[[package]]
 name = "comtypes"
 version = "1.4.16"
 source = { registry = "https://pypi.org/simple" }
@@ -1172,6 +1186,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "certifi" },
+    { name = "composio-client" },
     { name = "comtypes" },
     { name = "croniter" },
     { name = "fastapi" },
@@ -1220,6 +1235,7 @@ packaging = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "certifi", specifier = ">=2024.2.2" },
+    { name = "composio-client", specifier = "==2.1.36" },
     { name = "comtypes", specifier = ">=1.2.0" },
     { name = "croniter", specifier = "~=6.0" },
     { name = "fastapi", specifier = ">=0.115.0" },

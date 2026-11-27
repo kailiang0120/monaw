@@ -833,6 +833,10 @@ function toolEnvironment(value: string): Environment | undefined {
 function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
   const [localStatus, setLocalStatus] = useState<'idle' | 'approving' | 'rejecting' | 'approved' | 'rejected'>('idle')
   const [error, setError] = useState('')
+  const [previewReadyId, setPreviewReadyId] = useState('')
+  const onPreviewReady = useCallback((ready: boolean) => {
+    setPreviewReadyId(ready ? notice.ticket_id : '')
+  }, [notice.ticket_id])
   const filePreview = useMemo(() => normalizeFileChangePreview(notice.file_preview), [notice.file_preview])
 
   const handleApprove = async () => {
@@ -893,7 +897,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
           <p className="text-xs font-semibold text-amber-200">Approval required</p>
           <p className="mt-1 text-[11px] leading-relaxed text-neutral-200">{notice.action}</p>
           <ExecutionEnvironment environment={notice.execution_environment} />
-          <ActionApprovalCard action={notice.action_descriptor} />
+          <ActionApprovalCard action={notice.action_descriptor} ticketId={notice.ticket_id} onPreviewReady={onPreviewReady} />
           {notice.reason && (
             <p className="mt-1 text-[10px] text-neutral-500">{notice.reason}</p>
           )}
@@ -909,7 +913,7 @@ function ApprovalCard({ notice }: { notice: ApprovalNotice }) {
         <button
           type="button"
           onClick={handleApprove}
-          disabled={localStatus !== 'idle'}
+          disabled={localStatus !== 'idle' || (!!notice.action_descriptor?.preview_required && previewReadyId !== notice.ticket_id)}
           className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-400 disabled:opacity-50"
         >
           {localStatus === 'approving' ? <CircleDashed size={12} className="animate-spin" /> : <Check size={12} />}

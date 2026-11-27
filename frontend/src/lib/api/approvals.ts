@@ -1,6 +1,16 @@
 import { apiFetch, BASE, JSON_HEADERS } from './client'
 import type { ApprovalTicket } from './types'
 
+/** Fetch ephemeral action details only through the authenticated approval route. */
+export async function fetchApprovalPreview(ticketId: string): Promise<{
+  authorization_binding: string
+  parameters: Record<string, unknown>
+}> {
+  const res = await apiFetch(`${BASE}/api/approvals/${ticketId}/preview`, { cache: 'no-store' })
+  if (!res.ok) throw new Error('Action details are unavailable')
+  return res.json()
+}
+
 export async function fetchPendingApprovals(conversationId?: string, limit = 50, offset = 0): Promise<ApprovalTicket[]> {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
   if (conversationId) params.set('conversation_id', conversationId)

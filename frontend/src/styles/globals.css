@@ -48,45 +48,38 @@ button.context-usage-ring:focus-visible {
   outline-offset: 3px;
 }
 
-/* Native indeterminate progress, styled without introducing a fake percentage. */
-.startup-spinner {
-  appearance: none;
-  inline-size: 20px;
-  block-size: 20px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: conic-gradient(var(--st-accent-text), transparent 80%);
-  mask-image: radial-gradient(farthest-side, transparent calc(100% - 2px), black 0);
-  animation: startup-spin 1s linear infinite;
+/* Determinate green startup progress bar driven by real initialization milestones. */
+.startup-progress {
+  position: relative;
+  inline-size: min(15rem, 72vw);
+  block-size: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--st-border-strong);
 }
 
-.startup-spinner::-webkit-progress-bar {
-  display: none;
-  background: none;
-}
-
-.startup-spinner::-webkit-progress-value {
-  display: none;
-  background: none;
-}
-
-.startup-spinner::-moz-progress-bar {
-  display: none;
-  background: none;
-}
-
-@keyframes startup-spin {
-  to { transform: rotate(1turn); }
+.startup-progress-fill {
+  block-size: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--st-accent) 0%, var(--st-accent-text) 100%);
+  transition: width 300ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .startup-spinner { animation-duration: 6s; }
+  .startup-progress-fill {
+    transition: none;
+  }
 }
 
 @media (forced-colors: active) {
-  .startup-spinner {
+  .startup-progress {
     forced-color-adjust: none;
-    background: conic-gradient(CanvasText, transparent 80%);
+    background: Canvas;
+    border: 1px solid CanvasText;
+  }
+
+  .startup-progress-fill {
+    background: Highlight;
   }
 }
 
@@ -115,6 +108,8 @@ button.context-usage-ring:focus-visible {
 @layer base {
   :root {
     --control-height: 2.125rem;
+    /* Preserve brand artwork on a neutral tile in either theme. */
+    --st-brand-surface: #ffffff;
     --control-height-sm: 1.75rem;
   }
 
@@ -156,7 +151,9 @@ button.context-usage-ring:focus-visible {
 
     --st-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
     --st-focus: rgba(140, 200, 90, 0.4);
-    --st-scrollbar: rgba(255, 255, 255, 0.16);
+    --st-scrollbar: rgba(255, 255, 255, 0.08);
+    --st-scrollbar-hover: rgba(255, 255, 255, 0.2);
+    --st-scrollbar-active: rgba(255, 255, 255, 0.34);
   }
 
   .theme-light {
@@ -197,7 +194,9 @@ button.context-usage-ring:focus-visible {
 
     --st-shadow: 0 24px 56px rgba(40, 36, 28, 0.16);
     --st-focus: rgba(79, 122, 43, 0.32);
-    --st-scrollbar: rgba(30, 28, 24, 0.18);
+    --st-scrollbar: rgba(30, 28, 24, 0.1);
+    --st-scrollbar-hover: rgba(30, 28, 24, 0.22);
+    --st-scrollbar-active: rgba(30, 28, 24, 0.36);
   }
 }
 

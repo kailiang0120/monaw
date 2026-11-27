@@ -515,21 +515,70 @@ def test_deferred_summary_preserves_older_history_after_reopening():
     assert len(llm.calls) == 1
 
 
-def test_failed_deferred_summary_does_not_block_the_turn():
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_failed_deferred_summary_retains_all_active_instructions_and_latest_exchange(tmp_path, checkpoint):
+    """Failed compaction restores the whole suffix, with or without an older checkpoint."""
     manager = MemoryManager(RecordingLLM())
+    conversation = "failed-summary"
+    manager.get_or_create(conversation)
+    if checkpoint:
+        asyncio.run(manager.persist_turn(conversation, "Old request", "Old answer", tool_calls=[]))
+        assert asyncio.run(manager.compact_conversation(conversation))["status"] == "compacted"
+    goal = "Improve the training code"
+    TaskProgress(manager._db, conversation, goal, str(tmp_path))
+    correction = "  Never change the dataset; preserve account 0017.  "
+    asyncio.run(manager.persist_turn(conversation, goal, "Working", tool_calls=[], steering_messages=[correction]))
     for index in range(13):
-        asyncio.run(manager.persist_turn("failed-summary", f"Request {index}", f"Reply {index}", tool_calls=[]))
+        asyncio.run(manager.persist_turn(conversation, f"Request {index}", f"Reply {index}", tool_calls=[]))
     failing = FailingCompactionLLM()
     reopened = MemoryManager(failing)
-    asyncio.run(reopened.ensure_context_fits("failed-summary"))
+    asyncio.run(reopened.ensure_context_fits(conversation))
     assert len(failing.calls) == 1
-    history = reopened.build_llm_messages("failed-summary")
-    assert "Reply 12" in str(history)
-    retried = RecordingLLM(reply="Summary after the provider recovered.")
+    history = reopened.build_llm_messages(conversation)
+    assert any(item["content"] == goal for item in history)
+    assert any(item["content"].strip() == correction.strip() for item in history)
+    assert all(any(item["content"] == f"Request {index}" for item in history) for index in range(13))
+    assert history[-1]["content"] == "Reply 12"
+    # Even a later successful but lossy summary cannot remove active corrections.
+    retried = RecordingLLM(reply="Summary after the provider recovered; constraints omitted.")
     recovered = MemoryManager(retried)
-    asyncio.run(recovered.ensure_context_fits("failed-summary"))
+    asyncio.run(recovered.ensure_context_fits(conversation))
     assert len(retried.calls) == 1
-    assert "Summary after the provider recovered." in recovered.build_llm_messages("failed-summary")[0]["content"]
+    compacted = recovered.build_llm_messages(conversation)
+    assert "Summary after the provider recovered" in compacted[0]["content"]
+    assert any(item["content"] == correction and item.get(PROTECTED_CONTEXT) for item in compacted)
+    assert any(item["content"] == goal and item.get(PROTECTED_CONTEXT) for item in compacted)
+
+
+def test_failed_summary_pauses_when_complete_context_exceeds_budget(monkeypatch):
+    """A failed summarizer cannot hide old constraints to make an oversized request fit."""
+    manager = MemoryManager(FailingCompactionLLM())
+    for index in range(13):
+        asyncio.run(manager.persist_turn("oversized-failed-summary", f"Preserve constraint {index}", f"Reply {index}", tool_calls=[]))
+    monkeypatch.setattr(memory_manager_mod, "input_budget", lambda _client: 1)
+    before = manager._db.get_messages("oversized-failed-summary", limit=100)
+    from app.agent.harness.context_budget import ContextBudgetExceeded
+    with pytest.raises(ContextBudgetExceeded, match="complete saved conversation"):
+        asyncio.run(manager.ensure_context_fits("oversized-failed-summary"))
+    assert len(manager.llm_client.calls) == 1
+    assert manager._db.get_messages("oversized-failed-summary", limit=100) == before
+
+
+def test_restore_limit_pauses_instead_of_silently_selecting_a_message_slice(isolated_memory_db):
+    """The storage guard must reject the complete suffix rather than truncate it."""
+    from app.agent.harness.context_budget import ContextBudgetExceeded
+    from app.agent.harness.context_protection import MAX_RESTORED_TASK_MESSAGES
+    db = isolated_memory_db
+    db.create_conversation("restore-limit", "Restore limit")
+    with db.transaction() as connection:
+        connection.executemany(
+            "INSERT INTO messages(conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            [("restore-limit", "user", f"Instruction {index}", "2026-11-27T00:00:00Z")
+             for index in range(MAX_RESTORED_TASK_MESSAGES + 1)],
+        )
+    with pytest.raises(ContextBudgetExceeded, match="restoration limit"):
+        MemoryManager(RecordingLLM()).build_llm_messages("restore-limit")
+    assert db.count_messages("restore-limit") == MAX_RESTORED_TASK_MESSAGES + 1
 
 
 def test_memory_manager_builds_structured_context_and_history(monkeypatch, tmp_path):

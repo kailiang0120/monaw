@@ -55,6 +55,7 @@ function assertDisposable(root: string) {
 
 export class Desktop {
   app!: ElectronApplication
+  private appProcess?: ReturnType<ElectronApplication['process']>
   page!: Page
   errors: string[] = []
   consoleErrors: string[] = []
@@ -83,6 +84,7 @@ export class Desktop {
       executablePath: require('electron'), args: [join(frontend, 'e2e', 'fixtures', 'electron-entry.cjs')],
       cwd: frontend, env, timeout: 45_000, chromiumSandbox: true,
     })
+    this.appProcess = this.app.process()
     const capture = (chunk: Buffer) => { this.mainOutput = (this.mainOutput + chunk.toString()).slice(-20_000) }
     this.app.process().stdout?.on('data', capture)
     this.app.process().stderr?.on('data', capture)
@@ -125,18 +127,27 @@ export class Desktop {
   async events() {
     return readFile(join(this.root, 'control', 'events.jsonl'), 'utf8').then((value) => value.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)))
   }
+  /** Verify real process shutdown without depending on a disposed inspector channel. */
   async close() {
-    if (this.app && this.app.process().exitCode === null) {
-      const closed = this.app.waitForEvent('close', { timeout: 15_000 })
+    const child = this.appProcess
+    const running = () => child && child.exitCode === null && child.signalCode === null
+    if (running()) {
       try {
         // Return from the inspector call before quitting the inspected process.
         // This exercises the real quit handlers without awaiting app.quit inside
         // the inspector's own synchronous evaluation frame.
         await this.app.evaluate(({ app }) => { setImmediate(() => app.quit()) })
-        await closed
+        // The OS process handle survives Playwright's channel disposal. Allow
+        // Windows process-tree cleanup time, then require a clean actual exit.
+        await expect.poll(() => !running(), { timeout: 30_000 }).toBe(true)
+        expect(child!.exitCode).toBe(0)
       } catch (error) {
-        if (this.app.process().exitCode === null && process.platform === 'win32') {
-          execFileSync('taskkill', ['/pid', String(this.app.process().pid), '/t', '/f'], { windowsHide: true, timeout: 5000, stdio: 'ignore' })
+        if (running() && process.platform === 'win32') {
+          try {
+            execFileSync('taskkill', ['/pid', String(child!.pid), '/t', '/f'], { windowsHide: true, timeout: 5000, stdio: 'ignore' })
+          } catch {
+            // Preserve the original failure if the process exits during cleanup.
+          }
         }
         throw error
       }

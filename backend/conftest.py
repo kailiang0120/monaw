@@ -9,6 +9,7 @@ os.environ["MONAW_DISABLE_BUILTIN_MCP"] = "1"
 
 TEST_GROUPS = {
     "api": {
+        "test_skill_import.py",
         "test_chat_turn_detach.py",
         "test_conversation_workspace.py",
         "test_code_integrity.py",
@@ -119,6 +120,9 @@ TEST_GROUPS = {
         "test_observability_recorder.py",
     },
     "integrations": {
+        "test_connectors.py",
+        "test_github_connector.py",
+        "test_composio.py",
         "test_scheduler_dispatch.py",
         "test_scheduler.py",
         "test_telegram_integration.py",
@@ -182,10 +186,13 @@ def isolate_browser_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def isolate_user_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Keep skills the developer created in ~/.monaw/skills out of the catalog under test."""
     import app.agent.skill_loader as skill_loader
+    import app.agent.skill_import as skill_import
     import app.skills.skill_creator.tools as skill_creator_tools
 
     user_skills = tmp_path / "user-skills"
     monkeypatch.setattr(skill_loader, "USER_SKILLS_DIR", user_skills)
+    monkeypatch.setattr(skill_import, "USER_SKILLS_DIR", user_skills)
+    skill_import._PREPARED.clear()
     monkeypatch.setattr(skill_creator_tools, "SKILLS_DIR", user_skills)
 
 
@@ -285,6 +292,17 @@ def isolate_sandbox_image_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         "_INVENTORY_PATH",
         tmp_path / "image-inventories.json",
     )
+
+
+@pytest.fixture(autouse=True)
+def isolate_sandbox_workspaces(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Keep staging and cleanup tests away from the user's real sandbox runs."""
+    from app.agent.sandbox import path_policy
+
+    root = tmp_path_factory.mktemp("sandbox-runtime")
+    monkeypatch.setattr(path_policy, "SANDBOX_RUNTIME_DIR", root)
+    monkeypatch.setattr(path_policy, "SANDBOX_RUNS_DIR", root / "runs")
+    monkeypatch.setattr(path_policy, "SANDBOX_MANIFESTS_DIR", root / "manifests")
 
 
 @pytest.fixture(autouse=True)

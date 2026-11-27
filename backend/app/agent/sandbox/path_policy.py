@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import stat
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -10,12 +13,14 @@ from pathlib import Path
 from typing import Iterable
 
 from app.agent.runtime_paths import RUNTIME_DIR
+from app.agent.file_mutation.fingerprint import fingerprint_path
 
 SANDBOX_RUNTIME_DIR = RUNTIME_DIR / "sandbox"
 SANDBOX_RUNS_DIR = SANDBOX_RUNTIME_DIR / "runs"
 SANDBOX_MANIFESTS_DIR = SANDBOX_RUNTIME_DIR / "manifests"
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 DEFAULT_MAX_COPY_OUT_BYTES = 104857600
+MAX_WORKSPACE_ENTRIES = 10000
 
 
 @dataclass(slots=True)
@@ -24,7 +29,8 @@ class SandboxPathPolicy:
     allowed_output_roots: list[Path] = field(default_factory=list)
     max_copy_out_bytes: int = DEFAULT_MAX_COPY_OUT_BYTES
     max_copy_in_bytes: int = 104857600
-    initial_files: dict[str, tuple[int, int]] = field(default_factory=dict)
+    initial_files: dict[str, str] = field(default_factory=dict)
+    blocked_roots: list[Path] = field(default_factory=list)
 
     @classmethod
     def from_strings(
@@ -34,7 +40,8 @@ class SandboxPathPolicy:
         allowed_output_roots: Iterable[str] = (),
         max_copy_out_bytes: int = DEFAULT_MAX_COPY_OUT_BYTES,
         max_copy_in_bytes: int = 104857600,
-        initial_files: dict[str, tuple[int, int]] | None = None,
+        initial_files: dict[str, str] | None = None,
+        blocked_roots: Iterable[str] = (),
     ) -> "SandboxPathPolicy":
         return cls(
             allowed_input_roots=[canonical_path(root) for root in allowed_input_roots],
@@ -42,6 +49,7 @@ class SandboxPathPolicy:
             max_copy_out_bytes=max_copy_out_bytes,
             max_copy_in_bytes=max_copy_in_bytes,
             initial_files=dict(initial_files or {}),
+            blocked_roots=[canonical_path(root) for root in blocked_roots],
         )
 
 
@@ -67,6 +75,61 @@ def ensure_allowed_path(path: str | Path, roots: Iterable[Path], *, purpose: str
     return canonical
 
 
+def ensure_plain_path(path: Path, root: Path) -> None:
+    """Reject links, Windows reparse points, and special files without resolving them."""
+    relative = path.relative_to(root)
+    current = root
+    for part in (None, *relative.parts):
+        if part is not None:
+            current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+            or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
+        ):
+            raise PermissionError(f"Unsafe sandbox path: {current}")
+        if current != path and not stat.S_ISDIR(info.st_mode):
+            raise PermissionError(f"Sandbox parent is not a directory: {current}")
+
+
+def is_blocked_path(path: Path, blocked_roots: Iterable[Path]) -> bool:
+    """Check protected descendants as well as a protected workspace root."""
+    return any(path == root or is_relative_to(path, root) for root in blocked_roots)
+
+
+def regular_workspace_files(root: Path, *, skip_unsafe: bool = False):
+    """Walk ordinary files without traversing symlinks or Windows junctions."""
+    ensure_plain_path(root, root)
+    entries = 0
+    for directory, names, files in os.walk(root, followlinks=False):
+        entries += len(names) + len(files)
+        if entries > MAX_WORKSPACE_ENTRIES:
+            raise PermissionError("Sandbox workspace entry limit exceeded")
+        parent = Path(directory)
+        ensure_plain_path(parent, root)
+        for name in list(names):
+            try:
+                ensure_plain_path(parent / name, root)
+            except PermissionError:
+                if not skip_unsafe:
+                    raise
+                names.remove(name)
+        for name in files:
+            path = parent / name
+            try:
+                ensure_plain_path(path, root)
+            except PermissionError:
+                if not skip_unsafe:
+                    raise
+                continue
+            yield path
+
+
 def create_run_workspace(run_id: str | None = None) -> Path:
     run = run_id or uuid.uuid4().hex[:12]
     if not _RUN_ID_PATTERN.fullmatch(run):
@@ -75,8 +138,7 @@ def create_run_workspace(run_id: str | None = None) -> Path:
     workspace = canonical_path(runs_root / run)
     if not is_relative_to(workspace, runs_root):
         raise ValueError(f"Sandbox run workspace escaped runs directory: {workspace}")
-    (workspace / "input").mkdir(parents=True, exist_ok=True)
-    (workspace / "output").mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
     return workspace
 
 
@@ -96,32 +158,61 @@ def copy_in_file(source: str | Path, workspace: str | Path, policy: SandboxPathP
 
 
 def collect_copy_out(output_dir: str | Path, destination: str | Path, policy: SandboxPathPolicy) -> list[dict]:
-    source_root = canonical_path(output_dir)
+    """Preflight bounded regular files and host conflicts before publishing changes."""
+    source_root = Path(os.path.abspath(output_dir))
     destination_root = ensure_allowed_path(destination, policy.allowed_output_roots, purpose="output")
-    pending: list[tuple[Path, Path, int]] = []
+    pending: list[tuple[Path, Path, bytes, str | None]] = []
     copied: list[dict] = []
     total_bytes = 0
-    for path in source_root.rglob("*"):
-        if path.is_symlink():
-            raise PermissionError(f"Symlink copy-out is not allowed: {path}")
-        if not path.is_file():
-            continue
+    for path in regular_workspace_files(source_root):
         relative = path.relative_to(source_root)
         baseline = policy.initial_files.get(str(relative).replace("\\", "/"))
-        stat = path.stat()
-        if baseline == (stat.st_size, stat.st_mtime_ns):
+        size = path.stat().st_size
+        if size > policy.max_copy_out_bytes:
+            raise PermissionError("Sandbox copy-out size limit exceeded")
+        source = fingerprint_path(path, include_bytes=True, max_bytes=policy.max_copy_out_bytes)
+        if not source.exists:
+            raise PermissionError(f"Sandbox output changed during copy-out: {path}")
+        if baseline == source.sha256:
             continue
-        size = stat.st_size
-        total_bytes += size
+        total_bytes += source.size
         if total_bytes > policy.max_copy_out_bytes:
             raise PermissionError("Sandbox copy-out size limit exceeded")
         target = destination_root / relative
-        pending.append((path, target, size))
+        ensure_plain_path(target, destination_root)
+        if is_blocked_path(target, policy.blocked_roots):
+            raise PermissionError(f"Sandbox copy-out path is blocked: {target}")
+        existing = fingerprint_path(target, max_bytes=policy.max_copy_out_bytes) if target.exists() else None
+        current_hash = existing.sha256 if existing is not None else None
+        if current_hash != baseline:
+            raise PermissionError(f"Sandbox copy-out conflicts with a host change: {target}")
+        pending.append((path, target, source.data or b"", current_hash))
 
-    for path, target, size in pending:
+    for path, target, data, expected_hash in pending:
+        ensure_plain_path(target, destination_root)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-        copied.append({"source": str(path), "destination": str(target), "bytes": size})
+        ensure_plain_path(target, destination_root)
+        current = fingerprint_path(target, max_bytes=policy.max_copy_out_bytes)
+        if current.sha256 != expected_hash:
+            raise PermissionError(f"Sandbox copy-out conflicts with a host change: {target}")
+        # Replace the directory entry; never truncate through a hard-linked leaf.
+        stage = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".monaw-copy-", delete=False) as handle:
+                stage = Path(handle.name)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            ensure_plain_path(target, destination_root)
+            latest = fingerprint_path(target, max_bytes=policy.max_copy_out_bytes)
+            if latest != current:
+                raise PermissionError(f"Sandbox copy-out conflicts with a host change: {target}")
+            os.chmod(stage, stat.S_IMODE(path.stat().st_mode) & 0o777)
+            os.replace(stage, target)
+        finally:
+            if stage is not None:
+                stage.unlink(missing_ok=True)
+        copied.append({"source": str(path), "destination": str(target), "bytes": len(data)})
     return copied
 
 

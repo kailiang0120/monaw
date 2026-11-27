@@ -143,6 +143,25 @@ describe('ObservabilityPanel', () => {
     expect(await screen.findByText('Timeline')).toBeInTheDocument()
     expect(screen.getByText('tool_call_finished')).toBeInTheDocument()
     expect(screen.getAllByText('repeated_tool_call_blocked').length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close run detail' }))
+    expect(screen.queryByRole('region', { name: 'Run detail' })).not.toBeInTheDocument()
+  })
+
+  it('expands trends and breakdown details on demand', async () => {
+    render(<ObservabilityPanel />)
+
+    expect(await screen.findByText('Total runs')).toBeInTheDocument()
+    const summaryToggle = screen.getByText('Trends & breakdown').closest('summary')!
+    const details = summaryToggle.closest('details')!
+    expect(details).not.toHaveAttribute('open')
+
+    fireEvent.click(summaryToggle)
+    expect(details).toHaveAttribute('open')
+    expect(screen.getByText('Token usage')).toBeInTheDocument()
+    expect(screen.getByText('Model usage')).toBeInTheDocument()
+    expect(screen.getByText('Top error reasons')).toBeInTheDocument()
+    expect(screen.getByText('Failing tools')).toBeInTheDocument()
   })
 
   it('reloads view-specific data when switching panels', async () => {

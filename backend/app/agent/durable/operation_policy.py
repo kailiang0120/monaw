@@ -111,6 +111,11 @@ def classify_tool(tool_name: str, *, trusted_builtin: bool = False) -> Operation
     effect: EffectClass = (
         "read_only" if trusted_builtin and name in READ_ONLY_TOOL_NAMES else "opaque_effect"
     )
+    if trusted_builtin and name.startswith("connector__"):
+        from app.connectors.tools import is_registered_read_tool
+
+        if is_registered_read_tool(name):
+            effect = "read_only"
 
     operation_kind = "other" if name in READ_ONLY_TOOL_NAMES else _FILE_KINDS.get(name)
     if operation_kind is None:
