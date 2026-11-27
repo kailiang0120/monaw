@@ -38,6 +38,8 @@ test('execution UI reads the real Run routes and accepts a keyboard Stop once', 
   })
 
   await expect.poll(() => eventStreamRequests).toBeGreaterThan(0)
+  // Diagnostics are now folded into the transcript until the user opens them.
+  await desktop.page.locator('summary').filter({ hasText: 'Execution details' }).filter({ hasText: 'Running' }).click()
   await expect(desktop.page.getByRole('status').filter({ hasText: 'Reconnecting to execution updates.' })).toBeVisible()
   allowEventStream = true
   await expect.poll(() => eventStreamRequests).toBeGreaterThan(1)
