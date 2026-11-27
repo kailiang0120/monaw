@@ -9,6 +9,7 @@ os.environ["MONAW_DISABLE_BUILTIN_MCP"] = "1"
 
 TEST_GROUPS = {
     "api": {
+        "test_skill_import.py",
         "test_chat_turn_detach.py",
         "test_conversation_workspace.py",
         "test_code_integrity.py",
@@ -182,10 +183,13 @@ def isolate_browser_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def isolate_user_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Keep skills the developer created in ~/.monaw/skills out of the catalog under test."""
     import app.agent.skill_loader as skill_loader
+    import app.agent.skill_import as skill_import
     import app.skills.skill_creator.tools as skill_creator_tools
 
     user_skills = tmp_path / "user-skills"
     monkeypatch.setattr(skill_loader, "USER_SKILLS_DIR", user_skills)
+    monkeypatch.setattr(skill_import, "USER_SKILLS_DIR", user_skills)
+    skill_import._PREPARED.clear()
     monkeypatch.setattr(skill_creator_tools, "SKILLS_DIR", user_skills)
 
 

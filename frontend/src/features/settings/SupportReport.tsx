@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Download, FileText, Loader2 } from 'lucide-react'
 
+import { Note } from '../../components/ui/Panel'
 import { fetchSupportReport } from '../../lib/api/diagnostics'
 
 const FILE_NAME = 'monaw-support-report.json'
@@ -48,13 +49,13 @@ export function SupportReport() {
   const size = new TextEncoder().encode(text).length
 
   return (
-    <section aria-labelledby="support-report-title" className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <section aria-labelledby="support-report-title" className="st-card">
+      <header className="st-card-head flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 id="support-report-title" className="flex items-center gap-2 text-sm font-medium text-neutral-200">
+          <h3 id="support-report-title" className="st-label flex items-center gap-2">
             <FileText size={14} aria-hidden="true" /> Support report
           </h3>
-          <p className="mt-1 max-w-xl text-xs text-neutral-500">
+          <p className="st-desc mt-1">
             Versions, service status, which features are configured, and recent errors. Keys, file paths and setting values are removed.
             Read it before you share it.
           </p>
@@ -63,18 +64,22 @@ export function SupportReport() {
           type="button"
           onClick={() => void prepare()}
           disabled={preparing}
-          className="st-btn st-btn-secondary"
+          className="st-btn st-btn-secondary shrink-0"
         >
           {preparing && <Loader2 size={12} className="animate-spin" aria-hidden="true" />}
           {text ? 'Prepare again' : 'Prepare report'}
         </button>
-      </div>
+      </header>
 
-      {error && <p role="alert" className="mt-3 text-xs text-red-300">{error}</p>}
+      {error && (
+        <div role="alert" className="p-4">
+          <Note tone="danger">{error}</Note>
+        </div>
+      )}
 
       {text && (
-        <div className="mt-3 space-y-2">
-          <p className="text-xs text-neutral-400">
+        <div className="space-y-3 p-4">
+          <p className="st-desc">
             {formatSize(size)}
             {' · '}
             {logIncluded ? 'Includes the recent backend log.' : 'The backend log is left out; turn on support mode to include it.'}
@@ -83,7 +88,7 @@ export function SupportReport() {
           <pre
             aria-label="Support report contents"
             tabIndex={0}
-            className="max-h-80 overflow-auto rounded-lg border border-white/[0.06] bg-black/20 p-3 text-[11px] leading-relaxed text-neutral-300"
+            className="st-code max-h-80 overflow-auto whitespace-pre-wrap break-words"
           >
             {text}
           </pre>

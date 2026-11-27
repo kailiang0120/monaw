@@ -106,7 +106,6 @@ export const IDENTITY_COPY = {
 /* ----------------------------------------------------------------- skills --- */
 
 export const SKILLS_COPY = {
-  intro: 'Built-in skills such as browser use, computer use, web search and scheduling are always on, so they are not listed here.',
   title: 'Your skills',
   empty: 'No skills added yet. Ask Monaw to create one, and it will appear here.',
   unavailable: 'This skill cannot be turned on until the missing backend dependency is installed.',

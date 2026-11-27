@@ -107,6 +107,9 @@
   --st-accent: #4f7a2b;
   --st-accent-hover: #416523;
   --st-accent-text: #3a5f1e;
+  --st-scrollbar: rgba(30, 28, 24, 0.1);
+  --st-scrollbar-hover: rgba(30, 28, 24, 0.22);
+  --st-scrollbar-active: rgba(30, 28, 24, 0.36);
 }
 
 .monaw-startup-message {

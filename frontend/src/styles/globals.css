@@ -156,7 +156,9 @@ button.context-usage-ring:focus-visible {
 
     --st-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
     --st-focus: rgba(140, 200, 90, 0.4);
-    --st-scrollbar: rgba(255, 255, 255, 0.16);
+    --st-scrollbar: rgba(255, 255, 255, 0.08);
+    --st-scrollbar-hover: rgba(255, 255, 255, 0.2);
+    --st-scrollbar-active: rgba(255, 255, 255, 0.34);
   }
 
   .theme-light {
@@ -197,7 +199,9 @@ button.context-usage-ring:focus-visible {
 
     --st-shadow: 0 24px 56px rgba(40, 36, 28, 0.16);
     --st-focus: rgba(79, 122, 43, 0.32);
-    --st-scrollbar: rgba(30, 28, 24, 0.18);
+    --st-scrollbar: rgba(30, 28, 24, 0.1);
+    --st-scrollbar-hover: rgba(30, 28, 24, 0.22);
+    --st-scrollbar-active: rgba(30, 28, 24, 0.36);
   }
 }
 

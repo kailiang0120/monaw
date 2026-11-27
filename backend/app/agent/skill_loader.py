@@ -381,6 +381,9 @@ def load_tools(settings, *, skills_dir: Path | None = None) -> tuple[list[SkillS
     registry = ToolRegistry()
 
     for skill in skill_specs:
+        # Portable imports contain instructions and scripts, not native registry modules.
+        if skill.metadata.get("monaw_instruction_only") is True:
+            continue
         try:
             module = _load_skill_module(skill.path)
             if module is None:

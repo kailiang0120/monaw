@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
+import { SkillImport } from './SkillImport'
 import {
   Activity,
   HardDrive,
@@ -208,6 +209,7 @@ export function SettingsModal({
     setSecret: updateConnectionSecret,
     applyStoredCredentialStatus,
     reconcileMcpCredentials,
+    reconcileInstalledSkills,
     save: saveDraft,
   } = useSettingsDraft()
   const { catalog: modelOptions, status: modelCatalogStatus } = useModelCatalogState()
@@ -1215,7 +1217,7 @@ export function SettingsModal({
               {activeTab === 'tools' && toolsTab === 'skills' && (
                 <>
                   <div role="tabpanel" id="settings-tools-panel-skills" aria-labelledby="settings-tools-tab-skills" className="space-y-3" tabIndex={0}>
-                    <Note tone="info">{SKILLS_COPY.intro}</Note>
+                    <SkillImport onInstalled={reconcileInstalledSkills} />
                     <SettingsCard
                         title={SKILLS_COPY.title}
                         action={<Badge>{userSkills.length}</Badge>}
@@ -1228,7 +1230,7 @@ export function SettingsModal({
                             const isExpanded = expandedSkill === skill.name
                             return (
                               <div key={skill.name} className="st-row-stacked">
-                                <div className="flex items-start justify-between gap-4">
+                                <div className="flex items-center justify-between gap-4">
                                   <button
                                     type="button"
                                     onClick={() => setExpandedSkill(isExpanded ? null : skill.name)}

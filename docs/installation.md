@@ -34,7 +34,7 @@ Monaw keeps application data in the Monaw home folder, not in the install folder
   runtime\settings.json   settings
   runtime\backend.log     the local service log
   memory\                 long-term memory
-  skills\                 skills you created with the skill creator
+  skills\                 skills you created or imported
   browser\                the copy of the Monaw extension that Chrome loads
 ```
 

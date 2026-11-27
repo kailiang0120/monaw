@@ -94,6 +94,8 @@ def _required_scope(method: str, path: str) -> str:
         return "mcp:credentials"
     if path.startswith("/api/settings") or path.startswith("/api/openai-account"):
         return "settings:read" if method == "GET" else "settings:write"
+    if path.startswith("/api/skills"):
+        return "settings:write"
     if path.startswith("/api/sandbox"):
         return "settings:read" if method == "GET" else "settings:write"
     if path.startswith("/api/approvals") or path.startswith("/api/access-grants"):

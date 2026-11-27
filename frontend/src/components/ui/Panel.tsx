@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { Info, type LucideIcon } from 'lucide-react'
 
@@ -16,15 +16,85 @@ import { Info, type LucideIcon } from 'lucide-react'
 /** Descriptions longer than this sit behind an info button instead of under the label. */
 const INLINE_DESCRIPTION_MAX = 90
 
+/** Rows at or above this height (3+ lines or stacked content) top-align their controls. */
+export const ROW_TOP_ALIGN_HEIGHT_PX = 72
+
+function syncRowAlignment(row: HTMLElement) {
+  const height = row.getBoundingClientRect().height || row.offsetHeight
+  if (height >= ROW_TOP_ALIGN_HEIGHT_PX) {
+    if (row.dataset.align !== 'top') row.dataset.align = 'top'
+  } else if (row.dataset.align !== undefined) {
+    delete row.dataset.align
+  }
+}
+
+function useRowAlignment(ref: RefObject<HTMLDivElement | null>) {
+  useLayoutEffect(() => {
+    const row = ref.current
+    if (!row) return
+    syncRowAlignment(row)
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => syncRowAlignment(row))
+    observer.observe(row)
+    return () => observer.disconnect()
+  }, [ref])
+}
+
+function useCardRowAlignment(ref: RefObject<HTMLElement | null>) {
+  useLayoutEffect(() => {
+    const card = ref.current
+    if (!card) return
+
+    const observed = new Set<HTMLElement>()
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            if (entry.target instanceof HTMLElement) syncRowAlignment(entry.target)
+          }
+        })
+
+    const scan = () => {
+      const rows = card.querySelectorAll<HTMLElement>('.st-row:not([data-row-managed="true"])')
+      const next = new Set(rows)
+      for (const row of observed) {
+        if (!next.has(row)) {
+          resizeObserver?.unobserve(row)
+          observed.delete(row)
+        }
+      }
+      for (const row of next) {
+        if (!observed.has(row)) {
+          observed.add(row)
+          resizeObserver?.observe(row)
+        }
+        syncRowAlignment(row)
+      }
+    }
+
+    scan()
+    const mutationObserver = typeof MutationObserver === 'undefined'
+      ? null
+      : new MutationObserver(scan)
+    mutationObserver?.observe(card, { childList: true, subtree: true })
+
+    return () => {
+      mutationObserver?.disconnect()
+      resizeObserver?.disconnect()
+    }
+  }, [ref])
+}
+
 /** A row or card label with its description, or an info button when the description is long. */
-function RowText({ label, description, heading, keepVisible }: {
+function RowText({ label, description, heading, keepVisible, descriptionInInfo }: {
   label?: string
   description?: string
   heading?: boolean
   /** The description is a live status, not help text, so it always shows. */
   keepVisible?: boolean
+  descriptionInInfo?: boolean
 }) {
-  const behindInfo = Boolean(label && description && !keepVisible && description.length > INLINE_DESCRIPTION_MAX)
+  const behindInfo = Boolean(label && description && !keepVisible && (descriptionInInfo || description.length > INLINE_DESCRIPTION_MAX))
   const Label = heading ? 'h4' : 'p'
   return (
     <div className="min-w-0">
@@ -53,10 +123,13 @@ export function SettingsCard({
   footnote?: ReactNode
   children: ReactNode
 }) {
+  const cardRef = useRef<HTMLElement>(null)
+  useCardRowAlignment(cardRef)
+
   return (
-    <section className="st-card">
+    <section ref={cardRef} className="st-card">
       {(title || action) && (
-        <header className="st-card-head flex items-start justify-between gap-4">
+        <header className="st-card-head flex items-center justify-between gap-4">
           <RowText label={title} description={description} heading />
           {action && <div className="shrink-0">{action}</div>}
         </header>
@@ -74,6 +147,7 @@ export function SettingRow({
   children,
   wide,
   statusDescription,
+  descriptionInInfo,
 }: {
   label: string
   description?: string
@@ -82,10 +156,15 @@ export function SettingRow({
   wide?: boolean
   /** The description reports state, so it stays visible however long it is. */
   statusDescription?: boolean
+  /** Put explanatory copy in the info button even when it is short. */
+  descriptionInInfo?: boolean
 }) {
+  const rowRef = useRef<HTMLDivElement>(null)
+  useRowAlignment(rowRef)
+
   return (
-    <div className="st-row">
-      <RowText label={label} description={description} keepVisible={statusDescription} />
+    <div ref={rowRef} data-row-managed="true" className="st-row">
+      <RowText label={label} description={description} keepVisible={statusDescription} descriptionInInfo={descriptionInInfo} />
       <div className={wide ? 'st-row-control-auto w-1/2 min-w-0' : 'st-row-control'}>{children}</div>
     </div>
   )
@@ -105,7 +184,7 @@ export function StackedRow({
 }) {
   return (
     <div className="st-row-stacked">
-      <div className="mb-2 flex items-start justify-between gap-4">
+      <div className="mb-2 flex items-center justify-between gap-4">
         <RowText label={label} description={description} />
         {action && <div className="shrink-0">{action}</div>}
       </div>
@@ -161,10 +240,13 @@ export function SwitchRow({
   onChange: (checked: boolean) => void
   disabled?: boolean
 }) {
+  const rowRef = useRef<HTMLDivElement>(null)
+  useRowAlignment(rowRef)
+
   return (
-    <div className="st-row">
+    <div ref={rowRef} data-row-managed="true" className="st-row">
       <RowText label={label} description={description} />
-      <div className="st-row-control-auto pt-0.5">
+      <div className="st-row-control-auto st-row-switch">
         <Switch label={label} checked={checked} onChange={onChange} disabled={disabled} />
       </div>
     </div>
@@ -191,8 +273,11 @@ export function NumberRow({
   max?: number
   onChange: (value: string) => void
 }) {
+  const rowRef = useRef<HTMLDivElement>(null)
+  useRowAlignment(rowRef)
+
   return (
-    <div className="st-row st-number-row">
+    <div ref={rowRef} data-row-managed="true" className="st-row st-number-row">
       <RowText label={label} description={description} />
       <div className="st-row-control-auto flex items-center gap-2">
         <input
@@ -396,7 +481,7 @@ export function PageHeader({
   action?: ReactNode
 }) {
   return (
-    <div className="st-page-header mb-3 flex items-start justify-between gap-4">
+    <div className={`st-page-header mb-3 flex justify-between gap-4 ${description ? 'items-start' : 'items-center'}`}>
       <div className="min-w-0">
         <h3 className="st-page-title">{title}</h3>
         {description && <p className="st-page-desc mt-1.5">{description}</p>}

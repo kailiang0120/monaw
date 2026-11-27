@@ -54,14 +54,14 @@ export function AboutSettings() {
       <SettingRow label="Version" description="Installed desktop app version.">
         <span className="st-label block text-right tabular-nums">{update?.currentVersion || '—'}</span>
       </SettingRow>
-      <div className="st-row flex flex-wrap items-center justify-between gap-3">
+      <div className="st-row flex-wrap gap-3">
         <div><p className="st-label">Software updates</p><p role="status" aria-live="polite" className="st-desc mt-1">{message}</p></div>
         {status === 'ready'
           ? <button type="button" className="st-btn st-btn-secondary" onClick={() => setConfirmRestart(true)}>Restart to update</button>
           : <button type="button" className="st-btn st-btn-secondary" onClick={() => void check()}
               disabled={!update || ['unavailable', 'checking', 'downloading'].includes(status || '')}>Check for updates</button>}
       </div>
-      {confirmRestart && <div className="st-row flex flex-wrap items-center gap-3" role="group" aria-label="Confirm update restart">
+      {confirmRestart && <div className="st-row flex-wrap gap-3" role="group" aria-label="Confirm update restart">
         <p className="st-desc flex-1">Monaw will close and restart to install the update. Finish or pause active work first. Updates are currently unsigned, so their publisher cannot be verified.</p>
         <button type="button" className="st-btn st-btn-secondary" onClick={() => setConfirmRestart(false)}>Cancel</button>
         <button type="button" className="st-btn st-btn-secondary" onClick={() => void install()}>Restart and install</button>

@@ -91,6 +91,19 @@ export function useSettingsDraft() {
     setDraft((current) => (current ? updater(current) : current))
   }
 
+  /** Reconcile installed skills while preserving other unsaved edits and secrets. */
+  const reconcileInstalledSkills = (fresh: AgentSettings, names: string[]) => {
+    const merge = (current: AgentSettings | null) => current ? {
+      ...current,
+      available_skills: fresh.available_skills,
+      settings_version: fresh.settings_version,
+      tools: { ...current.tools, skills: { ...current.tools.skills,
+        ...Object.fromEntries(names.map((name) => [name, fresh.tools.skills[name]])) } },
+    } : current
+    setDraft(merge)
+    setSaved(merge)
+  }
+
   const setSecret = (secret: ConnectionSecretId, value: string) => {
     setDirtySecrets((current) => new Set(current).add(secret))
     setSecrets((current) => ({ ...current, [secret]: value }))
@@ -209,6 +222,7 @@ export function useSettingsDraft() {
     setSecret,
     applyStoredCredentialStatus,
     reconcileMcpCredentials,
+    reconcileInstalledSkills,
     save,
   }
 }

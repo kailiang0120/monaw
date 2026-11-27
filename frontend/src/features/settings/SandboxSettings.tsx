@@ -72,6 +72,7 @@ export function SandboxSettings({ sandbox, status, onChange, onStatus }: Props) 
           </SettingRow>
           <SettingRow
             label="Container network"
+            descriptionInInfo
             description={SANDBOX_COPY.networkHelp[sandbox.network.default as keyof typeof SANDBOX_COPY.networkHelp] ?? SANDBOX_COPY.network}
           >
             <Dropdown
@@ -90,6 +91,7 @@ export function SandboxSettings({ sandbox, status, onChange, onStatus }: Props) 
           </SettingRow>
           <SettingRow
             label="Container files"
+            descriptionInInfo
             description={SANDBOX_COPY.writeStrategyHelp[sandbox.default_write_strategy as keyof typeof SANDBOX_COPY.writeStrategyHelp] ?? SANDBOX_COPY.writeStrategy}
           >
             <Dropdown

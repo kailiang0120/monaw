@@ -118,6 +118,8 @@ unauthenticated runtime endpoint.
 | `DELETE` | `/api/settings/workspace-instructions` | `settings:write` | `WorkspaceInstructionsPayload` |
 | `GET` | `/api/settings/workspace-instructions` | `settings:read` | `WorkspaceInstructionsPayload` |
 | `PUT` | `/api/settings/workspace-instructions` | `settings:write` | `WorkspaceInstructionsPayload` |
+| `POST` | `/api/skills/inspect` | `settings:write` | `SkillImportPreview` |
+| `POST` | `/api/skills/install` | `settings:write` | `SkillInstallResult` |
 | `POST` | `/api/speech-to-text/transcribe` | `agent:run` | `SpeechToTextTranscriptionResponse` |
 | `POST` | `/api/uploads` | `agent:run` | `AttachmentUploadResponse` |
 | `GET` | `/health` | `unauthenticated` | `stream/file/none` |

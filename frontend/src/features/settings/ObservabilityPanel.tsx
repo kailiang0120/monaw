@@ -1,22 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { MessageDialog } from '../../components/ui/MessageDialog'
 import {
-  Activity,
-  AlertTriangle,
   Archive,
-  Bug,
+  ChevronDown,
+  ChevronRight,
   Clock3,
-  Coins,
-  FileText,
-  Gauge,
   Play,
   RefreshCw,
   Search,
-  Timer,
   Trash2,
-  Wrench,
-  type LucideIcon,
+  X,
 } from 'lucide-react'
+import { MessageDialog } from '../../components/ui/MessageDialog'
+import { Badge, Note, SettingsCard } from '../../components/ui/Panel'
+import { Dropdown } from '../../components/Dropdown'
+import { SupportReport } from './SupportReport'
 import {
   deleteRuntimeData,
   enableSupportMode,
@@ -29,8 +26,6 @@ import {
   replayObservabilityRun,
 } from '../../lib/api/diagnostics'
 import { ApiError } from '../../lib/api/client'
-import { Dropdown } from '../../components/Dropdown'
-import { SupportReport } from './SupportReport'
 import type {
   ObservabilityBackendLog,
   ObservabilityError,
@@ -42,8 +37,8 @@ import { formatBytes } from '../../lib/formatBytes'
 
 type ViewMode = 'runs' | 'errors' | 'backend' | 'report'
 const VIRTUALIZE_OBSERVABILITY_THRESHOLD = 60
-const RUN_ROW_HEIGHT_PX = 58
-const ERROR_ROW_HEIGHT_PX = 72
+const RUN_ROW_HEIGHT_PX = 62
+const ERROR_ROW_HEIGHT_PX = 56
 const VIRTUAL_OVERSCAN = 8
 
 const EMPTY_SUMMARY: ObservabilitySummary = {
@@ -80,7 +75,6 @@ function metricNumber(metrics: Record<string, unknown>, key: string): number {
   return typeof value === 'number' ? value : 0
 }
 
-
 function formatDuration(value: number): string {
   if (!value) return '-'
   if (value < 1000) return `${Math.round(value)}ms`
@@ -100,12 +94,20 @@ function shortId(value: string): string {
   return value ? value.replace(/^run_/, '').slice(0, 8) : '-'
 }
 
-function statusClass(status: string): string {
+function statusTone(status: string): 'ok' | 'accent' | 'warn' | 'danger' {
   const normalized = status.toLowerCase()
-  if (normalized === 'complete') return 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
-  if (normalized === 'running') return 'border-accent/30 bg-accent/10 text-accent-light'
-  if (normalized === 'paused') return 'border-amber-400/20 bg-amber-400/10 text-amber-200'
-  return 'border-red-400/20 bg-red-400/10 text-red-200'
+  if (normalized === 'complete') return 'ok'
+  if (normalized === 'running') return 'accent'
+  if (normalized === 'paused') return 'warn'
+  return 'danger'
+}
+
+function statusDotClass(status: string): string {
+  const tone = statusTone(status)
+  if (tone === 'ok') return 'st-dot st-dot-ok'
+  if (tone === 'warn') return 'st-dot st-dot-warn'
+  if (tone === 'danger') return 'st-dot st-dot-danger'
+  return 'st-dot'
 }
 
 function jsonText(value: unknown): string {
@@ -287,6 +289,14 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
     }
   }
 
+  const closeRunDetail = () => {
+    detailAbortRef.current?.abort()
+    detailAbortRef.current = null
+    setDetailLoading(false)
+    setSelectedRunId('')
+    setSelectedRun(null)
+  }
+
   const replayRun = async (runId: string) => {
     setActionRunId(runId)
     setNotice('')
@@ -338,6 +348,20 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
     return Math.max(1, ...summary.token_usage_over_time.map((item) => Number(item.tokens || 0)))
   }, [summary.token_usage_over_time])
 
+  const durationTrendMax = useMemo(() => {
+    return Math.max(1, ...summary.duration_trend.map((item) => Number(item.average_duration_ms || 0)))
+  }, [summary.duration_trend])
+
+  const storageBytes = metricNumber(summary.storage_metrics, 'total_bytes')
+  const droppedEvents = metricNumber(summary.runtime_metrics, 'dropped_events')
+  const successRatePercent = Math.round((summary.success_rate || 0) * 100)
+
+  const viewCountLabel = view === 'runs'
+    ? `${formatNumber(runs.length)} run${runs.length === 1 ? '' : 's'}`
+    : view === 'errors'
+      ? `${formatNumber(errors.length)} error${errors.length === 1 ? '' : 's'}`
+      : null
+
   return (
     <div className="space-y-4">
       {confirmDelete && (
@@ -353,158 +377,246 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
           }}
         />
       )}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-neutral-200">Runtime traces, token usage, local errors, and replay diagnosis.</p>
-          {summary.storage_path && (
-            <p className="mt-1 truncate text-[11px] text-neutral-600">{summary.storage_path}</p>
-          )}
+
+      <SettingsCard
+        title="Overview"
+        action={
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void refreshAll()}
+              disabled={loading || deletingData}
+              className="st-btn st-btn-ghost st-btn-sm"
+            >
+              <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              disabled={loading || deletingData}
+              className="st-btn st-btn-danger st-btn-sm"
+            >
+              <Trash2 size={13} />
+              Delete Data
+            </button>
+          </div>
+        }
+      >
+        <div className="st-obs-stat-grid">
+          <div className="st-obs-stat">
+            <p className="st-hint">Total runs</p>
+            <p className="mt-1 text-lg font-semibold" style={{ color: 'var(--st-text)' }}>
+              {formatNumber(summary.total_runs)}
+            </p>
+            <p className="mt-0.5 text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+              {successRatePercent}% success
+              {summary.failed_runs > 0 && (
+                <span style={{ color: 'var(--st-warn)' }}> · {formatNumber(summary.failed_runs)} failed</span>
+              )}
+            </p>
+          </div>
+
+          <div className="st-obs-stat">
+            <p className="st-hint">Total tokens</p>
+            <p className="mt-1 text-lg font-semibold" style={{ color: 'var(--st-text)' }}>
+              {formatNumber(summary.total_tokens)}
+            </p>
+            <p className="mt-0.5 text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+              {formatCost(summary.estimated_cost_usd)} est.
+            </p>
+          </div>
+
+          <div className="st-obs-stat">
+            <p className="st-hint">Avg duration</p>
+            <p className="mt-1 text-lg font-semibold" style={{ color: 'var(--st-text)' }}>
+              {formatDuration(summary.average_duration_ms)}
+            </p>
+            <p className="mt-0.5 text-[11px]" style={{ color: 'var(--st-text-muted)' }}>
+              per run
+            </p>
+          </div>
+
+          <div className="st-obs-stat">
+            <p className="st-hint">Tool errors</p>
+            <p
+              className="mt-1 text-lg font-semibold"
+              style={{ color: summary.tool_error_count > 0 ? 'var(--st-warn)' : 'var(--st-text)' }}
+            >
+              {formatNumber(summary.tool_error_count)}
+            </p>
+            <p
+              className="mt-0.5 text-[11px]"
+              style={{ color: droppedEvents > 0 ? 'var(--st-warn)' : 'var(--st-text-muted)' }}
+            >
+              {droppedEvents > 0 ? `${formatNumber(droppedEvents)} dropped` : 'across runs'}
+            </p>
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setConfirmDelete(true)}
-            disabled={loading || deletingData}
-            className="st-btn st-btn-danger"
-          >
-            <Trash2 size={13} />
-            Delete Data
-          </button>
-          <button
-            type="button"
-            onClick={() => void refreshAll()}
-            disabled={loading || deletingData}
-            className="st-btn st-btn-ghost"
-          >
-            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
-            Refresh
-          </button>
-        </div>
-      </div>
+
+        <details className="st-obs-disclosure st-divider-t">
+          <summary className="flex items-center justify-between gap-3 px-4 py-2.5 text-xs font-medium transition-colors hover:bg-[var(--st-surface-hover)]">
+            <span style={{ color: 'var(--st-text)' }}>Trends &amp; breakdown</span>
+            <span className="flex items-center gap-2 st-hint">
+              <span>{formatBytes(storageBytes)} stored</span>
+              <ChevronDown size={14} className="st-obs-disclosure-chevron" aria-hidden="true" />
+            </span>
+          </summary>
+
+          <div className="st-divider-t space-y-4 p-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <MiniChart
+                title="Token usage"
+                items={summary.token_usage_over_time.map((item) => ({
+                  label: item.day.slice(5),
+                  value: Number(item.tokens || 0),
+                  caption: `${formatNumber(item.runs)} runs`,
+                }))}
+                max={trendMax}
+              />
+              <MiniChart
+                title="Duration"
+                items={summary.duration_trend.map((item) => ({
+                  label: item.day.slice(5),
+                  value: Number(item.average_duration_ms || 0),
+                  caption: formatDuration(Number(item.average_duration_ms || 0)),
+                }))}
+                max={durationTrendMax}
+              />
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <RankList
+                  title="Model usage"
+                  items={summary.model_usage.map((item) => ({
+                    label: `${item.provider}/${item.model}`,
+                    value: item.runs,
+                    caption: `${formatNumber(item.tokens)} tokens`,
+                  }))}
+                />
+              </div>
+              <RankList
+                title="Top error reasons"
+                items={summary.top_error_reasons.map((item) => ({ label: item.reason, value: item.count }))}
+              />
+              <RankList
+                title="Failing tools"
+                items={summary.top_failing_tools.map((item) => ({ label: item.tool_name || 'unknown', value: item.count }))}
+              />
+            </div>
+
+            <div className="st-divider-t flex flex-wrap items-center justify-between gap-2 pt-3 text-[11px]" style={{ color: 'var(--st-text-faint)' }}>
+              <span className="min-w-0 truncate" title={summary.storage_path || undefined}>
+                {summary.storage_path || 'Storage path unavailable'}
+              </span>
+              <span className="shrink-0">
+                {formatNumber(summary.top_error_reasons.length)} error pattern{summary.top_error_reasons.length === 1 ? '' : 's'}
+                {' · '}
+                {formatNumber(droppedEvents)} dropped event{droppedEvents === 1 ? '' : 's'}
+              </span>
+            </div>
+          </div>
+        </details>
+      </SettingsCard>
 
       {error && (
-        <div className="rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200">
-          {error}
+        <div role="alert">
+          <Note tone="danger">{error}</Note>
         </div>
       )}
-      {notice && (
-        <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-200">
-          {notice}
+      {notice && <Note tone="info">{notice}</Note>}
+
+      <div className="space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="st-segment" role="group" aria-label="Activity views">
+            {(['runs', 'errors', 'backend', 'report'] as ViewMode[]).map((item) => (
+              <button
+                key={item}
+                type="button"
+                aria-pressed={view === item}
+                onClick={() => setView(item)}
+                className="st-segment-item"
+              >
+                {item === 'runs' ? 'Runs' : item === 'errors' ? 'Errors' : item === 'backend' ? 'Backend log' : 'Support report'}
+              </button>
+            ))}
+          </div>
+          {viewCountLabel && (
+            <span className="st-hint">{viewCountLabel}</span>
+          )}
         </div>
-      )}
 
-      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric icon={Activity} label="Total runs" value={formatNumber(summary.total_runs)} />
-        <Metric icon={Gauge} label="Success rate" value={`${Math.round((summary.success_rate || 0) * 100)}%`} />
-        <Metric icon={AlertTriangle} label="Failed runs" value={formatNumber(summary.failed_runs)} tone={summary.failed_runs ? 'amber' : 'default'} />
-        <Metric icon={Timer} label="Avg duration" value={formatDuration(summary.average_duration_ms)} />
-        <Metric icon={FileText} label="Total tokens" value={formatNumber(summary.total_tokens)} />
-        <Metric icon={Coins} label="Estimated cost" value={formatCost(summary.estimated_cost_usd)} />
-        <Metric icon={Wrench} label="Tool errors" value={formatNumber(summary.tool_error_count)} tone={summary.tool_error_count ? 'amber' : 'default'} />
-        <Metric icon={Bug} label="Error patterns" value={formatNumber(summary.top_error_reasons.length)} />
-        <Metric icon={Archive} label="Storage used" value={formatBytes(metricNumber(summary.storage_metrics, 'total_bytes'))} />
-        <Metric icon={AlertTriangle} label="Dropped events" value={formatNumber(metricNumber(summary.runtime_metrics, 'dropped_events'))} tone={metricNumber(summary.runtime_metrics, 'dropped_events') ? 'amber' : 'default'} />
-      </div>
-
-      <div className="grid gap-3 xl:grid-cols-5">
-        <MiniChart
-          title="Token usage"
-          items={summary.token_usage_over_time.map((item) => ({
-            label: item.day.slice(5),
-            value: Number(item.tokens || 0),
-            caption: `${formatNumber(item.runs)} runs`,
-          }))}
-          max={trendMax}
-        />
-        <MiniChart
-          title="Duration"
-          items={summary.duration_trend.map((item) => ({
-            label: item.day.slice(5),
-            value: Number(item.average_duration_ms || 0),
-            caption: formatDuration(Number(item.average_duration_ms || 0)),
-          }))}
-          max={Math.max(1, ...summary.duration_trend.map((item) => Number(item.average_duration_ms || 0)))}
-        />
-        <RankList title="Top error reasons" items={summary.top_error_reasons.map((item) => ({ label: item.reason, value: item.count }))} />
-        <RankList title="Failing tools" items={summary.top_failing_tools.map((item) => ({ label: item.tool_name || 'unknown', value: item.count }))} />
-        <RankList title="Model usage" items={summary.model_usage.map((item) => ({ label: `${item.provider}/${item.model}`, value: item.runs, caption: `${formatNumber(item.tokens)} tokens` }))} />
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        {(['runs', 'errors', 'backend', 'report'] as ViewMode[]).map((item) => (
-          <button
-            key={item}
-            type="button"
-            onClick={() => setView(item)}
-            className={`st-btn ${
-              view === item
-                ? 'st-btn-primary'
-                : 'st-btn-secondary'
-            }`}
-          >
-            {item === 'runs' ? 'Runs' : item === 'errors' ? 'Errors' : item === 'backend' ? 'Backend log' : 'Support report'}
-          </button>
-        ))}
-        <div className="relative ml-auto min-w-[220px]">
-          <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500" />
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search traces"
-            aria-label="Search traces"
-            className="st-input st-search"
-          />
-        </div>
-        {view === 'runs' && (
-          <>
-            <Dropdown
-              ariaLabel="Filter by status"
-              className="w-36"
-              size="sm"
-              value={statusFilter}
-              onChange={setStatusFilter}
-              options={[
-                { value: '', label: 'All status' },
-                { value: 'complete', label: 'Complete' },
-                { value: 'paused', label: 'Paused' },
-                { value: 'error', label: 'Error' },
-                { value: 'running', label: 'Running' },
-              ]}
-            />
-            <Dropdown
-              ariaLabel="Filter by source"
-              className="w-36"
-              size="sm"
-              value={sourceFilter}
-              onChange={setSourceFilter}
-              options={[
-                { value: '', label: 'All sources' },
-                { value: 'desktop', label: 'Desktop' },
-                { value: 'telegram', label: 'Telegram' },
-                { value: 'scheduled', label: 'Scheduled' },
-                { value: 'replay', label: 'Replay' },
-              ]}
-            />
-
-          </>
+        {(view === 'runs' || view === 'errors') && (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[180px] flex-1">
+              <Search
+                size={13}
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2"
+                style={{ color: 'var(--st-text-faint)' }}
+              />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search traces"
+                aria-label="Search traces"
+                className="st-input st-search"
+              />
+            </div>
+            {view === 'runs' && (
+              <>
+                <Dropdown
+                  ariaLabel="Filter by status"
+                  className="w-32"
+                  size="sm"
+                  value={statusFilter}
+                  onChange={setStatusFilter}
+                  options={[
+                    { value: '', label: 'All status' },
+                    { value: 'complete', label: 'Complete' },
+                    { value: 'paused', label: 'Paused' },
+                    { value: 'error', label: 'Error' },
+                    { value: 'running', label: 'Running' },
+                  ]}
+                />
+                <Dropdown
+                  ariaLabel="Filter by source"
+                  className="w-32"
+                  size="sm"
+                  value={sourceFilter}
+                  onChange={setSourceFilter}
+                  options={[
+                    { value: '', label: 'All sources' },
+                    { value: 'desktop', label: 'Desktop' },
+                    { value: 'telegram', label: 'Telegram' },
+                    { value: 'scheduled', label: 'Scheduled' },
+                    { value: 'replay', label: 'Replay' },
+                  ]}
+                />
+              </>
+            )}
+          </div>
         )}
       </div>
 
       {view === 'runs' && (
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
+        <div className="space-y-3">
           <RunsTable
             runs={runs}
             selectedRunId={selectedRunId}
             loading={loading}
             onSelect={(runId) => void selectRun(runId)}
           />
-          <RunDetail
-            run={selectedRun}
-            loading={detailLoading}
-            actionRunId={actionRunId}
-            onReplay={(runId) => void replayRun(runId)}
-            onExport={(runId) => void exportBundle(runId)}
-          />
+          {(selectedRunId || detailLoading) && (
+            <RunDetail
+              run={selectedRun}
+              loading={detailLoading}
+              actionRunId={actionRunId}
+              onReplay={(runId) => void replayRun(runId)}
+              onExport={(runId) => void exportBundle(runId)}
+              onClose={closeRunDetail}
+            />
+          )}
         </div>
       )}
 
@@ -523,32 +635,6 @@ export function ObservabilityPanel({ refreshKey = 0 }: { refreshKey?: number }) 
   )
 }
 
-function Metric({
-  icon: Icon,
-  label,
-  value,
-  tone = 'default',
-}: {
-  icon: LucideIcon
-  label: string
-  value: string
-  tone?: 'default' | 'amber'
-}) {
-  return (
-    <div className={`rounded-lg border px-3 py-2 ${
-      tone === 'amber'
-        ? 'border-amber-400/20 bg-amber-400/10'
-        : 'border-white/[0.07] bg-black/10'
-    }`}>
-      <div className="flex items-center gap-2">
-        <Icon size={13} className="text-neutral-500" />
-        <p className="section-label">{label}</p>
-      </div>
-      <p className="mt-1 text-lg font-semibold text-neutral-100">{value}</p>
-    </div>
-  )
-}
-
 function MiniChart({
   title,
   items,
@@ -559,22 +645,31 @@ function MiniChart({
   max: number
 }) {
   return (
-    <div className="panel-muted rounded-xl p-3">
-      <p className="section-label mb-3">{title}</p>
+    <div
+      className="rounded-lg border p-3"
+      style={{ borderColor: 'var(--st-border)', background: 'var(--st-surface-sunken)' }}
+    >
+      <p className="st-hint mb-2.5 font-medium">{title}</p>
       {items.length === 0 ? (
-        <p className="py-6 text-center text-xs text-neutral-600">No data yet.</p>
+        <p className="py-5 text-center text-xs" style={{ color: 'var(--st-text-faint)' }}>No data yet.</p>
       ) : (
-        <div className="flex h-28 items-end gap-1.5">
+        <div className="flex h-24 items-end gap-1.5">
           {items.map((item) => (
             <div key={item.label} className="flex min-w-0 flex-1 flex-col items-center gap-1">
-              <div className="flex h-20 w-full items-end rounded bg-black/10">
+              <div
+                className="flex h-16 w-full items-end overflow-hidden rounded"
+                style={{ background: 'var(--st-surface-muted)' }}
+              >
                 <div
-                  className="w-full rounded bg-accent/70"
-                  style={{ height: `${Math.max(4, (item.value / max) * 100)}%` }}
+                  className="w-full rounded"
+                  style={{
+                    height: `${Math.max(6, (item.value / max) * 100)}%`,
+                    background: 'var(--st-accent)',
+                  }}
                   title={`${item.label}: ${formatNumber(item.value)} ${item.caption || ''}`}
                 />
               </div>
-              <span className="truncate text-[10px] text-neutral-600">{item.label}</span>
+              <span className="truncate text-[10px]" style={{ color: 'var(--st-text-faint)' }}>{item.label}</span>
             </div>
           ))}
         </div>
@@ -592,20 +687,34 @@ function RankList({
 }) {
   const max = Math.max(1, ...items.map((item) => item.value))
   return (
-    <div className="panel-muted rounded-xl p-3">
-      <p className="section-label mb-3">{title}</p>
+    <div
+      className="rounded-lg border p-3"
+      style={{ borderColor: 'var(--st-border)', background: 'var(--st-surface-sunken)' }}
+    >
+      <p className="st-hint mb-2.5 font-medium">{title}</p>
       {items.length === 0 ? (
-        <p className="py-6 text-center text-xs text-neutral-600">No data yet.</p>
+        <p className="py-4 text-center text-xs" style={{ color: 'var(--st-text-faint)' }}>No data yet.</p>
       ) : (
         <div className="space-y-2">
           {items.map((item) => (
             <div key={item.label} className="space-y-1">
               <div className="flex items-center justify-between gap-2 text-xs">
-                <span className="min-w-0 truncate text-neutral-300">{item.label}</span>
-                <span className="shrink-0 text-neutral-500">{item.caption || formatNumber(item.value)}</span>
+                <span className="min-w-0 truncate" style={{ color: 'var(--st-text)' }}>{item.label}</span>
+                <span className="shrink-0 tabular-nums" style={{ color: 'var(--st-text-muted)' }}>
+                  {item.caption || formatNumber(item.value)}
+                </span>
               </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-black/15">
-                <div className="h-full rounded-full bg-accent/70" style={{ width: `${Math.max(4, (item.value / max) * 100)}%` }} />
+              <div
+                className="h-1.5 overflow-hidden rounded-full"
+                style={{ background: 'var(--st-surface-muted)' }}
+              >
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${Math.max(4, (item.value / max) * 100)}%`,
+                    background: 'var(--st-accent)',
+                  }}
+                />
               </div>
             </div>
           ))}
@@ -627,7 +736,7 @@ function RunsTable({
   onSelect: (runId: string) => void
 }) {
   const [scrollTop, setScrollTop] = useState(0)
-  const viewportHeight = 520
+  const viewportHeight = 420
   const virtualized = runs.length >= VIRTUALIZE_OBSERVABILITY_THRESHOLD
   const startIndex = virtualized
     ? Math.max(0, Math.floor(scrollTop / RUN_ROW_HEIGHT_PX) - VIRTUAL_OVERSCAN)
@@ -642,44 +751,67 @@ function RunsTable({
     : 0
 
   if (runs.length === 0 && !loading) {
-    return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">No traces recorded yet.</div>
+    return (
+      <div className="st-card px-4 py-10 text-center">
+        <p className="st-desc mx-auto">No traces recorded yet.</p>
+      </div>
+    )
   }
+
   return (
-    <div className="overflow-hidden rounded-xl border border-white/[0.07]">
-      <div className="grid grid-cols-[84px_88px_1fr_84px_70px] border-b border-white/[0.07] bg-black/10 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-600">
-        <span>Status</span>
-        <span>Source</span>
-        <span>Message</span>
-        <span>Tokens</span>
-        <span>Tools</span>
+    <div className="st-card">
+      <div className="st-card-head flex items-center justify-between gap-3">
+        <h4 className="st-label">Recent runs</h4>
+        {!selectedRunId && runs.length > 0 && (
+          <span className="st-hint">Select a run to inspect</span>
+        )}
       </div>
       <div
-        className="max-h-[520px] overflow-auto"
-        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        className="max-h-[420px] overflow-auto"
+        onScroll={virtualized ? (event) => setScrollTop(event.currentTarget.scrollTop) : undefined}
       >
         {topPadding > 0 && <div aria-hidden style={{ height: topPadding }} />}
         {visibleRuns.map((run) => (
           <button
             key={run.run_id}
             type="button"
+            aria-selected={selectedRunId === run.run_id}
             onClick={() => onSelect(run.run_id)}
-            className={`grid w-full grid-cols-[84px_88px_1fr_84px_70px] gap-2 border-b border-white/[0.06] px-3 py-2 text-left text-xs transition-colors hover:bg-white/[0.03] ${
-              selectedRunId === run.run_id ? 'bg-accent/10' : ''
-            }`}
+            className="st-obs-row"
           >
-            <span className={`status-pill w-fit ${statusClass(run.status)}`}>{run.status || '-'}</span>
-            <span className="text-neutral-500">{run.source || '-'}</span>
-            <span className="min-w-0">
-              <span className="block truncate text-neutral-200">{run.user_message || '(empty message)'}</span>
-              <span className="block truncate text-[11px] text-neutral-600">
-                {shortId(run.run_id)} · {run.provider || '-'} / {run.model || '-'} · {formatDuration(run.duration_ms)}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className={statusDotClass(run.status)} aria-hidden="true" />
+                <span className="st-label truncate">{run.user_message || '(empty message)'}</span>
+              </div>
+              <div
+                className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-3.5 text-[11px]"
+                style={{ color: 'var(--st-text-muted)' }}
+              >
+                <span>{run.status || '-'}</span>
+                <span>·</span>
+                <span>{run.source || '-'}</span>
+                <span>·</span>
+                <span className="truncate">{run.provider || '-'} / {run.model || '-'}</span>
+                <span>·</span>
+                <span className="font-mono" style={{ color: 'var(--st-text-faint)' }}>{shortId(run.run_id)}</span>
+                {run.failure_reason && (
+                  <>
+                    <span>·</span>
+                    <span className="truncate" style={{ color: 'var(--st-warn)' }}>{run.failure_reason}</span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-3 text-[11px] st-hint">
+              <span>{formatDuration(run.duration_ms)}</span>
+              <span>{formatNumber(run.total_tokens)} tok</span>
+              <span style={run.tool_error_count ? { color: 'var(--st-warn)' } : undefined}>
+                {run.tool_count}{run.tool_error_count ? `/${run.tool_error_count}` : ''} tools
               </span>
-              {run.failure_reason && <span className="block truncate text-[11px] text-amber-300">{run.failure_reason}</span>}
-            </span>
-            <span className="text-neutral-500">{formatNumber(run.total_tokens)}</span>
-            <span className={run.tool_error_count ? 'text-amber-300' : 'text-neutral-500'}>
-              {run.tool_count}{run.tool_error_count ? `/${run.tool_error_count}` : ''}
-            </span>
+              <ChevronRight size={14} aria-hidden="true" />
+            </div>
           </button>
         ))}
         {bottomPadding > 0 && <div aria-hidden style={{ height: bottomPadding }} />}
@@ -694,114 +826,164 @@ function RunDetail({
   actionRunId,
   onReplay,
   onExport,
+  onClose,
 }: {
   run: ObservabilityRunDetail | null
   loading: boolean
   actionRunId: string
   onReplay: (runId: string) => void
   onExport: (runId: string) => void
+  onClose: () => void
 }) {
-  if (loading) {
-    return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">Loading run detail...</div>
+  if (loading && !run) {
+    return (
+      <div className="st-card px-4 py-8 text-center">
+        <p className="st-desc mx-auto">Loading run detail…</p>
+      </div>
+    )
   }
-  if (!run) {
-    return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">Select a run to inspect the timeline.</div>
-  }
+  if (!run) return null
+
   const toolEvents = run.events.filter((event) => event.event_type === 'tool_call_finished')
+
   return (
-    <div className="panel-muted max-h-[620px] overflow-auto rounded-xl p-3">
-      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+    <section aria-label="Run detail" className="st-card">
+      <header className="st-card-head flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`status-pill ${statusClass(run.status)}`}>{run.status || '-'}</span>
-            <span className="font-mono text-[11px] text-neutral-500">{shortId(run.run_id)}</span>
-            <span className="text-[11px] text-neutral-600">{formatTime(run.started_at)}</span>
+            <Badge tone={statusTone(run.status)}>{run.status || '-'}</Badge>
+            <span className="font-mono text-[11px]" style={{ color: 'var(--st-text-muted)' }}>{shortId(run.run_id)}</span>
+            <span className="text-[11px]" style={{ color: 'var(--st-text-faint)' }}>{formatTime(run.started_at)}</span>
           </div>
-          <p className="mt-1 truncate text-xs text-neutral-300">{run.provider || '-'} / {run.model || '-'}</p>
+          <p className="st-desc mt-1 truncate">{run.provider || '-'} / {run.model || '-'}</p>
         </div>
-        <div className="flex gap-2">
-          <button type="button" onClick={() => onReplay(run.run_id)} disabled={!!actionRunId} className="st-btn st-btn-ghost">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onReplay(run.run_id)}
+            disabled={!!actionRunId}
+            className="st-btn st-btn-ghost st-btn-sm"
+          >
             <Play size={13} className={actionRunId === run.run_id ? 'animate-pulse' : ''} />
             Replay
           </button>
-          <button type="button" onClick={() => onExport(run.run_id)} disabled={!!actionRunId} className="st-btn st-btn-ghost">
+          <button
+            type="button"
+            onClick={() => onExport(run.run_id)}
+            disabled={!!actionRunId}
+            className="st-btn st-btn-ghost st-btn-sm"
+          >
             <Archive size={13} />
             Bundle
           </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close run detail"
+            title="Close run detail"
+            className="st-btn st-btn-ghost st-btn-icon st-btn-sm"
+          >
+            <X size={14} />
+          </button>
         </div>
-      </div>
+      </header>
 
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="grid grid-cols-1 divide-y sm:grid-cols-3 sm:divide-x sm:divide-y-0" style={{ borderColor: 'var(--st-border)' }}>
         <CompactStat label="Duration" value={formatDuration(run.duration_ms)} />
         <CompactStat label="Tokens" value={`${formatNumber(run.total_tokens)} · ${run.usage_source || 'unknown'}`} />
         <CompactStat label="Cost" value={`${formatCost(run.estimated_cost_usd)} · ${run.cost_source || 'unknown'}`} />
       </div>
 
-      <div className="mt-3 grid gap-3 lg:grid-cols-2">
-        <TextBlock title="User" value={run.user_message} />
-        <TextBlock title="Assistant" value={run.final_output} />
-      </div>
-
-      <div className="mt-3">
-        <p className="section-label mb-2">Timeline</p>
-        <div className="space-y-2">
-          {run.events.map((event) => (
-            <div key={event.event_id} className="rounded-lg border border-white/[0.07] bg-black/10 px-3 py-2">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="font-medium text-neutral-200">{event.event_type}</span>
-                {event.tool_name && <span className="status-pill border-white/[0.08] bg-white/[0.03] text-neutral-400">{event.tool_name}</span>}
-                {event.duration_ms ? <span className="text-neutral-500">{formatDuration(event.duration_ms)}</span> : null}
-                {event.error_code && <span className="text-amber-300">{event.error_code}</span>}
-                <span className="ml-auto text-[11px] text-neutral-600">{formatTime(event.created_at)}</span>
-              </div>
-              {event.error_message && <p className="mt-1 break-words text-[11px] text-amber-300">{event.error_message}</p>}
-            </div>
-          ))}
+      <div className="st-divider-t space-y-4 p-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <TextBlock title="User" value={run.user_message} />
+          <TextBlock title="Assistant" value={run.final_output} />
         </div>
-      </div>
 
-      {toolEvents.length > 0 && (
-        <div className="mt-3">
-          <p className="section-label mb-2">Tool IO</p>
-          <div className="space-y-2">
-            {toolEvents.map((event) => (
-              <details key={event.event_id} className="rounded-lg border border-white/[0.07] bg-black/10 px-3 py-2">
-                <summary className="cursor-pointer text-xs text-neutral-200">
-                  {event.tool_name || 'tool'} · {event.status || '-'} · {formatDuration(event.duration_ms)}
-                </summary>
-                <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-neutral-400">
-                  {jsonText({ input: event.input, output: event.output })}
-                </pre>
-              </details>
+        <div>
+          <p className="st-hint mb-2 font-medium">Timeline</p>
+          <div className="st-obs-timeline">
+            {run.events.map((event) => (
+              <div
+                key={event.event_id}
+                className="st-obs-timeline-item"
+                data-tone={event.error_code || event.error_message ? 'error' : undefined}
+              >
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="font-medium" style={{ color: 'var(--st-text)' }}>{event.event_type}</span>
+                  {event.tool_name && <Badge>{event.tool_name}</Badge>}
+                  {event.duration_ms ? <span className="st-hint">{formatDuration(event.duration_ms)}</span> : null}
+                  {event.error_code && (
+                    <span className="text-[11px]" style={{ color: 'var(--st-warn)' }}>{event.error_code}</span>
+                  )}
+                  <span className="ml-auto text-[11px]" style={{ color: 'var(--st-text-faint)' }}>
+                    {formatTime(event.created_at)}
+                  </span>
+                </div>
+                {event.error_message && (
+                  <p className="mt-1 break-words text-[11px]" style={{ color: 'var(--st-warn)' }}>{event.error_message}</p>
+                )}
+              </div>
             ))}
           </div>
         </div>
-      )}
 
-      {run.errors.length > 0 && (
-        <div className="mt-3">
-          <p className="section-label mb-2">Errors</p>
-          <ErrorsList errors={run.errors} />
-        </div>
-      )}
-    </div>
+        {toolEvents.length > 0 && (
+          <div>
+            <p className="st-hint mb-2 font-medium">Tool IO</p>
+            <div className="overflow-hidden rounded-lg border" style={{ borderColor: 'var(--st-border)' }}>
+              {toolEvents.map((event, index) => (
+                <details
+                  key={event.event_id}
+                  className={`st-obs-disclosure ${index > 0 ? 'st-divider-t' : ''}`}
+                >
+                  <summary className="flex items-center justify-between gap-2 px-3 py-2 text-xs hover:bg-[var(--st-surface-hover)]">
+                    <span style={{ color: 'var(--st-text)' }}>
+                      {event.tool_name || 'tool'} · {event.status || '-'} · {formatDuration(event.duration_ms)}
+                    </span>
+                    <ChevronDown size={13} className="st-obs-disclosure-chevron shrink-0" style={{ color: 'var(--st-text-faint)' }} aria-hidden="true" />
+                  </summary>
+                  <div className="st-divider-t p-3">
+                    <pre className="st-code max-h-56 overflow-auto whitespace-pre-wrap break-words">
+                      {jsonText({ input: event.input, output: event.output })}
+                    </pre>
+                  </div>
+                </details>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {run.errors.length > 0 && (
+          <div>
+            <p className="st-hint mb-2 font-medium">Errors</p>
+            <ErrorsList errors={run.errors} />
+          </div>
+        )}
+      </div>
+    </section>
   )
 }
 
 function CompactStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-white/[0.07] bg-black/10 px-2.5 py-2">
-      <p className="section-label">{label}</p>
-      <p className="mt-1 truncate text-xs font-medium text-neutral-200">{value}</p>
+    <div className="px-4 py-2.5" style={{ borderColor: 'var(--st-border)' }}>
+      <p className="st-hint">{label}</p>
+      <p className="mt-0.5 truncate text-xs font-medium tabular-nums" style={{ color: 'var(--st-text)' }}>{value}</p>
     </div>
   )
 }
 
 function TextBlock({ title, value }: { title: string; value: string }) {
   return (
-    <div className="rounded-lg border border-white/[0.07] bg-black/10 px-3 py-2">
-      <p className="section-label mb-1">{title}</p>
-      <p className="max-h-32 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-300">{value || '-'}</p>
+    <div
+      className="rounded-lg border p-3"
+      style={{ borderColor: 'var(--st-border)', background: 'var(--st-surface-sunken)' }}
+    >
+      <p className="st-hint mb-1 font-medium">{title}</p>
+      <p className="max-h-32 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed" style={{ color: 'var(--st-text)' }}>
+        {value || '-'}
+      </p>
     </div>
   )
 }
@@ -814,7 +996,7 @@ function ErrorsList({
   loading?: boolean
 }) {
   const [scrollTop, setScrollTop] = useState(0)
-  const viewportHeight = 520
+  const viewportHeight = 420
   const virtualized = errors.length >= VIRTUALIZE_OBSERVABILITY_THRESHOLD
   const startIndex = virtualized
     ? Math.max(0, Math.floor(scrollTop / ERROR_ROW_HEIGHT_PX) - VIRTUAL_OVERSCAN)
@@ -829,31 +1011,43 @@ function ErrorsList({
     : 0
 
   if (errors.length === 0 && !loading) {
-    return <div className="panel-muted rounded-xl px-4 py-10 text-center text-sm text-neutral-500">No structured errors recorded.</div>
+    return (
+      <div className="st-card px-4 py-10 text-center">
+        <p className="st-desc mx-auto">No structured errors recorded.</p>
+      </div>
+    )
   }
+
   return (
     <div
-      className={virtualized ? 'max-h-[520px] overflow-auto' : 'space-y-2'}
+      className={`st-card ${virtualized ? 'max-h-[420px] overflow-auto' : ''}`}
       onScroll={virtualized ? (event) => setScrollTop(event.currentTarget.scrollTop) : undefined}
     >
       {topPadding > 0 && <div aria-hidden style={{ height: topPadding }} />}
-      <div className="space-y-2">
-      {visibleErrors.map((item) => (
-        <details key={item.error_id} className="rounded-xl border border-red-400/15 bg-red-400/5 px-3 py-2">
-          <summary className="cursor-pointer">
-            <div className="inline-flex max-w-full flex-wrap items-center gap-2 text-xs">
-              <span className="status-pill border-red-400/20 bg-red-400/10 text-red-200">{item.level || 'error'}</span>
-              <span className="font-medium text-neutral-200">{item.error_type || item.logger_name || 'error'}</span>
-              <span className="truncate text-neutral-500">{item.message}</span>
-              <span className="text-[11px] text-neutral-600">{formatTime(item.created_at)}</span>
-            </div>
+      {visibleErrors.map((item, index) => (
+        <details
+          key={item.error_id}
+          className={`st-obs-disclosure ${index > 0 ? 'st-divider-t' : ''}`}
+        >
+          <summary className="flex items-center gap-2 px-3.5 py-2.5 text-xs hover:bg-[var(--st-surface-hover)]">
+            <Badge tone="danger">{item.level || 'error'}</Badge>
+            <span className="shrink-0 font-medium" style={{ color: 'var(--st-text)' }}>
+              {item.error_type || item.logger_name || 'error'}
+            </span>
+            <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--st-text-muted)' }}>
+              {item.message}
+            </span>
+            <span className="shrink-0 text-[11px]" style={{ color: 'var(--st-text-faint)' }}>
+              {formatTime(item.created_at)}
+            </span>
           </summary>
-          <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-neutral-400">
-            {item.traceback || jsonText(item.metadata)}
-          </pre>
+          <div className="st-divider-t p-3">
+            <pre className="st-code max-h-72 overflow-auto whitespace-pre-wrap break-words">
+              {item.traceback || jsonText(item.metadata)}
+            </pre>
+          </div>
         </details>
       ))}
-      </div>
       {bottomPadding > 0 && <div aria-hidden style={{ height: bottomPadding }} />}
     </div>
   )
@@ -900,15 +1094,22 @@ function BackendLogView({
     return <div className="st-card"><p className="st-desc p-10 text-center">backend.log has not been written yet.</p></div>
   }
   return (
-    <div className="panel-muted rounded-xl p-3">
-      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-neutral-500">
-        <Clock3 size={13} />
-        <span className="truncate">{log.path}</span>
-        {log.truncated && <span className="text-amber-300">tail truncated</span>}
+    <div className="st-card">
+      <div className="st-card-head flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex min-w-0 items-center gap-2" style={{ color: 'var(--st-text-muted)' }}>
+          <Clock3 size={13} className="shrink-0" aria-hidden="true" />
+          <span className="truncate font-mono text-[11px]">{log.path}</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="st-hint">{formatNumber(log.lines.length)} line{log.lines.length === 1 ? '' : 's'}</span>
+          {log.truncated && <Badge tone="warn">Tail truncated</Badge>}
+        </div>
       </div>
-      <pre className="max-h-[560px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/[0.07] bg-black/20 p-3 text-[11px] leading-relaxed text-neutral-400">
-        {log.lines.join('\n') || '(empty)'}
-      </pre>
+      <div className="p-3">
+        <pre className="st-code max-h-[460px] overflow-auto whitespace-pre-wrap break-words">
+          {log.lines.join('\n') || '(empty)'}
+        </pre>
+      </div>
     </div>
   )
 }
