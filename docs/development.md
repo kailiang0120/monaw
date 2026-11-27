@@ -483,6 +483,9 @@ skill loading can otherwise leave a different adapter in the same process.
 Application tests that inspect persisted history must wait for the turn to finish;
 visible streamed answer text does not mean the atomic history commit has completed.
 Skill-import workflows enter Settings → Tools → Skills before opening Import.
+Restart workflows retain the Electron child-process handle and verify its clean
+exit plus backend-port closure; a disposed inspector channel is not a reliable
+source for checking whether the OS process is still running.
 
 ## Connector development
 
