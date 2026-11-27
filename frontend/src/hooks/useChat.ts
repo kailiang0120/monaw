@@ -17,9 +17,6 @@ import type { ChatRun, UploadedAttachment } from '../lib/api/types'
 const IDLE_TIMEOUT_MS = 600_000
 const RUN_STATUSES = new Set(['streaming', 'complete', 'paused', 'error'])
 const TYPEWRITER_INTERVAL_MS = 24
-const TYPEWRITER_CHARS_PER_TICK = 18
-const TYPEWRITER_FAST_BACKLOG_CHARS = 900
-const TYPEWRITER_MAX_CHARS_PER_TICK = 72
 const INITIAL_HISTORY_LIMIT = 5
 const OLDER_HISTORY_LIMIT = 30
 const HISTORY_LOAD_TIMEOUT_MS = 10_000
@@ -66,6 +63,7 @@ export interface Message {
   runId?: string
   role: 'user' | 'assistant'
   content: string
+  previewContent?: string
   attachments?: UploadedAttachment[]
   toolCalls?: ToolCall[]
   approvals?: ApprovalNotice[]
@@ -396,6 +394,9 @@ export function useChat(conversationId: string | null) {
         const pending = typewriter.queue
         typewriter.queue = ''
         if (pending) appendAssistantContent(pending)
+        setMessages((prev) => prev.map((m) => m.id === assistantId && m.previewContent
+          ? { ...m, content: m.content || m.previewContent, previewContent: '', contentRevision: (m.contentRevision ?? 0) + 1 }
+          : m))
         if (typewriterCleanupRef.current === cleanupTypewriter) {
           typewriterCleanupRef.current = null
         }
@@ -411,6 +412,7 @@ export function useChat(conversationId: string | null) {
               ? {
                   ...m,
                   content: m.content + content,
+                  previewContent: '',
                   contentRevision: (m.contentRevision ?? 0) + 1,
                 }
               : m
@@ -435,6 +437,8 @@ export function useChat(conversationId: string | null) {
               ? {
                   ...m,
                   content: done.incomplete && done.summary && !m.content ? done.summary : m.content,
+                  previewContent: '',
+                  contentRevision: (m.contentRevision ?? 0) + 1,
                   attachments: done.attachments?.length ? done.attachments : m.attachments,
                   streaming: false,
                   runStatus: normalizeRunStatus(done.status) ?? (done.incomplete ? 'paused' : 'complete'),
@@ -458,18 +462,9 @@ export function useChat(conversationId: string | null) {
           typewriter.timer = null
           return
         }
-        const chunkSize = Math.min(
-          TYPEWRITER_MAX_CHARS_PER_TICK,
-          pending.length > TYPEWRITER_FAST_BACKLOG_CHARS
-            ? TYPEWRITER_CHARS_PER_TICK * 2
-            : TYPEWRITER_CHARS_PER_TICK,
-        )
-        appendAssistantContent(pending.slice(0, chunkSize))
-        typewriter.queue = pending.slice(chunkSize)
-        if (typewriter.queue) {
-          typewriter.timer = setTimeout(flushTypewriter, TYPEWRITER_INTERVAL_MS)
-          return
-        }
+        // Batch rendering without making long replies wait for a typing animation.
+        appendAssistantContent(pending)
+        typewriter.queue = ''
         typewriter.timer = null
       }
 
@@ -479,7 +474,7 @@ export function useChat(conversationId: string | null) {
         // Render tokens live as they stream in; the flush drains the queue and
         // (once `done` is set) finalizes the message.
         if (!typewriter.timer) {
-          typewriter.timer = setTimeout(flushTypewriter, 0)
+          typewriter.timer = setTimeout(flushTypewriter, TYPEWRITER_INTERVAL_MS)
         }
       }
 
@@ -547,6 +542,8 @@ export function useChat(conversationId: string | null) {
         resetIdleTimer()
         updateMsg((m) => ({
           ...m,
+          previewContent: '',
+          contentRevision: (m.contentRevision ?? 0) + 1,
           activityItems: [
             ...(m.activityItems ?? []),
             { id: crypto.randomUUID(), type: 'progress', content: trimmed },
@@ -808,7 +805,7 @@ export function useChat(conversationId: string | null) {
             const index = rest.findIndex((item) => item.id === previousId)
             if (index < 0) return current
             const previous = rest[index]
-            const kept = data.reset_response ? { ...previous, content: '' } : previous
+            const kept = data.reset_response ? { ...previous, content: '', previewContent: '' } : previous
             // A segment with nothing in it yet (two steers read together) is replaced, not kept.
             const empty = !kept.content && !kept.toolCalls?.length && !kept.activityItems?.length && !kept.approvals?.length
             const next: Message = {
@@ -826,6 +823,15 @@ export function useChat(conversationId: string | null) {
         workspaceDir,
         runId,
         follow?.run_id,
+        // Display provisional prose until it is classified as progress or an answer.
+        (data) => {
+          resetIdleTimer()
+          updateMsg((m) => ({
+            ...m,
+            previewContent: data.reset ? '' : (m.previewContent ?? '') + data.content,
+            contentRevision: (m.contentRevision ?? 0) + 1,
+          }))
+        },
       )
 
       abortRef.current = abort

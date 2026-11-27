@@ -33,6 +33,25 @@ function makeMessages(count: number): Message[] {
 }
 
 describe('ChatWindow', () => {
+  it('folds long prompts and replies only in previous turns', async () => {
+    const messages: Message[] = [
+      { id: 'old-user', role: 'user', content: 'Old prompt. '.repeat(200) },
+      { id: 'old-assistant', role: 'assistant', content: 'Old explanation. '.repeat(200) },
+      { id: 'latest-user', role: 'user', content: 'Current prompt. '.repeat(200) },
+      { id: 'latest-assistant', role: 'assistant', content: 'Current answer. '.repeat(200), streaming: true },
+    ]
+    const { container } = render(<ChatWindow messages={messages} />)
+    const folds = container.querySelectorAll('details')
+    expect(folds).toHaveLength(2)
+    expect(folds[0]).not.toHaveAttribute('open')
+    expect(folds[1]).not.toHaveAttribute('open')
+    fireEvent.click(screen.getAllByText('Show full message')[0])
+    await waitFor(() => expect(folds[0]).toHaveAttribute('open'))
+    await waitFor(() => expect(screen.getByText('Show less')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('Show less'))
+    await waitFor(() => expect(folds[0]).not.toHaveAttribute('open'))
+  })
+
   beforeEach(() => {
     Element.prototype.scrollIntoView = vi.fn()
   })

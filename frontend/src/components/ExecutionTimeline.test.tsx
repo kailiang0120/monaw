@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { RunEvent, RunOperation, RunSnapshot } from '../lib/api/runs'
-import { ExecutionTimeline } from './ExecutionTimeline'
+import { ExecutionDetails, ExecutionTimeline } from './ExecutionTimeline'
 
 const runningSnapshot: RunSnapshot = {
   run_id: 'run-ui',
@@ -44,6 +44,24 @@ const runEvent: RunEvent = {
 }
 
 describe('ExecutionTimeline', () => {
+  it('keeps the developer panel compact until requested', () => {
+    const { container, rerender } = render(<ExecutionDetails
+      snapshot={runningSnapshot} operations={[verifiedOperation]} detailMode="developer"
+    />)
+    const disclosure = container.querySelector('details')
+    expect(disclosure).not.toHaveAttribute('open')
+    expect(screen.getByText('Execution details')).toBeInTheDocument()
+    expect(screen.getByText('Running · 1 operation')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Execution details'))
+    expect(disclosure).toHaveAttribute('open')
+    expect(screen.getByText('Technical diagnostics').closest('details')).not.toHaveAttribute('open')
+    fireEvent.click(screen.getByText('Technical diagnostics'))
+    expect(screen.getByText('Technical diagnostics').closest('details')).toHaveAttribute('open')
+    rerender(<ExecutionDetails snapshot={runningSnapshot} operations={[verifiedOperation]} detailMode="detailed" />)
+    expect(screen.queryByText('Technical diagnostics')).not.toBeInTheDocument()
+    expect(screen.getByText('Started')).toBeInTheDocument()
+  })
+
   afterEach(cleanup)
 
   it('shows durable browser uncertainty without offering an external Undo', () => {

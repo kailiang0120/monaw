@@ -668,10 +668,10 @@ export function InputBar({
   return (
     <footer className="bg-[#11100f] px-4 pb-4 pt-2">
       <div className="chat-composer-container mx-auto max-w-3xl">
-        {onWorkspaceChange && <WorkspacePicker key={conversationId || 'new'} value={workspaceDir} isDefault={workspaceIsDefault}
-          disabled={disabled || isStreaming} onChange={onWorkspaceChange} />}
+        {!conversationId && !isStreaming && onWorkspaceChange && <WorkspacePicker value={workspaceDir} isDefault={workspaceIsDefault}
+          disabled={disabled} onChange={onWorkspaceChange} />}
         {/* Unified dock panel */}
-        <div className="panel relative rounded-2xl transition-colors focus-within:border-accent/40">
+        <div className="panel relative rounded-lg transition-colors focus-within:border-accent/40">
           {showSlashCommands && (
             <div className="panel absolute bottom-full left-0 right-0 z-30 mb-2 overflow-hidden rounded-xl p-1">
               {slashCommandMatches.map((item) => (

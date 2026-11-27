@@ -9,6 +9,7 @@ type ApprovalMode = AgentSettings['permissions']['mode']
 export type AgentStatus = 'starting' | 'ready' | 'working'
 
 interface Props {
+  startup?: boolean
   sidebarCollapsed: boolean
   onToggleSidebar: () => void
   agentName?: string
@@ -76,6 +77,7 @@ function WindowControls() {
 }
 
 export function AppBar({
+  startup = false,
   sidebarCollapsed,
   onToggleSidebar,
   agentName,
@@ -122,9 +124,23 @@ export function AppBar({
     }
   }
 
+  if (startup) {
+    return (
+      <header className={`app-bar drag-region ${platformClass()}`}>
+        <div className="app-bar-cap">
+          <div className="app-bar-wordmark">
+            <img src={appLogo} alt="" className="h-6 w-6 shrink-0 object-contain" draggable={false} />
+            <span>{resolveAgentName(agentName)}</span>
+          </div>
+        </div>
+        <div className="app-bar-actions col-start-3"><WindowControls /></div>
+      </header>
+    )
+  }
+
   return (
     <header
-      className={`app-bar drag-region ${platformClass()} ${sidebarCollapsed ? 'app-bar--collapsed' : ''}`}
+      className={`app-bar chat-interface drag-region ${platformClass()} ${sidebarCollapsed ? 'app-bar--collapsed' : ''}`}
       data-status={status}
     >
       <div className="app-bar-cap">

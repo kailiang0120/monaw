@@ -904,7 +904,7 @@ export function SettingsModal({
                                 Refresh usage
                               </button>
                             ) : openaiAccount.usage_url ? (
-                              <a href={openaiAccount.usage_url} target="_blank" rel="noopener noreferrer">Manage usage</a>
+                              <a className="st-btn st-btn-secondary" href={openaiAccount.usage_url} target="_blank" rel="noopener noreferrer">Manage usage</a>
                             ) : null}
                           </>
                         ) : (

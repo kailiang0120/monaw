@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 # Text deltas are appended to the previous one of the same kind in the replay.
-_MERGED_EVENTS = frozenset({"token", "thinking"})
+_MERGED_EVENTS = frozenset({"token", "thinking", "response_preview"})
 
 
 def sse_chunk(event: str, data: Any) -> bytes:

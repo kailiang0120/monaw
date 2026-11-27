@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { actionErrorMessage } from '../../hooks/useItemActions'
 import { useDiscardPrompt } from '../../hooks/useDiscardPrompt'
 import { useModalFocus } from '../../hooks/useModalFocus'
-import { AlertCircle, Clock, Play, X } from 'lucide-react'
+import { AlertCircle, Clock, FolderOpen, Play, X } from 'lucide-react'
 import {
   createScheduledTask,
   fetchTelegramChats,
@@ -73,6 +73,9 @@ export function ScheduledTaskDialog({
   onRunConversation,
 }: Props) {
   const [workspaceDir, setWorkspaceDir] = useState(task?.workspaceDir ?? defaultWorkspace)
+  const [choosingWorkspace, setChoosingWorkspace] = useState(false)
+  const [workspaceError, setWorkspaceError] = useState('')
+  const workspaceInputRef = useRef<HTMLInputElement>(null)
   const [followDefaultModel, setFollowDefaultModel] = useState(task ? !task.modelProvider : !defaultModel)
   const { catalog: modelOptions, status: modelCatalogStatus } = useModelCatalogState()
   const [pinnedModel, setPinnedModel] = useState<ModelSelection>(() => task?.modelProvider ? {
@@ -130,9 +133,28 @@ export function ScheduledTaskDialog({
   }, [notifyTelegram])
 
   const canSave = useMemo(
-    () => Boolean(title.trim() && prompt.trim() && !saving),
-    [title, prompt, saving],
+    () => Boolean(title.trim() && prompt.trim() && !saving && !choosingWorkspace),
+    [title, prompt, saving, choosingWorkspace],
   )
+
+  /** Choose a local folder without changing the draft when the picker is cancelled. */
+  const chooseWorkspace = async () => {
+    setWorkspaceError('')
+    if (!window.electronAPI?.selectDirectory) {
+      workspaceInputRef.current?.focus()
+      setWorkspaceError('Enter the folder path here. Folder browsing is available in the desktop app.')
+      return
+    }
+    setChoosingWorkspace(true)
+    try {
+      const selected = await window.electronAPI.selectDirectory(workspaceDir || undefined)
+      if (mounted.current && selected) setWorkspaceDir(selected)
+    } catch (cause) {
+      if (mounted.current) setWorkspaceError(cause instanceof Error ? cause.message : 'Could not open the folder picker')
+    } finally {
+      if (mounted.current) setChoosingWorkspace(false)
+    }
+  }
 
   const buildInput = (): ScheduledTaskInput => ({
     title: title.trim(),
@@ -225,9 +247,9 @@ export function ScheduledTaskDialog({
         aria-modal="true"
         aria-label={task ? 'Edit scheduled task' : 'New scheduled task'}
         tabIndex={-1}
-        className="settings-shell flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl"
+        className="settings-shell flex min-h-0 max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl"
       >
-        <header className="st-divider-b flex items-center justify-between gap-3 px-5 py-4">
+        <header className="st-divider-b flex shrink-0 items-center justify-between gap-3 px-5 py-4">
           <div className="flex items-center gap-3">
             <div
               className="flex h-9 w-9 items-center justify-center rounded-lg"
@@ -237,9 +259,6 @@ export function ScheduledTaskDialog({
             </div>
             <div>
               <h2 className="st-title">{task ? 'Edit scheduled task' : 'New scheduled task'}</h2>
-              <p className="st-desc mt-0.5">
-                Monaw will send the prompt below to the agent on its own, on the schedule you set.
-              </p>
             </div>
           </div>
           <button
@@ -252,16 +271,28 @@ export function ScheduledTaskDialog({
           </button>
         </header>
 
-        <div className="st-scroll flex-1 space-y-4 overflow-y-auto px-5 py-5">
-          <SettingsCard title="What to run">
+        <div className="st-scroll min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
+          <SettingsCard>
             <StackedRow label="Workspace">
-              <input value={workspaceDir} onChange={(event) => setWorkspaceDir(event.target.value)} aria-label="Workspace" placeholder="Default workspace" className="st-input" />
+              <div className="flex min-w-0 items-center gap-2">
+                <input ref={workspaceInputRef} value={workspaceDir} disabled={saving || choosingWorkspace}
+                  onChange={(event) => setWorkspaceDir(event.target.value)} aria-label="Workspace"
+                  placeholder="Default workspace" className="st-input min-w-0 flex-1" />
+                <button type="button" onClick={() => void chooseWorkspace()} disabled={saving || choosingWorkspace}
+                  aria-label="Choose scheduled task folder" className="st-btn st-btn-secondary shrink-0">
+                  <FolderOpen size={15} aria-hidden />
+                  {choosingWorkspace ? 'Choosing…' : 'Browse'}
+                </button>
+              </div>
+              {workspaceError && <p role="alert" className="st-desc mt-2">{workspaceError}</p>}
             </StackedRow>
-            <ModelPicker label="Scheduled task model" value={pinnedModel} catalog={modelOptions}
-              loading={modelCatalogStatus === 'loading'} onRetry={() => { void refreshModelCatalog(true) }}
-              followDefault={followDefaultModel} onFollowDefault={() => setFollowDefaultModel(true)}
-              onChange={(selection) => { setPinnedModel(selection); setFollowDefaultModel(false) }} />
-            <StackedRow label="Title" description="Shown in the sidebar so you can find this task later.">
+            <div className="st-row-stacked">
+              <ModelPicker label="Scheduled task model" value={pinnedModel} catalog={modelOptions}
+                loading={modelCatalogStatus === 'loading'} onRetry={() => { void refreshModelCatalog(true) }}
+                followDefault={followDefaultModel} onFollowDefault={() => setFollowDefaultModel(true)}
+                onChange={(selection) => { setPinnedModel(selection); setFollowDefaultModel(false) }} />
+            </div>
+            <StackedRow label="Title">
               <input
                 value={title}
                 aria-label="Title"
@@ -270,10 +301,7 @@ export function ScheduledTaskDialog({
                 placeholder="Morning briefing"
               />
             </StackedRow>
-            <StackedRow
-              label="Prompt"
-              description="Sent to the agent word for word on every run. Write it the way you would type it into the chat box."
-            >
+            <StackedRow label="Prompt">
               <textarea
                 value={prompt}
                 aria-label="Prompt"
@@ -374,7 +402,7 @@ export function ScheduledTaskDialog({
           {error && <Note tone="danger" icon={AlertCircle}>{error}</Note>}
         </div>
 
-        <footer className="st-divider-t flex items-center justify-between gap-2 px-5 py-3.5">
+        <footer className="st-divider-t flex shrink-0 flex-wrap items-center justify-between gap-2 px-5 py-3.5">
           {confirmDiscard ? (
             <>
               <p className="st-desc">Close and lose your changes to this task?</p>

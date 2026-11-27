@@ -23,6 +23,24 @@ function renderDialog() {
 }
 
 describe('ScheduledTaskDialog keyboard use', () => {
+  it('browses from the workspace and keeps the current folder when cancelled', async () => {
+    const originalApi = window.electronAPI
+    const selectDirectory = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce('C:\\Projects\\reports')
+    Object.defineProperty(window, 'electronAPI', { configurable: true, writable: true, value: { selectDirectory } })
+    try {
+      renderDialog()
+      fireEvent.change(screen.getByLabelText('Workspace'), { target: { value: 'C:\\Projects\\current' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Choose scheduled task folder' }))
+      await waitFor(() => expect(selectDirectory).toHaveBeenCalledWith('C:\\Projects\\current'))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Choose scheduled task folder' })).toBeEnabled())
+      expect(screen.getByLabelText('Workspace')).toHaveValue('C:\\Projects\\current')
+      fireEvent.click(screen.getByRole('button', { name: 'Choose scheduled task folder' }))
+      await waitFor(() => expect(screen.getByLabelText('Workspace')).toHaveValue('C:\\Projects\\reports'))
+    } finally {
+      Object.defineProperty(window, 'electronAPI', { configurable: true, writable: true, value: originalApi })
+    }
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
   })

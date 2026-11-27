@@ -39,6 +39,42 @@ describe('useChat history pagination', () => {
     vi.resetAllMocks()
   })
 
+  it('shows live previews, promotes progress, and flushes long answers without playback lag', () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(chatStream).mockReturnValue(vi.fn())
+      const { result } = renderHook(() => useChat(null))
+      act(() => result.current.sendMessage('Explain the repository', [], vi.fn()))
+      const callbacks = vi.mocked(chatStream).mock.calls[0]
+      act(() => callbacks[28]?.({ content: 'Reading files' }))
+      expect(result.current.messages[result.current.messages.length - 1]?.previewContent).toBe('Reading files')
+      expect(result.current.isStreaming).toBe(true)
+      act(() => callbacks[12]?.('Reading files'))
+      expect(result.current.messages[result.current.messages.length - 1]?.previewContent).toBe('')
+      act(() => callbacks[28]?.({ content: 'Draft answer' }))
+      const answer = 'Complete explanation. '.repeat(2000)
+      act(() => callbacks[3](answer))
+      act(() => vi.advanceTimersByTime(24))
+      expect(result.current.messages[result.current.messages.length - 1]).toMatchObject({ content: answer, previewContent: '', streaming: true })
+      act(() => callbacks[6]({ status: 'complete' }))
+      expect(result.current.messages[result.current.messages.length - 1]?.content).toBe(answer)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('preserves a live preview if the stream is interrupted', () => {
+    vi.mocked(chatStream).mockReturnValue(vi.fn())
+    const { result } = renderHook(() => useChat(null))
+    act(() => result.current.sendMessage('Explain', [], vi.fn()))
+    const callbacks = vi.mocked(chatStream).mock.calls[0]
+    act(() => callbacks[28]?.({ content: 'Partial explanation' }))
+    act(() => callbacks[7]('Disconnected', { code: 'stream_interrupted' }))
+    expect(result.current.messages[result.current.messages.length - 1]).toMatchObject({
+      content: 'Partial explanation', previewContent: '', runStatus: 'error',
+    })
+  })
+
   it('passes a new chat working folder to the stream request', () => {
     vi.mocked(chatStream).mockReturnValue(vi.fn())
     const { result } = renderHook(() => useChat(null))

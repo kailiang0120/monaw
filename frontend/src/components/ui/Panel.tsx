@@ -192,7 +192,7 @@ export function NumberRow({
   onChange: (value: string) => void
 }) {
   return (
-    <div className="st-row">
+    <div className="st-row st-number-row">
       <RowText label={label} description={description} />
       <div className="st-row-control-auto flex items-center gap-2">
         <input
@@ -204,7 +204,7 @@ export function NumberRow({
           onChange={(event) => onChange(event.target.value)}
           className="st-input st-input-number"
         />
-        {unit && <span className="st-hint w-10 shrink-0">{unit}</span>}
+        {unit && <span className="st-hint min-w-[10ch] shrink-0 whitespace-nowrap">{unit}</span>}
       </div>
     </div>
   )

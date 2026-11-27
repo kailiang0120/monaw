@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { PageHeader, SettingsCard, SettingRow } from '../../components/ui/Panel'
 
+/** Show the installed version and update actions with a shared right edge. */
 export function AboutSettings() {
   const [update, setUpdate] = useState<UpdateState | null>(null)
   const [confirmRestart, setConfirmRestart] = useState(false)
@@ -51,7 +52,7 @@ export function AboutSettings() {
     <PageHeader title="About" />
     <SettingsCard title="Monaw">
       <SettingRow label="Version" description="Installed desktop app version.">
-        <span>{update?.currentVersion || '—'}</span>
+        <span className="st-label block text-right tabular-nums">{update?.currentVersion || '—'}</span>
       </SettingRow>
       <div className="st-row flex flex-wrap items-center justify-between gap-3">
         <div><p className="st-label">Software updates</p><p role="status" aria-live="polite" className="st-desc mt-1">{message}</p></div>

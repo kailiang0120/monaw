@@ -18,6 +18,15 @@ vi.mock('../lib/api/files', () => ({
 }))
 
 describe('MessageBubble', () => {
+  it('renders the live response before the final answer arrives', () => {
+    render(<MessageBubble message={{
+      id: 'live-preview', role: 'assistant', content: '',
+      previewContent: 'The training pipeline starts with tokenization.', streaming: true,
+    }} />)
+    expect(screen.getByText('The training pipeline starts with tokenization.')).toBeInTheDocument()
+    expect(screen.getByText('Writing')).toBeInTheDocument()
+  })
+
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
