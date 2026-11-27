@@ -7,8 +7,8 @@ set "START_EXIT=%ERRORLEVEL%"
 if not "%START_EXIT%"=="0" (
   echo.
   echo [ERROR] Monaw Agent failed to start. Exit code: %START_EXIT%
-  echo Check launcher logs in:
-  echo   %USERPROFILE%\.monaw\runtime\launcher\
+  echo See the error and log paths above.
+  echo Setup and troubleshooting guide: docs\source-setup.md
   echo.
   pause
 )

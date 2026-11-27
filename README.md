@@ -75,7 +75,7 @@ Configure connections in the app; no `.env` editing is required. Voice input nee
 
 ### 2. Choose a workspace and permissions
 
-Click **Default workspace** above the message box to choose the folder Monaw should work in. Choose **Default**, **Full Access**, **Auto Review**, or **Custom** permissions in Settings or the composer. See [permissions](docs/permissions.md) for how approvals work; sandbox settings are configured separately.
+In a **new chat**, click **Default workspace** above the message box to choose the folder Monaw should work in. The selector is hidden after the chat starts; create a new chat to choose another folder. Choose **Default**, **Full Access**, **Auto Review**, or **Custom** permissions in Settings or the composer. See [permissions](docs/permissions.md) for how approvals work; sandbox settings are configured separately.
 
 ### 3. Try a first task
 
@@ -97,7 +97,7 @@ Browser profiles and allowed domains are configured under **Settings > Browser**
 
 ## Workspaces, Memory, and Local Data
 
-Each conversation can use its own project folder. Chats without a selected project work directly in `Documents\monaw\YYYY-MM-DD` (using your Windows Documents location, including redirection). Chats created on the same local date share that working folder and appear under **Default workspace**. The saved workspace determines relative file paths, command locations, and project `AGENTS.md` instructions. Change it while the agent is idle, or reset it to that chat's creation-date folder. Existing chats keep their saved workspace and files. Chat history stays in `.monaw\runtime\agent.db`.
+Each conversation can use its own project folder, selected before its first message. Chats without a selected project work directly in `Documents\monaw\YYYY-MM-DD` (using your Windows Documents location, including redirection). Chats created on the same local date share that working folder and appear under **Default workspace**. The saved workspace determines relative file paths, command locations, and project `AGENTS.md` instructions. Existing chats keep their saved workspace and files. Chat history stays in `.monaw\runtime\agent.db`.
 
 Memory has two scopes: **global** for your preferences and **workspace** for project context. Manage it under **Settings > Identity**. See the [memory guide](docs/memory.md).
 
@@ -122,6 +122,8 @@ For source setup and launcher errors, see [development troubleshooting](#develop
 
 Run from source to change Monaw or try work that has not shipped in a release. The installed Windows app opens directly from the Start menu; the batch files below belong to a source checkout.
 
+The detailed [Windows source setup and startup guide](docs/source-setup.md) covers every script stage, manual installation, daily use, code updates, custom paths and ports, logs, and failure recovery.
+
 ### Set up the source checkout
 
 You need Windows 10 or 11, **Git**, and an internet connection. [setup.bat](setup.bat) can install missing **uv** and a supported **Node.js LTS** through Windows Package Manager (`winget`); uv installs the pinned **Python 3.11** runtime. If `winget` is unavailable, install uv and Node.js manually first.
@@ -140,8 +142,8 @@ When setup completes, launch the development app:
 
 | Script | When to use it | What it does |
 | --- | --- | --- |
-| [setup.bat](setup.bat) | First setup, or after dependencies change. | Closes running Monaw processes from this checkout, syncs `backend/.venv` from `uv.lock`, and runs `npm ci` in `frontend`. |
-| [start.bat](start.bat) | Each time you run the source checkout. | Starts Vite and Electron, waits for the local backend to be ready, and exits after successful startup. |
+| [setup.bat](setup.bat) | First setup, or after dependencies change. | Closes running Monaw processes from this checkout, checks prerequisites, syncs `backend/.venv` from `uv.lock`, runs `npm ci`, and verifies the Electron executable. Shows command output live and records a setup log. |
+| [start.bat](start.bat) | Each time you run the source checkout. | Checks dependencies and configuration, starts Vite and Electron, waits for the local backend to be ready, and exits after successful startup. |
 
 Supported Node.js versions are **20.19+ within 20.x**, **22.13+ within 22.x**, and **24.x**, with npm. Setup and launch enforce the policy in [frontend/package.json](frontend/package.json).
 
@@ -161,7 +163,7 @@ Build the Windows installer:
 
 The installer is written to `frontend/release/Monaw-Setup-<version>-x64.exe`. See [packaging](docs/packaging.md) for build options and release checks.
 
-For separate frontend and backend commands, manual dependency setup, and the module map, see the [development guide](docs/development.md).
+For manual dependency setup and launcher recovery, see the [source setup guide](docs/source-setup.md). For separate frontend/backend commands and the module map, see the [development guide](docs/development.md).
 
 ### Development troubleshooting
 
@@ -304,9 +306,10 @@ See [docs/development.md](docs/development.md) for the module map and implementa
 | Topic | Guide |
 | --- | --- |
 | Architecture, modules, and testing | [Development](docs/development.md) |
+| Source checkout: setup, startup, updates, and troubleshooting | [Windows source setup](docs/source-setup.md) |
 | Browser and Windows automation | [Browser automation](docs/browser-automation.md) / [Computer use](docs/computer-use.md) |
 | Memory and workspaces | [Memory](docs/memory.md) |
-| Tool integrations and remote tasks | [MCP](docs/mcp.md) / [Telegram](docs/telegram.md) / [Scheduling](docs/scheduling.md) |
+| Skills, tool integrations, and remote tasks | [Skills and plugins](docs/skills.md) / [MCP](docs/mcp.md) / [Telegram](docs/telegram.md) / [Scheduling](docs/scheduling.md) |
 | Action approval and execution isolation | [Permissions](docs/permissions.md) / [Sandboxing](docs/sandboxing.md) |
 | Runtime operations and HTTP endpoints | [Operations](docs/operations.md) / [API reference](docs/api.md) |
 | Windows installer: install, upgrade, build | [Installation](docs/installation.md) / [Packaging](docs/packaging.md) |

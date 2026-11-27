@@ -9,6 +9,7 @@ if "%SETUP_EXIT%"=="0" (
   echo Monaw Agent setup completed successfully.
 ) else (
   echo Monaw Agent setup failed. Check the message above.
+  echo Setup and troubleshooting guide: docs\source-setup.md
 )
 echo.
 pause

@@ -25,6 +25,8 @@ use that mode on shared machines.
 
 ## Startup Requirements
 
+For the complete source-checkout workflow, including launcher stages and recovery commands, see [Windows source setup and startup](source-setup.md). Installed-app startup is covered in [installation](installation.md#if-monaw-does-not-start).
+
 Startup must fail closed when security configuration is missing. The backend
 requires `MONAW_CONTROL_SECRET` to be at least 32 characters, validates the
 runtime directory, and rejects symlinked runtime roots. Electron generates the
@@ -113,8 +115,9 @@ runtime\agent.db          conversations, scheduled tasks, and app state
 runtime\settings.json     local settings
 runtime\file_mutation\snapshots\  private before-images for supported file Undo/recovery
 memory\                   long-term memory markdown files
-skills\                   skills you created with the skill creator
-browser\                  browser screenshots
+skills\                   skills you created or imported
+browser\                  browser screenshots and extension-related files
+runtime\electron\         Electron profile and encrypted credential state
 ```
 
 New desktop chats without a project work directly in
@@ -248,9 +251,10 @@ For manual deletion, close Monaw and remove:
 %USERPROFILE%\.monaw\
 ```
 
-Manual deletion removes runtime data, memory, browser screenshots, the default
-workspace files, and local settings. Workspaces outside `.monaw` remain on
-their own paths. Your Chrome profile lives in Chrome's own folder and is not
+Manual deletion removes runtime data, memory, imported skills, browser screenshots,
+local settings, and any older workspace files stored inside `.monaw`.
+Default workspaces under `Documents\monaw` and selected project folders outside
+`.monaw` remain on their own paths. Your Chrome profile lives in Chrome's own folder and is not
 affected. Revoke external provider keys and Telegram tokens separately because
 local deletion cannot revoke third-party credentials.
 
