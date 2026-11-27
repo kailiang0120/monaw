@@ -476,6 +476,14 @@ after test failure when reports were produced. Artifacts have distinct names per
 matrix entry. New pushes cancel obsolete runs of the same workflow/ref. These
 jobs do not yet prove a packaged/installed Electron workflow, installer, or upgrade.
 
+When changing migrations, update the fresh-database regression's expected schema
+versions and verify the new tables. Approval integration tests must explicitly
+bind the production replay adapter they exercise: registry tests and dynamic
+skill loading can otherwise leave a different adapter in the same process.
+Application tests that inspect persisted history must wait for the turn to finish;
+visible streamed answer text does not mean the atomic history commit has completed.
+Skill-import workflows enter Settings → Tools → Skills before opening Import.
+
 ## Connector development
 
 The provider-neutral connector foundation lives in `backend/app/connectors`. Read the [connector architecture and adapter guide](connectors.md) before adding a service. [GitHub](github-connector.md) uses native device sign-in; the categorized daily-app connectors use a user-owned [Composio Platform project](composio.md) behind the same permissions and account contracts. Manage accounts through `/connector` or Settings → Tools → Connectors.

@@ -15,6 +15,7 @@ test('skills imported through Settings persist and become available without rest
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
   await settings.locator('nav').getByRole('button', { name: 'Tools', exact: true }).click()
+  await settings.getByRole('tab', { name: 'Skills', exact: true }).click()
   await settings.getByRole('button', { name: 'Import', exact: true }).click()
   const importCard = settings.locator('.st-card').filter({ has: page.getByRole('heading', { name: 'Import skills', exact: true }) })
   for (const theme of ['light', 'dark']) {
