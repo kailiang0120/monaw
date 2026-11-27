@@ -462,6 +462,9 @@ Feature branches use the pull-request run without a duplicate push run:
   the image can really import. Tests are selected by path because collecting
   the whole suite would import the Windows-only `computer_use` modules.
   `MONAW_REQUIRE_DOCKER_TESTS=1` makes unavailable Docker prerequisites a failure.
+  The job also runs workspace path-policy tests and real-container copy-back
+  checks for successful and failed commands. Windows sandbox tests cover junctions,
+  hard links, host-edit conflicts, and session expiry without polling.
 - **Per-commit integrity** — the checks above, capped at 20 commits.
 - **Frontend** — `npm run verify:ci` (Vitest, Electron tests, type-check, build),
   once on Node 22.13.0, matching the application job and packaging baseline.

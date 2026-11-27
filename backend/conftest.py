@@ -295,6 +295,17 @@ def isolate_sandbox_image_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 @pytest.fixture(autouse=True)
+def isolate_sandbox_workspaces(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Keep staging and cleanup tests away from the user's real sandbox runs."""
+    from app.agent.sandbox import path_policy
+
+    root = tmp_path_factory.mktemp("sandbox-runtime")
+    monkeypatch.setattr(path_policy, "SANDBOX_RUNTIME_DIR", root)
+    monkeypatch.setattr(path_policy, "SANDBOX_RUNS_DIR", root / "runs")
+    monkeypatch.setattr(path_policy, "SANDBOX_MANIFESTS_DIR", root / "manifests")
+
+
+@pytest.fixture(autouse=True)
 def authenticate_test_client_requests(monkeypatch: pytest.MonkeyPatch):
     from fastapi.testclient import TestClient
 

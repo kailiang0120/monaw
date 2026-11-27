@@ -13,6 +13,10 @@ Monaw classifies each shell command before starting a process. The decision reco
 
 There is no WSL backend. Long-running sessions use the local host runners and are capped at a maximum lifetime; Docker sessions are not supported.
 
+The local session lifetime is enforced by a background watchdog, even if the
+agent stops polling. Both host runners create a process group and stop the
+process tree on expiration. This is cleanup, not filesystem or network isolation.
+
 ## Isolation guarantees
 
 - `strong`: Docker container isolation with `--network none` when network denial is requested, dropped capabilities, PID/memory/CPU limits, and a read-only root filesystem by default.
@@ -67,6 +71,41 @@ Approvals, resumed approval notices, session and command results expose the same
 Approval replay reclassifies under current settings and re-enters the existing permission gate when the disclosed backend, workspace, shell, network/filesystem/write policy, mode/profile, approval requirement, or Docker runtime configuration changes. A legacy ticket without this snapshot must also pass the current gate. The final manager check refuses material changes between classification and dispatch with `execution_environment_changed`; retrying obtains a fresh decision. Docker/enforce never silently switch to host execution. Long-running sessions still use host execution only and disclose that boundary; Docker/enforce sessions remain unsupported.
 
 `GET /api/sandbox/status` and Settings show a representative command under **saved** settings, not a promise about every subsequent command or an unsaved draft. Their `execution_environment` uses the same presentation; each command is classified independently. Shell isolation does not contain desktop automation, personal Chrome, or external MCP servers. See [Browser automation](browser-automation.md) for the separate navigation-target policy and its limits.
+
+## Workspace staging and copy-back
+
+With `copy_out`, Monaw stages only regular, single-link files. Symlinks, Windows
+junctions/reparse points, and special files are excluded. Blocked child paths are
+excluded as well; a `direct_rw` mount containing a blocked child is rejected
+because a bind mount cannot hide that child. User folders named `input` and
+`output` are preserved as ordinary workspace content.
+
+Copy-in and copy-out enforce their separate byte budgets and a 10,000-entry
+workspace scan limit. Content hashes identify changed files even when their size
+and timestamp stay the same. Before publication, Monaw validates every output
+path, rejects links and protected destinations, and checks the host file against
+the content staged before the command. Conflicts preserve the newer host file.
+All planned files are checked before publication starts, and each replacement
+uses a temporary file followed by an atomic rename. File deletions are not copied.
+
+Only successful commands publish staged changes. Failed, cancelled, or timed-out
+commands leave the host workspace unchanged under `copy_out`; their captured
+stdout/stderr remain available. Docker removal attempts have a bounded timeout,
+so an unresponsive daemon cannot block cancellation indefinitely. A daemon outage
+can still prevent removal; inspect Docker for remaining `monaw-sandbox-*`
+containers after such an outage. `direct_rw` changes are immediate and cannot be
+rolled back by this publication gate.
+
+These checks do not make the whole workspace a transaction: a host filesystem
+failure during publication can leave earlier files published. They also do not
+isolate Monaw from a hostile process running as the same host user and racing
+filesystem changes. Byte budgets bound staging and publication, not the amount
+a running container can write into a writable bind mount. Native Windows
+isolation and isolated long-running Docker sessions remain future work.
+
+Implementation references: [Python filesystem metadata](https://docs.python.org/3/library/os.html#os.lstat),
+[Windows reparse-point attributes](https://docs.python.org/3/library/stat.html#stat.FILE_ATTRIBUTE_REPARSE_POINT),
+and [Docker security boundaries](https://docs.docker.com/engine/security/).
 
 ## Permission mode and explicit confirmation
 

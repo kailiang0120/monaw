@@ -43,8 +43,8 @@ class SandboxSessionRegistry:
         is_restricted = backend == "local_restricted"
         cleanup_mode = (
             "taskkill_process_tree"
-            if is_restricted and os.name == "nt"
-            else "process_group" if is_restricted else "manual_stop"
+            if os.name == "nt"
+            else "process_group"
         )
         metadata = SandboxRunMetadata(
             backend=backend,
@@ -84,11 +84,10 @@ class SandboxSessionRegistry:
         ).model_dump()
         stdout_limit, stderr_limit, _total_limit = _stream_capture_limits(request)
         popen_kwargs: dict[str, object] = {}
-        if is_restricted:
-            if os.name == "nt":
-                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            else:
-                popen_kwargs["start_new_session"] = True
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(
             shell_command(request.shell, script_path),
             cwd=request.workdir or None,
@@ -120,12 +119,24 @@ class SandboxSessionRegistry:
             "max_age_seconds": max(1, int((request.resources or {}).get("session_max_age_seconds") or self.DEFAULT_MAX_AGE_SECONDS)),
             "env_keys": list(request.env_metadata.get("explicit_env_keys", [])),
             "sandbox": metadata,
+            "expired": False,
         }
         with self._lock:
             self._sessions[command_id] = session
         threading.Thread(target=self._read_stream, args=(proc.stdout, command_id, "stdout"), daemon=True).start()
         threading.Thread(target=self._read_stream, args=(proc.stderr, command_id, "stderr"), daemon=True).start()
+        threading.Thread(target=self._watch_lifetime, args=(command_id, session), daemon=True).start()
         return SandboxSessionHandle(session_id=command_id, backend=backend, pid=proc.pid, sandbox=metadata)
+
+    def _watch_lifetime(self, session_id: str, session: dict[str, Any]) -> None:
+        """Enforce the lifetime even when the caller never polls the session."""
+        try:
+            session["process"].wait(timeout=session["max_age_seconds"])
+        except subprocess.TimeoutExpired:
+            self._expire_session(session_id, session)
+        finally:
+            if session["process"].poll() is not None:
+                Path(session["script_path"]).unlink(missing_ok=True)
 
     def poll(
         self,
@@ -223,12 +234,15 @@ class SandboxSessionRegistry:
     def _stop_process(self, session: dict[str, Any], signal_name: str) -> None:
         proc = session["process"]
         force = str(signal_name).lower() == "kill"
-        if session.get("backend") == "local_restricted":
+        if session.get("backend") in {"local_direct", "local_restricted"}:
             if os.name == "nt":
                 command = ["taskkill", "/T", "/PID", str(proc.pid)]
                 if force:
                     command.insert(1, "/F")
-                subprocess.run(command, capture_output=True, text=True, check=False)
+                try:
+                    subprocess.run(command, capture_output=True, text=True, check=False, timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    proc.kill() if force else proc.terminate()
             else:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
@@ -244,6 +258,7 @@ class SandboxSessionRegistry:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=3)
 
     def cleanup_stale(self, *, max_age_seconds: int) -> list[str]:
         cutoff = time.monotonic() - max_age_seconds
@@ -261,16 +276,22 @@ class SandboxSessionRegistry:
 
     @staticmethod
     def _is_expired(session: dict[str, Any]) -> bool:
-        return time.monotonic() - float(session.get("started_at", 0)) >= float(
-            session.get("max_age_seconds", SandboxSessionRegistry.DEFAULT_MAX_AGE_SECONDS)
+        return bool(session.get("expired")) or (
+            session["process"].poll() is None
+            and time.monotonic() - float(session.get("started_at", 0)) >= float(
+                session.get("max_age_seconds", SandboxSessionRegistry.DEFAULT_MAX_AGE_SECONDS)
+            )
         )
 
     def _expire_session(self, session_id: str, session: dict[str, Any]) -> None:
+        """Stop an overdue process once and retain its expiration for the caller."""
+        with self._lock:
+            if self._sessions.get(session_id) is not session or session.get("expired"):
+                return
+            session["expired"] = True
         proc = session.get("process")
         if proc is not None and proc.poll() is None:
             self._stop_process(session, "kill")
-        with self._lock:
-            self._sessions.pop(session_id, None)
 
     def _read_stream(self, stream, command_id: str, stream_name: str) -> None:
         if stream is None:

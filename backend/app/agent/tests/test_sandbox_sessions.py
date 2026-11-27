@@ -3,6 +3,7 @@ import os
 import shlex
 import sys
 import time
+import pytest
 from types import SimpleNamespace
 
 from app.agent.sandbox.environment import build_exec_environment
@@ -219,3 +220,20 @@ def test_session_lifetime_expires():
     expired = registry.poll(handle.session_id)
 
     assert expired.reason_code == "session_expired"
+
+
+@pytest.mark.parametrize("backend", ["local_direct", "local_restricted"])
+def test_unpolled_session_stops_at_its_lifetime(backend):
+    """The deadline kills the real process without a poll or another exec request."""
+    registry = SandboxSessionRegistry()
+    shell, command = _python_command("import time; time.sleep(60)")
+    request = _session_request(command, shell)
+    request.resources = {"session_max_age_seconds": 1}
+    handle = getattr(registry, f"start_{backend}")(request)
+    session = registry._sessions[handle.session_id]
+    try:
+        session["process"].wait(timeout=10)
+        assert session["expired"] is True
+        assert registry.poll(handle.session_id).reason_code == "session_expired"
+    finally:
+        registry.stop(handle.session_id, "kill")

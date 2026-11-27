@@ -178,6 +178,7 @@ jobs:
           uv run pytest -v \
             --junitxml=test-results/docker.xml \
             app/agent/tests/test_sandbox_docker.py \
+            app/agent/tests/test_sandbox_path_policy.py \
             app/agent/tests/test_sandbox_image_inventory.py
 
       # Policy decides what may run in the container from a module inventory. If
