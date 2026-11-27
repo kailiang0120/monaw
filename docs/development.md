@@ -213,7 +213,7 @@ mcp_bridge        MCP integrations (internal)
 memory            Global and workspace memory tools (internal)
 scheduling        Scheduled task tools
 skill_creator     Skill creation and reload tools
-web_search        Web search (when Tavily is configured)
+web_search        Web search (when Tavily or, without Tavily, Keenable is configured)
 ```
 
 Skills created with the skill creator or imported through **Settings > Tools > Skills > Import** are stored in `~/.monaw/skills` (the `skills` folder of Monaw home), loaded after the built-in skills, and cannot take a built-in skill's name. General agent filesystem tools cannot modify either skill folder. The approved skill creator and authenticated Settings import routes provide the supported write paths. Imported skills remain instruction-only and do not load bundled `tools.py`; see [skills and plugin compatibility](skills.md).

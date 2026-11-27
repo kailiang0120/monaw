@@ -35,6 +35,7 @@ _SECRET_PREFIXES = (
     "GOOGLE_",
     "GEMINI_",
     "TAVILY_",
+    "KEENABLE_",
     "TELEGRAM_",
     "GITHUB_",
     "GH_",

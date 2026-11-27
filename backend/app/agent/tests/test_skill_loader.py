@@ -143,6 +143,37 @@ External lookup skill
     assert skills[0].unavailable_reason == "missing_env"
 
 
+def test_any_env_requirement_needs_just_one_of_the_listed_variables(tmp_path, monkeypatch):
+    skill_dir = tmp_path / "search_lookup"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: search-lookup
+description: Search lookup
+metadata:
+  openclaw:
+    requires:
+      any_env:
+        - ANY_ENV_PROVIDER_ONE
+        - ANY_ENV_PROVIDER_TWO
+---
+Search lookup skill
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ANY_ENV_PROVIDER_ONE", raising=False)
+    monkeypatch.delenv("ANY_ENV_PROVIDER_TWO", raising=False)
+    runtime_settings = build_runtime_namespace(_base_settings(), AgentSettings())
+
+    missing = discover_skills(runtime_settings, skills_dir=tmp_path)
+    assert missing[0].available is False
+    assert missing[0].unavailable_reason == "missing_env"
+
+    monkeypatch.setenv("ANY_ENV_PROVIDER_TWO", "set")
+    present = discover_skills(runtime_settings, skills_dir=tmp_path)
+    assert present[0].available is True
+
+
 def test_malformed_skill_metadata_stays_hidden_with_load_error(tmp_path, monkeypatch):
     skill_dir = tmp_path / "malformed_skill"
     skill_dir.mkdir()
