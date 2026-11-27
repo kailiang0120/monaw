@@ -172,6 +172,16 @@ def _env_allowed(frontmatter: dict[str, Any], settings) -> tuple[bool, str]:
             continue
         return False, f"missing env var '{env_name}'"
 
+    # `any_env`: the skill needs at least one of these (for example one of several providers).
+    any_env = requires_meta.get("any_env", [])
+    if isinstance(any_env, str):
+        any_env = [any_env]
+    if any_env and not any(
+        os.getenv(str(env_name)) or getattr(settings, str(env_name).lower(), "")
+        for env_name in any_env
+    ):
+        return False, "missing env var: set one of " + ", ".join(str(name) for name in any_env)
+
     python_modules = requires_meta.get("python_module", [])
     if isinstance(python_modules, str):
         python_modules = [python_modules]

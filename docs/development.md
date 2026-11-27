@@ -200,7 +200,7 @@ mcp_bridge        MCP integrations (internal)
 memory            Global and workspace memory tools (internal)
 scheduling        Scheduled task tools
 skill_creator     Skill creation and reload tools
-web_search        Web search (when Tavily is configured)
+web_search        Web search (when Tavily or, without Tavily, Keenable is configured)
 ```
 
 Skills the user creates with the skill creator are stored in `~/.monaw/skills` (the `skills` folder of the Monaw

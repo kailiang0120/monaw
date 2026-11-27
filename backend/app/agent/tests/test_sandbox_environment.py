@@ -52,6 +52,7 @@ def test_build_exec_environment_strips_host_secrets():
             "PATH": r"C:\Windows\System32",
             "OPENAI_API_KEY": "should-not-leak",
             "TAVILY_API_KEY": "should-not-leak",
+            "KEENABLE_API_KEY": "should-not-leak",
         },
     )
 
@@ -59,6 +60,7 @@ def test_build_exec_environment_strips_host_secrets():
     assert "PATH" in env.env
     assert "OPENAI_API_KEY" not in env.env
     assert "TAVILY_API_KEY" not in env.env
+    assert "KEENABLE_API_KEY" not in env.env
     assert "OPENAI_API_KEY" not in env.inherited_keys
 
 

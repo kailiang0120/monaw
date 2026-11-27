@@ -90,6 +90,7 @@ You can steer or stop Monaw while it works. For browser tasks, set up the Monaw 
 | Service | Used for | Configuration |
 | --- | --- | --- |
 | **Tavily API** | Web search. | Tavily API key in Settings > Connections. |
+| **Keenable API** (optional) | Web search when no Tavily key is set. Tavily stays first. | `KEENABLE_API_KEY` environment variable or `.env`. Keenable logs search requests under its default data policy; see [data and privacy](https://docs.keenable.ai/data-privacy). |
 | **Telegram Bot API** | Remote task input and results. | Bot token and allowed users/chats in Settings. |
 | **MCP servers** | Additional local or remote tools. | Settings > Tools > MCP; supports stdio and Streamable HTTP. |
 

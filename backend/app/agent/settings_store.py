@@ -802,6 +802,7 @@ def build_runtime_namespace(base_settings, agent_settings: AgentSettings):
         openai_api_key=base_settings.openai_api_key,
         google_api_key=base_settings.google_api_key,
         tavily_api_key=base_settings.tavily_api_key,
+        keenable_api_key=getattr(base_settings, "keenable_api_key", ""),
         telegram_bot_token=getattr(base_settings, "telegram_bot_token", ""),
         reasoning_effort=agent_settings.llm.reasoning_effort,
         llm=SimpleNamespace(

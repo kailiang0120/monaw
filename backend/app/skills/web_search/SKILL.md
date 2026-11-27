@@ -2,7 +2,7 @@
 name: web-search
 display_name: Web search
 summary: Search the web for current information when a live answer is needed.
-description: Search the web for current information using the configured Tavily connection.
+description: Search the web for current information using the configured Tavily connection, or Keenable when only a Keenable key is set.
 version: 1.0.0
 enabled_by_default: true
 always: true
@@ -10,8 +10,9 @@ tier: internal
 metadata:
   openclaw:
     requires:
-      env:
+      any_env:
         - TAVILY_API_KEY
+        - KEENABLE_API_KEY
 ---
 
 Use `web_search` when the user needs current information, source discovery, or a live web lookup.
