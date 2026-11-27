@@ -118,6 +118,7 @@ dependency, and commit both `pyproject.toml` and `uv.lock`. Use
 - [Operations](operations.md)
 - [Windows packaging](packaging.md)
 - [API route reference](api.md)
+- [Composio: automated setup, reviewed actions, and upstream attribution](composio.md)
 
 ## Runtime Layout
 
@@ -474,3 +475,9 @@ Backend, compatibility, real-Docker, and renderer jobs upload JUnit reports even
 after test failure when reports were produced. Artifacts have distinct names per
 matrix entry. New pushes cancel obsolete runs of the same workflow/ref. These
 jobs do not yet prove a packaged/installed Electron workflow, installer, or upgrade.
+
+## Connector development
+
+The provider-neutral connector foundation lives in `backend/app/connectors`. Read the [connector architecture and adapter guide](connectors.md) before adding a service. [GitHub](github-connector.md) uses native device sign-in; the categorized daily-app connectors use a user-owned [Composio Platform project](composio.md) behind the same permissions and account contracts. Manage accounts through `/connector` or Settings → Tools → Connectors.
+
+For connector changes, run the core connector tests and renderer verification. `uv sync --locked` installs the pinned Composio API client; no companion build or separate runtime is needed. The user saves a Platform project key in Monaw desktop, then Monaw creates the managed OAuth configuration and hosted sign-in link. See the [setup guide](composio.md) for permissions, usage, and live-account verification. Do not expand the upstream catalog or OAuth scopes without reviewing the corresponding Monaw schemas and permissions.

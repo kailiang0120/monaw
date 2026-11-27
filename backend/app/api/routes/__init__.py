@@ -5,6 +5,7 @@ from app.api.routes.approvals import router as approvals_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.runs import router as runs_router
 from app.api.routes.conversations import router as conversations_router
+from app.api.routes.connectors import router as connectors_router
 from app.api.routes.diagnostics import router as diagnostics_router
 from app.api.routes.events import router as events_router
 from app.api.routes.files import router as files_router
@@ -29,6 +30,7 @@ router.include_router(chat_router)
 router.include_router(runs_router)
 router.include_router(events_router)
 router.include_router(conversations_router)
+router.include_router(connectors_router)
 router.include_router(access_grants_router)
 router.include_router(settings_router)
 router.include_router(skills_router)

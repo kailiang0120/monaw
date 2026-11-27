@@ -828,6 +828,7 @@ export interface ExecutionEnvironment {
 
 /** Safe runtime facts supplied by the backend; never script bodies or form values. */
 export interface ActionDescriptor {
+  connector_preview?: Record<string, string | number | boolean>
   action_id: string
   run_id?: string
   operation_id?: string

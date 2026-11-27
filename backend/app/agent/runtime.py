@@ -332,6 +332,8 @@ def _key_fingerprint(value: str) -> str:
 
 
 def _settings_cache_key(settings) -> str:
+    from app.connectors.service import get_connector_service
+
     provider = settings.model_provider
     provider_key = _provider_api_key(settings)
     skill_map = getattr(getattr(settings, "tools", object()), "skills", {}) or {}
@@ -367,6 +369,7 @@ def _settings_cache_key(settings) -> str:
     except TypeError:
         memory_fingerprint = str(memory_settings)
     parts = [
+        get_connector_service().fingerprint(),
         provider,
         settings.model_name,
         settings.reasoning_effort,

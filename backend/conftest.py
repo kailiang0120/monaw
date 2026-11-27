@@ -120,6 +120,9 @@ TEST_GROUPS = {
         "test_observability_recorder.py",
     },
     "integrations": {
+        "test_connectors.py",
+        "test_github_connector.py",
+        "test_composio.py",
         "test_scheduler_dispatch.py",
         "test_scheduler.py",
         "test_telegram_integration.py",

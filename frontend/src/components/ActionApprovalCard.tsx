@@ -23,6 +23,12 @@ export function ActionApprovalCard({ action }: { action?: ActionDescriptor }) {
         {action.side_effect && <><dt className="text-neutral-400">Effect</dt><dd className="break-words">{effects[action.side_effect] || action.side_effect.replace(/_/g, ' ')}</dd></>}
         {!!scope?.file_count && <><dt className="text-neutral-400">Files</dt><dd>{scope.file_count} selected{scope.size_bytes !== undefined ? ` · ${scope.size_bytes.toLocaleString()} bytes` : ''}</dd></>}
       </dl>
+      {!!Object.keys(action.connector_preview || {}).length && <dl aria-label="GitHub action details" className="max-h-64 space-y-2 overflow-auto rounded-lg bg-[var(--st-surface-sunken)] p-3 text-[var(--st-text)]">
+        {Object.entries(action.connector_preview || {}).map(([key, value]) => <div key={key}>
+          <dt className="font-medium capitalize">{key.replace(/_/g, ' ')}</dt>
+          <dd className="whitespace-pre-wrap break-words">{String(value)}</dd>
+        </div>)}
+      </dl>}
       {!!scope?.files?.length && <ul className="space-y-1 break-all" aria-label="Selected files">{scope.files.map((file, i) => <li key={i}>{file.name || file.path?.split(/[\\/]/).pop() || 'Selected file'}{file.size_bytes !== undefined ? ` (${file.size_bytes.toLocaleString()} bytes)` : ''}</li>)}</ul>}
       {action.opaque
         ? <p className="text-amber-200">Monaw cannot see everything this action does. Approving lets it run once; it does not limit what it sends or where.</p>

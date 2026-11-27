@@ -108,6 +108,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [settingsPage, setSettingsPage] = useState<SettingsPageId | undefined>(undefined)
   const [conversationsLoaded, setConversationsLoaded] = useState(false)
+  const [scheduledTasksLoaded, setScheduledTasksLoaded] = useState(false)
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [startupDismissed, setStartupDismissed] = useState(false)
   const [startupAttempt, setStartupAttempt] = useState(0)
@@ -272,6 +273,7 @@ export default function App() {
       const tasks = await fetchScheduledTasks()
       if (generation !== mutationGeneration.current) return true
       setIsBackendReady(true)
+      setScheduledTasksLoaded(true)
       setScheduledTasks((current) => (sameScheduledTasks(current, tasks) ? current : tasks))
       return true
     } catch {
@@ -650,11 +652,18 @@ export default function App() {
   if (!startupDismissed && (!conversationsLoaded || !settingsLoaded)) {
     const startupStatus = !isBackendReady ? 'Starting Monaw…'
       : !conversationsLoaded ? 'Loading chats…' : 'Loading preferences…'
+    const startupProgress = Math.min(
+      100,
+      (isBackendReady ? 40 : 15)
+        + (scheduledTasksLoaded ? 10 : 0)
+        + (conversationsLoaded ? 25 : 0)
+        + (settingsLoaded ? 25 : 0),
+    )
     return (
       <div className={`app-surface theme-${theme} flex h-screen w-screen flex-col overflow-hidden`}>
         <AppBar startup sidebarCollapsed={false} onToggleSidebar={() => {}}
           agentName={agentName} status="starting" approvalMode={approvalMode} />
-        <StartupScreen key={startupAttempt} status={startupStatus}
+        <StartupScreen key={startupAttempt} status={startupStatus} progress={startupProgress}
           onRetry={() => setStartupAttempt((attempt) => attempt + 1)}
           onContinue={() => setStartupDismissed(true)} />
       </div>

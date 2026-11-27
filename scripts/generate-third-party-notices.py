@@ -35,7 +35,7 @@ RULE = "=" * 78
 
 # Packages that write their own code into the renderer bundle without being imported:
 # Tailwind emits its base styles into the CSS.
-RENDERER_BUILD_PACKAGES = ("tailwindcss",)
+RENDERER_BUILD_PACKAGES = ("tailwindcss", "@iconify-json/logos")
 
 
 class Component:

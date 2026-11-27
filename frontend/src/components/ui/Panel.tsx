@@ -383,7 +383,7 @@ export function ChoiceCard({
  * choice card it sits apart so reading the details never selects the choice;
  * `inline` places it next to a row's label instead.
  */
-function InfoTip({ label, description, inline }: { label: string; description: string; inline?: boolean }) {
+export function InfoTip({ label, description, inline }: { label: string; description: string; inline?: boolean }) {
   const id = useId()
   const triggerRef = useRef<HTMLButtonElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)

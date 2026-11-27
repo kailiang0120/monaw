@@ -419,6 +419,10 @@ def load_tools(settings, *, skills_dir: Path | None = None) -> tuple[list[SkillS
             skill.load_error = message
             logger.exception("skill=%s load failed: %s", skill.name, exc)
 
+    from app.connectors.service import get_connector_service
+    from app.connectors.tools import register_connector_tools
+
+    register_connector_tools(registry, get_connector_service())
     _register_tool_search(registry)
     return skill_specs, registry
 

@@ -15,6 +15,7 @@ def _safe_destination(value):
 
 
 def public_descriptor(action, decision) -> dict:
+    """Expose sanitized approval facts, including explicitly supported connector previews."""
     target = {key: value for key, value in action.target.items()
               if key in {"origin", "page_id", "app", "server_id", "frame_id"} and isinstance(value, (str, int))}
     if "origin" in target:
@@ -33,6 +34,7 @@ def public_descriptor(action, decision) -> dict:
     pings = action.target.get("ping_urls")
     also = sorted({_safe_destination(url) for url in pings if isinstance(url, str)})[:8] if isinstance(pings, list) else []
     return redact_sensitive(dict(action_id=action.action_id, run_id=action.run_id, operation_id=action.operation_id,
+        connector_preview=facts.get("connector_preview", {}) if action.tool_name.startswith("connector__") else {},
         opaque=opaque, also_sends_to=also,
         tool_name=action.tool_name, action_kind=action.action_kind, target=target,
         destination=_safe_destination(action.destination), data_scope=scope, side_effect=action.side_effect,
@@ -59,10 +61,13 @@ def record_decision(action, decision, *, ticket_id=""):
     operation = current_operation_execution()
     if operation is None:
         return
+    # Content belongs in the approval, not the generic decision audit trail.
+    descriptor = public_descriptor(action, decision)
+    descriptor.pop("connector_preview", None)
     operation.journal.record_action_security(action.run_id, operation_id=action.operation_id,
         owner_instance_id=operation.owner_instance_id, attempt=operation.attempt,
         payload=dict(action_id=action.action_id, operation_id=action.operation_id,
             action_kind=action.action_kind, side_effect=action.side_effect,
             outcome=decision.outcome.value, reason_code=decision.reason_code,
             human_only=decision.human_only, authorization_binding=action.authorization_binding,
-            ticket_id=ticket_id, action_descriptor=public_descriptor(action, decision)))
+            ticket_id=ticket_id, action_descriptor=descriptor))

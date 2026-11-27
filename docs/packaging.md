@@ -65,6 +65,9 @@ resources/browser-extension/       The Monaw Chrome extension that setup copies 
 
 ## Measurements (first candidate, 31 October 2026)
 
+These historical measurements predate the current Composio SDK integration. The backend now includes the pinned Python client; no connector companion is bundled. Rebuild and measure the installer before publishing a new release. A complete installed-app Gmail/Outlook consent test still requires a user-owned project key and provider account; see [Composio setup](composio.md).
+
+
 Windows 11 x64 development machine; Python 3.11 backend, Electron 41.3.0, PyInstaller 6.22.3, electron-builder 26.18.0.
 
 | Measurement | Result |

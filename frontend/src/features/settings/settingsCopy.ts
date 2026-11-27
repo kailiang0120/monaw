@@ -38,8 +38,8 @@ export const PAGE_COPY = {
   },
   tools: {
     label: 'Tools',
-    blurb: 'Add your own skills, MCP connections, and plugins. Built-in tools are always on.',
-    keywords: 'skills capabilities tools browser computer use memory scheduling web search mcp model context protocol stdio http server integration plugins extensions',
+    blurb: 'Connect apps, add your own skills, and manage MCP servers. Built-in tools are always on.',
+    keywords: 'connectors github gmail outlook composio skills capabilities tools browser computer use memory scheduling web search mcp model context protocol stdio http server integration',
   },
   browser: {
     label: 'Browser',

@@ -742,6 +742,33 @@ ipcMain.handle('updates:install', (event) => {
   return updateController?.install() || false
 })
 
+/** Send a user-entered Composio key through a privileged, fixed backend route. */
+// Keep credential scope and response bodies out of the renderer's ordinary API session.
+ipcMain.handle('composio:key', async (event, input) => {
+  assertTrustedIpcSender(event)
+  if (!input || !['save', 'remove'].includes(input.action)) throw new Error('Invalid Composio operation')
+  const value = input.action === 'save' ? assertIpcString(input.value, 'Composio key', 4096) : null
+  const body = value === null ? null : Buffer.from(JSON.stringify({ api_key: value }))
+  const session = mintControlSession(CONTROL_SECRET, CONTROL_SESSION_ID, undefined, ['connectors:credentials'])
+  return new Promise((resolve, reject) => {
+    const request = http.request(`${BACKEND_BASE_URL}/api/connectors/composio/key`, {
+      method: input.action === 'save' ? 'PUT' : 'DELETE',
+      headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json',
+        ...(body ? { 'Content-Length': body.length } : {}) },
+    }, (response) => {
+      response.resume()
+      response.on('end', () => {
+        if (response.statusCode >= 200 && response.statusCode < 300) resolve({ ok: true })
+        else reject(new Error('Could not save Composio configuration. Check your Platform key and project permissions.'))
+      })
+    })
+    request.setTimeout(30000, () => request.destroy(new Error('Composio setup timed out. Please retry.')))
+    request.on('error', () => reject(new Error('Could not reach the local backend. Please retry.')))
+    request.on('close', () => body?.fill(0))
+    request.end(body)
+  })
+})
+
 ipcMain.handle('credentials:status', async (event) => {
   assertTrustedIpcSender(event)
   return (await getCredentialVault()).status()

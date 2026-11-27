@@ -76,6 +76,12 @@ const electronAPI = Object.freeze({
     return () => ipcRenderer.removeListener('updates:state', handler)
   },
   getControlSession: () => ipcRenderer.invoke('control:get-session'),
+  // Hand off a project key through a fixed write-only desktop channel.
+  changeComposioKey: (input) => {
+    if (!input || !['save', 'remove'].includes(input.action)) throw new TypeError('Invalid Composio operation')
+    return ipcRenderer.invoke('composio:key', { action: input.action,
+      ...(input.action === 'save' ? { value: safeString(input.value, 'Composio key', 4096) } : {}) })
+  },
   credentialStatus: () => ipcRenderer.invoke('credentials:status'),
   setCredential: (id, value) => ipcRenderer.invoke('credentials:set', credentialId(id), safeString(value, 'credential value')),
   deleteCredential: (id) => ipcRenderer.invoke('credentials:delete', credentialId(id)),

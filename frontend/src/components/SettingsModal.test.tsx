@@ -27,6 +27,16 @@ const mocks = vi.hoisted(() => ({
   updateSettings: vi.fn(),
 }))
 
+vi.mock('../lib/api/connectors', () => ({
+  connectorRequest: vi.fn().mockResolvedValue({
+    providers: [],
+    accounts: [],
+    device_login_available: false,
+    installation_url: '',
+    configured: false,
+  }),
+}))
+
 vi.mock('../lib/api/diagnostics', () => {
   const browserStatus = {
     skill_enabled: true,
@@ -513,7 +523,9 @@ describe('SettingsModal', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
 
-    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Skills', 'MCP', 'Plugins'])
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Connectors', 'Skills', 'MCP'])
+    expect(screen.getByRole('tab', { name: 'Connectors' })).toHaveAttribute('aria-selected', 'true')
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }))
     expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true')
     expect(await screen.findByText('Notion sync')).toBeInTheDocument()
     expect(screen.queryByText('Browser automation')).not.toBeInTheDocument()
@@ -530,10 +542,6 @@ describe('SettingsModal', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }))
     fireEvent.change(screen.getByRole('textbox', { name: 'Server name 1' }), { target: { value: 'my-files' } })
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Plugins' }))
-    expect(screen.getByText('Plugin installation is not available yet')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Manage MCP connections' }))
-    expect(screen.getByRole('textbox', { name: 'Server name 1' })).toHaveValue('my-files')
     fireEvent.click(screen.getByRole('tab', { name: 'Skills' }))
     expect(screen.getByRole('checkbox', { name: 'Notion sync' })).not.toBeChecked()
     expect(updateSettings).not.toHaveBeenCalled()
@@ -551,6 +559,7 @@ describe('SettingsModal', () => {
     render(<SettingsModal onClose={() => {}} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }))
 
     expect(await screen.findByText('No skills added yet. Ask Monaw to create one, and it will appear here.')).toBeInTheDocument()
   })

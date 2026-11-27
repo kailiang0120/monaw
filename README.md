@@ -309,6 +309,7 @@ See [docs/development.md](docs/development.md) for the module map and implementa
 | Source checkout: setup, startup, updates, and troubleshooting | [Windows source setup](docs/source-setup.md) |
 | Browser and Windows automation | [Browser automation](docs/browser-automation.md) / [Computer use](docs/computer-use.md) |
 | Memory and workspaces | [Memory](docs/memory.md) |
+| Connected apps and accounts | [GitHub connector](docs/github-connector.md) / [Composio setup](docs/composio.md) / [Connector architecture](docs/connectors.md) |
 | Skills, tool integrations, and remote tasks | [Skills and plugins](docs/skills.md) / [MCP](docs/mcp.md) / [Telegram](docs/telegram.md) / [Scheduling](docs/scheduling.md) |
 | Action approval and execution isolation | [Permissions](docs/permissions.md) / [Sandboxing](docs/sandboxing.md) |
 | Runtime operations and HTTP endpoints | [Operations](docs/operations.md) / [API reference](docs/api.md) |

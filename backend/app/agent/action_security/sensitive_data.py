@@ -76,6 +76,9 @@ def public_tool_arguments(tool_name: str, arguments: Any) -> dict[str, Any]:
         if set(arguments) - set(projected):
             projected["details"] = "Sensitive input omitted"
         return redact_sensitive(projected)
+    if tool_name.startswith("connector__"):
+        return {"account_id": str(arguments.get("account_id") or ""),
+                "summary": "Private connector arguments omitted"}
     if tool_name.startswith("mcp__"):
         return {"summary": "Private MCP arguments omitted"}
     # Existing structured local tools may retain safe paths/flags; free text,

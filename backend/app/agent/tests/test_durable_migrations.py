@@ -90,7 +90,8 @@ def test_v17_database_upgrades_in_place_and_retains_history_workspace_and_tasks(
     assert upgraded.fetchone("SELECT COUNT(*) FROM agent_runs")[0] == 0
     versions = [row["version"] for row in upgraded.fetchall("SELECT version FROM schema_migrations ORDER BY version")]
     assert versions[:13] == list(range(5, 18))
-    assert versions[13:] == list(range(18, 31))
+    assert versions[13:] == list(range(18, 33))
+    assert upgraded.fetchone("SELECT COUNT(*) FROM connector_accounts")[0] == 0
     assert upgraded.fetchone("SELECT COUNT(*) FROM task_progress")[0] == 0
     assert all(row["provider_history_json"] == "" for row in upgraded.get_messages("legacy-chat"))
     assert task["workspace_dir"] == task["model_provider"] == task["model_name"] == ""

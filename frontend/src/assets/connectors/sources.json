@@ -1,0 +1,59 @@
+{
+  "retrieved": "2026-11-27",
+  "icons": {
+    "github": {
+      "source": "@iconify-json/logos@1.2.21:github-icon",
+      "license": "CC0-1.0",
+      "sha256": "bcc536786283953ade46a74e5d975b1742288181a39d1344e12c93a951be43a0"
+    },
+    "gmail": {
+      "source": "@iconify-json/logos@1.2.21:google-gmail",
+      "license": "CC0-1.0",
+      "sha256": "b42d0f198355f68f544aef38d8eba08668fe1a84a7dc428b000df7b5d48a30bb"
+    },
+    "outlook": {
+      "source": "https://logos.composio.dev/api/outlook",
+      "sha256": "1f763338c1f8e692769e731fac9540d9cae82f934f12f3753aeb79118471a80c"
+    },
+    "googlecalendar": {
+      "source": "@iconify-json/logos@1.2.21:google-calendar",
+      "license": "CC0-1.0",
+      "sha256": "b86b093b2831fa19ac36f69e376f625268c6df7fc38cb2fb5dde60cf72f5f397"
+    },
+    "googledrive": {
+      "source": "@iconify-json/logos@1.2.21:google-drive",
+      "license": "CC0-1.0",
+      "sha256": "1b316ecebf967c18b9d5ef577b9d01c8996129a4cfd22ce9306ba8f16b1e8ca1"
+    },
+    "one_drive": {
+      "source": "@iconify-json/logos@1.2.21:microsoft-onedrive",
+      "license": "CC0-1.0",
+      "sha256": "696ba2d1e8795f66836b81082bc948a71e57899d0049f9adc4b60f5c7935e77e"
+    },
+    "notion": {
+      "source": "@iconify-json/logos@1.2.21:notion-icon",
+      "license": "CC0-1.0",
+      "sha256": "b080fd956301458452f447a1528b9852ea90048723d63bea7f708247c23cd618"
+    },
+    "slack": {
+      "source": "@iconify-json/logos@1.2.21:slack-icon",
+      "license": "CC0-1.0",
+      "sha256": "9e09857a1483cabf0f562a1725ff0f44fb38fd32b5e3236fd4443042d2bee7fd"
+    },
+    "microsoft_teams": {
+      "source": "@iconify-json/logos@1.2.21:microsoft-teams",
+      "license": "CC0-1.0",
+      "sha256": "b9ef4c1462fb14dd54ba2c0dfb23dbfd7701a161e5d0be7e35f4c577a36f668e"
+    },
+    "todoist": {
+      "source": "@iconify-json/logos@1.2.21:todoist-icon",
+      "license": "CC0-1.0",
+      "sha256": "f7451c7f86398d0b576d057c50bbde1b0f8ceba4777b08cb97ff5a1c27eac734"
+    },
+    "linear": {
+      "source": "@iconify-json/logos@1.2.21:linear-icon",
+      "license": "CC0-1.0",
+      "sha256": "bcc137706b7151221a4736608a6513463c324ed64a388f362771a85d7a0f8d16"
+    }
+  }
+}

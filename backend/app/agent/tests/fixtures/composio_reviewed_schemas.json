@@ -1,0 +1,849 @@
+{
+  "GOOGLECALENDAR_GET_CURRENT_USER": {
+    "type": "object",
+    "properties": {}
+  },
+  "GOOGLECALENDAR_LIST_CALENDARS": {
+    "type": "object",
+    "properties": {
+      "page_token": {
+        "type": "string"
+      },
+      "sync_token": {
+        "type": "string"
+      },
+      "max_results": {
+        "type": "integer",
+        "default": 100,
+        "maximum": 250,
+        "minimum": 1
+      },
+      "show_hidden": {
+        "type": "boolean",
+        "default": false
+      },
+      "show_deleted": {
+        "type": "boolean",
+        "default": false
+      },
+      "min_access_role": {
+        "enum": [
+          "freeBusyReader",
+          "reader",
+          "writerWithoutPrivateAccess",
+          "writer",
+          "owner"
+        ],
+        "type": "string"
+      }
+    }
+  },
+  "GOOGLECALENDAR_EVENTS_LIST": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string"
+      },
+      "fields": {
+        "type": "string"
+      },
+      "iCalUID": {
+        "type": "string"
+      },
+      "orderBy": {
+        "enum": [
+          "startTime",
+          "updated"
+        ],
+        "type": "string"
+      },
+      "timeMax": {
+        "type": "string"
+      },
+      "timeMin": {
+        "type": "string"
+      },
+      "timeZone": {
+        "type": "string"
+      },
+      "pageToken": {
+        "type": "string"
+      },
+      "syncToken": {
+        "type": "string"
+      },
+      "calendarId": {
+        "type": "string",
+        "default": "primary"
+      },
+      "eventTypes": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "birthday",
+            "default",
+            "focusTime",
+            "fromGmail",
+            "outOfOffice",
+            "workingLocation"
+          ],
+          "type": "string"
+        }
+      },
+      "maxResults": {
+        "type": "integer",
+        "maximum": 2500,
+        "minimum": 1
+      },
+      "updatedMin": {
+        "type": "string"
+      },
+      "showDeleted": {
+        "type": "boolean"
+      },
+      "maxAttendees": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "singleEvents": {
+        "type": "boolean"
+      },
+      "alwaysIncludeEmail": {
+        "type": "boolean"
+      },
+      "showHiddenInvitations": {
+        "type": "boolean"
+      },
+      "sharedExtendedProperty": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "privateExtendedProperty": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "GOOGLEDRIVE_GET_ABOUT": {
+    "type": "object",
+    "properties": {
+      "fields": {
+        "type": "string",
+        "default": "*"
+      }
+    }
+  },
+  "GOOGLEDRIVE_FIND_FILE": {
+    "type": "object",
+    "properties": {
+      "q": {
+        "type": "string"
+      },
+      "fields": {
+        "type": "string"
+      },
+      "spaces": {
+        "type": "string",
+        "default": "drive"
+      },
+      "corpora": {
+        "enum": [
+          "user",
+          "drive",
+          "domain",
+          "allDrives"
+        ],
+        "type": "string",
+        "default": "allDrives"
+      },
+      "driveId": {
+        "type": "string"
+      },
+      "orderBy": {
+        "type": "string"
+      },
+      "pageSize": {
+        "type": "integer",
+        "default": 100,
+        "maximum": 1000,
+        "minimum": 1
+      },
+      "folder_id": {
+        "type": "string"
+      },
+      "pageToken": {
+        "type": "string"
+      },
+      "include_labels": {
+        "type": "string"
+      },
+      "pagetoken_dropped": {
+        "type": "boolean",
+        "default": false
+      },
+      "supportsAllDrives": {
+        "type": "boolean",
+        "default": true
+      },
+      "original_email_query": {
+        "type": "string"
+      },
+      "editors_field_removed": {
+        "type": "boolean",
+        "default": false
+      },
+      "email_query_transformed": {
+        "type": "boolean",
+        "default": false
+      },
+      "orderby_size_transformed": {
+        "type": "boolean",
+        "default": false
+      },
+      "original_bare_text_query": {
+        "type": "string"
+      },
+      "includeItemsFromAllDrives": {
+        "type": "boolean",
+        "default": true
+      },
+      "emailaddress_field_removed": {
+        "type": "boolean",
+        "default": false
+      },
+      "original_invalid_pagetoken": {
+        "type": "string"
+      },
+      "bare_text_query_transformed": {
+        "type": "boolean",
+        "default": false
+      },
+      "include_permissions_for_view": {
+        "type": "string"
+      }
+    }
+  },
+  "GOOGLEDRIVE_GET_FILE_METADATA": {
+    "type": "object",
+    "required": [
+      "fileId"
+    ],
+    "properties": {
+      "fields": {
+        "type": "string"
+      },
+      "fileId": {
+        "type": "string"
+      },
+      "includeLabels": {
+        "type": "string"
+      },
+      "supportsAllDrives": {
+        "type": "boolean",
+        "default": true
+      },
+      "includePermissionsForView": {
+        "type": "string"
+      }
+    }
+  },
+  "GOOGLEDRIVE_GET_DOCUMENT": {
+    "type": "object",
+    "required": [
+      "document_id"
+    ],
+    "properties": {
+      "document_id": {
+        "type": "string"
+      },
+      "include_tabs_content": {
+        "type": "boolean",
+        "default": false
+      },
+      "suggestions_view_mode": {
+        "enum": [
+          "DEFAULT_FOR_CURRENT_ACCESS",
+          "SUGGESTIONS_INLINE",
+          "PREVIEW_SUGGESTIONS_ACCEPTED",
+          "PREVIEW_WITHOUT_SUGGESTIONS"
+        ],
+        "type": "string"
+      }
+    }
+  },
+  "GOOGLEDRIVE_GET_SPREADSHEET_VALUES": {
+    "type": "object",
+    "required": [
+      "spreadsheet_id",
+      "range"
+    ],
+    "properties": {
+      "range": {
+        "type": "string"
+      },
+      "spreadsheet_id": {
+        "type": "string"
+      },
+      "major_dimension": {
+        "enum": [
+          "ROWS",
+          "COLUMNS"
+        ],
+        "type": "string"
+      },
+      "value_render_option": {
+        "enum": [
+          "FORMATTED_VALUE",
+          "UNFORMATTED_VALUE",
+          "FORMULA"
+        ],
+        "type": "string",
+        "default": "FORMATTED_VALUE"
+      },
+      "date_time_render_option": {
+        "enum": [
+          "SERIAL_NUMBER",
+          "FORMATTED_STRING"
+        ],
+        "type": "string",
+        "default": "SERIAL_NUMBER"
+      }
+    }
+  },
+  "ONE_DRIVE_GET_USER": {
+    "type": "object",
+    "required": [
+      "user_id"
+    ],
+    "properties": {
+      "select": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "user_id": {
+        "type": "string"
+      }
+    }
+  },
+  "ONE_DRIVE_LIST_FOLDER_CHILDREN": {
+    "type": "object",
+    "properties": {
+      "top": {
+        "type": "integer",
+        "maximum": 999,
+        "minimum": 1
+      },
+      "expand": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "select": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "orderby": {
+        "type": "string"
+      },
+      "site_id": {
+        "type": "string"
+      },
+      "drive_id": {
+        "type": "string"
+      },
+      "page_token": {
+        "type": "string"
+      },
+      "folder_path": {
+        "type": "string"
+      },
+      "use_me_drive": {
+        "type": "boolean",
+        "default": false
+      },
+      "folder_item_id": {
+        "type": "string"
+      }
+    }
+  },
+  "ONE_DRIVE_SEARCH_ITEMS": {
+    "type": "object",
+    "required": [
+      "q"
+    ],
+    "properties": {
+      "q": {
+        "type": "string"
+      },
+      "top": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "expand": {
+        "type": "string"
+      },
+      "select": {
+        "type": "string"
+      },
+      "orderby": {
+        "type": "string"
+      },
+      "drive_id": {
+        "type": "string"
+      },
+      "page_token": {
+        "type": "string"
+      },
+      "search_scope": {
+        "enum": [
+          "drive",
+          "root"
+        ],
+        "type": "string",
+        "default": "root"
+      },
+      "stripped_annotations": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "transformed_path_query": {
+        "type": "string"
+      },
+      "transformed_kql_operator": {
+        "type": "string"
+      },
+      "transformed_parent_query": {
+        "type": "string"
+      },
+      "transformed_wildcard_query": {
+        "type": "string"
+      }
+    }
+  },
+  "ONE_DRIVE_GET_ITEM": {
+    "type": "object",
+    "required": [
+      "item_id"
+    ],
+    "properties": {
+      "item_id": {
+        "type": "string"
+      },
+      "drive_id": {
+        "type": "string"
+      },
+      "select_fields": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "expand_relations": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "activities",
+            "analytics",
+            "children",
+            "createdByUser",
+            "lastModifiedByUser",
+            "listItem",
+            "permissions",
+            "retentionLabel",
+            "subscriptions",
+            "thumbnails",
+            "versions",
+            "workbook"
+          ],
+          "type": "string"
+        }
+      }
+    }
+  },
+  "NOTION_GET_ABOUT_USER": {
+    "type": "object",
+    "required": [
+      "user_id"
+    ],
+    "properties": {
+      "user_id": {
+        "type": "string"
+      }
+    }
+  },
+  "NOTION_SEARCH_NOTION_PAGE": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "default": ""
+      },
+      "direction": {
+        "type": "string"
+      },
+      "page_size": {
+        "type": "integer",
+        "default": 25,
+        "maximum": 100,
+        "minimum": 1
+      },
+      "timestamp": {
+        "type": "string"
+      },
+      "filter_value": {
+        "enum": [
+          "page",
+          "database"
+        ],
+        "type": "string",
+        "default": "page"
+      },
+      "start_cursor": {
+        "type": "string"
+      },
+      "filter_property": {
+        "type": "string",
+        "default": "object"
+      },
+      "filter_properties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "NOTION_RETRIEVE_PAGE": {
+    "type": "object",
+    "required": [
+      "page_id"
+    ],
+    "properties": {
+      "page_id": {
+        "type": "string"
+      }
+    }
+  },
+  "NOTION_FETCH_BLOCK_CONTENTS": {
+    "type": "object",
+    "required": [
+      "block_id"
+    ],
+    "properties": {
+      "block_id": {
+        "type": "string"
+      },
+      "page_size": {
+        "type": "integer"
+      },
+      "start_cursor": {
+        "type": "string"
+      }
+    }
+  },
+  "SLACK_TEST_AUTH": {
+    "type": "object",
+    "properties": {}
+  },
+  "SLACK_LIST_CONVERSATIONS": {
+    "type": "object",
+    "properties": {
+      "user": {
+        "type": "string"
+      },
+      "limit": {
+        "type": "integer"
+      },
+      "types": {
+        "type": "string"
+      },
+      "cursor": {
+        "type": "string"
+      },
+      "team_id": {
+        "type": "string"
+      },
+      "exclude_archived": {
+        "type": "boolean"
+      }
+    }
+  },
+  "SLACK_SEARCH_MESSAGES": {
+    "type": "object",
+    "required": [
+      "query"
+    ],
+    "properties": {
+      "page": {
+        "type": "integer"
+      },
+      "sort": {
+        "type": "string"
+      },
+      "count": {
+        "type": "integer",
+        "default": 20
+      },
+      "query": {
+        "type": "string"
+      },
+      "cursor": {
+        "type": "string"
+      },
+      "team_id": {
+        "type": "string"
+      },
+      "sort_dir": {
+        "type": "string"
+      },
+      "highlight": {
+        "type": "boolean"
+      },
+      "auto_paginate": {
+        "type": "boolean",
+        "default": false
+      }
+    }
+  },
+  "SLACK_FETCH_CONVERSATION_HISTORY": {
+    "type": "object",
+    "required": [
+      "channel"
+    ],
+    "properties": {
+      "limit": {
+        "type": "integer",
+        "default": 100,
+        "maximum": 1000,
+        "minimum": 1
+      },
+      "cursor": {
+        "type": "string"
+      },
+      "latest": {
+        "type": "string"
+      },
+      "oldest": {
+        "type": "string"
+      },
+      "channel": {
+        "type": "string"
+      },
+      "inclusive": {
+        "type": "boolean"
+      },
+      "include_all_metadata": {
+        "type": "boolean"
+      }
+    }
+  },
+  "MICROSOFT_TEAMS_GET_MY_PROFILE": {
+    "type": "object",
+    "properties": {
+      "select": {
+        "type": "string"
+      },
+      "user_id": {
+        "type": "string",
+        "default": "me"
+      }
+    }
+  },
+  "MICROSOFT_TEAMS_TEAMS_LIST": {
+    "type": "object",
+    "properties": {
+      "top": {
+        "type": "integer",
+        "default": 100
+      },
+      "count": {
+        "type": "boolean",
+        "default": false
+      },
+      "filter": {
+        "type": "string",
+        "default": ""
+      },
+      "select": {
+        "type": "string",
+        "default": ""
+      },
+      "page_token": {
+        "type": "string"
+      }
+    }
+  },
+  "MICROSOFT_TEAMS_TEAMS_LIST_CHANNELS": {
+    "type": "object",
+    "required": [
+      "team_id"
+    ],
+    "properties": {
+      "filter": {
+        "type": "string",
+        "default": ""
+      },
+      "select": {
+        "type": "string",
+        "default": ""
+      },
+      "team_id": {
+        "type": "string",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      },
+      "page_token": {
+        "type": "string"
+      },
+      "include_shared_channels": {
+        "type": "boolean",
+        "default": false
+      }
+    }
+  },
+  "MICROSOFT_TEAMS_TEAMS_LIST_CHANNEL_MESSAGES": {
+    "type": "object",
+    "required": [
+      "team_id",
+      "channel_id"
+    ],
+    "properties": {
+      "top": {
+        "type": "integer",
+        "default": 50,
+        "maximum": 50,
+        "minimum": 1
+      },
+      "expand": {
+        "type": "string"
+      },
+      "team_id": {
+        "type": "string"
+      },
+      "channel_id": {
+        "type": "string"
+      },
+      "page_token": {
+        "type": "string"
+      }
+    }
+  },
+  "TODOIST_GET_USER": {
+    "type": "object",
+    "properties": {}
+  },
+  "TODOIST_GET_ALL_TASKS": {
+    "type": "object",
+    "properties": {
+      "ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "lang": {
+        "type": "string"
+      },
+      "label": {
+        "type": "string"
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "cursor": {
+        "type": "string"
+      },
+      "filter": {
+        "type": "string"
+      },
+      "parent_id": {
+        "type": "string"
+      },
+      "project_id": {
+        "type": "string"
+      },
+      "section_id": {
+        "type": "string"
+      }
+    }
+  },
+  "TODOIST_GET_ALL_PROJECTS": {
+    "type": "object",
+    "properties": {
+      "limit": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "cursor": {
+        "type": "string"
+      }
+    }
+  },
+  "LINEAR_GET_CURRENT_USER": {
+    "type": "object",
+    "properties": {}
+  },
+  "LINEAR_SEARCH_ISSUES": {
+    "type": "object",
+    "required": [
+      "query"
+    ],
+    "properties": {
+      "after": {
+        "type": "string"
+      },
+      "first": {
+        "type": "integer",
+        "default": 25,
+        "maximum": 50,
+        "minimum": 1
+      },
+      "query": {
+        "type": "string"
+      },
+      "include_archived": {
+        "type": "boolean",
+        "default": false
+      }
+    }
+  },
+  "LINEAR_LIST_LINEAR_PROJECTS": {
+    "type": "object",
+    "properties": {
+      "after": {
+        "type": "string"
+      },
+      "first": {
+        "type": "integer",
+        "default": 50,
+        "maximum": 250,
+        "minimum": 1
+      }
+    }
+  }
+}
