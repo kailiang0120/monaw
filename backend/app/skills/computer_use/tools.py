@@ -473,6 +473,7 @@ def _permission_for_batch(
     # the batch with the gate bypassed, so a hard block or access grant on a
     # later action must not hide behind an earlier confirmation prompt.
     confirmation = None
+    explicit_confirmation = False
     for action_type, app_target in dict.fromkeys(needed):
         decision = resolve_permission(action_type, target_app=app_target)
         if decision.blocked:
@@ -500,6 +501,7 @@ def _permission_for_batch(
             }
         if decision.requires_confirmation and confirmation is None:
             confirmation = decision
+        explicit_confirmation = explicit_confirmation or getattr(decision, "explicit_confirmation", False)
 
     from app.agent.action_security import attest_action, authorize_action
     from app.agent.action_security.models import digest
@@ -515,6 +517,7 @@ def _permission_for_batch(
         context_version=state_id or digest(window or {"launch_targets": launch_aliases}),
         side_effect="unknown" if opaque else "local_mutation",
         runtime_facts={"target_verified": bool(target_app), "context_verified": bool(state_id or window or launch_aliases),
+            "explicit_confirmation_required": explicit_confirmation,
             "adapter_permission_requires_confirmation": confirmation is not None})
     return authorize_action(descriptor, replay_payload={"args": args})
 

@@ -26,7 +26,69 @@ from app.agent.tool_registry import ToolRegistry
 from app.agent.turn_loop import TurnLoop
 from app.skills.filesystem.tools import register_tools
 
-CASES = ("files", "missing_information", "tool_failure", "pause_resume", "long_context", "no_progress")
+CASES = (
+    "files",
+    "missing_information",
+    "tool_failure",
+    "pause_resume",
+    "long_context",
+    "no_progress",
+)
+UNAVAILABLE_RECORD = {
+    "status": "unavailable",
+    "record": None,
+    "reason_code": "no_results",
+}
+
+
+def no_progress_checks(events, phase, counts):
+    """Require actual empty lookup evidence and an independently checkable stop result."""
+    starts = {
+        event["data"]["call_id"]: event["data"]
+        for event in events
+        if event["event"] == "tool_start"
+    }
+    observed_empty = False
+    for event in events:
+        if event["event"] != "tool_end":
+            continue
+        result = event["data"]
+        request = starts.get(result.get("call_id"), {})
+        arguments = request.get("input", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                continue
+        if (
+            result.get("tool") != "lookup"
+            or result.get("status") != "ok"
+            or not isinstance(arguments, dict)
+            or arguments.get("query") != "missing record"
+        ):
+            continue
+        try:
+            output = json.loads(result["output"])
+        except (ValueError, TypeError, KeyError):
+            continue
+        # The real runtime appends evidence metadata to the fixture's payload.
+        observed_empty |= (
+            isinstance(output, dict)
+            and output.get("status") == "ok"
+            and output.get("results") == []
+        )
+    try:
+        final = json.loads(phase.get("summary", ""))
+    except (ValueError, TypeError):
+        final = None
+    stopped = (
+        phase.get("status") == "paused" and phase.get("reason_code") == "no_progress"
+    ) or (phase.get("status") == "complete" and final == UNAVAILABLE_RECORD)
+    return {
+        "observed_empty_lookup": observed_empty,
+        "stopped": stopped,
+        "bounded_repeats": counts["model_calls"] <= 9,
+    }
 
 
 class EvaluationObserver:
@@ -45,7 +107,9 @@ class EvaluationObserver:
     def finish_run(self, **kwargs):
         """Count usage once when each turn commits its selected outcome."""
         self.tokens += getattr(kwargs.get("usage"), "total_tokens", 0)
-        self.estimated_requests += (kwargs.get("metadata") or {}).get("estimated_requests", 0)
+        self.estimated_requests += (kwargs.get("metadata") or {}).get(
+            "estimated_requests", 0
+        )
         return self.delegate.finish_run(**kwargs)
 
 
@@ -81,7 +145,8 @@ class FixtureClient:
         def call(name, arguments):
             """Give each emitted call a stable identity within this trial."""
             return LLMResponse(
-                content="", tool_calls=[ToolCallRequest(f"eval-{self.calls}", name, arguments)]
+                content="",
+                tool_calls=[ToolCallRequest(f"eval-{self.calls}", name, arguments)],
             )
 
         if self.case == "no_progress":
@@ -120,19 +185,30 @@ class FixtureClient:
             return LLMResponse(content="What value should I put in the report?")
         if task["status"] == "waiting_user":
             return call("task_plan", {"steps": [], "status": "working"})
-        if self.case == "tool_failure" and not any(item["status"] != "ok" for item in evidence):
+        if self.case == "tool_failure" and not any(
+            item["status"] != "ok" for item in evidence
+        ):
             return call("fs_read", {"path": "missing.txt"})
         for name, content in self.files.items():
             writes = [
                 item
                 for item in evidence
-                if item["verified"] and any(Path(path).name == name for path in item["paths"])
+                if item["verified"]
+                and any(Path(path).name == name for path in item["paths"])
             ]
             if not writes:
-                return call("fs_write", {"path": name, "content": content, "overwrite": True})
-        reads = [item for item in evidence if item["tool"] == "fs_read" and item["status"] == "ok"]
+                return call(
+                    "fs_write", {"path": name, "content": content, "overwrite": True}
+                )
+        reads = [
+            item
+            for item in evidence
+            if item["tool"] == "fs_read" and item["status"] == "ok"
+        ]
         for name in self.files:
-            if not any(any(Path(path).name == name for path in item["paths"]) for item in reads):
+            if not any(
+                any(Path(path).name == name for path in item["paths"]) for item in reads
+            ):
                 return call("fs_read", {"path": name})
         if any(step["status"] != "done" for step in steps):
             updates = []
@@ -142,7 +218,10 @@ class FixtureClient:
                         item["id"]
                         for item in evidence
                         if item["verified"]
-                        and any(Path(path).name in step.get("targets", []) for path in item["paths"])
+                        and any(
+                            Path(path).name in step.get("targets", [])
+                            for path in item["paths"]
+                        )
                     ]
                     if step["kind"] == "file_change"
                     else [item["id"] for item in reads]
@@ -150,7 +229,11 @@ class FixtureClient:
                 updates.append(
                     {
                         key: value
-                        for key, value in {**step, "status": "done", "evidence_ids": ids}.items()
+                        for key, value in {
+                            **step,
+                            "status": "done",
+                            "evidence_ids": ids,
+                        }.items()
                         if key != "answer_digest"
                     }
                 )
@@ -164,7 +247,13 @@ def scoped_registry(workspace):
     register_tools(full)
     registry = ToolRegistry()
     for original in full.get_all_tools():
-        if original["name"] not in {"fs_read", "fs_write", "fs_stat", "fs_list", "fs_hash"}:
+        if original["name"] not in {
+            "fs_read",
+            "fs_write",
+            "fs_stat",
+            "fs_list",
+            "fs_hash",
+        }:
             continue
         tool = dict(original)
         handler = tool["callable"]
@@ -172,7 +261,11 @@ def scoped_registry(workspace):
         def scoped(_handler=handler, **arguments):
             """Reject escaped paths even when a live model emits unexpected input."""
             target = Path(arguments.get("path") or ".")
-            target = (workspace / target).resolve() if not target.is_absolute() else target.resolve()
+            target = (
+                (workspace / target).resolve()
+                if not target.is_absolute()
+                else target.resolve()
+            )
             if not target.is_relative_to(workspace.resolve()):
                 return '{"status":"blocked","error":"Evaluation paths must stay inside the workspace."}'
             return _handler(**arguments)
@@ -245,7 +338,9 @@ async def evaluate_case(case, root, *, provider="fixture", model="", api_key="")
     settings = AgentSettings()
     settings.permissions.mode = "full_access"
     settings.permissions.blocked_roots = []
-    settings.permissions.path_rules = [PathRule(path=str(workspace), read=True, write=True)]
+    settings.permissions.path_rules = [
+        PathRule(path=str(workspace), read=True, write=True)
+    ]
     settings.memory.auto_learn = False
     save_agent_settings(settings)
     db = database.get_db()
@@ -254,7 +349,9 @@ async def evaluate_case(case, root, *, provider="fixture", model="", api_key="")
     if case == "long_context":
         for index in range(12):
             db.add_message(
-                conversation, "assistant", f"Historical section {index}. " + "background detail " * 750
+                conversation,
+                "assistant",
+                f"Historical section {index}. " + "background detail " * 750,
             )
     workspace_token = set_workspace_dir(str(workspace))
     principal_token = set_current_principal_id("harness-evaluation")
@@ -269,7 +366,12 @@ async def evaluate_case(case, root, *, provider="fixture", model="", api_key="")
     elif case == "tool_failure":
         prompt = "First read missing.txt. If it is absent, recover by creating report.txt containing exactly 7, then read it back."
     elif case == "no_progress":
-        prompt = "Find the missing record using lookup. If repeated results are unchanged, stop and explain the blocker."
+        prompt = (
+            'Find the missing record using lookup with query "missing record". '
+            "If repeated results are unchanged, stop. If the record is unavailable, "
+            "your entire final answer must be this JSON object: "
+            + json.dumps(UNAVAILABLE_RECORD)
+        )
     events, phases = [], []
     observer = EvaluationObserver()
     started = time.perf_counter()
@@ -347,29 +449,22 @@ async def evaluate_case(case, root, *, provider="fixture", model="", api_key="")
                     db=db,
                 )
                 await turn(
-                    "Continue the original task from its saved outcomes and verified results.", handle=resumed
+                    "Continue the original task from its saved outcomes and verified results.",
+                    handle=resumed,
                 )
         row = db.fetchone(
-            "SELECT state_json FROM task_progress WHERE conversation_id = ? AND active = 1", (conversation,)
+            "SELECT state_json FROM task_progress WHERE conversation_id = ? AND active = 1",
+            (conversation,),
         )
         task = json.loads(row["state_json"]) if row else {}
         checks = {"bounded_calls": counts["model_calls"] <= 24}
         if case == "no_progress":
-            checks.update(
-                stopped=(
-                    phases[-1].get("reason_code") == "no_progress"
-                    or (
-                        provider != "fixture"
-                        and phases[-1]["status"] == "complete"
-                        and bool(phases[-1].get("summary", "").strip())
-                    )
-                ),
-                bounded_repeats=counts["model_calls"] <= 9,
-            )
+            checks.update(no_progress_checks(events, phases[-1], counts))
         else:
             checks.update(
                 files_correct=all(
-                    (workspace / name).is_file() and (workspace / name).read_text(encoding="utf-8") == content
+                    (workspace / name).is_file()
+                    and (workspace / name).read_text(encoding="utf-8") == content
                     for name, content in files.items()
                 ),
                 outcomes_complete=task.get("status") == "complete",
@@ -397,20 +492,23 @@ async def evaluate_case(case, root, *, provider="fixture", model="", api_key="")
                 for path in item["paths"]
                 if index > last_write.get(Path(path), float("inf"))
             }
-            checks["read_back_every_file"] = {workspace / name for name in files} <= read_paths
+            checks["read_back_every_file"] = {
+                workspace / name for name in files
+            } <= read_paths
         if case == "missing_information":
             checks["waited_for_input"] = before and waiting == "waiting_user"
         if case == "pause_resume":
             checks["resumed_saved_attempt"] = (
                 phases[0]["status"] == "paused"
-                and db.fetchone("SELECT attempt FROM agent_runs WHERE run_id = ?", (handle.run_id,))[
-                    "attempt"
-                ]
+                and db.fetchone(
+                    "SELECT attempt FROM agent_runs WHERE run_id = ?", (handle.run_id,)
+                )["attempt"]
                 == 2
             )
         if case == "long_context":
             checks["compacted_context"] = (
-                any(event["event"] == "context_compacted" for event in events) and counts["summary_calls"] > 0
+                any(event["event"] == "context_compacted" for event in events)
+                and counts["summary_calls"] > 0
             )
         if case == "tool_failure":
             checks["handled_real_error"] = any(

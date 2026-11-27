@@ -257,8 +257,10 @@ def _permission_check(
     # Full Access authorizes ordinary opaque execution. Hard sandbox denials
     # were already enforced; a heuristic host hint cannot invent a new prompt.
     full_access = _load_runtime_settings().permissions.mode == "full_access"
-    needs_approval = not full_access and bool(decision.requires_confirmation or sandbox.get("always_ask"))
-    if full_access:
+    needs_approval = getattr(decision, "explicit_confirmation", False) or (
+        not full_access and bool(decision.requires_confirmation or sandbox.get("always_ask"))
+    )
+    if full_access and not getattr(decision, "explicit_confirmation", False):
         sandbox["always_ask"] = False
         sandbox["user_review_only"] = False
         if sandbox.get("explicit_approval_required"):
@@ -280,6 +282,7 @@ def _permission_check(
         context_version=digest({"workdir": workdir, "environment": environment}), side_effect="unknown",
         runtime_facts={"target_verified": True, "context_verified": True,
             "execution_environment": environment,
+            "explicit_confirmation_required": getattr(decision, "explicit_confirmation", False),
             "adapter_permission_requires_confirmation": needs_approval})
     # Secrets remain in this live process, never in ordinary approval JSONL.
     # Restarted approval continuations cannot recreate these credentials.

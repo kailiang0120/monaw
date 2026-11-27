@@ -582,3 +582,33 @@ def test_four_modes_share_one_action_policy(tmp_policy, mode, action, confirmati
     decision = resolve_permission(action, settings_data=settings)
     assert not decision.blocked
     assert decision.requires_confirmation is confirmation
+
+
+def test_saved_explicit_folder_and_app_confirmation_survive_full_access(tmp_policy, tmp_path):
+    """Preserve saved exceptions through both the shell gate and central desktop policy."""
+    import app.agent.controller_policy as cp
+    from app.skills.exec.tools import _permission_check
+    from app.agent.action_security import attest_action, evaluate_action, PolicyOutcome
+
+    folder = tmp_path / "financial-records"
+    folder.mkdir()
+    settings = AgentSettings()
+    settings.permissions.mode = "custom"
+    settings.permissions.path_rules = [PathRule(path=str(folder), read=True, write=True, require_confirmation=True)]
+    settings.permissions.app_rules = [AppRule(alias="notepad", launch_allowed=True, uia_allowed=True, require_confirmation=True)]
+    save_agent_settings(settings, settings_path=cp._settings_json_path())
+    settings = load_agent_settings(settings_path=cp._settings_json_path())
+    settings.permissions.mode = "full_access"
+    save_agent_settings(settings, settings_path=cp._settings_json_path())
+    decision = resolve_permission(ActionType.EXEC, target_path=str(folder))
+    assert decision.requires_confirmation and decision.explicit_confirmation
+    result = json.loads(_permission_check(command="Write-Output hi", shell="powershell", workdir=str(folder), env=None, sandbox={}))
+    assert result["status"] == "pending_approval"
+    assert result["action_descriptor"]["preview_required"]
+    app_decision = resolve_permission(ActionType.CLICK, target_app="notepad")
+    assert app_decision.requires_confirmation and app_decision.explicit_confirmation
+    action = attest_action(tool_name="computer_functions_act", action_kind="click", parameters={"uid": "1"},
+        target={"app": "notepad"}, context_version="snapshot", side_effect="unknown",
+        runtime_facts={"target_verified": True, "context_verified": True,
+            "explicit_confirmation_required": app_decision.explicit_confirmation})
+    assert evaluate_action(action, settings.permissions).outcome == PolicyOutcome.REQUIRE_HUMAN_APPROVAL

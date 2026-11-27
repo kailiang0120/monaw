@@ -492,3 +492,103 @@ def test_completion_save_failure_is_atomic_and_cannot_report_success(native_cont
         assert saved["status"] == "complete" and saved["steps"][0]["status"] == "done"
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize("failure", ["checkpoint", "after_transition", "unstable", "unavailable", "owner_changed", "review"])
+def test_durable_finalization_failure_cannot_leave_a_successful_turn(native_context, monkeypatch, failure):
+    """Roll back history, answer delivery and run completion across each finalization boundary."""
+    from app.agent.harness.turn_lifecycle import TurnLifecycle, TurnOutcome
+    from app.agent.observability.recorder import UsageStats
+    from app.agent.run_events import RunEventPublisher
+
+    context = native_context
+    db, run = context["db"], context["run"]
+    conversation = "chat-native-file-integration"
+    monkeypatch.setattr("app.agent.memory_manager.get_db", lambda: db)
+    memory = MemoryManager(None)
+    progress = TaskProgress(db, conversation, "Explain the result", str(context["root"]))
+    progress.update([{"id": "answer", "description": "Explain the result", "criteria": "Deliver the answer", "kind": "answer"}])
+    original = run.finalize_in_transaction
+
+    def fail_commit(connection, status, reason):
+        """Inject failures before or after the run update but before the shared commit."""
+        if failure == "unavailable":
+            raise RuntimeError("Run state storage unavailable")
+        if status == "complete":
+            if failure == "unstable":
+                return False
+            result = original(connection, status, reason)
+            if failure == "after_transition":
+                raise RuntimeError("Run transition was not committed")
+            return result
+        return original(connection, status, reason)
+
+    async def checkpoint(phase):
+        """Model a file-checkpoint failure without any tool or filesystem effects."""
+        if failure == "checkpoint":
+            raise RuntimeError("Workspace checkpoint unavailable")
+        if failure == "owner_changed":
+            # A different attempt claims the run while the old worker is waiting
+            # on its final workspace checkpoint.
+            with db.transaction() as connection:
+                connection.execute(
+                    "UPDATE agent_runs SET owner_instance_id=?, attempt=attempt+1 WHERE run_id=?",
+                    ("new-owner", run.run_id),
+                )
+
+    monkeypatch.setattr(run, "finalize_in_transaction", fail_commit)
+    monkeypatch.setattr(run, "checkpoint_files", checkpoint)
+
+    async def scenario():
+        """Persist using the real SQLite history and task transactions."""
+        queue = asyncio.Queue()
+        lifecycle = TurnLifecycle(conversation, RunEventPublisher(queue, [0.0]), FakeObservability(), durable_run=run)
+
+        async def persist(outcome, *, before_commit=None):
+            """Use the same persistence callback contract as the production coordinator."""
+            await memory.persist_turn(
+                conversation, "Explain the result", outcome.summary,
+                tool_calls=[], turn_id=run.turn_id, status=outcome.status,
+                task_progress=progress if outcome.status == "complete" else None,
+                before_commit=before_commit,
+            )
+
+        cleared = []
+        if failure == "review":
+            lifecycle.request_review()
+        await lifecycle.finalize(
+            TurnOutcome("Release verified."), persist=persist, persist_atomic=persist,
+            usage=UsageStats(), tool_calls=[], clear_progress=lambda: cleared.append(True),
+        )
+        return [queue.get_nowait() for _ in range(queue.qsize())], cleared
+
+    events, cleared = asyncio.run(scenario())
+    done = next(item["data"] for item in events if item["event"] == "done")
+    saved = db.fetchone("SELECT content, status FROM messages WHERE role='assistant'")
+    if failure == "owner_changed":
+        assert saved is None
+        assert done["status"] == "error" and done["reason_code"] == "persistence_failed"
+        current = db.fetchone("SELECT owner_instance_id, attempt, status FROM agent_runs WHERE run_id=?", (run.run_id,))
+        assert dict(current) == {"owner_instance_id": "new-owner", "attempt": run.attempt + 1, "status": "running"}
+        assert db.fetchone("SELECT COUNT(*) FROM turn_checkpoints WHERE turn_id=? AND finalized=1", (run.turn_id,))[0] == 0
+        assert any("could not be saved" in event["data"].get("message", "") for event in events if event["event"] == "error")
+        assert progress.snapshot()["steps"][0]["status"] == "pending"
+        assert cleared == []
+        return
+    assert db.fetchone("SELECT COUNT(*) FROM messages WHERE role='assistant'")[0] == 1
+    assert saved["status"] == done["status"] == "error"
+    assert saved["content"] == done["summary"]
+    if failure == "review":
+        assert "needs review" in saved["content"]
+        assert done["reason_code"] == "external_effect_unknown"
+        assert run.journal.snapshot(run.run_id)["status"] == "needs_review"
+        assert progress.snapshot()["steps"][0]["status"] == "pending"
+        assert cleared == []
+        return
+    assert "completion could not be saved" in saved["content"]
+    assert done["reason_code"] == "persistence_failed"
+    assert context["run"].journal.snapshot(run.run_id)["status"] == ("needs_review" if failure == "unavailable" else "failed")
+    persisted_task = json.loads(db.fetchone("SELECT state_json FROM task_progress WHERE active=1")[0])
+    assert persisted_task == progress.snapshot()
+    assert persisted_task["status"] == "working" and persisted_task["steps"][0]["status"] == "pending"
+    assert cleared == []

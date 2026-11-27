@@ -17,6 +17,7 @@ unauthenticated runtime endpoint.
 | `GET` | `/api/approvals/history` | `approval:resolve` | `list` |
 | `GET` | `/api/approvals/pending` | `approval:resolve` | `list` |
 | `POST` | `/api/approvals/{ticket_id}/approve` | `approval:resolve` | `ApprovalTicketOut` |
+| `GET` | `/api/approvals/{ticket_id}/preview` | `approval:resolve` | `dict` |
 | `POST` | `/api/approvals/{ticket_id}/reject` | `approval:resolve` | `ApprovalTicketOut` |
 | `POST` | `/api/chat` | `agent:run` | `stream/file/none` |
 | `GET` | `/api/chat/jobs` | `agent:run` | `list` |

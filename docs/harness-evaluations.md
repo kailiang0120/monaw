@@ -43,10 +43,13 @@ saved evidence does not clear that state. An explicit replacement request can
 start a new task; a resumed run cannot silently replace its original goal.
 Revision and active-task checks reject stale writers.
 
-Answer completion and the final history checkpoint commit in the same SQLite
-transaction. A required task write failure rolls back both and reports an error.
-One idempotent error-checkpoint attempt preserves the failed turn when storage
-allows it, without repeating tools or marking pending answer outcomes done.
+Answer completion, the final history checkpoint and durable run status commit in
+the same SQLite transaction, after the workspace checkpoint finishes. A required
+task write or durable transition failure rolls back every completion record and
+reports an error. One error-commit attempt preserves the failed turn and failed
+run when storage allows it, without repeating tools or marking pending answer
+outcomes done. A continuing storage outage can leave the run requiring review;
+Monaw reports that condition instead of advertising completion.
 
 Each task has at most 32 outcomes and a 256 KB stored snapshot. It retains 64
 recent unreferenced tool results plus referenced evidence and latest mutations.
@@ -90,7 +93,16 @@ model's final claim. It runs in the existing runtime CI group; it adds no CI job
 | `tool_failure` | Handle a real missing-file read error and produce the requested fallback file. |
 | `pause_resume` | Pause after a returned write, reopen SQLite, resume the saved attempt, and finish without repeating writes. |
 | `long_context` | Compact oversized history while retaining outcomes and finishing the exact file task. |
-| `no_progress` | Stop a deliberately unchanged lookup loop with the progress guard. A live model may instead stop and explain the blocker itself. |
+| `no_progress` | Observe the empty lookup fixture, then pause through the progress guard or return the specified structured unavailable result. Fabricated completion and skipped lookup fail. |
+
+The `no_progress` prompt specifies the exact query and an independently checkable
+final JSON result: `{"status":"unavailable","record":null,"reason_code":"no_results"}`.
+A passing run must have paired lookup start/end events with a successful empty
+result. A nonempty answer alone never counts as success. The same grading rules
+apply to fixture and live providers. Regression tests run adversarial model doubles
+through the real live-provider path: invented IDs before/after lookup, skipped
+lookup, empty answers and generic completion fail; observed unavailability passes.
+These are local tests and incur no model usage.
 
 Select cases and an output destination with:
 

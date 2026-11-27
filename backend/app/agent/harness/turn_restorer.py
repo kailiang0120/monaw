@@ -12,6 +12,7 @@ from app.agent.harness.context_budget import ContextBudgetExceeded
 from app.agent.harness.context_protection import (
     MAX_RESTORED_TASK_MESSAGES,
     PROTECTED_CONTEXT,
+    active_task_inputs,
     protected_failure_ranges,
 )
 
@@ -54,39 +55,28 @@ class TurnRestorer:
         protected = protected_failure_ranges(self.db, conversation_id)
         history_after_id = compaction_source_id
         if protected:
-            if compaction is None:
-                recent = self.db.get_messages(conversation_id, limit=self.history_limit)
-                history_after_id = int(recent[0]["id"]) - 1 if recent else 0
             history_after_id = min(history_after_id, protected[0][0] - 1)
-            persisted_history = self.db.get_messages_after(
-                conversation_id,
-                after_id=history_after_id,
-                limit=MAX_RESTORED_TASK_MESSAGES + 1,
+        # A checkpoint covers only its prefix. Every later message must be
+        # restored, including when summarization failed or was not attempted.
+        persisted_history = self.db.get_messages_after(
+            conversation_id,
+            after_id=history_after_id,
+            limit=MAX_RESTORED_TASK_MESSAGES + 1,
+        )
+        task_inputs = active_task_inputs(
+            self.db, conversation_id, through_id=self.db.get_last_message_id(conversation_id),
+        )
+        retained_inputs = [item for item in task_inputs if int(item["id"]) <= history_after_id]
+        task_input_ids = {int(item["id"]) for item in task_inputs}
+        if len(persisted_history) + len(retained_inputs) > MAX_RESTORED_TASK_MESSAGES:
+            raise ContextBudgetExceeded(
+                "Paused: the saved task history exceeds the restoration limit. "
+                "The saved instructions and unfinished history have not been shortened."
             )
-            if len(persisted_history) > MAX_RESTORED_TASK_MESSAGES:
-                raise ContextBudgetExceeded(
-                    "Paused: the saved task history exceeds the restoration limit. "
-                    "The failed turn remains saved and has not been shortened."
-                )
-        elif compaction is not None:
-            persisted_history = self.db.get_messages_after(
-                conversation_id,
-                after_id=compaction_source_id,
-                limit=self.history_limit,
-            )
-        else:
-            persisted_history = self.db.get_messages(conversation_id, limit=200)
         if persisted_history or compaction is not None:
             state.all_messages = [history_message(m) for m in persisted_history]
             state.recent_messages = state.all_messages[-self.recent_limit :]
-        if protected:
-            history = state.all_messages
-        elif compaction is not None:
-            history = state.all_messages[-self.history_limit :]
-        else:
-            history = (
-                state.all_messages[-self.history_limit :] or state.recent_messages[-self.history_limit :]
-            )
+        history = state.all_messages or state.recent_messages
         messages: list[dict] = []
 
         if compaction is not None and str(compaction.get("summary") or "").strip():
@@ -109,6 +99,15 @@ class TurnRestorer:
                 }
             )
 
+        # User corrections remain authoritative even if a lossy checkpoint
+        # omitted them; their original rows provide exact text and attachments.
+        for item in retained_inputs:
+            entry = {"role": "user", "content": item["content"], PROTECTED_CONTEXT: True}
+            images = self.images(item, conversation_id)
+            if images:
+                entry.update(images=images, ephemeral=True)
+            messages.append(entry)
+
         if context:
             messages.append({"role": "assistant", "content": context})
 
@@ -129,7 +128,7 @@ class TurnRestorer:
 
         for msg in history:
             owner_id = int(msg.get("id") or 0)
-            preserve = any(start <= owner_id <= end for start, end in protected)
+            preserve = owner_id in task_input_ids or any(start <= owner_id <= end for start, end in protected)
             native = native_histories.get(owner_id)
             if native:
                 for entry in native["messages"]:
@@ -138,7 +137,10 @@ class TurnRestorer:
                         images = self.images({"attachments_json": json.dumps(references)}, conversation_id)
                         if images:
                             entry.update({"images": images, "ephemeral": True})
-                    if preserve:
+                    if preserve or (
+                        entry.get("role") == "user" and task_input_ids.intersection(native["covered_message_ids"])
+                        and not entry.get("gemini_function_response") and not entry.get("tool_result")
+                    ):
                         entry[PROTECTED_CONTEXT] = True
                     messages.append(entry)
                 if preserve:

@@ -34,6 +34,7 @@ def public_descriptor(action, decision) -> dict:
     pings = action.target.get("ping_urls")
     also = sorted({_safe_destination(url) for url in pings if isinstance(url, str)})[:8] if isinstance(pings, list) else []
     return redact_sensitive(dict(action_id=action.action_id, run_id=action.run_id, operation_id=action.operation_id,
+        preview_required=action.action_kind == "execute_code" or action.tool_name.startswith("mcp__"),
         connector_preview=facts.get("connector_preview", {}) if action.tool_name.startswith("connector__") else {},
         opaque=opaque, also_sends_to=also,
         tool_name=action.tool_name, action_kind=action.action_kind, target=target,

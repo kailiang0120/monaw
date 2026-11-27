@@ -36,6 +36,9 @@ def authorize_action(action: ActionDescriptor, *, replay_payload: dict | None = 
         risk_level=decision.risk_level, reason=decision.reason, action_description=decision.reason,
         payload=replay_payload or {"args": action.parameters}, authorization_binding=action.authorization_binding,
         action_descriptor=public, human_only=decision.human_only, run_id=action.run_id, operation_id=action.operation_id)
+    if public["preview_required"]:
+        from .preview import save_preview
+        save_preview(ticket, action.parameters)
     operation = current_operation_execution()
     if operation is not None:
         if not operation.attest_local_approval_preflight(ticket, expected_tool_name=action.tool_name,

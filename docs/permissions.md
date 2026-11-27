@@ -175,6 +175,11 @@ Ticket statuses:
 
 Approval tickets are persisted as JSONL so pending and historical approvals survive restarts.
 
+Pending shell and MCP approvals fetch a separate **Action details** preview from `GET /api/approvals/{ticket_id}/preview`. It contains the exact command/script or structured parameters bound to that action, with known credentials and all explicit environment values hidden. The endpoint rechecks the pending status, expiry, principal, permission profile, payload integrity, and owning control session. Its response is not cached. Ordinary tool inputs, audit events, approval history, and support reports continue to omit private action parameters.
+
+These previews stay in bounded process memory for at most ten minutes. The Approve button stays unavailable until the preview loads and its action binding matches. If the process restarts, the preview expires, or the snapshot is evicted, approval is rejected: reject the old request and ask the agent to issue a fresh action. This avoids presenting an incomplete or reconstructed command as authoritative. Existing native file-change previews remain on their dedicated path.
+
+
 The harness keeps a private binding from each live invocation to its exact approval and access-grant tickets. Ownership is checked before review, prompting, ticket retirement and replay; changed parent arguments, targets or payloads invalidate continuation. Calls to the same tool have different invocation identities and cannot reuse or supersede each other's tickets. Sharing a `computer_functions_` prefix grants no authority. Trusted adapter code must explicitly establish a delegated child invocation before creating a child action ticket; the child still applies its own permission checks.
 
 These identities are generated locally, not accepted from model arguments or returned tool text. Restarting loses the live binding, so an old bound ticket cannot execute without its original parent invocation; a fresh action must go through its current checks. Legacy direct callers retain exact-tool checks, with no family-wide exception.
@@ -291,3 +296,7 @@ See `docs\sandboxing.md` for sandbox modes and backend behavior.
 | Delete is blocked. | `allow_delete` is false or delete confirmation was rejected. |
 | Path is blocked even in full access. | Blocked roots still apply. |
 | Policy markdown changes disappear. | Edit Settings instead; markdown files are generated. |
+
+## Explicit confirmation precedence
+
+An enabled folder or app rule with **Require confirmation** takes precedence over Full Access. For example, a saved writable folder rule that requires confirmation still prompts before a shell command runs there after switching from Custom to Full Access. The controller marks the requirement as an explicit resource rule, and the shell/desktop adapters carry that fact through the central action policy. Generic prompts introduced by Default or Auto Review presets are distinct from those saved exceptions. Folder/app denials and protected paths continue to be checked before any approval.

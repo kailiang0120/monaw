@@ -6,6 +6,23 @@ PROTECTED_CONTEXT = "_context_protected"
 MAX_RESTORED_TASK_MESSAGES = 1000
 
 
+def active_task_inputs(db, conversation_id: str, *, through_id: int) -> list[dict]:
+    """Recover exact active-task user inputs independently of any generated summary."""
+    row = db.fetchone(
+        "SELECT state_json FROM task_progress WHERE conversation_id=? AND active=1",
+        (conversation_id,),
+    )
+    task = json.loads(row["state_json"]) if row else {}
+    if task.get("status") not in {"working", "blocked", "waiting_user"}:
+        return []
+    return [dict(row) for row in db.fetchall(
+        """SELECT * FROM messages WHERE conversation_id=? AND role='user'
+           AND id>? AND id<=? ORDER BY id LIMIT ?""",
+        (conversation_id, int(task.get("history_start_id", 0)), through_id,
+         MAX_RESTORED_TASK_MESSAGES + 1),
+    )]
+
+
 def protected_failure_ranges(db, conversation_id: str) -> list[tuple[int, int]]:
     """Retain failed turns until their task is completed or explicitly replaced."""
     row = db.fetchone(

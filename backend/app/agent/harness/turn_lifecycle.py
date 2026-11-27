@@ -180,6 +180,7 @@ class TurnLifecycle:
         *,
         persist: Callable[[TurnOutcome], Awaitable[None]],
         usage: UsageStats,
+        persist_atomic: Callable[..., Awaitable[None]] | None = None,
         tool_calls: list[dict],
         metadata: dict | None = None,
         clear_progress: Callable[[], None] | None = None,
@@ -189,81 +190,172 @@ class TurnLifecycle:
             self.outcome = outcome
             self._duration_ms = self.duration_ms()
             self._finalization_task = asyncio.create_task(self._finish(
-                outcome, persist=persist, usage=usage, tool_calls=tool_calls,
+                outcome, persist=persist, persist_atomic=persist_atomic, usage=usage, tool_calls=tool_calls,
                 metadata=metadata, clear_progress=clear_progress,
             ))
         await asyncio.shield(self._finalization_task)
+
+    async def _finish_atomic(self, outcome, persist_atomic):
+        """Seal the transcript, answer outcomes and owned run in one SQLite transaction."""
+        run = self.durable_run
+
+        async def commit(selected):
+            """Pass the durable transition into the history transaction and publish after commit."""
+            committed = {}
+
+            def before_commit(connection):
+                """Keep every completion record behind the same rollback boundary."""
+                result = run.finalize_in_transaction(connection, selected.status, selected.reason_code)
+                if not isinstance(result, dict):
+                    raise RuntimeError("Durable finalization did not commit a stable state")
+                committed.update(result)
+
+            await persist_atomic(selected, before_commit=before_commit)
+            if not committed:
+                # An idempotent retry can find a sealed checkpoint; it must already
+                # agree with the run rather than silently skipping its transition.
+                saved = run.journal.snapshot(run.run_id) or {}
+                target = {"complete": "completed", "paused": "paused", "error": "failed"}[selected.status]
+                if selected.reason_code == "cancelled":
+                    target = "cancelled"
+                if saved.get("status") != target:
+                    raise RuntimeError("Saved turn and durable state disagree")
+                committed.update(saved)
+            run.revision, run.status = int(committed["revision"]), str(committed["status"])
+
+        if self.review_requested:
+            selected = TurnOutcome(
+                "This run needs review before it can continue."
+                f"\n\nLast generated response:\n{outcome.summary}",
+                "error", self.review_reason_code or "external_effect_unknown", outcome.attachments,
+            )
+            try:
+                run.mark_needs_review(selected.reason_code)
+                await persist_atomic(selected, before_commit=run.assert_owned_transaction)
+                return selected
+            except Exception:
+                logger.exception("Unable to save review checkpoint run_id=%s", run.run_id)
+                outcome = selected
+        else:
+            try:
+                if outcome.status != "paused" or outcome.reason_code == "cancelled":
+                    await run.checkpoint_files("after")
+                run.renew_lease()
+                await commit(outcome)
+                return outcome
+            except Exception:
+                logger.exception("Unable to commit turn and durable state run_id=%s", run.run_id)
+
+        failure = TurnOutcome(
+            summary=("The turn's completion could not be saved. Verify the saved task progress before continuing."
+                     f"\n\nLast generated response:\n{outcome.summary}"),
+            status="error", reason_code="persistence_failed", attachments=outcome.attachments,
+        )
+        try:
+            # The failed transaction rolled back answer completion as well as the
+            # history. This retry records failure without delivering answer steps.
+            await commit(failure)
+            message = "Completion could not be saved. The failed turn was saved for continuation."
+        except Exception:
+            logger.exception("Unable to commit durable failure run_id=%s", run.run_id)
+            try:
+                # Even error-only history must remain fenced. A stale worker
+                # cannot seal another attempt's checkpoint after losing its lease.
+                await persist_atomic(failure, before_commit=run.assert_owned_transaction)
+                message = "The failed turn was saved, but its run state still needs review."
+            except Exception:
+                logger.exception("Unable to save failure checkpoint conversation_id=%s", self.conversation_id)
+                message = "The turn ended, but its history and run state could not be saved."
+            try:
+                run.mark_needs_review("external_effect_unknown")
+            except Exception:
+                logger.exception("Unable to mark failed finalization for review run_id=%s", run.run_id)
+        self.publisher.emit("error", {"code": "persistence_failed", "message": message})
+        return failure
 
     async def _finish(
         self,
         outcome: TurnOutcome,
         *,
         persist: Callable[[TurnOutcome], Awaitable[None]],
+        persist_atomic: Callable[..., Awaitable[None]] | None,
         usage: UsageStats,
         tool_calls: list[dict],
         metadata: dict | None,
         clear_progress: Callable[[], None] | None,
     ) -> None:
         self.transition(self.state.finalizing)
-        try:
-            await persist(outcome)
-        except Exception:
-            logger.exception("Unable to persist turn conversation_id=%s", self.conversation_id)
-            outcome = TurnOutcome(
-                summary=(
-                    "The turn's completion could not be saved. Verify the saved task progress before continuing."
-                    f"\n\nLast generated response:\n{outcome.summary}"
-                ),
-                status="error",
-                reason_code="persistence_failed",
-                attachments=outcome.attachments,
-            )
-            # Retry only the idempotent history checkpoint, without committing
-            # answer outcomes or repeating model requests and tool effects.
+        transaction_finalizer = getattr(self.durable_run, "finalize_in_transaction", None)
+        if callable(transaction_finalizer) and persist_atomic is not None:
+            outcome = await self._finish_atomic(outcome, persist_atomic)
+            self.outcome = outcome
+        else:
             try:
                 await persist(outcome)
-                message = "Completion could not be saved. The failed turn was saved for continuation."
             except Exception:
-                logger.exception("Unable to save failure checkpoint conversation_id=%s", self.conversation_id)
-                message = "The turn ended, but its history could not be saved."
-            self.publisher.emit("error", {
-                "code": "persistence_failed",
-                "message": message,
-            })
-        self.outcome = outcome
-        durable_stable = True
-        if self.durable_run is not None:
-            try:
-                if self.review_requested:
-                    self.durable_run.mark_needs_review(self.review_reason_code)
-                    durable_stable = False
-                else:
-                    finalize_async = getattr(self.durable_run, "finalize_async", None)
-                    if callable(finalize_async):
-                        durable_stable = await finalize_async(outcome.status, outcome.reason_code)
-                    else:
-                        durable_stable = self.durable_run.finalize(outcome.status, outcome.reason_code)
-            except Exception:
-                logger.exception("Unable to finalize durable run run_id=%s", self.durable_run.run_id)
+                logger.exception("Unable to persist turn conversation_id=%s", self.conversation_id)
                 outcome = TurnOutcome(
-                    summary=outcome.summary,
+                    summary=(
+                        "The turn's completion could not be saved. Verify the saved task progress before continuing."
+                        f"\n\nLast generated response:\n{outcome.summary}"
+                    ),
                     status="error",
                     reason_code="persistence_failed",
                     attachments=outcome.attachments,
                 )
+                # Retry only the idempotent history checkpoint, without committing
+                # answer outcomes or repeating model requests and tool effects.
+                try:
+                    await persist(outcome)
+                    message = "Completion could not be saved. The failed turn was saved for continuation."
+                except Exception:
+                    logger.exception("Unable to save failure checkpoint conversation_id=%s", self.conversation_id)
+                    message = "The turn ended, but its history could not be saved."
                 self.publisher.emit("error", {
                     "code": "persistence_failed",
-                    "message": "The durable run state could not be finalized, so this turn cannot be marked complete.",
+                    "message": message,
                 })
-                durable_stable = False
-            if not durable_stable and outcome.status != "error":
-                outcome = TurnOutcome(
-                    summary=outcome.summary,
-                    status="error",
-                    reason_code="durable_state_unavailable",
-                    attachments=outcome.attachments,
-                )
+            saved_outcome = outcome
             self.outcome = outcome
+            durable_stable = True
+            if self.durable_run is not None:
+                try:
+                    if self.review_requested:
+                        self.durable_run.mark_needs_review(self.review_reason_code)
+                        durable_stable = False
+                    else:
+                        finalize_async = getattr(self.durable_run, "finalize_async", None)
+                        if callable(finalize_async):
+                            durable_stable = await finalize_async(outcome.status, outcome.reason_code)
+                        else:
+                            durable_stable = self.durable_run.finalize(outcome.status, outcome.reason_code)
+                except Exception:
+                    logger.exception("Unable to finalize durable run run_id=%s", self.durable_run.run_id)
+                    outcome = TurnOutcome(
+                        summary=outcome.summary,
+                        status="error",
+                        reason_code="persistence_failed",
+                        attachments=outcome.attachments,
+                    )
+                    self.publisher.emit("error", {
+                        "code": "persistence_failed",
+                        "message": "The durable run state could not be finalized, so this turn cannot be marked complete.",
+                    })
+                    durable_stable = False
+                if not durable_stable and outcome.status != "error":
+                    outcome = TurnOutcome(
+                        summary=outcome.summary,
+                        status="error",
+                        reason_code="durable_state_unavailable",
+                        attachments=outcome.attachments,
+                    )
+                self.outcome = outcome
+            if outcome != saved_outcome:
+                # Compatibility sinks may support updates; production uses the atomic path.
+                try:
+                    await persist(outcome)
+                except Exception:
+                    logger.exception("Unable to save corrected turn status conversation_id=%s", self.conversation_id)
         if outcome.status == "complete" and clear_progress is not None:
             try:
                 clear_progress()

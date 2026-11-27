@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Mapping
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -667,7 +668,11 @@ class Journal:
         expected_scope: Mapping[str, str] | None = None,
         reason_code: str | None = None,
         recovery_input_ref: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> RunDTO:
+        """Transition under a private transaction or the caller's turn commit."""
+        if connection is not None and (connection is not self.db.conn or not connection.in_transaction):
+            raise ValueError("Run transitions require the journal's active transaction")
         run_id = _required_id(run_id, name="run_id")
         owner_instance_id = _required_id(owner_instance_id, name="owner_instance_id")
         if to_status not in RUN_STATUSES:
@@ -676,7 +681,7 @@ class Journal:
         safe_reason = _reason_code(reason_code)
         now = _timestamp()
 
-        with self.db.transaction() as conn:
+        with nullcontext(connection) if connection is not None else self.db.transaction() as conn:
             row = self._require_run(conn, run_id)
             self._assert_owner(row, owner_instance_id, attempt)
             if expected_scope is not None:

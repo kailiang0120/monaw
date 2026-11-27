@@ -44,6 +44,8 @@ def evaluate_action(action: ActionDescriptor, permissions=None) -> PolicyDecisio
     # Untrusted remote tools still need explicit review of unknown capabilities.
     if action.side_effect == "unknown" and action.runtime_facts.get("untrusted_remote") is True:
         return decision(PolicyOutcome.REQUIRE_HUMAN_APPROVAL, "unknown_remote_effect", "The remote tool effects could not be established.")
+    if action.runtime_facts.get("explicit_confirmation_required") is True:
+        return decision(PolicyOutcome.REQUIRE_HUMAN_APPROVAL, "configured_resource_review", "An explicit folder or app rule requires review of this action.")
     if permissions.mode == "full_access":
         return decision(PolicyOutcome.ALLOW, "full_access", "Allowed by Full Access.")
     if action.runtime_facts.get("adapter_permission_requires_confirmation") is True:

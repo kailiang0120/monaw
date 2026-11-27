@@ -16,7 +16,7 @@ execution source, or expiry invalidate the approval.
 | Local file selection for browser upload | Canonical workspace paths, content/identity/size, sensitivity, actual input and destination are bound and revalidated | CDP opens a path separately, so the final file-open race cannot be eliminated without handle-based transfer |
 | Reflected MCP tools | Exact server identity, schema, arguments, observable destination and configured exact tool capability are bound; provider hints never prove read-only behavior | Third-party internals and network requests are opaque; explicitly trusted tools grant a capability, not evidence that it is harmless |
 | MCP refresh/reconnect controls | Reload current configured server set, bind each complete configuration fingerprint, and re-enter central policy on approved replay before launch/contact | Configured server startup remains an opaque capability; its internals require separate isolation |
-| Shell `exec`, `exec_start`, `exec_write_stdin` | Central gate after actual sandbox/environment/workdir selection; exact command/stdin/session and execution environment bound; existing hard sandbox, path and environment blocks remain | Arbitrary shell effects and destinations cannot be inferred reliably from command text. Full Access authorizes this opaque capability without ordinary prompts |
+| Shell `exec`, `exec_start`, `exec_write_stdin` | Central gate after actual sandbox/environment/workdir selection; exact command/stdin/session and execution environment bound; existing hard sandbox, path and environment blocks remain | Arbitrary shell effects and destinations cannot be inferred reliably from command text. Full Access authorizes this opaque capability except for explicit working-folder confirmation rules |
 | Desktop action batches | Current window/app identity and observed state ID plus all exact actions bound; live geometry/window/observation checks occur again before input; existing credential-entry and screen-fallback controls remain | Generic desktop input may cause effects the adapter cannot observe semantically. Full Access permits ordinary opaque input |
 | Process termination | Actual PID/name/create-time set bound as irreversible human-only action; PID identity checked again before termination | A process can exit during dispatch; already-terminated processes cannot be restored |
 | Native filesystem mutations | Existing v1.1 permission, preview/plan fingerprint, snapshot and undo pipeline retained; sensitive-location checks at reachable read/write boundaries | Arbitrary shell/MCP file access does not become a native reversible mutation |
@@ -76,3 +76,24 @@ standard logging (including exception traces), UI events and support exports.
 Pattern scanners cannot detect every sensitive value in arbitrary page content,
 ordinary files or opaque remote output. They supplement location/capability
 controls rather than serving as proof that a payload is safe.
+
+
+### Credential redaction and ordinary flags
+
+Environment values are treated as credentials only when their variable names end
+in a credential slot such as `_API_KEY`, `_ACCESS_TOKEN`, `_CLIENT_SECRET`, or
+`_PASSWORD`. Names such as `CREDENTIAL_FLAG`, `SECRET_ENABLED`, and `TOKEN_LIMIT`
+do not identify credentials. Boolean/null-style switches are excluded from this environment scan; numeric
+credentials in explicit password slots remain protected. Values explicitly registered by
+the credential vault remain redacted regardless of their format.
+
+Valid JSON objects and arrays are sanitized as structured data before they are
+serialized. Secret strings become quoted placeholders while booleans and numeric
+values retain their types. Unchanged JSON retains its original wire representation,
+so a benign flag cannot corrupt saved results, disable native provider-history
+replay, or make an otherwise eligible action require manual review. This narrows
+false positives; it does not certify arbitrary tool output as free of secrets.
+
+## Private approval previews
+
+Shell and MCP tickets carry a `preview_required` flag, while a separate in-memory snapshot holds redacted exact action parameters and their authorization binding. Only the owning authenticated pending-ticket session can fetch that snapshot through `/api/approvals/{ticket_id}/preview`. The renderer checks the returned binding before enabling approval. Lost or expired snapshots require a new action; the backend also refuses approval without the snapshot. Command/script previews never enter general action-security events or history projections. Environment values are always hidden, and other known secrets use the shared redactor. The preview has a 256 KiB bound and at most 128 entries, so an oversized/evicted request is unavailable for approval rather than silently truncated.
